@@ -41,7 +41,7 @@ dependencies = [
     "pymysql>=1.1",
     "snowflake-connector-python>=3.12",
     "pyjwt[crypto]>=2.13.0",
-    "cryptography>=43",
+    "cryptography>=50.0.0",
     # Floor is 1.23, not 1.2: 1.9.4 fixed a FastMCP request-validation DoS, and 1.23.0
     # was the release that enabled DNS-rebinding protection by DEFAULT for localhost
     # HTTP servers (CVE-2025-66416). The lockfile protects this deployment; the floor
