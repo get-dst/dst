@@ -1,0 +1,39 @@
+instructions: 'Derived computations are IN scope: multi-step CTEs, window functions,
+
+  NTILE/percentile scoring, and trigonometric math (RADIANS/SIN/COS/ASIN/SQRT)
+
+  over existing columns. Before declining for missing data, verify the claim
+
+  against the schema: decline only when a required COLUMN truly does not exist —
+
+  a value derivable from existing columns is never "missing data". If a business
+
+  rule is genuinely undefined, name the missing rule; otherwise compute. Columns
+
+  may be VARCHAR even when they hold numeric or timestamp data — CAST as needed.
+
+  '
+definitions:
+- term: RFM scores
+  body: 'R, F, M are quintile scores 1-5 per unique customer (customers.customer_unique_id;
+    join orders on customers.customer_id), assigned with NTILE(5). Recency: days since
+    the customer''s last orders.order_purchase_timestamp (R=1 = most recent quintile,
+    R=5 = longest ago). Frequency: count of the customer''s orders (F=1 = most frequent).
+    Monetary: SUM(order_payments.payment_value) over the customer''s orders (M=1 =
+    highest spending). Timestamps are VARCHAR - CAST to TIMESTAMP first.'
+- term: RFM segments
+  body: 'Assign per customer from R and the sum F+M, exactly these buckets and bounds
+    - never invent other names or thresholds: Champions: R=1 and F+M 1-4. Can''t Lose
+    Them: R in (4,5) and F+M 1-2. Hibernating: R in (4,5) and F+M 3-6. Lost: R in
+    (4,5) and F+M 7-10. Loyal Customers: R in (2,3) and F+M 1-4. Needs Attention:
+    R=3 and F+M 5-6. Recent Users: R=1 and F+M 7-8. Potential Loyalists: (R=1 and
+    F+M 5-6) or (R=2 and F+M 5-8). Price Sensitive: R=1 and F+M 9-10. Promising: R=2
+    and F+M 9-10. About to Sleep: R=3 and F+M 7-10.'
+- term: orders counted for RFM
+  body: 'ASK the user: all orders regardless of status, or delivered orders only?
+    The RFM doc does not rule on order_status and the two readings give different
+    segments.'
+  status: ambiguous
+  possible_mappings:
+  - all orders - every row in orders
+  - delivered only - orders.order_status = 'delivered'

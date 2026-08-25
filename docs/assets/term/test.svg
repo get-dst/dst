@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 833 192" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="833" height="192" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst test customer_value</text>
+<line x1="0" y1="36" x2="833" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst test customer_value</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">me/customer_value: no active certified answers, no behavioral cases</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#efe9dd" font-weight="700">0/0 passed</tspan><tspan fill="#d9d2c5"> (0 certified + 0 behavioral) in org me</tspan></text>
+<text x="20" y="123" xml:space="preserve"><tspan fill="#d9d2c5">warning: nothing was verified — this lens has no certified answers and no behavioral cases, so this </tspan></text>
+<text x="20" y="144" xml:space="preserve"><tspan fill="#d9d2c5">run could not have failed. Add certified answers (`dst reviews rule &lt;id&gt; --verdict approve --certify</tspan></text>
+<text x="20" y="165" xml:space="preserve"><tspan fill="#d9d2c5">`) or eval cases.</tspan></text>
+</svg>

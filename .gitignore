@@ -1,0 +1,57 @@
+# secrets / credentials
+.env
+.env.*
+!.env.example
+# Downloaded cloud service-account keys. Google names the file
+# `<project-id>-<12 hex>.json`, so the third rule matches that shape rather
+# than any one project's name.
+*-service-account*.json
+gcp-credentials*.json
+*-????????????.json
+*.pem
+# Key and certificate containers. The pre-commit credential gate scans text
+# diffs and cannot see inside a binary keystore, so these are barred from
+# being stageable at all rather than checked at commit time.
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+.netrc
+.pypirc
+# Local SQLite scratch databases, which pick up whatever was queried through
+# them. Deliberately not *.duckdb: fixtures/jaffle_shop.duckdb is a committed
+# test fixture.
+*.db
+*.sqlite
+*.sqlite3
+# Per-machine Claude Code settings: they carry machine-local tool grants.
+.claude/settings.local.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Warehouse and query-log exports: a CSV pulled out of a warehouse holds real
+# rows. Committed seed data lives under fixtures/ and is not matched here.
+docs/**/*.csv
+bq-results-*.csv
+
+# logs / os
+*.log
+.DS_Store
+
+# Transient agent worktrees.
+.claude/worktrees/
+
+# Where the wheel build hook copies the built dashboard. The output itself is
+# never committed; the .gitkeep keeps the directory in the tree.
+services/web_dist/*
+!services/web_dist/.gitkeep
+

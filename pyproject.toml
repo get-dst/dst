@@ -1,0 +1,154 @@
+[project]
+name = "dst-core"
+version = "0.1.0"
+description = "dst, the data serve tool — governed data access layer (backend)"
+dynamic = ["readme"]
+license = "Apache-2.0"
+# Attribution rides the wheel: the default glob carries LICENSE/NOTICE but not
+# the third-party list they reference, nor the upstream license the demo
+# fixture derives from (fixtures/jaffle, dbt Labs' jaffle_shop).
+license-files = [
+    "LICENSE",
+    "NOTICE",
+    "THIRD-PARTY-NOTICES.md",
+    "fixtures/jaffle/LICENSE",
+]
+authors = [{ name = "Anton Heikinheimo", email = "security@dataservetool.com" }]
+keywords = ["semantic-layer", "data-access", "governance", "mcp", "text-to-sql"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "duckdb>=1.5.3",
+    "sqlglot>=30.8.0",
+    # <1: anthropic 1.0 removed temperature/top_p/top_k from messages.create();
+    # our providers pass temperature unconditionally. A 1.x
+    # port must re-decide determinism (output_config.effort) before lifting this.
+    "anthropic>=0.105.2,<1",
+    "google-cloud-bigquery>=3.41.0",
+    "pymysql>=1.1",
+    "snowflake-connector-python>=3.12",
+    "pyjwt[crypto]>=2.13.0",
+    "cryptography>=43",
+    # Floor is 1.23, not 1.2: 1.9.4 fixed a FastMCP request-validation DoS, and 1.23.0
+    # was the release that enabled DNS-rebinding protection by DEFAULT for localhost
+    # HTTP servers (CVE-2025-66416). The lockfile protects this deployment; the floor
+    # is what protects anyone who pip-installs dst-core and resolves it fresh.
+    "mcp>=1.23,<2",  # 2.0 restructured server.fastmcp — clean installs crashed on import
+    "pyyaml>=6.0",
+    # A direct runtime import in the app, the MCP server, the OIDC client and
+    # both openai-compatible clients. It arrives transitively today, which is
+    # luck, not a contract: a floor here is what survives a provider SDK bump.
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Any openai-compatible embedding endpoint works with no extra at all.
+# In-process embeddings (the PoC tier): fastembed ONNX on CPU, pinned
+# to a measured model (services/context/local_embedder.py). Weights download to
+# the local cache on first use; the default install stays weight-free.
+local-embed = ["fastembed>=0.5"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.27",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+dst = "services.cli.main:main"
+
+[project.urls]
+# The docs site is first because it is the one that answers "what is this?"
+# without a clone.
+Homepage = "https://www.dataservetool.com"
+Documentation = "https://www.dataservetool.com"
+Repository = "https://github.com/get-dst/dst"
+Issues = "https://github.com/get-dst/dst/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+# The built SPA must ride in the sdist: `uv build` builds the wheel FROM the
+# sdist, so the wheel hook can only bundle apps/web/dist if it's in there.
+# (artifacts, not force-include: gitignored, may be absent — API-only build.)
+artifacts = ["apps/web/dist"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["services"]
+# .gitkeep only keeps the dir in git; force-include re-adds it -> dedupe.
+exclude = ["services/web_dist/.gitkeep"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "migrations"
+"alembic.ini" = "alembic.ini"
+"fixtures/jaffle_shop.duckdb" = "fixtures/jaffle_shop.duckdb"
+# The built SPA (release CI copies apps/web/dist here; gitignored, may be absent).
+"services/web_dist" = "services/web_dist"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Local research scripts are outside the lint scope; the patterns are inert
+# when no matching file is present.
+extend-exclude = ["scripts/exp_*.py", "scripts/enforcement_experiment.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency-injection markers are safe to call in argument defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = [
+    # An optional install extra this test genuinely needs. Extras are masked for
+    # every test that does not name one (tests/conftest.py), so an installed extra
+    # cannot silently change an unrelated result; a named one that is absent skips
+    # loudly instead of passing on a different code path.
+    "extra(name): the optional extra this test needs, e.g. extra('local-embed')",
+    # For the few tests whose subject IS the database being reachable — they drive
+    # code that catches the connection error and reports a degraded state, so their
+    # failure looks like a plain assertion and tests/conftest.py cannot recognise
+    # it. Everything else that needs a database needs no marker.
+    "needs_db: this test asserts on a working database connection, not just through one",
+]

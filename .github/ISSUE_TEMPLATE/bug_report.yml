@@ -1,0 +1,39 @@
+name: Bug report
+description: Something broke
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`dst --version`, or `version` from `/health`"
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: How are you running dst?
+      options:
+        - docker compose (deploy/docker-compose.yml)
+        - Kubernetes (helm chart)
+        - pip / uv install + dst dev
+        - from source (make dev)
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Include the exact command or request if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >
+        Server logs around the failure. Please redact credentials, provider
+        keys, and warehouse data.
+      render: text

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: dst
+description: >-
+  dst — governed answers over your warehouse. One stateless container
+  (API + dashboard) against a Postgres with pgvector that you provide.
+type: application
+# version/appVersion are stamped by the release workflow (chart version = app tag).
+version: 0.1.0
+appVersion: "0.1.0"

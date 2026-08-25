@@ -1,0 +1,24 @@
+instructions: 'Derived computations are IN scope: multi-step CTEs, window functions,
+
+  NTILE/percentile scoring, and trigonometric math (RADIANS/SIN/COS/ASIN/SQRT)
+
+  over existing columns. Before declining for missing data, verify the claim
+
+  against the schema: decline only when a required COLUMN truly does not exist —
+
+  a value derivable from existing columns is never "missing data". If a business
+
+  rule is genuinely undefined, name the missing rule; otherwise compute. Columns
+
+  may be VARCHAR even when they hold numeric or timestamp data — CAST as needed.
+
+  '
+definitions:
+- term: projected 2021 sales
+  body: 'Per product and calendar month over sales joined times (sales.time_id = times.time_id),
+    customers filtered to the target country (customers -> countries.country_name):
+    monthly sales = SUM(sales.amount_sold) per year. Projection for 2021 = sales_2020
+    + ((sales_2020 - sales_2019) / sales_2019) * sales_2020. For years other than
+    2021 use the plain average of the available monthly values. USD conversion: multiply
+    by currency.to_us matched on country, year, month; when no rate row exists use
+    1.0. Round reported monthly averages to 2 decimals.'

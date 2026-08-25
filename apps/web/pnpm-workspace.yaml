@@ -1,0 +1,6 @@
+# pnpm v11 reads these settings here (not from package.json).
+# @clerk/shared ships prebuilt; acknowledge its build script and skip it so a clean
+# `pnpm install --frozen-lockfile` doesn't error on "ignored builds".
+allowBuilds:
+  '@clerk/shared': false
+verifyDepsBeforeRun: false

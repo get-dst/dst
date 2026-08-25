@@ -1,0 +1,21 @@
+name: Docs
+# Build check only: the documentation site is published separately at
+# https://www.dataservetool.com, so this workflow proves every change still
+# builds strictly and never deploys a second copy.
+
+on:
+  pull_request:
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  push:
+    branches: [main]
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Strict mkdocs build
+        run: |
+          uvx --with mkdocs-material mkdocs build -f mkdocs.yml --strict --site-dir "$RUNNER_TEMP/site"

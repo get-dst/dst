@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 833 402" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="833" height="402" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst plan</text>
+<line x1="0" y1="36" x2="833" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst plan</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#7cbd82" font-weight="700">+</tspan><tspan fill="#d9d2c5"> semantic/definitions/examples/lifetime-value.md</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#7cbd82" font-weight="700">+</tspan><tspan fill="#d9d2c5"> semantic/definitions/examples/repeat-customer.md</tspan></text>
+<text x="20" y="123" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#7cbd82" font-weight="700">+</tspan><tspan fill="#d9d2c5"> semantic/definitions/examples/value.md</tspan></text>
+<text x="20" y="144" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#7cbd82" font-weight="700">+</tspan><tspan fill="#d9d2c5"> semantic/entities/examples/customers.yaml</tspan></text>
+<text x="20" y="165" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#7cbd82" font-weight="700">+</tspan><tspan fill="#d9d2c5"> semantic/entities/examples/orders.yaml</tspan></text>
+<text x="20" y="186" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#7cbd82" font-weight="700">+</tspan><tspan fill="#d9d2c5"> customer_value — create</tspan></text>
+<text x="20" y="228" xml:space="preserve"><tspan fill="#d9d2c5">not checked by plan — apply still runs these, and they need a live warehouse</tspan></text>
+<text x="20" y="249" xml:space="preserve"><tspan fill="#d9d2c5">  - warehouse connection probes — apply builds every declared connection and reads through it before</tspan></text>
+<text x="20" y="270" xml:space="preserve"><tspan fill="#d9d2c5"> it lands, and a dead credential aborts the apply</tspan></text>
+<text x="20" y="291" xml:space="preserve"><tspan fill="#d9d2c5">  - eval-case expected_sql EXECUTED against the warehouse (plan parses it only) — an oracle that par</tspan></text>
+<text x="20" y="312" xml:space="preserve"><tspan fill="#d9d2c5">ses but errors aborts the apply</tspan></text>
+<text x="20" y="333" xml:space="preserve"><tspan fill="#d9d2c5">  - the publish eval gate — it scores the certified corpus with live generation, so under `eval_gate</tspan></text>
+<text x="20" y="354" xml:space="preserve"><tspan fill="#d9d2c5">: block` a regression can still abort the apply</tspan></text>
+<text x="20" y="375" xml:space="preserve"><tspan fill="#efe9dd" font-weight="700">Plan: 6 to add.</tspan><tspan fill="#d9d2c5"> </tspan><tspan fill="#857b6f">(--full shows diffs and hints)</tspan></text>
+</svg>

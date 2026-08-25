@@ -1,0 +1,21 @@
+instructions: 'Derived computations are IN scope: multi-step CTEs, window functions,
+
+  NTILE/percentile scoring, and trigonometric math (RADIANS/SIN/COS/ASIN/SQRT)
+
+  over existing columns. Before declining for missing data, verify the claim
+
+  against the schema: decline only when a required COLUMN truly does not exist —
+
+  a value derivable from existing columns is never "missing data". If a business
+
+  rule is genuinely undefined, name the missing rule; otherwise compute. Columns
+
+  may be VARCHAR even when they hold numeric or timestamp data — CAST as needed.
+
+  '
+definitions:
+- term: track length types
+  body: 'Computed over Track.Milliseconds with mn = MIN, av = AVG, mx = MAX across
+    all tracks: Short = mn to (mn+av)/2; Medium = (mn+av)/2 to (av+mx)/2; Long = (av+mx)/2
+    to mx. The boundaries are ALWAYS these midpoints of min/average and average/max
+    - never fixed thresholds like 3 or 5 minutes.'

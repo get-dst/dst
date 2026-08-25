@@ -1,0 +1,30 @@
+instructions: 'Derived computations are IN scope: multi-step CTEs, window functions,
+
+  NTILE/percentile scoring, and trigonometric math (RADIANS/SIN/COS/ASIN/SQRT)
+
+  over existing columns. Before declining for missing data, verify the claim
+
+  against the schema: decline only when a required COLUMN truly does not exist —
+
+  a value derivable from existing columns is never "missing data". If a business
+
+  rule is genuinely undefined, name the missing rule; otherwise compute. Columns
+
+  may be VARCHAR even when they hold numeric or timestamp data — CAST as needed.
+
+  '
+definitions:
+- term: overtake
+  body: 'An on-track position exchange between consecutive laps of the same race in
+    lap_times: driver A overtakes driver B on lap n when A was behind B on lap n-1
+    (higher lap_times.position) and ahead of B on lap n. Compare positions per (race_id,
+    lap).'
+- term: overtake labels
+  body: 'Classify each overtake, first matching label wins, in order: R (Retirement)
+    - the overtaken driver has a retirements row for the same race on that same lap.
+    P (Pit) - the overtaken driver has a pit_stops row on the same lap (pit entry),
+    or pitted on the previous lap and the time gap between the drivers is less than
+    a typical pit-stop duration (pit_stops.milliseconds). S (Start) - the overtake
+    is on lap 1 and the two drivers started within two grid positions of each other
+    (results.grid). T (Track) - the default when none of the above apply. pit_stops
+    columns are VARCHAR - CAST when comparing.'
