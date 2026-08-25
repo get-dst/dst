@@ -47,7 +47,7 @@ dependencies = [
     # HTTP servers (CVE-2025-66416). The lockfile protects this deployment; the floor
     # is what protects anyone who pip-installs dst-core and resolves it fresh.
     "mcp>=1.23,<2",  # 2.0 restructured server.fastmcp — clean installs crashed on import
-    "pypdf>=5.0",
+    "pypdf>=6.15.0",
     "boto3>=1.34",
     "pyyaml>=6.0",
 ]
