@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 817 150" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="817" height="150" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst patches approve 2094ed1f… --dir .</text>
+<line x1="0" y1="36" x2="817" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst patches approve 2094ed1f… --dir .</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">2094ed1f-7705-435a-8ea2-073f89f98d3b: approved (definition revenue)</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#d9d2c5">wrote lenses/customer_value/definitions/revenue.md — NOT live yet: commit it, then run `dst apply`</tspan></text>
+<text x="20" y="123" xml:space="preserve"><tspan fill="#d9d2c5">eval case 39f34330-92e3-47fa-9b9b-53f046d93067 filed (candidate)</tspan></text>
+</svg>

@@ -1,0 +1,236 @@
+{
+  "semantic_models": [
+    {
+      "name": "orders",
+      "description": "Order activity and revenue at the order grain.",
+      "node_relation": {
+        "alias": "orders",
+        "schema_name": "main",
+        "database": "jaffle_shop",
+        "relation_name": "\"jaffle_shop\".\"main\".\"orders\""
+      },
+      "defaults": {
+        "agg_time_dimension": "order_date"
+      },
+      "entities": [
+        {
+          "name": "order",
+          "type": "primary",
+          "expr": "order_id"
+        },
+        {
+          "name": "customer",
+          "type": "foreign",
+          "expr": "customer_id"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "order_date",
+          "type": "time",
+          "type_params": {
+            "time_granularity": "day"
+          },
+          "expr": "order_date"
+        },
+        {
+          "name": "status",
+          "type": "categorical",
+          "expr": "status"
+        }
+      ],
+      "measures": [
+        {
+          "name": "order_count",
+          "agg": "count",
+          "expr": "1",
+          "agg_time_dimension": "order_date",
+          "create_metric": true
+        },
+        {
+          "name": "order_total",
+          "agg": "sum",
+          "expr": "amount",
+          "agg_time_dimension": "order_date"
+        },
+        {
+          "name": "average_order_amount",
+          "agg": "average",
+          "expr": "amount"
+        },
+        {
+          "name": "distinct_customers",
+          "agg": "count_distinct",
+          "expr": "customer_id"
+        },
+        {
+          "name": "median_order_amount",
+          "agg": "median",
+          "expr": "amount"
+        }
+      ]
+    },
+    {
+      "name": "customers",
+      "description": "Customer base and lifetime value at the customer grain.",
+      "node_relation": {
+        "alias": "customers",
+        "schema_name": "main",
+        "database": "jaffle_shop",
+        "relation_name": "\"jaffle_shop\".\"main\".\"customers\""
+      },
+      "entities": [
+        {
+          "name": "customer",
+          "type": "primary",
+          "expr": "customer_id"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "first_order_date",
+          "type": "time",
+          "type_params": {
+            "time_granularity": "day"
+          },
+          "expr": "first_order_date"
+        },
+        {
+          "name": "customer_name",
+          "type": "categorical",
+          "expr": "customer_name"
+        }
+      ],
+      "measures": [
+        {
+          "name": "customer_count",
+          "agg": "count_distinct",
+          "expr": "customer_id"
+        },
+        {
+          "name": "total_lifetime_value",
+          "agg": "sum",
+          "expr": "customer_lifetime_value"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "name": "revenue",
+      "type": "simple",
+      "description": "Total order revenue (sum of order amount).",
+      "type_params": {
+        "measure": {
+          "name": "order_total"
+        }
+      }
+    },
+    {
+      "name": "order_count",
+      "type": "simple",
+      "description": "Number of orders placed.",
+      "type_params": {
+        "measure": {
+          "name": "order_count"
+        }
+      }
+    },
+    {
+      "name": "average_order_value",
+      "type": "ratio",
+      "description": "Revenue divided by order count.",
+      "type_params": {
+        "numerator": {
+          "name": "revenue"
+        },
+        "denominator": {
+          "name": "order_count"
+        }
+      }
+    },
+    {
+      "name": "customer_lifetime_value",
+      "type": "simple",
+      "description": "Sum of per-customer lifetime value across the customer base.",
+      "type_params": {
+        "measure": {
+          "name": "total_lifetime_value"
+        }
+      }
+    },
+    {
+      "name": "median_order_value",
+      "type": "simple",
+      "description": "Median order amount.",
+      "type_params": {
+        "measure": {
+          "name": "median_order_amount"
+        }
+      }
+    },
+    {
+      "name": "completed_revenue",
+      "type": "simple",
+      "description": "Revenue from completed orders only.",
+      "type_params": {
+        "measure": {
+          "name": "order_total"
+        }
+      },
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Dimension('order__status') }} = 'completed'"
+          }
+        ]
+      }
+    },
+    {
+      "name": "weird_filtered",
+      "type": "simple",
+      "description": "Filter uses a macro we cannot translate.",
+      "type_params": {
+        "measure": {
+          "name": "order_total"
+        }
+      },
+      "filter": "{{ TimeDimension('order__order_date', 'day') }} >= '2020-01-01'"
+    },
+    {
+      "name": "open_revenue",
+      "type": "derived",
+      "description": "Revenue from orders not yet completed.",
+      "type_params": {
+        "expr": "revenue - completed_revenue",
+        "metrics": [
+          {
+            "name": "revenue"
+          },
+          {
+            "name": "completed_revenue"
+          }
+        ]
+      }
+    },
+    {
+      "name": "clv_per_order",
+      "type": "derived",
+      "description": "Lifetime value per order - inputs live on different entities.",
+      "type_params": {
+        "expr": "customer_lifetime_value / order_count",
+        "metrics": [
+          {
+            "name": "customer_lifetime_value"
+          },
+          {
+            "name": "order_count"
+          }
+        ]
+      }
+    }
+  ],
+  "project_configuration": {
+    "metric_set": "jaffle_shop"
+  }
+}

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 833 675" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="833" height="675" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst plan --full</text>
+<line x1="0" y1="36" x2="833" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst plan --full</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">semantic/definitions/examples/lifetime-value.md: unchanged</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#d9d2c5">semantic/definitions/examples/repeat-customer.md: update</tspan></text>
+<text x="20" y="123" xml:space="preserve"><tspan fill="#857b6f">--- db/semantic/definitions/examples/repeat-customer.md</tspan></text>
+<text x="20" y="144" xml:space="preserve"><tspan fill="#857b6f">+++ files/semantic/definitions/examples/repeat-customer.md</tspan></text>
+<text x="20" y="165" xml:space="preserve"><tspan fill="#d78700">@@ -1,6 +1,6 @@</tspan></text>
+<text x="20" y="186" xml:space="preserve"><tspan fill="#d9d2c5"> ---</tspan></text>
+<text x="20" y="207" xml:space="preserve"><tspan fill="#d9d2c5"> metric: repeat_customer</tspan></text>
+<text x="20" y="228" xml:space="preserve"><tspan fill="#e0736a">-sql: customers.number_of_orders &gt; 1</tspan></text>
+<text x="20" y="249" xml:space="preserve"><tspan fill="#7cbd82">+sql: customers.number_of_orders &gt;= 3</tspan></text>
+<text x="20" y="270" xml:space="preserve"><tspan fill="#d9d2c5"> ---</tspan></text>
+<text x="20" y="291" xml:space="preserve"><tspan fill="#d9d2c5"> </tspan></text>
+<text x="20" y="312" xml:space="preserve"><tspan fill="#e0736a">-A repeat customer has number_of_orders &gt; 1.</tspan></text>
+<text x="20" y="333" xml:space="preserve"><tspan fill="#7cbd82">+A repeat customer has number_of_orders &gt;= 3.</tspan></text>
+<text x="20" y="354" xml:space="preserve"><tspan fill="#d9d2c5">semantic/definitions/examples/value.md: unchanged</tspan></text>
+<text x="20" y="375" xml:space="preserve"><tspan fill="#d9d2c5">semantic/entities/examples/customers.yaml: unchanged</tspan></text>
+<text x="20" y="396" xml:space="preserve"><tspan fill="#d9d2c5">semantic/entities/examples/orders.yaml: unchanged</tspan></text>
+<text x="20" y="417" xml:space="preserve"><tspan fill="#d9b45b">customer_value: unchanged — STALE compile (shared changed: definition/repeat_customer) → will recomp</tspan></text>
+<text x="20" y="438" xml:space="preserve"><tspan fill="#d9b45b">ile on apply</tspan></text>
+<text x="20" y="459" xml:space="preserve"><tspan fill="#d9d2c5">  certified: 1 answers touch changed assets (definition/repeat_customer) — re-verify by updating eac</tspan></text>
+<text x="20" y="480" xml:space="preserve"><tspan fill="#d9d2c5">h answer&#x27;s verified_by (or sql) in certified_answers.yaml</tspan></text>
+<text x="20" y="501" xml:space="preserve"><tspan fill="#d9d2c5">    re-verify: How many customers are repeat customers?</tspan></text>
+<text x="20" y="522" xml:space="preserve"><tspan fill="#d9d2c5">not checked by plan — apply still runs these, and they need a live warehouse</tspan></text>
+<text x="20" y="543" xml:space="preserve"><tspan fill="#d9d2c5">  - warehouse connection probes — apply builds every declared connection and reads through it before</tspan></text>
+<text x="20" y="564" xml:space="preserve"><tspan fill="#d9d2c5"> it lands, and a dead credential aborts the apply</tspan></text>
+<text x="20" y="585" xml:space="preserve"><tspan fill="#d9d2c5">  - eval-case expected_sql EXECUTED against the warehouse (plan parses it only) — an oracle that par</tspan></text>
+<text x="20" y="606" xml:space="preserve"><tspan fill="#d9d2c5">ses but errors aborts the apply</tspan></text>
+<text x="20" y="627" xml:space="preserve"><tspan fill="#d9d2c5">  - the publish eval gate — it scores the certified corpus with live generation, so under `eval_gate</tspan></text>
+<text x="20" y="648" xml:space="preserve"><tspan fill="#d9d2c5">: block` a regression can still abort the apply</tspan></text>
+</svg>

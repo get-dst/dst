@@ -1,0 +1,4 @@
+orders: gained column `discount_amount`
+  ! entity `orders` (semantic/entities/examples/orders.yaml) reads this table
+
+1 schema change(s) since 2026-08-24, 1 on tables the semantic layer reads. Re-record with `dst drift --accept` once reviewed.

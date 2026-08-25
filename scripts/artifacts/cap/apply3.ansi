@@ -1,0 +1,9 @@
+[38;5;172mconnections[0m: ok
+[38;5;172mprofiles[0m: profiles 'jaffle': landed 13 table(s)
+[38;5;172msemantic[0m: ok
+[38;5;172mlens customer_value[0m: updated
+  [33mwarning:[0m 'value' is claimed by average order value, lifetime value, value: lifetime value, value governed by a definition, average order value not. A question asking for 'value' picks one silently and two people can get different numbers — govern the others, or mark the term `status: ambiguous` with `possible_mappings` so dst asks which is meant
+  [33mwarning:[0m 2 definitions have no sql_expr (prose-only — they guide prose answers but can't be enforced in generated SQL): lifetime_value, revenue
+  [33mwarning:[0m no callers on the allow-list (admin-only until callers are added)
+  [33mwarning:[0m this lens has metrics, so generation's first pass is the metric-layer prompt — 1 joins, 1 sample_queries, 1 instructions reach the model only if that pass fails and generation escalates to raw SQL. `dst lens prompt customer_value "<question>"` renders both.
+[32m[1mApply complete.[0m 4 warning(s), 0 error(s). [2m(--json for the row array)[0m

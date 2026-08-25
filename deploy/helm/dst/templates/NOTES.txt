@@ -1,0 +1,12 @@
+dst {{ .Chart.AppVersion }} deployed.
+
+  Dashboard/API service: {{ include "dst.fullname" . }}:{{ .Values.service.port }}
+  Public origin (DST_PUBLIC_BASE_URL): {{ .Values.publicBaseUrl }}
+
+Verify:
+  kubectl port-forward svc/{{ include "dst.fullname" . }} 8000:{{ .Values.service.port }}
+  curl -s localhost:8000/health   # liveness
+  curl -s localhost:8000/ready    # DB + MCP readiness
+
+First install: create the admin org/token (prints the token once — store it now):
+  kubectl exec -it deploy/{{ include "dst.fullname" . }} -- /app/.venv/bin/python -m services.cli.main bootstrap --org default

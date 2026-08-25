@@ -1,0 +1,46 @@
+name: Docs
+
+# Layout-agnostic on purpose: the mkdocs config is resolved at the repo root
+# first and under docs/oss/ otherwise, so the same workflow works either way.
+#
+# The deploy job self-arms: it is skipped while the repository is private and
+# publishes to GitHub Pages once the repository is public. One-time setup:
+# Settings → Pages → Source = GitHub Actions.
+
+on:
+  pull_request:
+    paths: ["docs/oss/**", "docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  push:
+    branches: [main]
+    paths: ["docs/oss/**", "docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Strict mkdocs build
+        run: |
+          CONFIG=$([ -f mkdocs.yml ] && echo mkdocs.yml || echo docs/oss/mkdocs.yml)
+          uvx --with mkdocs-material mkdocs build -f "$CONFIG" --strict --site-dir "$RUNNER_TEMP/site"
+      - name: Upload site
+        if: github.event_name == 'push' && !github.event.repository.private
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    # Self-arming: skipped while private, publishes once the repo is public.
+    if: github.event_name == 'push' && !github.event.repository.private
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

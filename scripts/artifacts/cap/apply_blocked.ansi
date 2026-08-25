@@ -1,0 +1,10 @@
+[38;5;172mconnections[0m: rolled-back
+[38;5;172msemantic[0m: rolled-back
+[38;5;172mlens customer_value[0m: [31m[1mrejected[0m
+  [31m[1merror:[0m certified 'How many customers are repeat customers?' diverged: certified SQL → 19, generated → 1 (definition repeat_customer changed this push) — fix the definition, or re-certify/retire the answer
+  [31m[1merror:[0m eval gate blocked publish: accuracy regressed (score 0.5 < prev 1.0 — failing: certified:909ab84a-94dc-4cbe-a0ca-5d7e8e0821c9)
+[31m[1mApply finished.[0m 1 rejected, 2 error(s). [2m(--json for the row array)[0m
+[31m[1m
+APPLY ABORTED — nothing deployed — fix the errors and re-apply[0m
+  [31m[1mcustomer_value: certified 'How many customers are repeat customers?' diverged: certified SQL → 19, generated → 1 (definition repeat_customer changed this push) — fix the definition, or re-certify/retire the answer[0m
+  [31m[1mcustomer_value: eval gate blocked publish: accuracy regressed (score 0.5 < prev 1.0 — failing: certified:909ab84a-94dc-4cbe-a0ca-5d7e8e0821c9)[0m

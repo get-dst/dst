@@ -1,0 +1,5 @@
+[31m[1mFAIL[0m  me/customer_value: What was total revenue? — certified SQL → 1761.0, generated → 1739.0 (generated 1739.0 vs certified 1761.0)  [2m28.4s[0m
+[32m[1mPASS[0m  me/customer_value: How many customers are repeat customers?             [2m39.8s[0m
+[32m[1mPASS[0m  me/customer_value: What is the average value of a customer? [expect: clarify]
+[38;5;172m────────────────────────────────────────────────────────────────[0m
+[1m2/3 passed[0m (certified answers + behavioral expectations) in org me

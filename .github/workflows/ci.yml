@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    # Two legs, one verdict. `bare` is a stock install in a clean shell; `loaded`
+    # installs every optional extra, plants a ./.env and exports ambient settings —
+    # each of which can flip a result on its own (see tests/conftest.py).
+    # They must report the same counts, modulo tests that DECLARE an extra and
+    # therefore skip without it. fail-fast off: the difference is the signal.
+    name: backend (${{ matrix.install }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        install: [bare, loaded]
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: dst
+          POSTGRES_PASSWORD: dst_dev
+          POSTGRES_DB: dst
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dst"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install deps
+        run: uv sync ${{ matrix.install == 'loaded' && '--all-extras' || '' }}
+      - name: Migrate
+        run: uv run alembic upgrade head
+      - name: Dirty the environment (loaded leg)
+        if: matrix.install == 'loaded'
+        # A .env in the CWD and settings exported in the shell: the two shapes the
+        # suite must be immune to. ENVIRONMENT=production is the loudest of them —
+        # unscrubbed it rewrites both DSNs to sslmode=require and raises the
+        # production contract at `import services.app`. Planted after Migrate,
+        # because that step legitimately talks to the plaintext CI Postgres.
+        # BOTH spellings of every name: settings are DST_-prefixed now and the
+        # bare ones are compatibility aliases, so the scrub has two shapes to cover.
+        run: |
+          printf 'DST_EDITION=cloud\nDST_PUBLIC_BASE_URL=https://planted.example\n' > .env
+          printf 'EDITION=cloud\nPUBLIC_BASE_URL=https://planted.example\n' >> .env
+          printf 'DST_PROVIDERS={"acme":{"type":"anthropic","api_key":"sk-planted"}}\n' >> .env
+          echo "DST_ENVIRONMENT=production" >> "$GITHUB_ENV"
+          echo "ENVIRONMENT=production" >> "$GITHUB_ENV"
+          echo "EDITION=cloud" >> "$GITHUB_ENV"
+          echo "DST_SECRET_KEY=planted" >> "$GITHUB_ENV"
+      - name: Lint (ruff)
+        if: matrix.install == 'bare'
+        run: uv run ruff check services tests
+      - name: Format check (ruff)
+        if: matrix.install == 'bare'
+        run: uv run ruff format --check services tests
+      - name: Type check (mypy)
+        if: matrix.install == 'bare'
+        run: uv run mypy services
+      - name: Test (pytest)
+        run: uv run pytest
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+      - name: Type check
+        run: pnpm typecheck
+      - name: Lint (eslint)
+        run: pnpm lint
+      - name: Test (vitest)
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint + render the chart
+        run: |
+          helm lint deploy/helm/dst --set publicBaseUrl=https://ci.example.com
+          helm template ci deploy/helm/dst \
+            --set publicBaseUrl=https://ci.example.com \
+            --set ingress.enabled=true --set ingress.host=ci.example.com >/dev/null
+          # The contract fails closed: rendering without publicBaseUrl must error.
+          if helm template ci deploy/helm/dst >/dev/null 2>&1; then
+            echo "chart rendered without publicBaseUrl - required() guard lost"; exit 1
+          fi

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Refuse to commit a credential. Install with `make hooks` (sets core.hooksPath).
+#
+# The commit is the earliest deterministic point to catch a leaked token, before
+# it reaches history where rotation is the only remedy. Credential shapes live in
+# scripts/credential_regex.sh, shared with any export-time gate so the two never
+# drift.
+#
+# Scans STAGED CONTENT, not the working tree: what is being committed is the
+# only thing that matters, and a dirty working file is not an error.
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+. "$ROOT/scripts/credential_regex.sh"
+
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+[ -n "$staged" ] || exit 0
+
+hits=""
+for f in $staged; do
+  # Added lines only. An existing credential is a separate (already-filed)
+  # problem; blocking every commit that touches a tainted file just teaches
+  # people --no-verify, and a gate routinely bypassed is worse than none.
+  # -o so the allowlist filters MATCHES, not lines: a real credential sharing a
+  # line with a shipped dev default must still block.
+  match="$(git diff --cached -U0 -- "$f" \
+    | grep '^+' | grep -v '^+++' \
+    | grep -oE "$CREDS" \
+    | grep -vE "$CREDS_ALLOW" || true)"
+  [ -n "$match" ] && hits="$hits$f\n"
+done
+
+if [ -n "$hits" ]; then
+  # Print WHERE, never the match. Echoing a credential to warn about leaking it
+  # puts it in the terminal scrollback and the shell history.
+  printf '\nCOMMIT BLOCKED — credential-shaped content in staged changes:\n\n'
+  printf "$hits" | sed 's/^/  /'
+  printf '\nRotate it (`dst revoke-token <raw>`), move it to .env, and re-stage.\n'
+  printf 'If this is a placeholder, make it obviously fake (dst_YOUR_KEY).\n\n'
+  exit 1
+fi

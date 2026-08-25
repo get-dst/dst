@@ -1,0 +1,6 @@
+^D19 customers are repeat customers (where a repeat customer has number_of_orders > 1).
+
+[38;5;172msql:[0m [2mSELECT COUNT(customers.customer_id) AS repeat_customers FROM customers WHERE customers.number_of_orders > 1[0m
+[38;5;172mbasis:[0m Computed as `repeat_customer` — A repeat customer has number_of_orders > 1. (governed definition)
+[38;5;172mconfidence:[0m [32m[1mverified[0m · [38;5;172mdefinition:[0m repeat_customer
+request_id: req_7ba12c2be21b4d6c

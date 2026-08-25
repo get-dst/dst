@@ -1,0 +1,7 @@
+  [33m~[0m customer_value — update
+
+not checked by plan — apply still runs these, and they need a live warehouse
+  - warehouse connection probes — apply builds every declared connection and reads through it before it lands, and a dead credential aborts the apply
+  - eval-case expected_sql EXECUTED against the warehouse (plan parses it only) — an oracle that parses but errors aborts the apply
+  - the publish eval gate — it scores the certified corpus with live generation, so under `eval_gate: block` a regression can still abort the apply
+[1mPlan: 1 to change, 5 unchanged.[0m [2m(--full shows diffs and hints)[0m

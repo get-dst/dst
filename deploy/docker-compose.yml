@@ -1,0 +1,47 @@
+# dst self-host: one Postgres, one app container. VM quickstart:
+#   POSTGRES_PASSWORD=… DST_APP_DB_PASSWORD=… DST_SECRET_KEY=$(dst secret) docker compose up -d
+# DST_PROVIDERS carries your LLM/embedding entries (see dst.yaml docs).
+# DST_APP_DB_PASSWORD is required (the app role ships without a password) —
+# the entrypoint's migrate syncs the role to whatever DATABASE_URL declares,
+# so changing it here rotates the role's password on next start.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dst
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: dst
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dst"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: ..  # becomes image: ghcr.io/<org>/dst once the registry publishes
+    restart: unless-stopped
+    ports:
+      - "${DST_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    environment:
+      # sslmode=disable is deliberate: the DB is on the compose-private network
+      # and production mode would otherwise append sslmode=require (the managed-PG
+      # default). TLS belongs at your reverse proxy.
+      DATABASE_URL: postgresql+psycopg://dst_app:${DST_APP_DB_PASSWORD:?set DST_APP_DB_PASSWORD}@db:5432/dst?sslmode=disable
+      DATABASE_ADMIN_URL: postgresql+psycopg://dst:${POSTGRES_PASSWORD}@db:5432/dst?sslmode=disable
+      DST_SECRET_KEY: ${DST_SECRET_KEY:?generate one with `dst secret`}
+      DST_PROVIDERS: ${DST_PROVIDERS:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

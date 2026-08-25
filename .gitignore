@@ -1,0 +1,52 @@
+# secrets / credentials
+.env
+.env.*
+!.env.example
+# GCP service-account keys are named after the PROJECT, and project ids are
+# immutable — the GCP project stayed `kurator-core` through the dst rename.
+kurator-core-*.json
+dst-core-*.json
+*-service-account*.json
+gcp-credentials*.json
+*.pem
+# key/cert containers and credential stores — the diff-based pre-commit hook is
+# blind to binary files, so keep these from ever being stageable (SECRET-AUDIT §.gitignore)
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+.netrc
+.pypirc
+# local SQLite scratch (a proxy requests.db already leaked into history once).
+# Not *.duckdb — fixtures/jaffle_shop.duckdb is a deliberately committed test fixture.
+*.db
+*.sqlite
+*.sqlite3
+# per-machine Claude settings — carries a machine-local read grant, not for git
+.claude/settings.local.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# data dumps — warehouse/query-log exports must never enter git (real customer data)
+docs/v*/*.csv
+docs/benchmarks/**/*.csv
+bq-results-*.csv
+
+# logs / os
+*.log
+.DS_Store
+
+# agent worktrees (transient)
+.claude/worktrees/
+services/web_dist/*
+!services/web_dist/.gitkeep
+scripts/artifacts/*.html

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 802 129" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="802" height="129" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst correct req_… --kind definition --target revenue --note &quot;…&quot;</text>
+<line x1="0" y1="36" x2="802" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst correct req_… --kind definition --target revenue --note &quot;…&quot;</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">rev_81907144f8: correction filed (definition → revenue) on req_c3ed41945c9a4aad — state=approved</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#d9d2c5">next: dst patches draft rev_81907144f8</tspan></text>
+</svg>

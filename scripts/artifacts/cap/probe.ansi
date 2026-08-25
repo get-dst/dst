@@ -1,0 +1,3 @@
+sampled 2 of 13 table(s) — the semantic layer reads 2; catalog metadata covers the rest (--sample-all samples every table, --tables a,b exactly those)
+probed 'jaffle': 13 table(s) -> profiles/jaffle.probe.json (6 complete value dictionaries)
+commit profiles/ — the next `dst apply` lands these facts in the serving prompt

@@ -1,0 +1,16 @@
+.git
+.venv
+node_modules
+apps/web/dist
+__pycache__
+*.pyc
+.env
+.env.*
+docs
+tests
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.claude
+dst-core-*.json
+*.duckdb.wal
