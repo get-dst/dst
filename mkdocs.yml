@@ -1,0 +1,66 @@
+# Ships at the OSS repo root (docs/oss/docs -> docs/). mkdocs-material, markdown only.
+site_name: data serve tool (dst)
+site_description: data serve tool (dst) — callers ask, a governed layer answers.
+site_url: https://www.dataservetool.com/
+# These three turn themselves on: deploy/deploy.sh checks anonymously whether
+# the repo answers, and uncomments them for that build only. Off while it 404s,
+# on the first deploy after it goes public — no launch-day step to remember.
+# repo_url: https://github.com/get-dst/dst
+# edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    scheme: default
+  font: false # identity faces ship via extra_css, never Google Fonts defaults
+  logo: assets/dst-mark.svg
+  favicon: assets/dst-mark.svg
+  features:
+    - navigation.sections
+
+extra:
+  generator: false # no "Made with Material for MkDocs" footer
+
+extra_css:
+  - stylesheets/dst.css # paper + amber + Plex Mono, receipt-style admonitions
+
+extra_javascript:
+  - javascripts/cta.js # header dst Cloud button
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+nav:
+  - What dst is: index.md
+  - Quickstart: quickstart.md
+  - The product, on screen: on-screen.md
+  - Concepts:
+      - The answer path: concepts/answer-path.md
+      - Lenses: concepts/lens.md
+      - Curated context: concepts/curated-context.md
+      - Certified answers: concepts/certified.md
+      - Receipts: concepts/receipts.md
+      - What the model sees: concepts/what-the-model-sees.md
+      - Clarify & refusal: concepts/clarify-and-refusal.md
+  - Guides:
+      - Project files: guides/project-files.md
+      - Connect a warehouse: guides/connect-a-warehouse.md
+      - Answerable tables: guides/answerable-tables.md
+      - Bootstrap from history: guides/drift-audit.md
+      - Agents over MCP: guides/agents-mcp.md
+      - Build your own UI: guides/build-your-own-ui.md
+      - The correction loop: guides/correction-loop.md
+      - Evaluation: guides/evaluation.md
+      - Environments and CI: guides/environments-and-ci.md
+  - Deploying: deployment.md
+  - Security and data flow: security.md
+  - Upgrading: upgrading.md
+  - Reference:
+      - CLI: reference/cli.md
+      - API: reference/api.md
+      - Configuration: reference/configuration.md
+  - FAQ: faq.md
+  - dst Cloud: cloud.md

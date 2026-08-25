@@ -1,0 +1,198 @@
+/* dst docs identity — paper + amber + mono over mkdocs-material.
+   Tokens mirror apps/web/src/index.css; admonitions are receipts, not warnings. */
+
+:root {
+  --md-primary-fg-color: #1a1917;
+  --md-accent-fg-color: #4d4945;
+  --md-default-bg-color: #faf9f6;
+  --md-default-fg-color: #1a1917;
+  --md-default-fg-color--light: #4d4945;
+  --md-default-fg-color--lighter: #6f6a64;
+  --md-code-bg-color: #f5f4f0;
+  --md-code-fg-color: #1a1917;
+  --md-typeset-a-color: #1a1917;
+  --dst-border: #dddbd6;
+  --dst-green: #16a34a;
+  --dst-green-bg: #f0fdf4;
+  --dst-amber-bg: #fdf8ec;
+  --dst-amber-border: #ead9b5;
+}
+
+.md-typeset code,
+.md-nav,
+.md-header__topic {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.md-typeset table:not([class]) th {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+}
+
+/* ink-only brand: links are underlined ink, never a color */
+.md-typeset a { text-decoration: underline; text-underline-offset: 2px; }
+.md-typeset a:hover { color: #4d4945; }
+
+/* receipt admonitions: clarify */
+.md-typeset .admonition {
+  border: 1px solid var(--dst-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px 0 rgb(26 25 23 / 0.05);
+}
+.md-typeset .admonition-title {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: none;
+}
+.md-typeset .admonition-title::before { display: none; }
+
+.md-typeset .admonition.clarify { background: var(--dst-amber-bg); border-color: var(--dst-amber-border); }
+.md-typeset .admonition.clarify > .admonition-title { color: #b45309; }
+
+/* header mark sizing */
+.md-header__button.md-logo img, .md-header__button.md-logo svg { height: 1.3rem; width: 1.3rem; }
+
+/* dst Cloud: the one button in the nav */
+.md-nav--primary .md-nav__link[href*="cloud"] {
+  display: inline-block;
+  margin-top: 0.6rem;
+  padding: 0.25rem 0.7rem;
+  background: var(--md-primary-fg-color);
+  color: #faf9f6;
+  border-radius: 6px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+}
+.md-nav--primary .md-nav__link[href*="cloud"]:hover { background: var(--md-accent-fg-color); color: #faf9f6; }
+
+/* dst Cloud signup form: paper + mono, receipt-flat */
+.dst-signup { max-width: 26rem; }
+.dst-signup label {
+  display: block;
+  margin: 0.9rem 0 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--md-default-fg-color--lighter);
+}
+.dst-signup input, .dst-signup textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.45rem 0.6rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  color: var(--md-default-fg-color);
+  background: #fff;
+  border: 1px solid var(--dst-border);
+  border-radius: 6px;
+}
+.dst-signup input:focus, .dst-signup textarea:focus {
+  outline: none;
+  border-color: var(--md-accent-fg-color);
+}
+.dst-signup button {
+  margin-top: 1rem;
+  padding: 0.5rem 1.1rem;
+  background: var(--md-primary-fg-color);
+  color: #faf9f6;
+  border: none;
+  border-radius: 6px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.dst-signup button:hover { background: var(--md-accent-fg-color); }
+.dst-signup button:disabled { opacity: 0.6; cursor: default; }
+.dst-signup-err { color: #b91c1c; font-size: 0.66rem; margin-top: 0.6rem; }
+.dst-signup-done {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--dst-green);
+  background: var(--dst-green-bg);
+  border: 1px solid #d7e8d9;
+  border-radius: 6px;
+  padding: 0.7rem 0.9rem;
+}
+
+/* header CTA (injected by javascripts/cta.js) */
+.dst-cloud-cta {
+  margin-left: 0.6rem;
+  margin-right: 0.4rem;
+  padding: 0.3rem 0.75rem;
+  background: #faf9f6;
+  color: #1a1917 !important;
+  border-radius: 6px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  align-self: center;
+}
+.dst-cloud-cta:hover { background: #f1efe9; color: #1a1917 !important; }
+
+/* dst Cloud page: ink terminal hero + value rows, distinct from the paper pages */
+.dst-cloud-hero {
+  background: #1a1917;
+  border-radius: 10px;
+  padding: 1.6rem 1.8rem;
+  margin: 1rem 0 1.4rem;
+}
+.dst-cloud-status {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #a8a29e;
+  margin: 0 0 0.9rem;
+}
+.dst-cloud-status span { color: #fbbf24; }
+.dst-cloud-head {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 1.05rem;
+  line-height: 1.45;
+  color: #faf9f6;
+  margin: 0 0 0.7rem;
+}
+.dst-cloud-sub { color: #d6d3d1; font-size: 0.74rem; line-height: 1.6; margin: 0; }
+.dst-cloud-rows { margin: 0 0 1.2rem; }
+.dst-cloud-row {
+  border: 1px solid var(--dst-border);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.6rem;
+  background: #fff;
+}
+.dst-cloud-row span {
+  display: block;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  color: #6f6a64;
+  margin-bottom: 0.35rem;
+}
+.dst-cloud-row p { margin: 0; font-size: 0.72rem; line-height: 1.6; }
+
+/* --- Wide artifacts (terminal frames, architecture figures) --------------
+   The frames are drawn at 1000px+; on a laptop the default grid squeezes
+   them to ~700px. Widen the grid, let artifact images fill the content
+   column (they are SVG, so scaling stays crisp), and mark the click-through
+   to the raw asset with a zoom cursor. */
+.md-grid { max-width: 78rem; }
+.md-content img[src*="assets/term/"],
+.md-content img[src*="assets/figures/"],
+.md-content img[src*="product-on-screen"] { width: 100%; }
+.md-content a > img { cursor: zoom-in; }
+
+/* Overscroll: paint the root canvas paper and declare the scheme, so the
+   rubber-band at both ends shows the site's own ground instead of the
+   browser's white/black default canvas. */
+html { background: #faf9f6; color-scheme: light; }

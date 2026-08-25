@@ -1,0 +1,147 @@
+# Starter question set for the synthetic proving ground.
+# Each question binds to an oracle key emitted by the data generator's
+# --oracle output. Categories follow the medallion competencies the full set
+# will grow into; this starter covers totals, group-bys, lookups, tops.
+questions:
+  - id: count-customers
+    tier: discriminating
+    category: counts
+    kind: count
+    question: How many customers do we have in the CRM?
+    oracle: [customers_count]
+
+  - id: count-invoices
+    tier: discriminating
+    category: counts
+    kind: count
+    question: How many invoices have we issued in total?
+    oracle: [invoices_count]
+
+  - id: net-invoiced-total
+    tier: discriminating
+    category: finance-totals
+    kind: scalar
+    question: What is our total net invoiced amount in euros, across all invoices?
+    oracle: [invoiced_net_total_eur]
+
+  - id: outstanding-total
+    tier: discriminating
+    category: finance-totals
+    kind: scalar
+    question: How much money is currently outstanding on our invoices, in euros (net of payments)?
+    oracle: [outstanding_total_eur]
+
+  - id: overdue-total
+    tier: discriminating
+    category: finance-totals
+    kind: scalar
+    question: What is the total overdue amount in our accounts receivable, in euros?
+    oracle: [overdue_total_eur]
+
+  - id: net-invoiced-2025
+    tier: discriminating
+    category: time-slicing
+    kind: scalar
+    question: What was our total net invoiced amount in euros for 2025, as one number (use the invoice issue date)?
+    oracle: [invoiced_net_by_year, "2025"]
+
+  - id: net-invoiced-2026
+    tier: discriminating
+    category: time-slicing
+    kind: scalar
+    question: What is our total net invoiced amount in euros for 2026 so far, as one number (use the invoice issue date)?
+    oracle: [invoiced_net_by_year, "2026"]
+
+  # [[overdue_by_customer#7]] = the 7th customer (sorted) that actually exists
+  # in the generated world — bound at load time, so the question tracks the
+  # generator instead of hardcoding a name its pool is free to drop (the
+  # "Havitek Suomi Oy" drift killed a run mid-flight on 2026-08-17).
+  - id: overdue-customer
+    category: entity-lookup
+    kind: scalar
+    lang: fi
+    question: Kuinka paljon [[overdue_by_customer#7]]:ltä on erääntynyttä saatavaa euroissa?
+    oracle: [overdue_by_customer, "[[overdue_by_customer#7]]"]
+
+  - id: top-customer-net
+    tier: discriminating
+    category: tops
+    kind: top
+    question: Which customer have we invoiced the most (net, euros), and how much?
+    oracle: [top_customer_by_net_invoiced]
+
+  - id: top-rep-won
+    tier: discriminating
+    category: tops
+    kind: top
+    question: Which sales rep has won the most contract value in euros, and how much?
+    oracle: [top_rep_by_won_value]
+
+  - id: win-rate
+    tier: discriminating
+    category: ratios
+    kind: ratio
+    question: What is our quote win rate, counting only decided quotes (won, lost or expired)?
+    oracle: [quote_win_rate]
+
+  - id: contract-value-total
+    tier: discriminating
+    category: sales-totals
+    kind: scalar
+    question: What is the total contract value of all our closed deals, in euros?
+    oracle: [contract_value_total_eur]
+
+  - id: payouts-total
+    category: comp-totals
+    kind: scalar
+    question: How much have we paid out in sales compensation in total, in euros?
+    oracle: [payout_total_eur]
+
+  - id: payments-total
+    tier: discriminating
+    category: finance-totals
+    kind: scalar
+    question: What is the total amount of customer payments we have received, in euros?
+    oracle: [payments_total_eur]
+
+  # Absence tier: the data for these does not exist in the warehouse. The
+  # correct answer is a decline naming the gap; any number is a hallucination.
+  - id: absent-churn-rate
+    tier: discriminating
+    category: absence
+    kind: absent
+    question: What is our customer churn rate for maintenance contracts this year?
+    oracle: [absent, churn_rate]
+
+  - id: absent-support-tickets
+    tier: discriminating
+    category: absence
+    kind: absent
+    question: How many open support tickets do we have right now?
+    oracle: [absent, support_tickets_open]
+
+  - id: absent-website-visits
+    tier: discriminating
+    category: absence
+    kind: absent
+    question: How many visits did our website get per month this year?
+    oracle: [absent, website_visits_by_month]
+
+  # User-context pair: IDENTICAL question text, different caller, different
+  # correct answer. The caller is deliberately not in the text — only lanes
+  # with runtime-context plumbing can know who is asking, like production.
+  - id: revenue-march-cfo
+    tier: discriminating
+    category: user-context
+    kind: scalar
+    caller: cfo
+    question: What was our revenue in March 2026, in euros?
+    oracle: [invoiced_net_by_month, "2026-03"]
+
+  - id: revenue-march-sales
+    tier: discriminating
+    category: user-context
+    kind: scalar
+    caller: head-of-sales
+    question: What was our revenue in March 2026, in euros?
+    oracle: [bookings_by_month, "2026-03"]

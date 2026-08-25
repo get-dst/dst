@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 574 129" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="574" height="129" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst keys create --caller maija</text>
+<line x1="0" y1="36" x2="574" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst keys create --caller maija</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">caller: maija</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#d9d2c5">key (store it now — shown once): dst_doZrchBl………………………………(redacted)</tspan></text>
+</svg>

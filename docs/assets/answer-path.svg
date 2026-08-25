@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" font-family="IBM Plex Mono, ui-monospace, Menlo, monospace">
+  <style>
+    .box { fill: #ffffff; stroke: #dddbd6; rx: 6; }
+    .stage { fill: #f1efe9; stroke: #dddbd6; }
+    .label { font-size: 13px; fill: #1a1917; }
+    .small { font-size: 10px; fill: #6f6a64; letter-spacing: 0.08em; }
+    .amber { fill: #1a1917; }
+    .arrow { stroke: #1a1917; stroke-width: 1.5; fill: none; marker-end: url(#head); }
+    .back { stroke: #6f6a64; stroke-width: 1; fill: none; marker-end: url(#headgrey); stroke-dasharray: 4 3; }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#1a1917"/>
+    </marker>
+    <marker id="headgrey" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#6f6a64"/>
+    </marker>
+  </defs>
+
+  <!-- caller -->
+  <rect class="box" x="10" y="70" width="120" height="64" rx="6"/>
+  <text class="label" x="70" y="98" text-anchor="middle">caller</text>
+  <text class="small" x="70" y="116" text-anchor="middle">ALWAYS AN AI</text>
+
+  <!-- dst -->
+  <rect class="box" x="180" y="28" width="400" height="148" rx="6"/>
+  <text class="label amber" x="196" y="52" font-weight="600">dst</text>
+  <text class="small" x="564" y="52" text-anchor="end">THE ANSWER PATH</text>
+
+  <g>
+    <rect class="stage" x="196" y="66" width="110" height="30" rx="5"/>
+    <text class="label" x="251" y="86" text-anchor="middle" font-size="12">ground</text>
+    <rect class="stage" x="326" y="66" width="110" height="30" rx="5"/>
+    <text class="label" x="381" y="86" text-anchor="middle" font-size="12">generate</text>
+    <rect class="stage" x="456" y="66" width="110" height="30" rx="5"/>
+    <text class="label" x="511" y="86" text-anchor="middle" font-size="12">guard</text>
+    <rect class="stage" x="196" y="112" width="110" height="30" rx="5"/>
+    <text class="label" x="251" y="132" text-anchor="middle" font-size="12">execute</text>
+    <rect class="stage" x="326" y="112" width="110" height="30" rx="5"/>
+    <text class="label" x="381" y="132" text-anchor="middle" font-size="12">verify</text>
+    <rect class="stage" x="456" y="112" width="110" height="30" rx="5"/>
+    <text class="label" x="511" y="132" text-anchor="middle" font-size="12">compose</text>
+    <path class="arrow" d="M306,81 L322,81"/>
+    <path class="arrow" d="M436,81 L452,81"/>
+    <path class="arrow" d="M511,96 C511,104 251,100 251,108"/>
+    <path class="arrow" d="M306,127 L322,127"/>
+    <path class="arrow" d="M436,127 L452,127"/>
+  </g>
+  <text class="small" x="380" y="166" text-anchor="middle">READ-ONLY · ROW CAPS · ALLOW-LISTED SCHEMA · EVERY CALL AUDITED</text>
+
+  <!-- warehouse -->
+  <rect class="box" x="630" y="70" width="120" height="64" rx="6"/>
+  <text class="label" x="690" y="98" text-anchor="middle">warehouse</text>
+  <text class="small" x="690" y="116" text-anchor="middle">NEVER RAW</text>
+
+  <!-- flows -->
+  <path class="arrow" d="M130,92 L176,92"/>
+  <text class="small" x="153" y="84" text-anchor="middle">ASK</text>
+  <path class="arrow" d="M580,92 L626,92"/>
+  <text class="small" x="603" y="84" text-anchor="middle">SQL</text>
+  <path class="back" d="M626,118 L584,118"/>
+  <path class="back" d="M176,118 L134,118"/>
+  <text class="small" x="70" y="160" text-anchor="middle">answer + SQL +</text>
+  <text class="small" x="70" y="174" text-anchor="middle">grade + receipt</text>
+</svg>

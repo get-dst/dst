@@ -1,0 +1,37 @@
+instructions: 'Derived computations are IN scope: multi-step CTEs, window functions,
+
+  NTILE/percentile scoring, and trigonometric math (RADIANS/SIN/COS/ASIN/SQRT)
+
+  over existing columns. Before declining for missing data, verify the claim
+
+  against the schema: decline only when a required COLUMN truly does not exist —
+
+  a value derivable from existing columns is never "missing data". If a business
+
+  rule is genuinely undefined, name the missing rule; otherwise compute. Columns
+
+  may be VARCHAR even when they hold numeric or timestamp data — CAST as needed.
+
+  '
+definitions:
+- term: city and airport names
+  body: 'airports_data.city and airport_name are JSON objects in VARCHAR, e.g. {"en":
+    "Abakan", "ru": "Абакан"}. The city name means the ENGLISH name: json_extract_string(city,
+    ''$.en'') (DuckDB: city ->> ''$.en'' also works). NEVER compare the raw column
+    to a plain string like ''Abakan'' — it never matches and falsely looks like the
+    city has no flights.'
+- term: airport coordinates
+  body: 'airports_data.coordinates is a VARCHAR point string ''(lon,lat)'' - LONGITUDE
+    FIRST, latitude second; never swap. Parse: lon = CAST(split_part(trim(coordinates,
+    ''()''), '','', 1) AS DOUBLE), lat = CAST(split_part(trim(coordinates, ''()''),
+    '','', 2) AS DOUBLE).'
+- term: route distance
+  body: 'Distance between two airports/cities = Haversine great-circle km over their
+    coordinates: d = 2 * 6371 * ASIN(SQRT( SIN((lat2-lat1)/2)^2 + COS(lat1)*COS(lat2)*SIN((lon2-lon1)/2)^2
+    )) with all angles converted via RADIANS(). Flights link airports via flights.departure_airport
+    / flights.arrival_airport = airports_data.airport_code. City-pair distance = average
+    over all flights between the two cities.'
+- term: unique route (city pair)
+  body: 'A route between two cities is direction-insensitive: standardize with city1
+    = LEAST(from_city, to_city), city2 = GREATEST(...), so A-to-B and B-to-A are the
+    same route.'

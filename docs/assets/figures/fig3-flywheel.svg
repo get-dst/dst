@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 330" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13"><defs><marker id="ai" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#292524"/></marker><marker id="aa" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#b45309"/></marker></defs><rect width="1060" height="330" fill="#faf6ee"/>
+<rect x="60" y="70" width="190" height="84" fill="#f6e8d7" stroke="#b45309" stroke-width="1.6"/>
+<text x="155" y="98" font-size="13.5" fill="#b45309" text-anchor="middle" font-weight="700" xml:space="preserve">an answer is served</text>
+<text x="155" y="120" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">with the SQL and</text>
+<text x="155" y="136" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">a receipt attached</text>
+<rect x="310" y="70" width="190" height="84" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
+<text x="405" y="98" font-size="13.5" fill="#292524" text-anchor="middle" font-weight="700" xml:space="preserve">someone doubts it</text>
+<text x="405" y="120" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">they flag it — or dst</text>
+<text x="405" y="136" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">flags itself; a person rules</text>
+<rect x="560" y="70" width="190" height="84" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
+<text x="655" y="98" font-size="13.5" fill="#292524" text-anchor="middle" font-weight="700" xml:space="preserve">it becomes a test</text>
+<text x="655" y="120" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">the fix is saved as an</text>
+<text x="655" y="136" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">approved answer + its test</text>
+<rect x="810" y="70" width="190" height="84" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
+<text x="905" y="98" font-size="13.5" fill="#292524" text-anchor="middle" font-weight="700" xml:space="preserve">it gates every deploy</text>
+<text x="905" y="120" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">the test re-runs on</text>
+<text x="905" y="136" font-size="10" fill="#8a8178" text-anchor="middle" xml:space="preserve">every future change</text>
+<line x1="252" y1="112" x2="308" y2="112" stroke="#292524" stroke-width="1.2" marker-end="url(#ai)"/>
+<line x1="502" y1="112" x2="558" y2="112" stroke="#292524" stroke-width="1.2" marker-end="url(#ai)"/>
+<line x1="752" y1="112" x2="808" y2="112" stroke="#292524" stroke-width="1.2" marker-end="url(#ai)"/>
+<path d="M 905 154 C 905 268, 155 268, 155 154" fill="none" stroke="#b45309" stroke-width="1.6" marker-end="url(#aa)"/>
+<text x="530" y="268" font-size="11" fill="#b45309" text-anchor="middle" font-weight="700" xml:space="preserve">the corrected answer is served from then on — and the AI learns from it</text>
+</svg>

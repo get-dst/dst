@@ -1,0 +1,83 @@
+# dst deploys as ONE stateless container against YOUR Postgres (pgvector
+# >= 0.5.0 — RDS PG 15.5+/16.1+, Cloud SQL PG 15+, Neon/Supabase). The chart
+# never bundles a database; all state lives in Postgres, so pods are
+# interchangeable. The full env contract lives in the deployment docs.
+
+image:
+  # The release workflow stamps the real repository at publish time.
+  repository: ghcr.io/get-dst/dst
+  # Pin a release tag; defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# One existing Secret carries the three contract values (create it yourself or
+# via your secrets operator):
+#   kubectl create secret generic dst \
+#     --from-literal=database-url='postgresql+psycopg://dst_app:...?sslmode=require' \
+#     --from-literal=database-admin-url='postgresql+psycopg://admin:...?sslmode=require' \
+#     --from-literal=secret-key="$(dst secret)"
+secret:
+  name: dst
+  databaseUrlKey: database-url
+  # Admin DSN — the migrate hook Job AND the serving pods both need it: admin-token
+  # auth, the scheduler and OAuth all run on the admin engine. Withholding it
+  # leaves /ready green while every /mgmt call 503s. See _helpers.tpl.
+  databaseAdminUrlKey: database-admin-url
+  secretKeyKey: secret-key
+
+# Required by the production contract: the origin the deployment is reached at,
+# e.g. https://dst.example.com (OAuth metadata, review links).
+publicBaseUrl: ""
+
+# Extra environment (DST_PROVIDERS, DST_CORS_ORIGINS, tuning knobs...).
+# Secret-shaped values belong in envFrom, not here.
+env: {}
+envFrom: []
+
+# Migrations run as a pre-install/pre-upgrade hook Job (advisory-locked,
+# idempotent); serving pods start with DST_MIGRATE_ON_START=false.
+migrate:
+  enabled: true
+
+replicaCount: 1
+
+# The image runs as uid 10001 and the app writes only to Postgres, so the
+# defaults satisfy the PodSecurity "restricted" profile with a read-only root
+# filesystem. Pods get an emptyDir at /tmp for Python scratch space (upload
+# spooling, tempfiles). Building with UV_EXTRA=local-embed caches model
+# weights under $HOME — flip readOnlyRootFilesystem off (or point
+# XDG_CACHE_HOME at /tmp) for that variant.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tls: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

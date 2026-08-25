@@ -1,0 +1,10 @@
+^D[38;5;172mconnections[0m: created 'jaffle' (duckdb)
+  jaffle: read ✓ · query ✓ · query history ✓
+[38;5;172msemantic[0m: created definition/lifetime_value, created definition/repeat_customer, created definition/value, created entity/customers, created entity/orders
+[38;5;172mlens customer_value[0m: created
+  [33mwarning:[0m 'value' is claimed by average order value, lifetime value, value: lifetime value, value governed by a definition, average order value not. A question asking for 'value' picks one silently and two people can get different numbers — govern the others, or mark the term `status: ambiguous` with `possible_mappings` so dst asks which is meant
+  [33mwarning:[0m definition 'lifetime_value' has no sql_expr; it guides prose answers but can't be enforced in generated SQL
+  [33mwarning:[0m no callers on the allow-list (admin-only until callers are added)
+  [33mwarning:[0m this lens has metrics, so generation's first pass is the metric-layer prompt — 1 joins, 1 sample_queries, 1 instructions reach the model only if that pass fails and generation escalates to raw SQL. `dst lens prompt customer_value "<question>"` renders both.
+  [33mwarning:[0m DEGRADED: eval_gate: block configured but no active certified answers and no approved behavioral cases (certify answers — the regression suite — or pin expect: cases with status: approved) — gate SKIPPED
+[32m[1mApply complete.[0m 5 warning(s), 0 error(s). [2m(--json for the row array)[0m

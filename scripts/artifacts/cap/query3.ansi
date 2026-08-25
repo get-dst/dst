@@ -1,0 +1,6 @@
+^DTotal revenue was 1761.0 (using the applied revenue definition, SUM of `orders.amount`).
+
+[38;5;172msql:[0m [2mSELECT SUM(orders.amount) AS revenue FROM orders AS orders[0m
+[38;5;172mbasis:[0m Computed as `revenue` on `orders`. (entity metric)
+[38;5;172mconfidence:[0m [32m[1mverified[0m · [38;5;172mdefinition:[0m revenue
+request_id: req_c3ed41945c9a4aad

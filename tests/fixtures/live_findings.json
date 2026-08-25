@@ -1,0 +1,391 @@
+[
+ {
+  "metric_intent": "sum of net",
+  "variants": [
+   {
+    "statement": "SELECT SUM(amount_eur) AS payments_eur FROM (SELECT payment_id, MAX_BY(amount_eur, row_version) AS amount_eur FROM silver.fct_payments GROUP BY payment_id)",
+    "source_tables": [
+     "silver.fct_payments"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(amount_eur); over silver.fct_payments; no filters",
+    "observed_columns": [
+     "PAYMENTS_EUR"
+    ],
+    "observed_rows": [
+     [
+      41818677.589999996
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT SUM(net_amount_eur) AS net_invoiced_eur FROM (SELECT DISTINCT invoice_id, customer_id, service, issue_date, net_amount_eur FROM (SELECT invoice_id, customer_id, service, issue_date, net_amount_eur FROM bronze.netvisor__invoices_legacy WHERE NOT _fivetran_deleted UNION ALL SELECT invoice_id, customer_id, service, issue_date, net_amount_eur FROM bronze.netvisor__invoices WHERE NOT _fivetran_deleted))",
+    "source_tables": [
+     "bronze.netvisor__invoices",
+     "bronze.netvisor__invoices_legacy"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(net_amount_eur); over bronze.netvisor__invoices, bronze.netvisor__invoices_legacy; filters: NOT _fivetran_deleted AND NOT _fivetran_deleted",
+    "observed_columns": [
+     "NET_INVOICED_EUR"
+    ],
+    "observed_rows": [
+     [
+      35020740.0
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT c.customer_name, SUM(i.net_amount_eur) AS net_invoiced_eur FROM (SELECT DISTINCT invoice_id, customer_id, service, issue_date, net_amount_eur FROM (SELECT invoice_id, customer_id, service, issue_date, net_amount_eur FROM bronze.netvisor__invoices_legacy WHERE NOT _fivetran_deleted UNION ALL SELECT invoice_id, customer_id, service, issue_date, net_amount_eur FROM bronze.netvisor__invoices WHERE NOT _fivetran_deleted)) i JOIN silver.dim_customers c ON i.customer_id = c.customer_id AND c.is_current GROUP BY c.customer_name ORDER BY net_invoiced_eur DESC LIMIT 1",
+    "source_tables": [
+     "bronze.netvisor__invoices",
+     "bronze.netvisor__invoices_legacy",
+     "silver.dim_customers"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(i.net_amount_eur); over bronze.netvisor__invoices, bronze.netvisor__invoices_legacy, silver.dim_customers; filters: NOT _fivetran_deleted AND NOT _fivetran_deleted",
+    "observed_columns": [
+     "CUSTOMER_NAME",
+     "NET_INVOICED_EUR"
+    ],
+    "observed_rows": [
+     [
+      "Tammiketju Kiinteist\u00f6t Oy",
+      2348460.0
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT SUM(net_revenue_eur) FROM gold.dashboard_revenue_old",
+    "source_tables": [
+     "gold.dashboard_revenue_old"
+    ],
+    "run_count": 1,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(net_revenue_eur); over gold.dashboard_revenue_old; no filters",
+    "observed_columns": [
+     "SUM(NET_REVENUE_EUR)"
+    ],
+    "observed_rows": [
+     [
+      32717890.0
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT SUM(net_revenue_eur) FROM gold.fct_revenue_monthly",
+    "source_tables": [
+     "gold.fct_revenue_monthly"
+    ],
+    "run_count": 1,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(net_revenue_eur); over gold.fct_revenue_monthly; no filters",
+    "observed_columns": [
+     "SUM(NET_REVENUE_EUR)"
+    ],
+    "observed_rows": [
+     [
+      35020740.0
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT SUM(revenue_eur) FROM gold.sales_revenue_monthly",
+    "source_tables": [
+     "gold.sales_revenue_monthly"
+    ],
+    "run_count": 1,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(revenue_eur); over gold.sales_revenue_monthly; no filters",
+    "observed_columns": [
+     "SUM(REVENUE_EUR)"
+    ],
+    "observed_rows": [
+     [
+      35020740.0
+     ]
+    ],
+    "observed_error": null
+   }
+  ],
+  "blast_radius": 12,
+  "severity": "conflict"
+ },
+ {
+  "metric_intent": "count of invoice",
+  "variants": [
+   {
+    "statement": "SELECT COUNT(*) AS invoices FROM (SELECT DISTINCT invoice_id, customer_id, service, issue_date, net_amount_eur FROM (SELECT invoice_id, customer_id, service, issue_date, net_amount_eur FROM bronze.netvisor__invoices_legacy WHERE NOT _fivetran_deleted UNION ALL SELECT invoice_id, customer_id, service, issue_date, net_amount_eur FROM bronze.netvisor__invoices WHERE NOT _fivetran_deleted))",
+    "source_tables": [
+     "bronze.netvisor__invoices",
+     "bronze.netvisor__invoices_legacy"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "COUNT(*); over bronze.netvisor__invoices, bronze.netvisor__invoices_legacy; filters: NOT _fivetran_deleted AND NOT _fivetran_deleted",
+    "observed_columns": [
+     "INVOICES"
+    ],
+    "observed_rows": [
+     [
+      771
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT COUNT(*) FROM silver.fct_invoices",
+    "source_tables": [
+     "silver.fct_invoices"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "COUNT(*); over silver.fct_invoices; no filters",
+    "observed_columns": [
+     "COUNT(*)"
+    ],
+    "observed_rows": [
+     [
+      721
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT COUNT(DISTINCT invoice_id) FROM silver.fct_invoices",
+    "source_tables": [
+     "silver.fct_invoices"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "COUNT(DISTINCT invoice_id); over silver.fct_invoices; no filters",
+    "observed_columns": [
+     "COUNT(DISTINCT INVOICE_ID)"
+    ],
+    "observed_rows": [
+     [
+      721
+     ]
+    ],
+    "observed_error": null
+   }
+  ],
+  "blast_radius": 9,
+  "severity": "conflict"
+ },
+ {
+  "metric_intent": "sum of aging ar outstanding snap",
+  "variants": [
+   {
+    "statement": "SELECT SUM(outstanding_eur) AS outstanding_eur FROM silver.snap_ar_aging WHERE as_of_date = (SELECT MAX(as_of_date) FROM silver.snap_ar_aging)",
+    "source_tables": [
+     "silver.snap_ar_aging"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "filters: as_of_date = (SELECT MAX(as_of_date) FROM silver.snap_ar_aging)",
+    "observed_columns": [
+     "OUTSTANDING_EUR"
+    ],
+    "observed_rows": [
+     [
+      2132351.11
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT SUM(outstanding_eur) AS overdue_eur FROM silver.snap_ar_aging WHERE as_of_date = (SELECT MAX(as_of_date) FROM silver.snap_ar_aging) AND due_date < as_of_date",
+    "source_tables": [
+     "silver.snap_ar_aging"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "filters: as_of_date = (SELECT MAX(as_of_date) FROM silver.snap_ar_aging) AND due_date < as_of_date",
+    "observed_columns": [
+     "OVERDUE_EUR"
+    ],
+    "observed_rows": [
+     [
+      1192531.81
+     ]
+    ],
+    "observed_error": null
+   }
+  ],
+  "blast_radius": 6,
+  "severity": "conflict"
+ },
+ {
+  "metric_intent": "sum of contract deal value",
+  "variants": [
+   {
+    "statement": "SELECT SUM(contract_value_eur) AS contract_value_eur FROM silver.fct_deals",
+    "source_tables": [
+     "silver.fct_deals"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(contract_value_eur); over silver.fct_deals",
+    "observed_columns": [
+     "CONTRACT_VALUE_EUR"
+    ],
+    "observed_rows": [
+     [
+      35020740.0
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT r.first_name || ' ' || r.last_name AS rep_name, SUM(d.contract_value_eur) AS won_eur FROM silver.fct_deals d JOIN silver.dim_reps r ON d.rep_id = r.rep_id GROUP BY rep_name ORDER BY won_eur DESC LIMIT 1",
+    "source_tables": [
+     "silver.dim_reps",
+     "silver.fct_deals"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "SUM(d.contract_value_eur); over silver.dim_reps, silver.fct_deals",
+    "observed_columns": [
+     "REP_NAME",
+     "WON_EUR"
+    ],
+    "observed_rows": [
+     [
+      "Maria Mattila",
+      4939200.0
+     ]
+    ],
+    "observed_error": null
+   }
+  ],
+  "blast_radius": 6,
+  "severity": "conflict"
+ },
+ {
+  "metric_intent": "count of customer",
+  "variants": [
+   {
+    "statement": "SELECT COUNT(*) AS customers FROM silver.dim_customers WHERE is_current AND customer_name NOT ILIKE '%test%'",
+    "source_tables": [
+     "silver.dim_customers"
+    ],
+    "run_count": 3,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "filters: is_current AND NOT customer_name ILIKE ?",
+    "observed_columns": [
+     "CUSTOMERS"
+    ],
+    "observed_rows": [
+     [
+      30
+     ]
+    ],
+    "observed_error": null
+   },
+   {
+    "statement": "SELECT COUNT(*) FROM silver.dim_customers WHERE is_current = true",
+    "source_tables": [
+     "silver.dim_customers"
+    ],
+    "run_count": 1,
+    "principals": [
+     "NORTHWIND"
+    ],
+    "source_tools": [
+     "PythonConnector 4.6.0"
+    ],
+    "distinguishing": "filters: is_current = TRUE",
+    "observed_columns": [
+     "COUNT(*)"
+    ],
+    "observed_rows": [
+     [
+      33
+     ]
+    ],
+    "observed_error": null
+   }
+  ],
+  "blast_radius": 4,
+  "severity": "conflict"
+ }
+]

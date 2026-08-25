@@ -1,0 +1,4 @@
+^Dclarify: 'value' is ambiguous here — do you mean lifetime value - customers.customer_lifetime_value or order amount - orders.amount?
+  - lifetime value - customers.customer_lifetime_value
+  - order amount - orders.amount
+request_id: req_d01245c2bdc7474e

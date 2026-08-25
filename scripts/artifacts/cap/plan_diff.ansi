@@ -1,0 +1,23 @@
+semantic/definitions/examples/lifetime-value.md: unchanged
+semantic/definitions/examples/repeat-customer.md: update
+[2m--- db/semantic/definitions/examples/repeat-customer.md[0m
+[2m+++ files/semantic/definitions/examples/repeat-customer.md[0m
+[38;5;172m@@ -1,6 +1,6 @@[0m
+ ---
+ metric: repeat_customer
+[31m-sql: customers.number_of_orders > 1[0m
+[32m+sql: customers.number_of_orders >= 3[0m
+ ---
+ 
+[31m-A repeat customer has number_of_orders > 1.[0m
+[32m+A repeat customer has number_of_orders >= 3.[0m
+semantic/definitions/examples/value.md: unchanged
+semantic/entities/examples/customers.yaml: unchanged
+semantic/entities/examples/orders.yaml: unchanged
+[33mcustomer_value: unchanged — STALE compile (shared changed: definition/repeat_customer) → will recompile on apply[0m
+  certified: 1 answers touch changed assets (definition/repeat_customer) — re-verify by updating each answer's verified_by (or sql) in certified_answers.yaml
+    re-verify: How many customers are repeat customers?
+not checked by plan — apply still runs these, and they need a live warehouse
+  - warehouse connection probes — apply builds every declared connection and reads through it before it lands, and a dead credential aborts the apply
+  - eval-case expected_sql EXECUTED against the warehouse (plan parses it only) — an oracle that parses but errors aborts the apply
+  - the publish eval gate — it scores the certified corpus with live generation, so under `eval_gate: block` a regression can still abort the apply

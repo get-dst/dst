@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 470" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13"><defs><marker id="ai" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#292524"/></marker><marker id="aa" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#b45309"/></marker></defs><rect width="980" height="470" fill="#faf6ee"/>
+<rect x="290" y="30" width="400" height="52" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
+<text x="490" y="52" font-size="12.5" fill="#292524" text-anchor="middle" font-weight="700" xml:space="preserve">“how were commissions last quarter?”</text>
+<text x="490" y="71" font-size="10.5" fill="#8a8178" text-anchor="middle" xml:space="preserve">from any caller, over MCP or REST</text>
+<line x1="490" y1="82" x2="490" y2="136" stroke="#b45309" stroke-width="1.4" marker-end="url(#aa)"/>
+<text x="506" y="112" font-size="11" fill="#b45309" text-anchor="start" xml:space="preserve">routed to the covering lens</text>
+<rect x="40" y="140" width="280" height="190" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
+<text x="60" y="168" font-size="13" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">lens — finance_close</text>
+<line x1="60" y1="180" x2="300" y2="180" stroke="#d8cfbf" stroke-width="1.1"/>
+<text x="60" y="204" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">for</text>
+<text x="132" y="204" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">maija · pekka · antti</text>
+<text x="60" y="230" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">data</text>
+<text x="132" y="230" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">gl · journals</text>
+<text x="60" y="256" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">means</text>
+<text x="132" y="256" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">revenue, margin</text>
+<text x="60" y="282" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">proven</text>
+<text x="132" y="282" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">23 certified</text>
+<text x="60" y="308" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">30d</text>
+<text x="132" y="308" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">212 calls · 99% ok</text>
+<rect x="350" y="140" width="280" height="190" fill="#f6e8d7" stroke="#b45309" stroke-width="1.6"/>
+<text x="370" y="168" font-size="13" fill="#b45309" text-anchor="start" font-weight="700" xml:space="preserve">lens — sales_comp</text>
+<line x1="370" y1="180" x2="610" y2="180" stroke="#d8cfbf" stroke-width="1.1"/>
+<text x="370" y="204" font-size="11" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">for</text>
+<text x="442" y="204" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">sales · its agent</text>
+<text x="370" y="230" font-size="11" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">data</text>
+<text x="442" y="230" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">deals · payouts</text>
+<text x="370" y="256" font-size="11" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">means</text>
+<text x="442" y="256" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">commission, earnings</text>
+<text x="370" y="282" font-size="11" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">proven</text>
+<text x="442" y="282" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">12 certified</text>
+<text x="370" y="308" font-size="11" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">30d</text>
+<text x="442" y="308" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">8,910 calls · 98% ok</text>
+<rect x="660" y="140" width="280" height="190" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
+<text x="680" y="168" font-size="13" fill="#292524" text-anchor="start" font-weight="700" xml:space="preserve">lens — churn_risk</text>
+<line x1="680" y1="180" x2="920" y2="180" stroke="#d8cfbf" stroke-width="1.1"/>
+<text x="680" y="204" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">for</text>
+<text x="752" y="204" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">the cs agent</text>
+<text x="680" y="230" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">data</text>
+<text x="752" y="230" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">accounts · usage</text>
+<text x="680" y="256" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">means</text>
+<text x="752" y="256" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">churn, active</text>
+<text x="680" y="282" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">proven</text>
+<text x="752" y="282" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">8 certified</text>
+<text x="680" y="308" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">30d</text>
+<text x="752" y="308" font-size="11" fill="#8a8178" text-anchor="start" xml:space="preserve">1,204 calls · 97% ok</text>
+<text x="490" y="380" font-size="11" fill="#8a8178" text-anchor="middle" xml:space="preserve">same warehouse — each lens selects its own data and its own meanings</text>
+<text x="490" y="412" font-size="11" fill="#292524" text-anchor="middle" xml:space="preserve">no covering lens? declined: “no governed lens covers this” — never a guess</text>
+</svg>

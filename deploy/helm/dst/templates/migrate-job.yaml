@@ -1,0 +1,43 @@
+{{- if .Values.migrate.enabled }}
+# Schema migrations run once per release, before pods roll — the release-step
+# pattern (fly.toml release_command, Airbyte's bootloader). `dst migrate`
+# itself takes a blocking advisory lock, so even overlapping runs serialize.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dst.fullname" . }}-migrate
+  labels: {{- include "dst.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: {{- include "dst.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "dst.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["/app/.venv/bin/python", "-m", "services.cli.main", "migrate"]
+          env:
+            {{- include "dst.contractEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

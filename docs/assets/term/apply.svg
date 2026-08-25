@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 833 486" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="833" height="486" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst apply</text>
+<line x1="0" y1="36" x2="833" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst apply</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d78700">connections</tspan><tspan fill="#d9d2c5">: created &#x27;jaffle&#x27; (duckdb)</tspan></text>
+<text x="20" y="102" xml:space="preserve"><tspan fill="#d9d2c5">  jaffle: read ✓ · query ✓ · query history ✓</tspan></text>
+<text x="20" y="123" xml:space="preserve"><tspan fill="#d78700">semantic</tspan><tspan fill="#d9d2c5">: created definition/lifetime_value, created definition/repeat_customer, created definition/</tspan></text>
+<text x="20" y="144" xml:space="preserve"><tspan fill="#d9d2c5">value, created entity/customers, created entity/orders</tspan></text>
+<text x="20" y="165" xml:space="preserve"><tspan fill="#d78700">lens customer_value</tspan><tspan fill="#d9d2c5">: created</tspan></text>
+<text x="20" y="186" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#d9b45b">warning:</tspan><tspan fill="#d9d2c5"> &#x27;value&#x27; is claimed by average order value, lifetime value, value: lifetime value, value g</tspan></text>
+<text x="20" y="207" xml:space="preserve"><tspan fill="#d9d2c5">overned by a definition, average order value not. A question asking for &#x27;value&#x27; picks one silently a</tspan></text>
+<text x="20" y="228" xml:space="preserve"><tspan fill="#d9d2c5">nd two people can get different numbers — govern the others, or mark the term `status: ambiguous` wi</tspan></text>
+<text x="20" y="249" xml:space="preserve"><tspan fill="#d9d2c5">th `possible_mappings` so dst asks which is meant</tspan></text>
+<text x="20" y="270" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#d9b45b">warning:</tspan><tspan fill="#d9d2c5"> definition &#x27;lifetime_value&#x27; has no sql_expr; it guides prose answers but can&#x27;t be enforce</tspan></text>
+<text x="20" y="291" xml:space="preserve"><tspan fill="#d9d2c5">d in generated SQL</tspan></text>
+<text x="20" y="312" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#d9b45b">warning:</tspan><tspan fill="#d9d2c5"> no callers on the allow-list (admin-only until callers are added)</tspan></text>
+<text x="20" y="333" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#d9b45b">warning:</tspan><tspan fill="#d9d2c5"> this lens has metrics, so generation&#x27;s first pass is the metric-layer prompt — 1 joins, 1</tspan></text>
+<text x="20" y="354" xml:space="preserve"><tspan fill="#d9d2c5"> sample_queries, 1 instructions reach the model only if that pass fails and generation escalates to </tspan></text>
+<text x="20" y="375" xml:space="preserve"><tspan fill="#d9d2c5">raw SQL. `dst lens prompt customer_value &quot;&lt;question&gt;&quot;` renders both.</tspan></text>
+<text x="20" y="396" xml:space="preserve"><tspan fill="#d9d2c5">  </tspan><tspan fill="#d9b45b">warning:</tspan><tspan fill="#d9d2c5"> DEGRADED: eval_gate: block configured but no active certified answers and no approved beh</tspan></text>
+<text x="20" y="417" xml:space="preserve"><tspan fill="#d9d2c5">avioral cases (certify answers — the regression suite — or pin expect: cases with status: approved) </tspan></text>
+<text x="20" y="438" xml:space="preserve"><tspan fill="#d9d2c5">— gate SKIPPED</tspan></text>
+<text x="20" y="459" xml:space="preserve"><tspan fill="#7cbd82" font-weight="700">Apply complete.</tspan><tspan fill="#d9d2c5"> 5 warning(s), 0 error(s). </tspan><tspan fill="#857b6f">(--json for the row array)</tspan></text>
+</svg>

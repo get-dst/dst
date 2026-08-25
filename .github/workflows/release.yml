@@ -1,0 +1,103 @@
+# Tag vX.Y.Z -> GHCR image (multi-arch) + wheel artifact + PyPI (dst-core).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write # create the GitHub release
+  packages: write # push to GHCR
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@v5
+      - name: Build SPA into the wheel
+        run: |
+          pnpm -C apps/web install --frozen-lockfile
+          pnpm -C apps/web build
+          cp -r apps/web/dist/. services/web_dist/
+      # sdist + wheel; uv builds the wheel FROM the sdist, so the SPA rides both.
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+      - name: Attach wheel to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.whl --generate-notes || gh release upload "$GITHUB_REF_NAME" dist/*.whl
+
+  pypi:
+    runs-on: ubuntu-latest
+    needs: wheel # publish exactly the artifacts the release carries
+    # Trusted publishing (OIDC, no API token). Before the first tag, register
+    # the publisher in PyPI project settings for dst-core:
+    #   owner: get-dst, repository: dst,
+    #   workflow: release.yml, environment: pypi
+    # — and create the matching `pypi` environment in the GitHub repo settings.
+    environment: pypi
+    permissions:
+      id-token: write # mint the OIDC token PyPI verifies
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  chart:
+    runs-on: ubuntu-latest
+    needs: image # never publish a chart whose image didn't
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package + push the helm chart (OCI)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Stamp the real image repository into the packaged defaults.
+          sed -i "s|repository: ghcr.io/get-dst/dst|repository: ghcr.io/${GITHUB_REPOSITORY@L}|" \
+            deploy/helm/dst/values.yaml
+          helm package deploy/helm/dst --version "$VERSION" --app-version "$VERSION"
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "dst-${VERSION}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER@L}/charts"

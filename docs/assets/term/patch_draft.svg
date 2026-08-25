@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 833 297" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13">
+<rect width="833" height="297" rx="8" fill="#14100d" stroke="#3a332c"/>
+<text x="20" y="24" fill="#857b6f" font-size="11">dst patches draft rev_81907144f8</text>
+<line x1="0" y1="36" x2="833" y2="36" stroke="#3a332c"/>
+<text x="20" y="60" xml:space="preserve"><tspan fill="#857b6f">$</tspan><tspan fill="#efe9dd" font-weight="700"> dst patches draft rev_81907144f8</tspan></text>
+<text x="20" y="81" xml:space="preserve"><tspan fill="#d9d2c5">2094ed1f-7705-435a-8ea2-073f89f98d3b  candidate  definition revenue</tspan></text>
+<text x="20" y="123" xml:space="preserve"><tspan fill="#d9d2c5">--- drafted definition &#x27;revenue&#x27; ---</tspan></text>
+<text x="20" y="144" xml:space="preserve"><tspan fill="#d9d2c5">Revenue is the total value of orders, calculated as the sum of `orders.amount`.</tspan></text>
+<text x="20" y="186" xml:space="preserve"><tspan fill="#d9d2c5">Exclusion: Orders with `orders.status = &#x27;returned&#x27;` are excluded from revenue.</tspan></text>
+<text x="20" y="228" xml:space="preserve"><tspan fill="#d9d2c5">read the target and body above — the draft AMENDS the current body, so check the CHANGED ruling, not</tspan></text>
+<text x="20" y="249" xml:space="preserve"><tspan fill="#d9d2c5"> whether the rest survived; then `dst patches approve 2094ed1f-7705-435a-8ea2-073f89f98d3b --dir .` </tspan></text>
+<text x="20" y="270" xml:space="preserve"><tspan fill="#d9d2c5">or `dst patches reject 2094ed1f-7705-435a-8ea2-073f89f98d3b --note &#x27;&lt;why&gt;&#x27;`</tspan></text>
+</svg>

@@ -1,0 +1,5 @@
+[32m[1mPASS[0m  me/customer_value: How many customers are repeat customers?             [2m25.7s[0m
+[32m[1mPASS[0m  me/customer_value: What was total revenue?                              [2m4.6s[0m
+[32m[1mPASS[0m  me/customer_value: What is the average value of a customer? [expect: clarify]
+[38;5;172m────────────────────────────────────────────────────────────────[0m
+[1m3/3 passed[0m (certified answers + behavioral expectations) in org me

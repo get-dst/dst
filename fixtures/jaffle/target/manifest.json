@@ -1,0 +1,47 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.0",
+    "project_name": "jaffle_shop",
+    "generated_at": "2026-06-01T00:00:00Z"
+  },
+  "nodes": {
+    "model.jaffle_shop.orders": {
+      "resource_type": "model",
+      "name": "orders",
+      "alias": "orders",
+      "database": "jaffle_shop",
+      "schema": "main",
+      "relation_name": "\"jaffle_shop\".\"main\".\"orders\"",
+      "description": "Order grain — one row per order with payment-method breakdown.",
+      "columns": {
+        "order_id": {"name": "order_id", "data_type": "integer", "description": "Primary key."},
+        "customer_id": {"name": "customer_id", "data_type": "integer", "description": "FK to customers."},
+        "order_date": {"name": "order_date", "data_type": "date", "description": "Date the order was placed."},
+        "status": {"name": "status", "data_type": "varchar", "description": "Order lifecycle status."},
+        "bank_transfer_amount": {"name": "bank_transfer_amount", "data_type": "double", "description": null},
+        "coupon_amount": {"name": "coupon_amount", "data_type": "double", "description": null},
+        "credit_card_amount": {"name": "credit_card_amount", "data_type": "double", "description": null},
+        "gift_card_amount": {"name": "gift_card_amount", "data_type": "double", "description": null},
+        "amount": {"name": "amount", "data_type": "double", "description": "Total order amount."}
+      }
+    },
+    "model.jaffle_shop.customers": {
+      "resource_type": "model",
+      "name": "customers",
+      "alias": "customers",
+      "database": "jaffle_shop",
+      "schema": "main",
+      "relation_name": "\"jaffle_shop\".\"main\".\"customers\"",
+      "description": "Customer grain — one row per customer with lifetime value.",
+      "columns": {
+        "customer_id": {"name": "customer_id", "data_type": "integer", "description": "Primary key."},
+        "customer_name": {"name": "customer_name", "data_type": "varchar", "description": "Display name."},
+        "first_order_date": {"name": "first_order_date", "data_type": "date", "description": "First order date."},
+        "most_recent_order_date": {"name": "most_recent_order_date", "data_type": "date", "description": "Most recent order date."},
+        "number_of_orders": {"name": "number_of_orders", "data_type": "bigint", "description": "Lifetime order count."},
+        "customer_lifetime_value": {"name": "customer_lifetime_value", "data_type": "double", "description": "Sum of order amounts."}
+      }
+    }
+  }
+}
