@@ -29,6 +29,27 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.1.1] — 2026-08-29
+
+### Security
+
+Dependency refresh clearing every open Dependabot advisory against the locked
+development environment. User installs resolve dependencies freshly and were
+already receiving the patched versions; this pins the repository's own
+toolchain and CI to the same ground.
+
+- `cryptography` 48.0.0 → 50.0.1 (PKCS#7 Bleichenbacher oracle, certificate
+  path-building exhaustion, name-constraint wildcard escape)
+- `mcp` 1.27.2 → 1.29.1 (WebSocket transport Host/Origin validation — dst
+  serves MCP over streamable HTTP, so the vulnerable transport was never
+  exposed, but the SDK moves past it regardless)
+- `pyasn1` 0.6.3 → 0.6.4 (three decoder denial-of-service advisories)
+- `pillow` 12.2.0 → 12.3.0 (development lockfile only — Pillow is not a
+  dst-core dependency and never reaches an installed copy)
+
+No schema changes: upgrading from 0.1.0 is `pip install --upgrade dst-core`
+with nothing to migrate.
+
 ## [0.1.0] — 2026-08-25
 
 The first public release. Nothing public preceded it, so this entry describes

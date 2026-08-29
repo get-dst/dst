@@ -1,6 +1,6 @@
 [project]
 name = "dst-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "dst, the data serve tool — governed data access layer (backend)"
 dynamic = ["readme"]
 license = "Apache-2.0"
