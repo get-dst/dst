@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12.5">
+  <rect x="0.5" y="0.5" width="759" height="229" rx="8" fill="#161310" stroke="#38322b"/>
+  <rect x="0.5" y="0.5" width="759" height="27.5" rx="8" fill="#1d1916"/>
+  <rect x="0.5" y="14" width="759" height="14" fill="#1d1916"/>
+  <path d="M 0.5 28 L 759.5 28" stroke="#38322b" stroke-width="1"/>
+  <text x="380" y="18.5" font-size="11" fill="#857b6f" text-anchor="middle" xml:space="preserve">analytics/ — second terminal</text>
+
+  <text x="30" y="52" xml:space="preserve"><tspan fill="#3fa37c" font-weight="700">$ </tspan><tspan fill="#fdfbf7" font-weight="600">git checkout semantic/definitions/examples/repeat-customer.md</tspan></text>
+  <text x="30" y="75" xml:space="preserve"><tspan fill="#3fa37c" font-weight="700">$ </tspan><tspan fill="#fdfbf7" font-weight="600">dst apply</tspan></text>
+  <text x="30" y="98" fill="#d9d2c5" xml:space="preserve"><tspan fill="#3fa37c" font-weight="700">Apply complete.</tspan> 1 warning(s), 0 error(s).</text>
+  <text x="30" y="125" xml:space="preserve"><tspan fill="#3fa37c" font-weight="700">$ </tspan><tspan fill="#fdfbf7" font-weight="600">dst test</tspan></text>
+  <text x="30" y="148" fill="#86807a" xml:space="preserve">me/customer_value: running 1 certified …</text>
+  <text x="30" y="171" xml:space="preserve"><tspan fill="#3fa37c" font-weight="700">PASS</tspan><tspan fill="#d9d2c5">  me/customer_value: How many customers are repeat customers?</tspan><tspan fill="#86807a">      5.9s</tspan></text>
+  <text x="30" y="190" fill="#38322b" xml:space="preserve">────────────────────────────────────────────────────────────────</text>
+  <text x="30" y="211" fill="#d9d2c5" xml:space="preserve"><tspan font-weight="700" fill="#fdfbf7">1/1 passed</tspan> (1 certified + 0 behavioral) in org me</text>
+</svg>

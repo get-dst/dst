@@ -158,17 +158,10 @@ Plan: 1 to change, 5 unchanged. (--full shows diffs and hints)
 …and `dst apply` re-runs the certified answer against live generation under
 the new meaning, and blocks:
 
-```console
-$ dst apply
-
-APPLY ABORTED — nothing deployed — fix the errors and re-apply
-  customer_value: certified 'How many customers are repeat customers?' diverged: certified SQL → 19, generated → 79 (definition repeat_customer changed this push) — fix the definition, or re-certify/retire the answer
-connections: rolled-back
-semantic: rolled-back
-lens customer_value: rejected
-Apply finished. 1 rejected, 1 warning(s), 2 error(s). (--json for the row array)
-eval gates: 1 blocked
-```
+<p align="center">
+  <img src="docs/assets/term/apply-aborted.svg" width="760"
+       alt="dst apply: APPLY ABORTED — nothing deployed — fix the errors and re-apply. customer_value: certified 'How many customers are repeat customers?' diverged: certified SQL → 19, generated → 79 (definition repeat_customer changed this push) — fix the definition, or re-certify/retire the answer. connections rolled-back, semantic rolled-back, lens customer_value rejected. Apply finished: 1 rejected, 1 warning, 2 errors. eval gates: 1 blocked">
+</p>
 
 dst caught that an answer somebody vouched for would silently change, and
 deployed nothing. The error names your fork:
@@ -177,16 +170,10 @@ deployed nothing. The error names your fork:
 - **The change was intended** → re-certify the answer with its new SQL, or
   retire it (`status: retired` keeps its history).
 
-```console
-$ git checkout semantic/definitions/examples/repeat-customer.md
-$ dst apply
-Apply complete. 1 warning(s), 0 error(s). (--json for the row array)
-$ dst test
-me/customer_value: running 1 certified …
-PASS  me/customer_value: How many customers are repeat customers?        5.9s
-────────────────────────────────────────────────────────────────
-1/1 passed (1 certified + 0 behavioral) in org me
-```
+<p align="center">
+  <img src="docs/assets/term/test-pass.svg" width="760"
+       alt="git checkout the definition, then dst apply: Apply complete, 1 warning, 0 errors. dst test: PASS — How many customers are repeat customers? 5.9s. 1/1 passed (1 certified + 0 behavioral) in org me">
+</p>
 
 Every certified answer is a tripwire like this, and the suite grows every
 time someone approves an answer or fixes a mistake.
