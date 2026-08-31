@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13"><defs><marker id="ai" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#292524"/></marker><marker id="aa" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#b45309"/></marker></defs><rect width="960" height="300" fill="#faf6ee"/>
-<rect x="60" y="60" width="250" height="96" fill="#f6e8d7" stroke="#b45309" stroke-width="1.6"/>
-<text x="185" y="96" font-size="17" fill="#b45309" text-anchor="middle" font-weight="700" xml:space="preserve">test</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13"><defs><marker id="ai" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#292524"/></marker><marker id="aa" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="7.5" markerHeight="6.5" orient="auto-start-reverse"><polygon points="0,0 10,4 0,8" fill="#206b4e"/></marker></defs><rect width="960" height="300" fill="#faf6ee"/>
+<rect x="60" y="60" width="250" height="96" fill="#e4ecdf" stroke="#206b4e" stroke-width="1.6"/>
+<text x="185" y="96" font-size="17" fill="#206b4e" text-anchor="middle" font-weight="700" xml:space="preserve">test</text>
 <text x="185" y="120" font-size="10.5" fill="#8a8178" text-anchor="middle" xml:space="preserve">every approved answer is a</text>
 <text x="185" y="136" font-size="10.5" fill="#8a8178" text-anchor="middle" xml:space="preserve">regression test on your data</text>
 <rect x="355" y="60" width="250" height="96" fill="#fffdf7" stroke="#292524" stroke-width="1.1"/>
@@ -13,6 +13,6 @@
 <text x="775" y="136" font-size="10.5" fill="#8a8178" text-anchor="middle" xml:space="preserve">and on the ledger</text>
 <line x1="312" y1="108" x2="353" y2="108" stroke="#292524" stroke-width="1.3" marker-end="url(#ai)"/>
 <line x1="607" y1="108" x2="648" y2="108" stroke="#292524" stroke-width="1.3" marker-end="url(#ai)"/>
-<path d="M 775 156 C 775 252, 185 252, 185 156" fill="none" stroke="#b45309" stroke-width="1.6" marker-end="url(#aa)"/>
-<text x="480" y="240" font-size="11.5" fill="#b45309" text-anchor="middle" font-weight="700" xml:space="preserve">every mistake feeds back in as a test</text>
+<path d="M 775 156 C 775 252, 185 252, 185 156" fill="none" stroke="#206b4e" stroke-width="1.6" marker-end="url(#aa)"/>
+<text x="480" y="240" font-size="11.5" fill="#206b4e" text-anchor="middle" font-weight="700" xml:space="preserve">every mistake feeds back in as a test</text>
 </svg>
