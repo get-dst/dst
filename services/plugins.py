@@ -2,7 +2,7 @@
 
 A package extends the core by declaring an entry point in the ``dst.plugins``
 group that resolves to a ``register(app: FastAPI)`` callable — this is how a
-package such as ``dst-cloud`` mounts onto a stock core.
+separately installed package mounts onto a stock core.
 Plugins load after every core router, so they can never shadow a core route; a
 plugin that raises on load or register is logged and skipped — core always boots.
 

@@ -94,5 +94,4 @@ because it sits on the whole path between the question and the warehouse:
   and you can point at why.
 
 Start with [the answer path](concepts/answer-path.md), then the
-[quickstart](quickstart.md). A hosted version, [dst Cloud](cloud.md), is
-planned; the open-source tool is the product today.
+[quickstart](quickstart.md).

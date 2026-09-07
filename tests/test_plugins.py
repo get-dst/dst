@@ -61,7 +61,7 @@ def test_plugin_route_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         def ping() -> dict[str, bool]:
             return {"pong": True}
 
-    monkeypatch.setattr(plugins, "entry_points", lambda group: [_EntryPoint("cloud", register)])
+    monkeypatch.setattr(plugins, "entry_points", lambda group: [_EntryPoint("extras", register)])
     app = _core_app()
     plugins.load_plugins(app)
     assert TestClient(app).get("/plugin/ping").json() == {"pong": True}
@@ -79,7 +79,7 @@ def test_broken_plugin_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         plugins,
         "entry_points",
-        lambda group: [_EntryPoint("broken", broken), _EntryPoint("cloud", register)],
+        lambda group: [_EntryPoint("broken", broken), _EntryPoint("extras", register)],
     )
     app = _core_app()
     plugins.load_plugins(app)  # must not raise
@@ -87,7 +87,7 @@ def test_broken_plugin_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.get("/core").json() == {"status": "ok"}
     assert client.get("/plugin/after-broken").json() == {"pong": True}
     # …and the one that blew up is not reported as running.
-    assert [p.name for p in plugins.loaded] == ["cloud"]
+    assert [p.name for p in plugins.loaded] == ["extras"]
 
 
 def _two_routes(app: FastAPI) -> None:
@@ -109,13 +109,13 @@ def test_every_mount_says_what_it_mounted(
     monkeypatch.setattr(
         plugins,
         "entry_points",
-        lambda group: [_EntryPoint("cloud", _two_routes, _Dist("dst-cloud", "0.0.1"))],
+        lambda group: [_EntryPoint("extras", _two_routes, _Dist("dst-extras", "0.0.1"))],
     )
     with caplog.at_level(logging.INFO, logger="dst"):
         mounted = plugins.load_plugins(_core_app())
-    assert mounted == [plugins.LoadedPlugin("cloud", "dst-cloud", "0.0.1", 2)]
+    assert mounted == [plugins.LoadedPlugin("extras", "dst-extras", "0.0.1", 2)]
     line = "".join(r.getMessage() for r in caplog.records)
-    assert "cloud" in line and "dst-cloud 0.0.1" in line and "+2 routes" in line
+    assert "extras" in line and "dst-extras 0.0.1" in line and "+2 routes" in line
 
 
 def test_ready_reports_what_is_mounted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,10 +125,10 @@ def test_ready_reports_what_is_mounted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         plugins,
         "entry_points",
-        lambda group: [_EntryPoint("cloud", _two_routes, _Dist("dst-cloud", "0.0.1"))],
+        lambda group: [_EntryPoint("extras", _two_routes, _Dist("dst-extras", "0.0.1"))],
     )
     plugins.load_plugins(_core_app())
-    assert plugins.status() == "cloud@0.0.1"
+    assert plugins.status() == "extras@0.0.1"
 
 
 def test_an_allowlist_pins_the_route_table(
@@ -140,13 +140,13 @@ def test_an_allowlist_pins_the_route_table(
     monkeypatch.setattr(
         plugins,
         "entry_points",
-        lambda group: [_EntryPoint("cloud", _two_routes), _EntryPoint("hitchhiker", _two_routes)],
+        lambda group: [_EntryPoint("extras", _two_routes), _EntryPoint("hitchhiker", _two_routes)],
     )
-    monkeypatch.setattr(plugins.settings, "plugins", "cloud")
+    monkeypatch.setattr(plugins.settings, "plugins", "extras")
     app = _core_app()
     with caplog.at_level(logging.WARNING, logger="dst"):
         mounted = plugins.load_plugins(app)
-    assert [p.name for p in mounted] == ["cloud"]
+    assert [p.name for p in mounted] == ["extras"]
     assert TestClient(app).get("/plugin/a").status_code == 200
     assert "hitchhiker" in "".join(r.getMessage() for r in caplog.records)
 
@@ -156,7 +156,7 @@ def test_an_empty_allowlist_is_an_answer_not_an_accident(
 ) -> None:
     """`DST_PLUGINS=` is how an operator says "none" — and it cannot be silent
     either, because an empty value in a compose file is just as often a mistake."""
-    monkeypatch.setattr(plugins, "entry_points", lambda group: [_EntryPoint("cloud", _two_routes)])
+    monkeypatch.setattr(plugins, "entry_points", lambda group: [_EntryPoint("extras", _two_routes)])
     monkeypatch.setattr(plugins.settings, "plugins", "")
     with caplog.at_level(logging.WARNING, logger="dst"):
         assert plugins.load_plugins(_core_app()) == []

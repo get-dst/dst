@@ -225,8 +225,8 @@ class Settings(BaseSettings):
     # dst and the warehouse (docs: Security & data flow).
     llm_descriptions: bool = True
     # Entry-point plugins (services/plugins.py) allowed to mount routes, by name,
-    # comma-separated. Unset = every installed one mounts (what dst-cloud needs;
-    # they are logged and shown in /ready either way). Set = exactly these, and an
+    # comma-separated. Unset = every installed one mounts (they are logged and
+    # shown in /ready either way). Set = exactly these, and an
     # installed plugin outside the list is refused out loud — the route table becomes
     # a declared fact instead of a consequence of what is in the venv.
     plugins: str | None = Field(default=None, validation_alias=AliasChoices("DST_PLUGINS"))

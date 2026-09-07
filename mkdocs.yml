@@ -24,9 +24,6 @@ extra:
 extra_css:
   - stylesheets/dst.css # paper + amber + Plex Mono, receipt-style admonitions
 
-extra_javascript:
-  - javascripts/cta.js # header dst Cloud button
-
 markdown_extensions:
   - admonition
   - pymdownx.superfences
@@ -63,4 +60,3 @@ nav:
       - API: reference/api.md
       - Configuration: reference/configuration.md
   - FAQ: faq.md
-  - dst Cloud: cloud.md
