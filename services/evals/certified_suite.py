@@ -140,6 +140,37 @@ def _shape_story(
     )
 
 
+def _cells_close(a: Any, b: Any) -> bool:
+    """Exact equality except float↔numeric pairs, which get _SCALAR_RTOL."""
+    if isinstance(a, float) or isinstance(b, float):
+        if (
+            isinstance(a, int | float)
+            and isinstance(b, int | float)
+            and not isinstance(a, bool)
+            and not isinstance(b, bool)
+        ):
+            return abs(a - b) <= _SCALAR_RTOL * max(abs(a), abs(b), 1)
+    return bool(a == b)
+
+
+def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) -> bool:
+    """Greedy 1:1 pairing of the exact-diff leftovers under per-cell tolerance."""
+    remaining = list(got)
+    for w in want:
+        m = next(
+            (
+                g
+                for g in remaining
+                if len(g) == len(w) and all(_cells_close(a, b) for a, b in zip(w, g, strict=True))
+            ),
+            None,
+        )
+        if m is None:
+            return False
+        remaining.remove(m)
+    return not remaining
+
+
 def _compare(
     oracle_cols: list[str],
     oracle_rows: list[list[Any]],
@@ -174,6 +205,16 @@ def _compare(
         gen_rows = [[r[i] for i in order] for r in gen_rows]
     want_set, got_set = {_key(r) for r in oracle_rows}, {_key(r) for r in gen_rows}
     missing, extra = len(want_set - got_set), len(got_set - want_set)
+    if (
+        missing
+        and missing == extra
+        and _tolerant_rows_match(want_set - got_set, got_set - want_set)
+    ):
+        # The scalar tolerance above, applied per cell: two equivalent SQL
+        # plans sum floats in different orders and drift in the last bits —
+        # a multi-row result deserves the same physics as a 1×1 one. Floats
+        # only; ints, strings and everything else stay exact.
+        return True, None
     if missing or extra:
         # Count-vs-cardinality bridge: a "how many"
         # oracle is a 1×1 integer K, and generation often row-shapes the same

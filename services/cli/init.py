@@ -387,7 +387,9 @@ def run_init(args: argparse.Namespace) -> int:
     # Admin token, Fernet key and provider keys all end up in here; a shared dev
     # box is the normal early habitat, so never leave it world-readable.
     env_file.chmod(0o600)
-    (root / ".gitignore").write_text(".env\n", encoding="utf-8")
+    # .dst/ holds per-machine state (the env-name → admin-token map that
+    # `dst env new` records); it is a credential store, never project truth.
+    (root / ".gitignore").write_text(".env\n.dst/\n", encoding="utf-8")
 
     # Local Postgres for `dst dev` - credentials match the .env above.
     (root / "docker-compose.yml").write_text(
@@ -1167,6 +1169,14 @@ away from answering nearly all of them; the laps are cheap, guessing is not.
    (outside a project dir it gates the server's stored bundle and says so).
    `dst plan` names which lenses a shared edit made stale - gate each.
 
+   `dst test` records every run, so the re-measure has a one-line verdict:
+   `dst runs <lens> --diff prev latest` - score delta plus per-case flips,
+   exit 1 on a regression, so a lap that traded one fix for one break can
+   never read as a wash. And when the candidate fix is a CONFIG fork
+   (model, temperature, instructions), measure instead of arguing:
+   `dst experiment <lens> --vary model.temperature=0.0,0.7` runs the
+   variants in a disposable env, side by side, and tears it down after.
+
 6. Certify each verified win (the dst-certify skill, "own verified
    answers" section) - it pins the question against wobble, serves far
    faster (no generation), and lifts uncertified neighbors via the assisted
@@ -1404,6 +1414,11 @@ Gotchas:
   before declaring two statements equivalent.
 - Scheduled traffic inflates run counts; weigh multi-principal shapes higher.
 - The history export never goes into git.
+
+This skill is the COLD start - the warehouse's history, before dst serves
+anything. Once a lens has real traffic of its own, `dst evals from-traffic
+<lens>` drafts suite cases from dst's request log directly (observed outcome
+shape as the expectation); review them the same way as step 5's candidates.
 """
 
 
@@ -1431,6 +1446,8 @@ never author in a UI.
     `certified_answers.yaml` (approved question->SQL), `evals/cases.yaml`.
     `compiled.yaml` is a server-rendered artifact - read it, never edit it.
 - `.env` (gitignored) - secrets only; files refer to them by env name
+- `.dst/` (gitignored) - per-machine state: the env-name -> token map
+  `dst env new` records; a credential store, never project truth
   (`DST_API_KEY_<NAME>`). Never write a secret into a tracked file.
 - `.claude/skills/dst-semantic/` - the warehouse-to-semantic-layer
   authoring loop as a Claude Code skill (introspect -> author -> select ->
@@ -1456,6 +1473,10 @@ dst bootstrap --org <name>   # once: mints + saves DST_ADMIN_TOKEN to .env
 dst plan                     # dry-run diff, files vs server
 dst apply                    # files win; all-or-nothing: any error deploys NOTHING
 dst query <lens> "..."       # ask a governed question from the terminal
+dst env new <name>           # disposable org + admin token (recorded in .dst/,
+                             # gitignored) - experiment there, not in the real org
+dst test --env <name>        # env-aware verbs take --env; `dst env rm` when done
+dst runs <lens> --diff prev latest   # did the change help? exit 1 on regression
 ```
 FIND THE SERVER BEFORE STARTING ONE. Every verb talks to `DST_URL` - the
 process env first, then `.env` (this project wrote

@@ -60,7 +60,12 @@ divergence or failed expectation.
 ![dst test with a certified corpus: three green PASS rows, 3/3 passed](../assets/term/test2.svg)
 
 Every run is recorded: `dst test` persists the run and its per-case results in
-the same tables the publish gate writes, so accuracy is a queryable trend.
+the same tables the publish gate writes, so accuracy is a queryable trend —
+`dst runs <lens>` lists the recorded runs, and `dst runs <lens> --diff A B`
+compares two (score delta plus per-case flips; exit `1` on a regression).
+Once a lens serves real traffic, `dst evals from-traffic <lens>` drafts new
+cases from the request log, with the observed outcome shape as the
+expectation.
 The cadence is yours — run the sweep from CI, cron, or a deploy pipeline
 (see [Environments and CI](environments-and-ci.md)); there is no in-process
 scheduler to configure.

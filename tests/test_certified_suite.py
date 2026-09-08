@@ -678,3 +678,44 @@ def test_a_suite_that_verified_nothing_exits_4_not_0(org, monkeypatch, capsys) -
     assert rc == 4, captured.out + captured.err
     assert "0/0 passed" in captured.out
     assert "nothing was verified" in captured.err
+
+
+def test_compare_tolerates_float_summation_drift_in_multirow_results() -> None:
+    # Probe finding (spider-probe env, 2026-08-29): two equivalent SQL plans
+    # summed the same transactions in different orders and drifted in the last
+    # float bits (372.42995999999994 vs 372.42996); exact set-matching reported
+    # "1 missing / 1 extra" on a numerically identical result. Multi-row floats
+    # get the scalar tolerance, per cell.
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["month", "total"],
+        [["2020-02-01", 103512.29000000004], ["2020-03-01", 158264.15]],
+        ["month", "total"],
+        [["2020-02-01", 103512.29000000001], ["2020-03-01", 158264.15]],
+    )
+    assert ok and reason is None
+    # A real numeric difference still fails.
+    ok, _reason = _compare(
+        ["month", "total"],
+        [["2020-02-01", 103512.29], ["2020-03-01", 158264.15]],
+        ["month", "total"],
+        [["2020-02-01", 103599.99], ["2020-03-01", 158264.15]],
+    )
+    assert not ok
+    # Non-float cells stay exact: a different month is a different row.
+    ok, _reason = _compare(
+        ["month", "total"],
+        [["2020-02-01", 103512.29]],
+        ["month", "total"],
+        [["2020-02-02", 103512.29]],
+    )
+    assert not ok
+    # Cardinality mismatches never pair up.
+    ok, _reason = _compare(
+        ["month", "total"],
+        [["2020-02-01", 103512.29], ["2020-03-01", 158264.15]],
+        ["month", "total"],
+        [["2020-02-01", 103512.29]],
+    )
+    assert not ok

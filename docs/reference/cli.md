@@ -119,6 +119,33 @@ creates a duplicate org, only a new token. Saves the token to `./.env` as
 needed. Flags: `--org` (default `default`), `--email` (create/update the first
 dashboard admin), `--password` (omit to be prompted).
 
+### `dst env new|ls|rm`
+
+Disposable environments. An environment is an org on this server — RLS-isolated
+content (lenses, callers, traces, certified answers) sharing the container and
+database, which is what makes one cheap enough to throw away
+([environments and CI](../guides/environments-and-ci.md)).
+
+- `dst env new <name>` — create the org and mint its admin token. Idempotent
+  like `bootstrap`, with one deliberate difference: it **never writes `.env`** —
+  a sandbox must not steal the project's identity. The token is recorded in
+  `.dst/envs.json` (gitignored, per-machine), so local commands reach the env
+  **by name**: `dst apply --env <name>`, `dst test --env <name>`, `dst runs
+  <lens> --diff prev latest --env <name>` — no secret changes hands. The
+  printed `export DST_ADMIN_TOKEN=…` line remains the wiring for CI and
+  remote shells.
+- `dst env ls` — every org on the server with what it holds (lenses, callers,
+  traces) and when it was created, so a stale sandbox is visible instead of
+  silently accumulating.
+- `dst env rm <name> --yes` — delete the org and everything in it, one
+  transaction, printing what went. Irreversible, hence the mandatory `--yes`;
+  an ambiguous name (two orgs, one name) is refused.
+
+All three talk to `DATABASE_ADMIN_URL` directly; no server needed. A separate
+*server* per environment is still the right shape when production data or
+credentials are at stake — these verbs make the cheap shape disposable, they do
+not replace the isolated one.
+
 ### `dst secret`
 
 Generate a `DST_SECRET_KEY` (Fernet) for encrypting stored credentials.
@@ -450,6 +477,71 @@ lens names are not unique across orgs, and an unscopable run sweeps every org an
 so). `--url`/`--token`
 are accepted for uniformity and **ignored** (this command talks to the database, not to a
 server); passing them prints a note saying so.
+
+### `dst runs <lens>`
+
+The run history `dst test` records (`eval_run`/`eval_result`), on the
+terminal: every run newest first — id, mode, score, pass/fail/error counts,
+started. `--json` for the parseable form.
+
+`dst runs <lens> --diff A B` compares two runs: score delta plus the per-case
+flips — newly failing (with the failure reason), newly passing, still failing,
+and cases present on only one side. `A`/`B` are run ids (a unique prefix is
+enough) or the words `latest` / `prev` — `prev` stays within `latest`'s mode,
+so the apply gate's `regression` runs never silently become a `dst test`
+baseline. Exit `1` when B regresses A: the score
+dropped beyond the publish gate's epsilon **or any case newly fails** — a flip
+hidden by an unchanged score still fails the build. Cases join on the question
+asked, so the compare holds across environments too: `--other-url` +
+`--other-token` resolve B on another server, and `--other-token` alone
+resolves B as another org on the *same* server — the org-per-env shape
+`dst env new` mints. Same suite, sandbox vs production.
+
+`dst test --compare-last` prints each lens's score against its previous test
+run after recording (informational; the exit code stays the suite's own —
+`dst runs <lens> --diff prev latest` is the comparator CI branches on).
+
+### `dst experiment <lens>`
+
+Measure N lens-config variants side by side, without touching your project or
+any shared environment. Each `--vary` is a dimension dotted into `lens.yaml`
+(`--vary model.temperature=0.0,0.7 --vary answer_mode=strict,balanced`);
+variants are the cartesian product, capped at 8 — each one costs a gated apply
+plus a full test sweep, and the cap says so rather than hiding it.
+
+Under the hood it is only the verbs you already know, in order: `dst env new
+exp-…` mints a disposable org, then per variant a **copy** of the project gets
+its `lens.yaml` patched and applied (`--env`), the suite runs, and every
+variant's recorded run is diffed against variant #1 with the same comparator
+CI uses — so the table shows score, pass/fail, and the per-case flips, with
+`newly failing` questions named. The env is removed at the end (`--keep` to
+inspect it; the kept name is printed). `--json` for the parseable form. Exit
+`0` when every variant produced a measurement — a variant that *scores worse*
+is a result, not an error; a variant that could not be measured (apply
+rejected, suite errored) exits `1`.
+
+```console
+$ dst experiment customer_balances --vary model.temperature=0.0,0.7
+experiment env: exp-3f9a41c2 (2 variant(s))
+   VARIANT                                       SCORE  PASS  FAIL  VS #1
+#1 model.temperature=0.0                          100%     5     0  baseline
+#2 model.temperature=0.7                           80%     4     1  1 newly failing
+     newly failing: How many customers churned last quarter?
+```
+
+### `dst evals from-traffic <lens>`
+
+Production questions become the suite. Reads recent request-log rows for the
+lens (`--limit`, default 200) and drafts each as a behavioral case whose
+expectation is the **observed outcome**: an answered question pins
+`expect: answer`, a governed decline pins `refuse` or `clarify`. Errors are
+faults, not expectations — skipped. Drafts are **appended** to
+`lenses/<lens>/evals/cases.yaml` (existing bytes and comments untouched) as
+`status: candidate` / `source: harvested`, deduped against the suite by
+normalized question. Candidates are visible to `dst test` but never scored;
+review, promote to `status: approved`, then `dst apply` — the file is the
+interface. This is how a fresh [environment](#dst-env-newlsrm) inherits
+production's questions without inheriting production's data.
 
 ### `dst evals migrate`
 

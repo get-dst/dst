@@ -338,6 +338,239 @@ def _bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _env(args: argparse.Namespace) -> int:
+    """Disposable environments. An environment IS an org on this server — these
+    verbs manage orgs, they do not introduce a new resource."""
+    from sqlalchemy import text
+
+    from services.db.session import admin_engine
+
+    if args.action != "ls" and not args.name:
+        print(f"error: `dst env {args.action}` needs a name", file=sys.stderr)
+        return 1
+
+    # Managed-PG admin roles lack BYPASSRLS: FORCE-RLS tables are invisible to
+    # them until the org GUC is set, so every per-org count below sets it first
+    # (same class as tests/test_rls_managed_pg.py).
+    def _counts(c: Any, org_id: Any) -> tuple[int, int, int]:
+        c.execute(text("SELECT set_config('app.current_org', :o, true)"), {"o": str(org_id)})
+        return c.execute(  # type: ignore[no-any-return]
+            text(
+                "SELECT (SELECT count(*) FROM lens WHERE org_id = :o),"
+                " (SELECT count(*) FROM caller WHERE org_id = :o),"
+                " (SELECT count(*) FROM request_log WHERE org_id = :o)"
+            ),
+            {"o": org_id},
+        ).one()
+
+    if args.action == "new":
+        from services.auth import tokens
+
+        raw = tokens.new_admin_token()
+        with admin_engine.begin() as c:
+            org_id = c.execute(
+                text("SELECT id FROM org WHERE name = :n ORDER BY created_at LIMIT 1"),
+                {"n": args.name},
+            ).scalar()
+            created = org_id is None
+            if org_id is None:
+                org_id = c.execute(
+                    text("INSERT INTO org (name) VALUES (:n) RETURNING id"), {"n": args.name}
+                ).scalar_one()
+            c.execute(
+                text("INSERT INTO admin_token (org_id, token_hash, label) VALUES (:o, :h, :l)"),
+                {"o": org_id, "h": hashlib.sha256(raw.encode()).hexdigest(), "l": "env"},
+            )
+        print(
+            f"env: {args.name} ({org_id}) — "
+            + ("created" if created else "reused (fresh token minted; earlier tokens stay valid)")
+        )
+        # Unlike bootstrap this never writes .env: a sandbox must not steal the
+        # project's identity. The token lands in .dst/envs.json instead, so
+        # local commands reach the env by NAME (--env) and no human handles
+        # the secret; the export line stays for CI and remote shells.
+        _envs_write({**_envs_read(), args.name: raw})
+        print(f"recorded in {_envs_file()} — local commands can use --env {args.name}")
+        print(f"admin token (shown once): {raw}")
+        print("wire a remote shell or a CI job:")
+        print(f"  export DST_ADMIN_TOKEN={raw}")
+        return 0
+
+    if args.action == "ls":
+        with admin_engine.begin() as c:
+            orgs = c.execute(text("SELECT id, name, created_at FROM org ORDER BY created_at")).all()
+            rows = [(name, oid, created, *_counts(c, oid)) for oid, name, created in orgs]
+        if not rows:
+            print("no environments on this server")
+            return 0
+        print(f"{'NAME':<24} {'LENSES':>6} {'CALLERS':>7} {'TRACES':>7}  CREATED")
+        for name, oid, created, lenses, callers, traces in rows:
+            print(
+                f"{name:<24} {lenses:>6} {callers:>7} {traces:>7}"
+                f"  {created:%Y-%m-%d} {style.dim(str(oid))}"
+            )
+        return 0
+
+    # rm
+    if not args.yes:
+        print("error: `dst env rm` is irreversible — re-run with --yes", file=sys.stderr)
+        return 1
+    with admin_engine.begin() as c:
+        ids = (
+            c.execute(text("SELECT id FROM org WHERE name = :n"), {"n": args.name}).scalars().all()
+        )
+        if not ids:
+            print(f"error: no environment named {args.name!r}", file=sys.stderr)
+            return 1
+        if len(ids) > 1:
+            print(
+                f"error: {len(ids)} orgs named {args.name!r} — refusing an ambiguous delete",
+                file=sys.stderr,
+            )
+            return 1
+        lenses, callers, traces = _counts(c, ids[0])
+        # Every org FK is ON DELETE CASCADE (pinned by tests/test_env_cli.py),
+        # and referential actions bypass RLS — one delete empties the
+        # environment even where the admin role lacks BYPASSRLS.
+        c.execute(text("DELETE FROM org WHERE id = :o"), {"o": ids[0]})
+    known = _envs_read()
+    if args.name in known:
+        _envs_write({k: v for k, v in known.items() if k != args.name})
+    print(f"env {args.name} removed — {lenses} lenses, {callers} callers, {traces} traces gone")
+    return 0
+
+
+def _runs(args: argparse.Namespace) -> int:
+    """The run history `dst test` always kept, finally visible — and comparable.
+
+    dst runs <lens>              every recorded run, newest first
+    dst runs <lens> --diff A B   two runs side by side: score delta + case flips
+
+    A and B are run ids (a unique prefix is enough) or `latest` / `prev`. B may
+    live on another server via --other-url/--other-token — that is the
+    cross-environment compare: same suite, sandbox vs production."""
+    import httpx
+
+    from services.evals.service import REGRESSION_EPS
+
+    url, headers = _client(args)
+
+    def get(base: str, hdrs: dict[str, str], path: str) -> Any:
+        r = httpx.get(f"{base}{path}", headers=hdrs, timeout=args.timeout)
+        if r.status_code >= 400:
+            print(f"error: {_detail(r)}", file=sys.stderr)
+            raise SystemExit(1)
+        return r.json()
+
+    runs = get(url, headers, f"/mgmt/lenses/{args.lens}/evals/runs")
+    if not args.diff:
+        if args.as_json:
+            print(json.dumps(runs, indent=2))
+            return 0
+        if not runs:
+            print(f"no recorded runs for lens {args.lens!r} — `dst test {args.lens}` records one")
+            return 0
+        print(f"{'ID':<10} {'MODE':<12} {'SCORE':>6} {'PASS':>5} {'FAIL':>5} {'ERR':>4}  STARTED")
+        for r in runs:
+            score = "—" if r["score"] is None else f"{float(r['score']):.0%}"
+            print(
+                f"{str(r['id'])[:8]:<10} {r['mode']:<12} {score:>6}"
+                f" {r['passed']:>5} {r['failed']:>5} {r['errored']:>4}"
+                f"  {str(r['started_at'])[:19]}"
+            )
+        return 0
+
+    if args.other_url and not args.other_token:
+        print("error: --other-url needs --other-token (its own admin token)", file=sys.stderr)
+        return 1
+    # An environment is a server+token, and the cheap shape is org-per-env on
+    # ONE server — so --other-token alone (same URL, another org) is a valid
+    # side B. Keying the "other side" off the URL alone silently reused side
+    # A's runs for it; found dogfooding the first probe.
+    other_url = args.other_url.rstrip("/") if args.other_url else url
+    other_headers = {"Authorization": f"Bearer {args.other_token}"} if args.other_token else headers
+    runs_b = (
+        runs
+        if (other_url, other_headers) == (url, headers)
+        else get(other_url, other_headers, f"/mgmt/lenses/{args.lens}/evals/runs")
+    )
+
+    def resolve(spec: str, pool: list[dict[str, Any]], side: str) -> dict[str, Any]:
+        # The endpoint returns newest first. `latest`/`prev` stay within one
+        # MODE: the pool mixes `dst test` runs with the apply gate's
+        # `regression` runs, and a `prev` that silently crossed modes shifted
+        # the baseline mid-probe — the compare must be like against like.
+        if spec == "latest":
+            picked = pool[:1]
+        elif spec == "prev":
+            picked = [r for r in pool[1:] if not pool or r["mode"] == pool[0]["mode"]][:1]
+        else:
+            picked = [r for r in pool if str(r["id"]).startswith(spec)]
+        if len(picked) != 1:
+            what = "no run matches" if not picked else f"{len(picked)} runs match"
+            print(f"error: {side}: {what} {spec!r}", file=sys.stderr)
+            raise SystemExit(1)
+        return picked[0]
+
+    a = resolve(args.diff[0], runs, "A")
+    b = resolve(args.diff[1], runs_b, "B")
+    res_a = get(url, headers, f"/mgmt/lenses/{args.lens}/evals/runs/{a['id']}/results")
+    res_b = get(other_url, other_headers, f"/mgmt/lenses/{args.lens}/evals/runs/{b['id']}/results")
+    # Question is the join key: case ids differ across environments, the
+    # question asked is what both sides share.
+    pa = {r["question"]: r for r in res_a}
+    pb = {r["question"]: r for r in res_b}
+    newly_failing = sorted(q for q in pb if not pb[q]["passed"] and pa.get(q, {}).get("passed"))
+    newly_passing = sorted(q for q in pb if pb[q]["passed"] and q in pa and not pa[q]["passed"])
+    still_failing = sorted(q for q in pb if not pb[q]["passed"] and q in pa and not pa[q]["passed"])
+    only_a = sorted(set(pa) - set(pb))
+    only_b = sorted(set(pb) - set(pa))
+    regressed = (
+        a["score"] is not None
+        and b["score"] is not None
+        and float(b["score"]) < float(a["score"]) - REGRESSION_EPS
+    )
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "a": a,
+                    "b": b,
+                    "regressed": regressed,
+                    "newly_failing": newly_failing,
+                    "newly_passing": newly_passing,
+                    "still_failing": still_failing,
+                    "only_in_a": only_a,
+                    "only_in_b": only_b,
+                },
+                indent=2,
+            )
+        )
+        return 1 if regressed or newly_failing else 0
+
+    def score_of(r: dict[str, Any]) -> str:
+        return "—" if r["score"] is None else f"{float(r['score']):.0%}"
+
+    print(f"A {str(a['id'])[:8]} {a['mode']} {score_of(a)} ({a['passed']}p {a['failed']}f)")
+    print(f"B {str(b['id'])[:8]} {b['mode']} {score_of(b)} ({b['passed']}p {b['failed']}f)")
+    for q in newly_failing:
+        why = pb[q].get("reason") or ""
+        print(style.bad(f"  newly failing: {q}") + (f" — {why}" if why else ""))
+    for q in newly_passing:
+        print(style.good(f"  newly passing: {q}"))
+    for q in still_failing:
+        print(style.dim(f"  still failing: {q}"))
+    for q in only_a:
+        print(style.dim(f"  only in A: {q}"))
+    for q in only_b:
+        print(style.dim(f"  only in B: {q}"))
+    if regressed or newly_failing:
+        print(style.bad("regressed") + " — score dropped or a case flipped to failing")
+        return 1
+    print(style.good("no regression"))
+    return 0
+
+
 def _demo(args: argparse.Namespace) -> int:
     from services.config import settings
     from services.db.session import org_session
@@ -1580,6 +1813,62 @@ def _adopt_project_env(args: argparse.Namespace) -> None:
     args.restore_project_env = adopt_project_env(_env_dirs(args))
 
 
+def _envs_file(args: argparse.Namespace | None = None) -> Path:
+    """The env-name → admin-token map `dst env new` records: .dst/envs.json in
+    the --dir project (or cwd). Per-machine credential state, never project
+    truth — `dst init` gitignores .dst/."""
+    base = Path(_env_dirs(args)[0]) if args is not None else Path.cwd()
+    return base / ".dst" / "envs.json"
+
+
+def _envs_read(args: argparse.Namespace | None = None) -> dict[str, str]:
+    path = _envs_file(args)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _envs_write(mapping: dict[str, str]) -> None:
+    path = _envs_file()
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    path.write_text(json.dumps(mapping, indent=1) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _resolve_env_flag(args: argparse.Namespace) -> int | None:
+    """--env <name>: the local no-secret selector.
+
+    Resolves the name through .dst/envs.json and injects the stored token as
+    if --token had been typed, BEFORE any other resolution — so every
+    precedence rule downstream is unchanged and no human handles the secret.
+    Returns an exit code on error, None when resolved (or no flag given)."""
+    name = getattr(args, "env", None)
+    if not name:
+        return None
+    if getattr(args, "token", None):
+        print(
+            "error: --env and --token are two answers to the same question — pick one",
+            file=sys.stderr,
+        )
+        return 1
+    known = _envs_read(args)
+    token = known.get(name)
+    if token is None:
+        hint = f"known here: {', '.join(sorted(known))}" if known else "none recorded here"
+        print(
+            f"error: no environment named {name!r} in {_envs_file(args)} ({hint}) — "
+            f"`dst env new {name}` records it",
+            file=sys.stderr,
+        )
+        return 1
+    args.token = token
+    return None
+
+
 def _resolve_url(args: argparse.Namespace) -> tuple[str, str]:
     """The server URL and WHERE it came from. Precedence is unchanged — --url,
     then DST_URL in the process env, then DST_URL in the --dir project's
@@ -1653,6 +1942,9 @@ def _client(
     verb whose two doors are different endpoints can route on it."""
     from services.config import resolve_env_ref
 
+    code = _resolve_env_flag(args)
+    if code is not None:
+        raise SystemExit(code)
     dirs = _env_dirs(args)
     url, args.url_source = _resolve_url(args)
     args.url = url
@@ -1666,7 +1958,9 @@ def _client(
     if explicit_key:
         return _caller(explicit_key)
     env_key = resolve_env_ref("DST_API_KEY", dirs=dirs) if caller_key_ok else None
-    if env_key and not admin_first:
+    # An explicit --env targets THAT org's admin door; letting an ambient
+    # caller key win here would silently query the default org instead.
+    if env_key and not admin_first and not getattr(args, "env", None):
         return _caller(env_key)
     token = getattr(args, "token", None) or resolve_env_ref("DST_ADMIN_TOKEN", dirs=dirs)
     if token:
@@ -2905,6 +3199,12 @@ def _project_org(args: argparse.Namespace) -> tuple[uuid.UUID, str] | None:
     from services.config import resolve_env_ref
     from services.db.session import admin_engine
 
+    # --env on a DB-direct verb IS the org selector: `dst env new x` creates
+    # an org named x, so the name scopes without any token changing hands —
+    # the local no-secret path.
+    if not args.org and getattr(args, "env", None):
+        args.org = args.env
+
     with admin_engine.connect() as c:
         if args.org:
             row = c.execute(
@@ -3385,6 +3685,12 @@ def _test(args: argparse.Namespace) -> int:
                 if recorded:
                     r_passed = sum(1 for r in recorded if r.passed)
                     r_errored = sum(1 for r in recorded if r.grade == "errored")
+                    # Captured BEFORE create_run — afterwards "last" is this run.
+                    prev_score = (
+                        eval_store.last_run_score(session, name, "test")
+                        if getattr(args, "compare_last", False)
+                        else None
+                    )
                     run_id = eval_store.create_run(
                         session,
                         name,
@@ -3397,6 +3703,20 @@ def _test(args: argparse.Namespace) -> int:
                     for rec in recorded:
                         rec.run_id = run_id
                     eval_store.record_results(session, run_id, recorded)
+                    if getattr(args, "compare_last", False):
+                        score = r_passed / len(recorded)
+                        if prev_score is None:
+                            say(f"compare {label}: no previous test run")
+                        else:
+                            word = (
+                                "regressed"
+                                if score < prev_score
+                                else ("improved" if score > prev_score else "unchanged")
+                            )
+                            say(
+                                f"compare {label}: {prev_score:.0%} → {score:.0%} "
+                                f"vs previous run ({word})"
+                            )
     scope = ", ".join(n for _, n in orgs)
     if args.lens and not found_lens:
         print(f"error: no published lens '{args.lens}' in org {scope}", file=sys.stderr)
@@ -3807,10 +4127,352 @@ def _evals_gate(args: argparse.Namespace) -> int:
     return 1 if red else 0
 
 
+def _parse_vary(specs: list[str]) -> list[tuple[str, list[Any]]]:
+    """ "model.temperature=0.0,0.7" → ("model.temperature", [0.0, 0.7]).
+    Values parse as YAML scalars so numbers stay numbers in lens.yaml."""
+    import yaml
+
+    dims: list[tuple[str, list[Any]]] = []
+    for spec in specs:
+        key, eq, raw = spec.partition("=")
+        values = [yaml.safe_load(v.strip()) for v in raw.split(",") if v.strip()]
+        if not eq or not key.strip() or len(values) < 2:
+            raise ValueError(
+                f"--vary {spec!r}: expected <dotted.key>=<value>,<value>[,…] "
+                "(at least two values — one value is not an experiment)"
+            )
+        dims.append((key.strip(), values))
+    return dims
+
+
+def _expand_variants(dims: list[tuple[str, list[Any]]]) -> list[dict[str, Any]]:
+    """Cartesian product of the --vary dimensions, in declaration order."""
+    import itertools
+
+    return [
+        dict(combo) for combo in itertools.product(*[[(k, v) for v in vals] for k, vals in dims])
+    ]
+
+
+def _patch_lens_yaml(path: Path, overrides: dict[str, Any]) -> None:
+    """Set dotted keys in a lens.yaml — on the experiment's COPY, never the
+    user's project."""
+    import yaml
+
+    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    for dotted, value in overrides.items():
+        cur = doc
+        keys = dotted.split(".")
+        for k in keys[:-1]:
+            nxt = cur.get(k)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[k] = nxt
+            cur = nxt
+        cur[keys[-1]] = value
+    path.write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=88), encoding="utf-8"
+    )
+
+
+def _dst_run(argv: list[str], cwd: str) -> tuple[int, str]:
+    """One product verb as a subprocess — the same commands a user or CI runs,
+    exit codes as the interface. Seam monkeypatched in tests."""
+    import shutil
+    import subprocess
+
+    exe = str(Path(sys.executable).parent / "dst")
+    if not Path(exe).exists():
+        exe = shutil.which("dst") or exe
+    proc = subprocess.run([exe, *argv], cwd=cwd, capture_output=True, text=True, timeout=3600)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _experiment(args: argparse.Namespace) -> int:
+    """`dst experiment` — N lens-config variants, measured, side by side.
+
+    An orchestrator over the product's own verbs, nothing more: mint a
+    disposable env, then per variant patch a COPY of the project's lens.yaml,
+    `apply --env`, `test --env`, read the recorded run — and diff every
+    variant against the first. The user's project directory is never touched,
+    the env is removed at the end (--keep to inspect), and each step is the
+    same gated, audited command CI runs."""
+    import json as _json
+    import shutil
+    import tempfile
+    import uuid as _uuid
+
+    try:
+        dims = _parse_vary(args.vary or [])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not dims:
+        print("error: at least one --vary <dotted.key>=<v1>,<v2> is required", file=sys.stderr)
+        return 1
+    variants = _expand_variants(dims)
+    if len(variants) > 8:
+        print(
+            f"error: {len(variants)} variants (cartesian of --vary) — cap is 8; "
+            "every variant costs one gated apply + one full test sweep",
+            file=sys.stderr,
+        )
+        return 1
+
+    root = str(Path(args.dir).resolve())
+    lens_rel = Path("lenses") / args.lens / "lens.yaml"
+    if not (Path(root) / lens_rel).exists():
+        print(f"error: no {lens_rel} under {root}", file=sys.stderr)
+        return 1
+
+    # Resolve the server ONCE, at the root, and pass it explicitly to every
+    # subcall: apply's --dir is the variant copy (no .env there), and letting
+    # it fall back to the built-in default aimed the second live lap at
+    # whatever server owned localhost:8000. A wrong server must be impossible
+    # here, not merely 401-unlikely.
+    resolved_url, _src = _resolve_url(args)
+    url_extra = ["--url", resolved_url]
+    env_name = f"exp-{_uuid.uuid4().hex[:8]}"
+    code, out = _dst_run(["env", "new", env_name], cwd=root)
+    if code != 0:
+        print(out, file=sys.stderr)
+        return 1
+    # apply's --dir points at the variant COPY, and --env resolves the map
+    # from the --dir project — where it deliberately doesn't exist. The
+    # orchestrator owns the root's map, so it resolves the token itself and
+    # hands apply the explicit credential. Found on the first live lap.
+    try:
+        env_token = _json.loads((Path(root) / ".dst" / "envs.json").read_text(encoding="utf-8"))[
+            env_name
+        ]
+    except (OSError, ValueError, KeyError):
+        print(
+            f"error: `dst env new {env_name}` did not record a token in {root}/.dst/envs.json",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"experiment env: {env_name} ({len(variants)} variant(s))")
+
+    results: list[dict[str, Any]] = []
+    hard_error = False
+    try:
+        for i, overrides in enumerate(variants, 1):
+            label = " ".join(f"{k}={v}" for k, v in overrides.items())
+            workdir = tempfile.mkdtemp(prefix=f"dst-exp-{i}-")
+            shutil.copytree(
+                root,
+                workdir,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(
+                    ".env", ".dst", ".git", "__pycache__", ".venv", "node_modules"
+                ),
+            )
+            _patch_lens_yaml(Path(workdir) / lens_rel, overrides)
+            print(f"#{i} {label}: apply …", flush=True)
+            code, out = _dst_run(
+                ["apply", "--dir", workdir, "--token", env_token, "--quiet", "--timeout", "2400"]
+                + url_extra,
+                cwd=root,
+            )
+            if code != 0:
+                results.append({"variant": label, "status": "apply-failed", "detail": out[-400:]})
+                hard_error = True
+                continue
+            print(f"#{i} {label}: test …", flush=True)
+            code, out = _dst_run(["test", "--all", "--env", env_name, "--dir", root], cwd=root)
+            # test exit 1 = failures, still a measurement; 4 = nothing verified.
+            if code not in (0, 1):
+                results.append({"variant": label, "status": "not-measured", "detail": out[-400:]})
+                hard_error = True
+                continue
+            code, out = _dst_run(
+                ["runs", args.lens, "--env", env_name, "--json", "--dir", root] + url_extra,
+                cwd=root,
+            )
+            runs = _json.loads(out) if code == 0 else []
+            tests = [r for r in runs if r.get("mode") == "test"]
+            if not tests:
+                results.append({"variant": label, "status": "no-run-recorded"})
+                hard_error = True
+                continue
+            latest = tests[0]
+            results.append(
+                {
+                    "variant": label,
+                    "status": "ok",
+                    "run_id": latest["id"],
+                    "score": latest["score"],
+                    "passed": latest["passed"],
+                    "failed": latest["failed"],
+                }
+            )
+        # Flips vs variant #1, via the same comparator CI uses.
+        baseline = next((r for r in results if r.get("status") == "ok"), None)
+        for r in results:
+            if r.get("status") != "ok" or r is baseline or baseline is None:
+                continue
+            code, out = _dst_run(
+                [
+                    "runs",
+                    args.lens,
+                    "--diff",
+                    str(baseline["run_id"]),
+                    str(r["run_id"]),
+                    "--env",
+                    env_name,
+                    "--json",
+                    "--dir",
+                    root,
+                ]
+                + url_extra,
+                cwd=root,
+            )
+            try:
+                diff = _json.loads(out)
+            except ValueError:
+                diff = {}
+            r["newly_failing"] = diff.get("newly_failing", [])
+            r["newly_passing"] = diff.get("newly_passing", [])
+            r["regressed"] = bool(diff.get("regressed") or diff.get("newly_failing"))
+    finally:
+        if getattr(args, "keep", False):
+            print(f"env kept for inspection: dst env rm {env_name} --yes when done")
+        else:
+            _dst_run(["env", "rm", env_name, "--yes"], cwd=root)
+
+    if args.as_json:
+        print(_json.dumps({"env": env_name, "variants": results}, indent=2, default=str))
+        return 1 if hard_error else 0
+
+    def pct(v: Any) -> str:
+        return "—" if v is None else f"{float(v):.0%}"
+
+    print()
+    print(f"{'':<3}{'VARIANT':<44} {'SCORE':>6} {'PASS':>5} {'FAIL':>5}  VS #1")
+    for i, r in enumerate(results, 1):
+        if r.get("status") != "ok":
+            print(f"#{i} {r['variant']:<44} {r['status']}")
+            continue
+        if r is baseline:
+            note = "baseline"
+        elif r.get("regressed"):
+            note = style.bad(f"{len(r.get('newly_failing', []))} newly failing")
+        else:
+            note = style.good("no regression")
+        row = f"#{i} {r['variant']:<44} {pct(r['score']):>6} {r['passed']:>5} {r['failed']:>5}"
+        print(f"{row}  {note}")
+        for q in r.get("newly_failing", []):
+            print(style.bad(f"     newly failing: {q}"))
+        for q in r.get("newly_passing", []):
+            print(style.good(f"     newly passing: {q}"))
+    for r in results:
+        if r.get("status") not in ("ok", None) and r.get("detail"):
+            print(f"\n#{results.index(r) + 1} {r['variant']} — {r['status']}:\n{r['detail']}")
+    return 1 if hard_error else 0
+
+
 def _evals_dispatch(args: argparse.Namespace) -> int:
     if args.action == "gate":
         return _evals_gate(args)
+    if args.action == "from-traffic":
+        return _evals_from_traffic(args)
     return _evals_migrate(args)
+
+
+def _evals_from_traffic(args: argparse.Namespace) -> int:
+    """`dst evals from-traffic <lens>` — production questions become the suite.
+
+    Recent request-log rows are drafted into
+    lenses/<lens>/evals/cases.yaml with the OBSERVED outcome shape as the
+    expectation (`ok`→answer, `refused`/`rejected`→refuse,
+    `clarification`→clarify; errors are faults, not expectations — skipped).
+
+    Drafts land as ``status: candidate`` / ``source: harvested`` — visible to
+    `dst test` (counted, never scored) until a person promotes them to
+    approved. The file is the interface: entries are APPENDED, existing bytes
+    (and their comments) untouched, and nothing lands server-side until the
+    user reviews and runs `dst apply` — same contract as `dst evals migrate`."""
+    import httpx
+    import yaml
+
+    if not args.lens:
+        print("error: `dst evals from-traffic` needs a lens name", file=sys.stderr)
+        return 1
+    url, headers = _client(args)
+    r = httpx.get(
+        f"{url}/mgmt/observe/requests",
+        headers=headers,
+        params={"lens": args.lens, "limit": args.limit},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        print(f"error: {_detail(r)}", file=sys.stderr)
+        return 1
+    rows = r.json()
+
+    # The stored triage field maps deterministically; sniffing prose was tried
+    # elsewhere and misattributed — the same rule holds here.
+    expect_of = {
+        "ok": "answer",
+        "refused": "refuse",
+        "rejected": "refuse",
+        "clarification": "clarify",
+    }
+
+    path = Path(args.dir) / "lenses" / args.lens / "evals" / "cases.yaml"
+    existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
+    existing = yaml.safe_load(existing_text) if existing_text.strip() else []
+    if existing is not None and not isinstance(existing, list):
+        print(f"error: {path} is not a top-level YAML list", file=sys.stderr)
+        return 1
+
+    def norm(q: str) -> str:
+        return " ".join(q.split()).rstrip("?").casefold()
+
+    seen = {
+        norm(str(c["question"]))
+        for c in existing or []
+        if isinstance(c, dict) and c.get("question")
+    }
+    drafted: list[dict[str, str]] = []
+    skipped_outcome = skipped_dupe = 0
+    for row in rows:
+        expect = expect_of.get(str(row.get("status")))
+        q = str(row.get("question") or "").strip()
+        if expect is None or not q:
+            skipped_outcome += 1
+            continue
+        if norm(q) in seen:
+            skipped_dupe += 1
+            continue
+        seen.add(norm(q))
+        drafted.append(
+            {"question": q, "expect": expect, "status": "candidate", "source": "harvested"}
+        )
+    if not drafted:
+        print(
+            f"nothing new to draft: {len(rows)} traffic row(s), "
+            f"{skipped_dupe} already in the suite, {skipped_outcome} without a usable outcome"
+        )
+        return 0
+    stamp = (
+        "# drafted from traffic by `dst evals from-traffic` — review, promote to\n"
+        "# status: approved, then `dst apply`\n"
+    )
+    block = yaml.safe_dump(drafted, sort_keys=False, allow_unicode=True, width=88)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joiner = "" if not existing_text or existing_text.endswith("\n") else "\n"
+    path.write_text(existing_text + joiner + stamp + block, encoding="utf-8")
+    by_expect: dict[str, int] = {}
+    for d in drafted:
+        by_expect[d["expect"]] = by_expect.get(d["expect"], 0) + 1
+    shape = " · ".join(f"{k}: {v}" for k, v in sorted(by_expect.items()))
+    print(
+        f"{len(drafted)} candidate case(s) drafted into {path} ({shape}); "
+        f"{skipped_dupe} duplicate(s) and {skipped_outcome} non-outcome row(s) skipped"
+    )
+    print("candidates are visible to `dst test` but not scored until promoted to approved")
+    return 0
 
 
 def _evals_migrate(args: argparse.Namespace) -> int:
@@ -4293,9 +4955,92 @@ def main() -> int:
     p.add_argument("--password", help="its password (omit to be prompted)")
     p.set_defaults(fn=_bootstrap)
 
+    p = sub.add_parser(
+        "env",
+        help="disposable environments — an env is an org on this server: "
+        "`new <name>` mints an org + admin token (never writes .env), "
+        "`ls` shows each env and what it holds, "
+        "`rm <name> --yes` deletes the env and everything in it — irreversible",
+    )
+    p.add_argument("action", choices=["new", "ls", "rm"])
+    p.add_argument("name", nargs="?", help="environment (org) name")
+    p.add_argument("--yes", action="store_true", help="rm: confirm the irreversible delete")
+    p.add_argument(
+        "--url",
+        help="ignored — env talks to DATABASE_ADMIN_URL directly (no server needed)",
+    )
+    p.set_defaults(fn=_env)
+
+    p = sub.add_parser(
+        "runs",
+        help="eval-run history for a lens (what dst test records): list newest "
+        "first, or `--diff A B` to compare two runs — score delta + per-case "
+        "flips; exit 1 when B regresses A (score drop beyond the publish "
+        "gate's epsilon, or any case newly failing)",
+    )
+    p.add_argument("lens", help="lens whose runs to read")
+    p.add_argument(
+        "--diff",
+        nargs=2,
+        metavar=("A", "B"),
+        help="two runs to compare: a run id (unique prefix is enough), or latest | prev",
+    )
+    p.add_argument(
+        "--env",
+        help="target a named environment minted by `dst env new` — resolves "
+        "its recorded admin token from .dst/envs.json (mutually exclusive "
+        "with --token)",
+    )
+    p.add_argument(
+        "--other-url",
+        help="resolve run B on another server — the cross-environment compare "
+        "(same suite, sandbox vs production)",
+    )
+    p.add_argument(
+        "--other-token",
+        help="admin token for side B; alone (no --other-url) it means another "
+        "org on the SAME server — the org-per-env shape `dst env new` mints",
+    )
+    p.add_argument(
+        "--url",
+        help="server URL (default: DST_URL from env or ./.env, else http://localhost:8000)",
+    )
+    p.add_argument(
+        "--token", help="a dstadm_ admin token (default: DST_ADMIN_TOKEN from env or ./.env)"
+    )
+    p.add_argument("--dir", default=".", help="project root (default: .)")
+    p.add_argument("--timeout", type=int, default=30)
+    p.add_argument("--json", dest="as_json", action="store_true", help="parseable form")
+    p.set_defaults(fn=_runs)
+
     p = sub.add_parser("demo", help="publish the bundled duckdb demo lens into an org")
     p.add_argument("--org-id", required=True, help="org UUID from `dst bootstrap`")
     p.set_defaults(fn=_demo)
+
+    p = sub.add_parser(
+        "experiment",
+        help="measure N lens-config variants side by side: mints a disposable "
+        "env, then per variant applies a patched COPY of the project and runs "
+        "the suite — scores + per-case flips vs variant #1; the project dir "
+        "is never touched and the env is removed at the end",
+    )
+    p.add_argument("lens", help="the lens whose lens.yaml the variants patch")
+    p.add_argument(
+        "--vary",
+        action="append",
+        metavar="KEY=V1,V2[,…]",
+        help="a dimension to vary, dotted into lens.yaml (e.g. "
+        "model.temperature=0.0,0.7); repeatable — variants are the cartesian "
+        "product, capped at 8 (each costs one gated apply + one test sweep)",
+    )
+    p.add_argument("--keep", action="store_true", help="keep the env for inspection")
+    p.add_argument("--dir", default=".", help="project root (default: .)")
+    p.add_argument(
+        "--url",
+        help="server URL (default: DST_URL from env or ./.env, else http://localhost:8000)",
+    )
+    p.add_argument("--json", dest="as_json", action="store_true", help="parseable form")
+    p.set_defaults(fn=_experiment)
 
     p = sub.add_parser(
         "reindex",
@@ -4377,6 +5122,12 @@ def main() -> int:
     )
     p.add_argument(
         "--token", help="a dstadm_ admin token (default: DST_ADMIN_TOKEN from env or ./.env)"
+    )
+    p.add_argument(
+        "--env",
+        help="ask through a named environment minted by `dst env new` — resolves "
+        "its recorded admin token; an explicit --env outranks an ambient caller "
+        "key, so the question lands in THAT env",
     )
     p.add_argument(
         "--key",
@@ -4583,10 +5334,23 @@ def main() -> int:
         "(default: .) — point the sweep at a project from outside it",
     )
     p.add_argument(
+        "--compare-last",
+        dest="compare_last",
+        action="store_true",
+        help="after recording, print each lens's score against its previous test "
+        "run (informational — the exit code stays the suite's own; `dst runs "
+        "<lens> --diff prev latest` is the comparator with exit semantics)",
+    )
+    p.add_argument(
         "--org",
         help="org to sweep, by name (default: the org this project's "
         "DST_ADMIN_TOKEN authenticates as) — lens names are NOT unique across "
         "orgs, so an unscoped sweep tests every org's lens of that name",
+    )
+    p.add_argument(
+        "--env",
+        help="scope the sweep to a named environment minted by `dst env new` — "
+        "the env name IS its org name, so no token changes hands",
     )
     p.add_argument(
         "--url",
@@ -4882,10 +5646,19 @@ def main() -> int:
         "evals",
         help="eval utilities; `gate <lens>` runs ONE lens's publish gate as a dry run "
         "(the apply code path, nothing published); `migrate` moves value cases "
-        "(expected_sql) into certified_answers.yaml — local file rewrite",
+        "(expected_sql) into certified_answers.yaml — local file rewrite; "
+        "`from-traffic <lens>` drafts candidate cases from recent production "
+        "questions (observed outcome becomes the expectation) — appends to "
+        "evals/cases.yaml for review",
     )
-    p.add_argument("action", choices=["migrate", "gate"])
-    p.add_argument("lens", nargs="?", help="lens name (gate only)")
+    p.add_argument("action", choices=["migrate", "gate", "from-traffic"])
+    p.add_argument("lens", nargs="?", help="lens name (gate and from-traffic)")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="from-traffic: how many recent requests to read (default 200)",
+    )
     p.add_argument("--dir", default=".", help="project root (default: .)")
     p.add_argument(
         "--url",
@@ -4893,6 +5666,11 @@ def main() -> int:
     )
     p.add_argument(
         "--token", help="a dstadm_ admin token (default: DST_ADMIN_TOKEN from env or ./.env)"
+    )
+    p.add_argument(
+        "--env",
+        help="target a named environment minted by `dst env new` — resolves "
+        "its recorded admin token from .dst/envs.json",
     )
     p.add_argument("--json", dest="as_json", action="store_true", help="the decision as JSON")
     p.set_defaults(fn=_evals_dispatch)
@@ -4903,6 +5681,12 @@ def main() -> int:
         ("apply", _apply, "apply a project dir to the server (files win)"),
     ]:
         p = sub.add_parser(name, help=help_)
+        p.add_argument(
+            "--env",
+            help="target a named environment minted by `dst env new` — resolves "
+            "its recorded admin token from .dst/envs.json; no secret changes "
+            "hands (mutually exclusive with --token)",
+        )
         if name == "export":
             # `dst export` keeps its meaning (server -> this project's files);
             # `dst export osi` writes the project's semantic layer OUT to the

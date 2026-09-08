@@ -29,6 +29,38 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.3.0] — 2026-09-08
+
+No schema changes: upgrading from 0.2.0 is `pip install --upgrade dst-core`
+with nothing to migrate.
+
+### Added — disposable environments and measured change
+
+An environment is an org on the server — nothing new to operate, just verbs
+that make one cheap to mint, select, and throw away:
+
+- **`dst env new|ls|rm`** — `new` mints an org and its admin token without
+  touching your project's `.env` (a sandbox must not steal the project's
+  identity; the token is recorded in the gitignored `.dst/` map instead);
+  `rm` deletes the org and everything in it, one confirmation, one cascade.
+  Env-aware verbs take `--env <name>` to run against it by name.
+- **`dst runs <lens>`** — the run history `dst test` has always recorded,
+  finally visible. `--diff A B` compares two runs: score delta plus the
+  per-case flips, exit `1` on a score regression *or any newly failing
+  case* — a flip masked by an unchanged score still fails CI. Works
+  cross-environment and cross-server (`--other-url`, `--other-token`).
+- **`dst experiment <lens> --vary key=a,b`** — N lens-config variants,
+  each applied to a disposable env, measured against the same suite, and
+  reported side by side. An orchestrator over the verbs above, nothing more.
+- **`dst evals from-traffic <lens>`** — production questions become the
+  suite: recent request-log rows are drafted into `evals/cases.yaml` with
+  the observed outcome shape as the expectation, ready for review.
+- A new **[Environments and CI](docs/guides/environments-and-ci.md)** guide,
+  including the per-PR ephemeral-environment recipe, and CLI reference
+  sections for every verb above. The scaffolded agent skills teach the same
+  loop (`dst runs --diff` as the re-measure verdict, `dst experiment` for
+  config forks, disposable envs in the agent workflow).
+
 ## [0.2.0] — 2026-09-07
 
 Schema changes ship with this release: run `dst migrate` before serving (the

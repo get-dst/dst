@@ -168,6 +168,70 @@ second implementation that drifts. If you would rather not expose a server to PR
 builds, give the check job a staging server reachable only from CI — it holds no
 production data and its admin token is scoped to it.
 
+## An environment per pull request
+
+The org-per-environment shape is cheap enough to mint one per PR: the change
+publishes into its own org, the suite runs there, the score is compared
+against main's last run, and the org is deleted when the PR closes. Nothing
+the PR does can touch a shared environment, and the comparison — not a green
+checkmark — is what lands in the review.
+
+```yaml
+# .github/workflows/dst-pr-env.yml
+name: dst-pr-env
+on:
+  pull_request:
+    types: [opened, synchronize, closed]
+
+env:
+  DST_URL: ${{ vars.DST_STAGING_URL }}
+  # the STAGING admin credential mints and removes envs; each minted env's
+  # own token is scoped to that env alone
+  DATABASE_ADMIN_URL: ${{ secrets.DST_STAGING_ADMIN_DB_URL }}
+
+jobs:
+  measure:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx install dst-core
+      - run: dst env new pr-${{ github.event.number }} | tee env.out
+      - run: echo "DST_ADMIN_TOKEN=$(grep -oE 'dstadm_\S+' env.out | head -1)" >> "$GITHUB_ENV"
+      - run: dst apply --dir . --require-gates --quiet
+      - run: dst test --all || true          # the diff below is the verdict
+      - run: |
+          dst runs my_lens --diff latest latest \
+            --other-url "$DST_URL" --other-token "${{ secrets.DST_MAIN_ADMIN_TOKEN }}" \
+            | tee diff.out
+      - if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = '```\n' + fs.readFileSync('diff.out', 'utf8') + '\n```';
+            github.rest.issues.createComment({ ...context.repo,
+              issue_number: context.issue.number, body });
+
+  dispose:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - run: pipx install dst-core
+      - run: dst env rm pr-${{ github.event.number }} --yes
+```
+
+Reading the diff step: side A is the PR env's latest run (its token is the
+job's `DST_ADMIN_TOKEN`), side B is the main org's latest run via
+`--other-token` — the same comparator, so the PR comment names the per-case
+flips, and its exit code (`1` on regression or any newly failing case) is
+available to make the job itself red. `dst env rm` is idempotent about the
+map and refuses ambiguity, so a re-run of the dispose job is safe.
+
+Locally the same loop is one flag instead of tokens — `dst env new exp1`,
+then `--env exp1` on every verb — and `dst experiment` packages the whole
+cycle for lens-config comparisons ([CLI reference](../reference/cli.md)).
+
 ## Exit codes
 
 Every command carries its outcome in the exit code, so a pipeline branches without
