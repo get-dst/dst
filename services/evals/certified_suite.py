@@ -380,6 +380,7 @@ def _score_one(
             max_rows=_ROW_CAP,
             model_name=model_name,
             data_as_of=assembled.data_as_of,
+            entity_coverage=assembled.entity_coverage,
         )
         t = pr.trace
         gen_sql = t.sql

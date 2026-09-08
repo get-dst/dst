@@ -52,6 +52,22 @@ class PartitioningProfile(BaseModel):
     latest_partition: str | None = None  # latest partition id — a logical-freshness hint
 
 
+class TimeCoverage(BaseModel):
+    """The measured span of a table's best time column: full-table MIN/MAX.
+
+    A declared clock fact nobody downstream can infer — the difference between
+    "the data holds no rows for that period" and "the period is beyond what was
+    loaded". Always read whole-table (the same probe that measures logical
+    freshness), never from a sample: a sampled MIN presented as the start of
+    coverage would accuse the data of missing history it has. ``min == max``
+    (by date) is a single snapshot — its date is the table's AS-OF.
+    """
+
+    column: str  # the probed time column, as `_freshness_column` picked it
+    min: datetime
+    max: datetime
+
+
 class ColumnProfile(BaseModel):
     name: str
     type: str
@@ -100,6 +116,10 @@ class TableProfile(BaseModel):
     clustering: list[str] = Field(default_factory=list)
     last_updated_physical: datetime | None = None  # engine timestamp; best-effort
     last_updated_logical: datetime | None = None  # max of a real time column
+    # Whole-table span of the freshness column — the date-coverage fact the
+    # serving rail consults so a question about a period beyond it discloses
+    # "data ends <date>" instead of zero-filling. None = never probed.
+    time_coverage: TimeCoverage | None = None
     profiled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: Literal["catalog", "sampled", "mixed"] = "catalog"
     columns: list[ColumnProfile] = Field(default_factory=list)

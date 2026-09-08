@@ -13,7 +13,11 @@ import pytest
 from services.contracts.query_intent import QueryIntent
 from services.contracts.semantic_model import Entity, EntitySource, Field, Metric, SemanticModel
 from services.runtime.compiler import compile_intent
-from services.runtime.filter_guard import conflict_note, missing_metric_filters
+from services.runtime.filter_guard import (
+    conflict_note,
+    metric_filter_findings,
+    missing_metric_filters,
+)
 
 
 def _model(dialect: str = "bigquery") -> SemanticModel:
@@ -462,6 +466,96 @@ def test_a_query_satisfying_one_twin_still_clears_without_a_question() -> None:
 def test_conflict_note_is_none_for_a_single_metric_miss() -> None:
     missing = [("current_arr", "whatever")]
     assert conflict_note(missing, _snapshot_model()) is None
+
+
+# ─── a question naming NO group member waives the demand, never rejects ──────
+# The twin rule needs a twin: a lens whose ONLY count metric carries a
+# mandatory filter condemned every bare COUNT — including the one answering
+# "how many X in total", a question the metric never claimed. Zero name-token
+# signal on every group member moves the demand to `waived` so the pipeline
+# can serve the plain aggregate (disclosed) instead of dead-ending.
+
+
+def _overdue_only_model() -> SemanticModel:
+    """The dead-end shape: one governed count metric, mandatorily filtered,
+    and no unfiltered sibling to clear the bare form."""
+    return SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="invoices",
+                source=EntitySource(connection="duckdb", table="finance.invoices"),
+                fields=[
+                    Field(name="invoice_id", type="number"),
+                    Field(name="days_overdue", type="number"),
+                ],
+                metrics=[
+                    Metric(
+                        name="overdue_invoice_count",
+                        agg="count",
+                        expr="invoices.invoice_id",
+                        filters=["invoices.days_overdue > 0"],
+                    )
+                ],
+            )
+        ],
+    )
+
+
+_PLAIN_COUNT = "SELECT COUNT(invoices.invoice_id) AS n FROM finance.invoices AS invoices"
+
+
+def test_a_question_naming_no_group_member_waives_the_demand() -> None:
+    findings = metric_filter_findings(
+        _PLAIN_COUNT,
+        _overdue_only_model(),
+        question="How many invoices have we issued in total, all statuses?",
+    )
+    assert findings.missing == []
+    assert findings.waived == [("overdue_invoice_count", "invoices.days_overdue > 0")]
+
+
+def test_a_question_naming_the_metric_keeps_the_full_demand() -> None:
+    """The negative case the escape must not widen: 'overdue' is the metric's
+    own name token, so the bare COUNT here IS the metric unfiltered."""
+    findings = metric_filter_findings(
+        _PLAIN_COUNT, _overdue_only_model(), question="How many overdue invoices do we have?"
+    )
+    assert findings.missing == [("overdue_invoice_count", "invoices.days_overdue > 0")]
+    assert findings.waived == []
+
+
+def test_without_a_question_nothing_is_ever_waived() -> None:
+    """No question, no signal to hear — the guard keeps its full demand."""
+    findings = metric_filter_findings(_PLAIN_COUNT, _overdue_only_model())
+    assert findings.missing == [("overdue_invoice_count", "invoices.days_overdue > 0")]
+    assert findings.waived == []
+
+
+def test_zero_signal_on_every_twin_waives_the_whole_group() -> None:
+    """Twins with a shared expression and NO name token in the question: the
+    question asked for neither governed metric, so the union (permanently
+    unsatisfiable) is waived rather than demanded."""
+    findings = metric_filter_findings(
+        _BARE_ARR, _snapshot_model(), question="How much recurring revenue per customer tier?"
+    )
+    assert findings.missing == []
+    assert {name for name, _f in findings.waived} == {"current_arr", "total_arr"}
+
+
+def test_a_satisfied_filter_yields_no_waiver_to_disclose() -> None:
+    """A correctly filtered query is clean, not 'waived' — the disclosure must
+    only ever fire when a demand was actually dropped."""
+    sql = (
+        "SELECT COUNT(invoices.invoice_id) AS n FROM finance.invoices AS invoices "
+        "WHERE invoices.days_overdue > 0"
+    )
+    findings = metric_filter_findings(
+        sql, _overdue_only_model(), question="How many invoices have we issued in total?"
+    )
+    assert findings.missing == []
+    assert findings.waived == []
 
 
 # ── the latest-snapshot predicate, however it is spelled ─────────────────────

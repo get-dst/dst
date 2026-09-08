@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from services.contracts.profile import TableProfile
 from services.contracts.semantic_model import Definition
-from services.contracts.shared_semantic import SharedEntity
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.lenses.profile_drift import DriftKind, ProfileDrift, diff_profiles
 
 # Committed, not hidden: the point is that a teammate who pulls the project gets
@@ -59,8 +59,8 @@ SCHEMA_KINDS: frozenset[str] = frozenset(
 class LayerRef(BaseModel):
     """One semantic asset that reads the table a delta landed on."""
 
-    kind: Literal["entity", "definition", "certified"]
-    name: str  # entity name / definition term / certified question
+    kind: Literal["entity", "definition", "relationship", "certified"]
+    name: str  # entity name / definition term / relationship name / certified question
     path: str  # semantic/definitions/discounts.md
     why: str  # the sentence fragment that says HOW it reads it
     sql_expr: str | None = None  # the derivation a new column may supersede
@@ -264,8 +264,10 @@ def parse_certified(files: dict[str, str]) -> list[CertifiedRef]:
     return out
 
 
-def parse_layer(files: dict[str, str]) -> tuple[dict[str, SharedEntity], dict[str, Definition]]:
-    """`semantic/**` → (entities by path, definitions by path).
+def parse_layer(
+    files: dict[str, str],
+) -> tuple[dict[str, SharedEntity], dict[str, Definition], dict[str, SharedRelationship]]:
+    """`semantic/**` → (entities by path, definitions by path, relationships by path).
 
     Keyed by PATH, unlike `semantic.files.parse_semantic_files` (by name), because
     a finding has to name the file you open to fix it — and the term does not give
@@ -276,6 +278,7 @@ def parse_layer(files: dict[str, str]) -> tuple[dict[str, SharedEntity], dict[st
 
     entities: dict[str, SharedEntity] = {}
     definitions: dict[str, Definition] = {}
+    relationships: dict[str, SharedRelationship] = {}
     for path, content in sorted(files.items()):
         try:
             asset = parse_semantic_file(path, content)
@@ -283,9 +286,11 @@ def parse_layer(files: dict[str, str]) -> tuple[dict[str, SharedEntity], dict[st
             continue
         if isinstance(asset, SharedEntity):
             entities[path] = asset
+        elif isinstance(asset, SharedRelationship):
+            relationships[path] = asset
         elif isinstance(asset, Definition):
             definitions[path] = asset
-    return entities, definitions
+    return entities, definitions, relationships
 
 
 def _entity_refs(table: str, entities: dict[str, SharedEntity]) -> list[LayerRef]:
@@ -294,6 +299,32 @@ def _entity_refs(table: str, entities: dict[str, SharedEntity]) -> list[LayerRef
         for path, e in sorted(entities.items())
         if same_table(e.source.table, table)
     ]
+
+
+def _relationship_refs(
+    table: str,
+    column: str | None,
+    entities: dict[str, SharedEntity],
+    relationships: dict[str, SharedRelationship],
+) -> list[LayerRef]:
+    """Relationships the delta lands under: one of the pair's entities reads the
+    table, and either the whole table went away or the moved column is named in
+    the join's ON clause. A column delta a join never references stays the
+    entity's finding alone — flagging every relationship on every delta is how
+    the one broken join gets skipped over."""
+    on_table = {e.name for e in entities.values() if same_table(e.source.table, table)}
+    out: list[LayerRef] = []
+    for path, r in sorted(relationships.items()):
+        if not any(e in on_table for e in (r.left, r.right)):
+            continue
+        if column is None:
+            why = "joins through this table"
+        elif _mentions(r.on, column):
+            why = f"names `{column}` in its join condition"
+        else:
+            continue
+        out.append(LayerRef(kind="relationship", name=r.name, path=path, why=why))
+    return out
 
 
 def _definition_refs(
@@ -404,6 +435,7 @@ def cross_reference(
     entities: dict[str, SharedEntity],
     defs: dict[str, Definition],
     certified: list[CertifiedRef] | None = None,
+    relationships: dict[str, SharedRelationship] | None = None,
 ) -> list[Finding]:
     """Each delta with the semantic assets that read the table it landed on.
 
@@ -415,6 +447,7 @@ def cross_reference(
         refs = _entity_refs(d.table, entities) + _definition_refs(
             d.table, _column_of(d), entities, defs
         )
+        refs += _relationship_refs(d.table, _column_of(d), entities, relationships or {})
         refs += _certified_refs(d.table, _column_of(d), d.kind, certified or [])
         if d.kind == "column_added":
             named = {(r.kind, r.name) for r in refs}

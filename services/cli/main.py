@@ -352,11 +352,13 @@ def _demo(args: argparse.Namespace) -> int:
             )
         # The demo dogfoods the shared layer: seed its assets so the published
         # bundle's compile provenance matches the store (never spuriously stale).
-        entities, definitions = jaffle_shared_assets()
+        entities, definitions, relationships = jaffle_shared_assets()
         for e in entities:
             semantic_store.upsert_asset(session, "entity", e.name, e.model_dump(mode="json"))
         for d in definitions:
             semantic_store.upsert_asset(session, "definition", d.term, d.model_dump(mode="json"))
+        for r in relationships:
+            semantic_store.upsert_asset(session, "relationship", r.name, r.model_dump(mode="json"))
         bundle = jaffle_customer_value_bundle()
         if not store.lens_exists(session, bundle.config.name):
             store.create_lens(session, bundle)
@@ -696,7 +698,9 @@ def _check_joins(connector: object, root: Path) -> int:
     from services.semantic.cardinality import measure, verdict
     from services.semantic.files import parse_semantic_files
 
-    entities, _definitions = parse_semantic_files(split_semantic(_read_project(root)))
+    entities, _definitions, relationships = parse_semantic_files(
+        split_semantic(_read_project(root))
+    )
     if not entities:
         print(f"error: no semantic/entities/*.yaml under {root}", file=sys.stderr)
         return 1
@@ -706,48 +710,54 @@ def _check_joins(connector: object, root: Path) -> int:
 
     worst = 0
     checked = 0
-    for entity in entities.values():
-        for join in entity.joins:
-            other = entities.get(join.right)
-            if other is None:
-                print(f"[unknown  ] {entity.name} -> {join.right}: no such entity", file=sys.stderr)
-                worst = max(worst, 1)
-                continue
-            # EVERY column each side matches on: a composite key measured one column
-            # at a time reports a fan-out that the full key does not have (a prices
-            # table with 2 rows per market_date, but 1 per (ticker, market_date)).
-            columns: dict[str, list[str]] = {}
-            for c in sqlglot.parse_one(join.on, read="duckdb").find_all(exp.Column):
-                owned = columns.setdefault(c.table or "", [])
-                if c.name not in owned:
-                    owned.append(c.name)
-            left_col = columns.get(entity.name, [])
-            right_col = columns.get(join.right, [])
-            if not left_col or not right_col:
-                print(
-                    f"[skipped  ] {entity.name} -> {join.right}: could not read one column per "
-                    f"side out of `{join.on}`",
-                    file=sys.stderr,
-                )
-                continue
-            checked += 1
-            status, message = verdict(
-                join.relationship,
-                measure(
-                    run,
-                    left_table=entity.source.table,
-                    left_columns=left_col,
-                    right_table=other.source.table,
-                    right_columns=right_col,
-                    left=entity.name,
-                    right=join.right,
-                ),
+    for rel in relationships.values():
+        left, right = entities.get(rel.left), entities.get(rel.right)
+        if left is None or right is None:
+            missing = rel.left if left is None else rel.right
+            print(
+                f"[unknown  ] {rel.left} <-> {rel.right}: no such entity '{missing}'",
+                file=sys.stderr,
             )
-            print(f"[{status:9s}] {message}")
-            if status in ("wrong", "unsafe"):
-                worst = 1
+            worst = max(worst, 1)
+            continue
+        # EVERY column each side matches on: a composite key measured one column
+        # at a time reports a fan-out that the full key does not have (a prices
+        # table with 2 rows per market_date, but 1 per (ticker, market_date)).
+        columns: dict[str, list[str]] = {}
+        for c in sqlglot.parse_one(rel.on, read="duckdb").find_all(exp.Column):
+            owned = columns.setdefault(c.table or "", [])
+            if c.name not in owned:
+                owned.append(c.name)
+        left_col = columns.get(rel.left, [])
+        right_col = columns.get(rel.right, [])
+        if not left_col or not right_col:
+            print(
+                f"[skipped  ] {rel.left} <-> {rel.right}: could not read one column per "
+                f"side out of `{rel.on}`",
+                file=sys.stderr,
+            )
+            continue
+        checked += 1
+        status, message = verdict(
+            rel.relationship,
+            measure(
+                run,
+                left_table=left.source.table,
+                left_columns=left_col,
+                right_table=right.source.table,
+                right_columns=right_col,
+                left=rel.left,
+                right=rel.right,
+            ),
+        )
+        print(f"[{status:9s}] {message}")
+        if status in ("wrong", "unsafe"):
+            worst = 1
     if not checked:
-        print("no declared joins to check — joins live on the FK-side entity", file=sys.stderr)
+        print(
+            "no relationships to check — declare them in semantic/relationships/*.yaml",
+            file=sys.stderr,
+        )
     return worst
 
 
@@ -918,7 +928,7 @@ def _drift(args: argparse.Namespace) -> int:
         return 1
 
     project_files = _read_project(root)
-    entities, definitions = wd.parse_layer(split_semantic(project_files))
+    entities, definitions, relationships = wd.parse_layer(split_semantic(project_files))
     baseline = wd.read_baseline(root, args.connection)
     if baseline is None:
         if not args.accept:
@@ -949,6 +959,7 @@ def _drift(args: argparse.Namespace) -> int:
         entities,
         definitions,
         wd.parse_certified(project_files),
+        relationships,
     )
     if args.as_json:
         print(
@@ -1073,7 +1084,7 @@ def _probe(args: argparse.Namespace) -> int:
         if not wanted:
             print("error: dst.yaml declares no warehouse connection to probe", file=sys.stderr)
             return 1
-    entities_by_path, _defs = parse_layer(split_semantic(_read_project(root)))
+    entities_by_path, _defs, _rels = parse_layer(split_semantic(_read_project(root)))
     entities = list(entities_by_path.values())
     # A table skipped by the sampling pass warns through its module logger
     # — mirror that to stderr so the operator sees it
@@ -1197,8 +1208,8 @@ def _import_osi(args: argparse.Namespace) -> int:
 
     The direction that answers "why must I author this twice?". Relationships arrive
     with their cardinality already stated — the spec defines `from` as the many side —
-    so the imported joins are the safe kind the compiler can emit, rather than the
-    inferred kind that is wrong 8% of the time (measured on BIRD's foreign keys).
+    so the imported relationships are the safe kind the compiler can emit, rather than
+    the inferred kind that is wrong 8% of the time (measured on BIRD's foreign keys).
     """
     import json as _json
 
@@ -1226,7 +1237,7 @@ def _import_osi(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    files = render_semantic_files(result.entities, [])
+    files = render_semantic_files(result.entities, [], result.relationships)
     header = f"# imported from OSI model {source.name} - dst-owned; not re-synced\n"
     root = Path(args.dir)
     for path, content in files.items():
@@ -1236,9 +1247,11 @@ def _import_osi(args: argparse.Namespace) -> int:
             (header + content) if path.endswith((".yaml", ".yml")) else content, encoding="utf-8"
         )
 
-    joins = sum(len(e.joins) for e in result.entities)
     metrics = sum(len(e.metrics) for e in result.entities)
-    print(f"imported {len(result.entities)} entities, {joins} joins, {metrics} metrics")
+    print(
+        f"imported {len(result.entities)} entities, "
+        f"{len(result.relationships)} relationships, {metrics} metrics"
+    )
     if result.ai_context:
         # It belongs on the lens, which this command does not write — say so rather
         # than drop the one field the spec reserves for exactly our kind of judgment.
@@ -1268,12 +1281,13 @@ def _export_osi(args: argparse.Namespace) -> int:
     from services.semantic.files import parse_semantic_files
 
     root = Path(args.dir)
-    entities, definitions = parse_semantic_files(split_semantic(_read_project(root)))
+    entities, definitions, relationships = parse_semantic_files(split_semantic(_read_project(root)))
     if not entities:
         print(f"error: no semantic/entities/*.yaml under {root}", file=sys.stderr)
         return 1
     document, skipped = to_osi(
         list(entities.values()),
+        list(relationships.values()),
         name=args.name or root.resolve().name,
         dialect=args.dialect,
         definitions=list(definitions.values()),
@@ -1299,7 +1313,7 @@ def _import_dbt(args: argparse.Namespace) -> int:
 
     artifacts = load_artifacts(Path(args.target_dir))
     result = import_shared_assets(artifacts, connection=args.connection)
-    files = render_semantic_files(result.entities, result.definitions)
+    files = render_semantic_files(result.entities, result.definitions, result.relationships)
     header = (
         f"# imported from dbt project '{artifacts.project}' (manifest "
         f"{artifacts.manifest_version}) - dst-owned; not re-synced\n"
@@ -3675,7 +3689,7 @@ def _migrate_context(root: Path) -> tuple[dict[str, str], dict[str, str], list[s
     from services.project.schema import parse_project_yaml
     from services.project.warehouse_drift import parse_layer
 
-    entities_by_path, _defs = parse_layer(split_semantic(_read_project(root)))
+    entities_by_path, _defs, _rels = parse_layer(split_semantic(_read_project(root)))
     leaf_to_table: dict[str, str] = {}
     ambiguous: set[str] = set()
     for entity in entities_by_path.values():
@@ -3926,6 +3940,30 @@ def _evals_migrate(args: argparse.Namespace) -> int:
         total_migrated += len(fresh)
     if total_migrated:
         print("review the entries, then `dst apply` to land them")
+    return 0
+
+
+def _retire(args: argparse.Namespace) -> int:
+    """Retire a certified answer — served no more, history kept.
+
+    A wrong certified answer used to be unremovable in practice: files own only
+    file-originated rows, so a review-promoted pair could only be destroyed
+    (losing its provenance) or left serving. This is the missing verb.
+    """
+    import httpx
+
+    url, headers = _client(args)
+    r = httpx.post(
+        f"{url}/mgmt/lenses/{args.lens}/certified/{args.answer_id}/retire",
+        headers=headers,
+        timeout=30,
+    )
+    if r.status_code == 404:
+        print(f"no certified answer '{args.answer_id}' on lens '{args.lens}'", file=sys.stderr)
+        return 1
+    body = r.raise_for_status().json()
+    print(f"retired {args.answer_id}: {body.get('question', '')}")
+    print("  it will not be served, matched, or tested again; its record stays.")
     return 0
 
 
@@ -4630,6 +4668,22 @@ def main() -> int:
     p.set_defaults(fn=_rule)
 
     p = sub.add_parser(
+        "retire",
+        help="stop serving a certified answer, keeping its history (the way out "
+        "when an approved answer turns out to be wrong)",
+    )
+    p.add_argument("lens")
+    p.add_argument("answer_id", help="certified answer id (from `dst lens show` / the dashboard)")
+    p.add_argument(
+        "--url",
+        help="server URL (default: DST_URL from env or ./.env, else http://localhost:8000)",
+    )
+    p.add_argument(
+        "--token", help="a dstadm_ admin token (default: DST_ADMIN_TOKEN from env or ./.env)"
+    )
+    p.set_defaults(fn=_retire)
+
+    p = sub.add_parser(
         "correct",
         help="file a correction against a served answer (loop step 3) — opens the "
         "review ticket `dst patches draft` drafts the fix from",
@@ -4735,7 +4789,7 @@ def main() -> int:
         "published asset (YAML), `rm` deletes one",
     )
     p.add_argument("action", choices=["get", "rm"])
-    p.add_argument("kind", choices=["entity", "definition"])
+    p.add_argument("kind", choices=["entity", "definition", "relationship"])
     p.add_argument("name")
     p.add_argument(
         "--url",

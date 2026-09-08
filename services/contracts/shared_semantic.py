@@ -13,9 +13,9 @@ import json
 from typing import Any, Literal
 
 from pydantic import Field as PField
-from pydantic import field_validator, model_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 
-from services.contracts.authoring import Authored
+from services.contracts.authoring import Authored, authoring_scope
 from services.contracts.semantic_model import (
     _ON_ALIASES,
     _ON_DESC,
@@ -26,16 +26,24 @@ from services.contracts.semantic_model import (
 )
 
 
-class SharedJoin(Authored):
-    """A join owned by its FK-side entity file; `left` is implicit (the owner).
-    Compile flattens these to the model-level Join list."""
+def relationship_name(left: str, right: str) -> str:
+    """The asset name a relationship is stored and hashed under. Derived from
+    the pair, never authored — the same pair can have exactly one identity."""
+    return f"{left}__{right}"
 
-    right: str = PField(description="the entity this one joins to")
+
+class SharedRelationship(Authored):
+    """A join pair, authored in its OWN file (semantic/relationships/*.yaml) —
+    a relationship is a fact about two entities, so it lives in neither.
+    Compile emits it as a model-level Join when a lens selects both endpoints."""
+
+    left: str = PField(description="the FK-side entity (the many side of many_to_one)")
+    right: str = PField(description="the entity `left` joins to")
     on: str = PField(validation_alias=_ON_ALIASES, description=_ON_DESC)
     type: Literal["inner", "left", "right", "full"] = "left"
     relationship: Literal["one_to_one", "many_to_one", "one_to_many"] | None = PField(
         default=None,
-        description="row-count relationship owner->right — guards fan-out/double-count bugs",
+        description="row-count relationship left->right — guards fan-out/double-count bugs",
     )
 
     @model_validator(mode="before")
@@ -43,14 +51,36 @@ class SharedJoin(Authored):
     def _on_key(cls, data: object) -> object:
         return _restore_on_key(data)
 
+    @model_validator(mode="after")
+    def _two_entities(self) -> SharedRelationship:
+        if self.left == self.right:
+            raise ValueError(
+                f"left and right are both '{self.left}' — a relationship spans two "
+                "entities; model a self-join as a second entity over the same table"
+            )
+        return self
+
+    @property
+    def name(self) -> str:
+        return relationship_name(self.left, self.right)
+
 
 class SharedEntity(Entity):
-    """An Entity as authored in semantic/entities/<name>.yaml — plus its joins."""
+    """An Entity as authored in semantic/entities/<name>.yaml."""
 
-    joins: list[SharedJoin] = PField(
-        default_factory=list,
-        description="joins this entity owns (FK side); left side is this entity",
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def _joins_moved(cls, data: object, info: ValidationInfo) -> object:
+        # Authoring seam only (storage stays tolerant): an old-style `joins:`
+        # block gets the pointer, not a generic unknown-key error.
+        if authoring_scope(info) is not None and isinstance(data, dict) and "joins" in data:
+            raise ValueError(
+                "`joins` no longer lives on the entity — a relationship is a fact "
+                "about a pair, so it gets its own file: "
+                "semantic/relationships/<left>__<right>.yaml with "
+                "left/right/on/type/relationship (left = this FK-side entity)"
+            )
+        return data
 
 
 class SelectEntity(Authored):
@@ -99,7 +129,11 @@ def asset_hash(body: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-_ASSET_MODELS: dict[str, type[Authored]] = {"entity": SharedEntity, "definition": Definition}
+_ASSET_MODELS: dict[str, type[Authored]] = {
+    "entity": SharedEntity,
+    "definition": Definition,
+    "relationship": SharedRelationship,
+}
 
 
 def authored_body(kind: str, body: dict[str, Any]) -> dict[str, Any]:

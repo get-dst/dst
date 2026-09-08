@@ -48,6 +48,10 @@ from services.contracts.warehouse import QueryResult
 #   "Q3", "H1", "W33", "FY26", "v2" claimed bare 3s and 26s that nothing grounds;
 # - "-" binds as a minus only when NOT preceded by a digit — "rated 3-5" claimed
 #   MINUS five, and "2026-08-15" in prose claimed -8 and -15.
+# fi-FI group separators: regular, no-break, and narrow no-break space — all
+# three reach prose from Finnish-locale composition. Escapes, not raw
+# characters: two of the three are invisible in source.
+_GROUP_SPACES = "\u0020\u00a0\u202f"
 _NUM = re.compile(
     # Alphanumeric lookbehind, not just letters: "W33" blocks at the first 3 but
     # the engine restarts at the second — a digit before the match start always
@@ -61,7 +65,15 @@ _NUM = re.compile(
     # claims — 1.65786, then the 8 after the '+' — so every correct large
     # answer is withheld as ungrounded. float() parses the captured form
     # natively.
-    r"(?<![A-Za-z0-9])((?:(?<!\d)[-−])?\d(?:[\d,]*\d)?(?:\.\d+)?(?:[eE][-+]?\d+)?)"
+    r"(?<![A-Za-z0-9])((?:(?<!\d)[-−])?"
+    # Space-grouped thousands, tried first: "195 419,94" is the fi-FI rendering
+    # of 195419.94 (decimal comma; dot for the SI sibling), and scanning it as
+    # the two claims 195 and 419.94 demoted a correct Finnish answer. Strict on
+    # purpose so unrelated adjacent numbers never weld: 1-3 leading digits,
+    # then groups of EXACTLY 3, and the shape must end the digit run —
+    # "2026 195" stays a year and a count, "195 4192" stays two numbers.
+    r"(?:\d{1,3}(?:[" + _GROUP_SPACES + r"]\d{3})+(?:,\d{1,2}|\.\d+)?(?!\d)"
+    r"|\d(?:[\d,]*\d)?(?:\.\d+)?(?:[eE][-+]?\d+)?))"
     r"(?:(bn|k|m|b)\b|\s+(thousand|million|billion)\b)?",
     re.IGNORECASE,
 )
@@ -132,12 +144,36 @@ _CHANGE_CUE = re.compile(
 _BARE_YEAR = re.compile(r"(?:1[89]|20)\d{2}")
 
 
+# Group spaces drop and the decimal comma becomes a dot — float() syntax.
+_DEGROUP = str.maketrans(",", ".", _GROUP_SPACES)
+
+
+def _parse(token: str) -> float | None:
+    """The captured spelling as a float, or None for the unparseable. A token
+    with a space in it can only be the grouped fi-FI shape (the plain
+    alternative admits no spaces), and there the comma is the DECIMAL mark —
+    stripping it the en-US way would read "195 419,94" as 19541994."""
+    if any(c in token for c in _GROUP_SPACES):
+        token = token.translate(_DEGROUP)
+    else:
+        token = token.replace(",", "")
+    try:
+        return float(token.replace("\u2212", "-"))
+    except ValueError:
+        return None
+
+
+def _separated(token: str) -> bool:
+    """A spelling that carries a separator — comma, dot, or a group space — is
+    a real formatted figure, never a date fragment or a window/rank descriptor."""
+    return any(c in token for c in ",." + _GROUP_SPACES)
+
+
 def _numbers(text: str) -> list[float]:
     out: list[float] = []
     for m in _NUM.finditer(text):
-        try:
-            value = float(m.group(1).replace(",", "").replace("\u2212", "-"))
-        except ValueError:
+        value = _parse(m.group(1))
+        if value is None:
             continue
         suffix = m.group(2) or m.group(3)
         if suffix:
@@ -155,9 +191,8 @@ def _scan(text: str) -> Iterator[tuple[re.Match[str], float, str]]:
     The span is what `reconcile` rewrites, so classification is shared with the check
     that grades the result: one scanner, one notion of what counts as a claim."""
     for m in _NUM.finditer(text):
-        try:
-            value = float(m.group(1).replace(",", "").replace("\u2212", "-"))
-        except ValueError:
+        value = _parse(m.group(1))
+        if value is None:
             continue
         suffix = m.group(2) or m.group(3)
         if suffix:
@@ -175,8 +210,7 @@ def _scan(text: str) -> Iterator[tuple[re.Match[str], float, str]]:
         elif (
             value == int(value)
             and 1 <= value <= 31
-            and "," not in m.group(1)
-            and "." not in m.group(1)
+            and not _separated(m.group(1))
             and (_MONTH_BEFORE.search(text[:start]) or _MONTH_AFTER.match(tail))
         ):
             kind = "derived"  # a day-of-month next to its month name — a date
@@ -184,15 +218,13 @@ def _scan(text: str) -> Iterator[tuple[re.Match[str], float, str]]:
             _RATIO_AFTER.match(tail) and re.fullmatch(r"[1-9]", m.group(1)) is not None
         ) or _RATIO_BEFORE.search(text[:start]):
             kind = "derived"  # the "1 in 3" proportion idiom (single-digit numerator)
-        elif (
-            "," not in m.group(1)
-            and "." not in m.group(1)
-            and (_DURATION_AFTER.match(tail) or _RANK_BEFORE.search(text[:start]))
+        elif not _separated(m.group(1)) and (
+            _DURATION_AFTER.match(tail) or _RANK_BEFORE.search(text[:start])
         ):
             # "last 30 days", "7-day rolling", "top 5 regions" — a descriptor
             # of the window/grain/rank, not a data claim. The
             # separator guard keeps real figures out: "1,234 days of data"
-            # still claims 1234.
+            # still claims 1234 — and so does the grouped "1 234 days".
             kind = "derived"
         elif _BPS.match(tail):
             kind = "bps"  # "25 bps" states the fraction 0.0025

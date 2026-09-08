@@ -165,6 +165,7 @@ def test_pipeline_serves_lens_tailored_options() -> None:
             ),
         ),
         shared_entities={"projects": shared},
+        shared_relationships={},
         shared_definitions={"workload": ambiguous},
         local_definitions=[],
         use_when=[],
@@ -381,3 +382,241 @@ def test_clarification_is_a_status_not_just_a_field() -> None:
     result = _run(script, [WORKLOAD])
     assert result.response.status == "clarification" == result.trace.status
     assert result.response.data is None
+
+
+# ── deterministic resolution: the clarify rail's earliest exit ───────────────
+
+REVENUE = Definition(
+    term="revenue",
+    body="ASK unless the question or the caller resolves it",
+    status="ambiguous",
+    possible_mappings=[
+        "net invoiced revenue (Finance / CFO world) - invoices.amount, "
+        "sum of invoices.amount by issue date",
+        "bookings (Sales / VP Sales world) - deals.value, sum of deals.value by close date",
+    ],
+    audiences={
+        "cfo": "net invoiced revenue",
+        "finance": "net invoiced revenue",
+        "head of sales": "bookings",
+        "vp sales": "bookings",
+    },
+)
+
+
+def _revenue_model() -> SemanticModel:
+    return SemanticModel(
+        lens="t",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="invoices",
+                source=EntitySource(connection="wh", table="invoices"),
+                primary_key=["id"],
+                fields=[Field(name="id", type="string"), Field(name="amount", type="number")],
+            )
+        ],
+        definitions=[REVENUE],
+    )
+
+
+class _SummingConnector:
+    kind = "duckdb"
+
+    def execute(self, sql: str, *, read_only: bool = True, row_limit: int | None = None):
+        from services.contracts.warehouse import QueryResult
+
+        return QueryResult(columns=["total"], rows=[[3]])
+
+
+def _run_revenue(question: str):
+    from services.runtime.answer import AnswerComposer
+
+    llm = ScriptedLLM(
+        [
+            '{"sql": "SELECT SUM(invoices.amount) AS total FROM invoices AS invoices", '
+            '"definition_used": null, "rationale": "r"}',
+            "The total was 3.",
+        ]
+    )
+    return run_query(
+        question=question,
+        lens_name="t",
+        org_id="org-1",
+        caller="test",
+        semantic_model=_revenue_model(),
+        connector=_SummingConnector(),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+
+
+def test_resolution_matrix() -> None:
+    """The two deterministic channels, their negatives, and the exclusions —
+    a wrong auto-pick is strictly worse than a clarify, so anything short of
+    exactly one selected mapping stays on the clarify rail."""
+    from services.runtime import ambiguity
+
+    model = _revenue_model()
+
+    def picked(question: str) -> list[tuple[str, str | None]]:
+        return [
+            (ambiguity.mapping_label(r.mapping), r.audience)
+            for r in ambiguity.resolve(question, model)
+        ]
+
+    # (1) the question contains one mapping's own decisive term — the
+    # parenthetical qualifier the caller never types must not block it
+    assert picked("What was net invoiced revenue in Q1 2026?") == [
+        ("net invoiced revenue (Finance / CFO world)", None)
+    ]
+    # (2)+(3) the caller rail: the principal's identity rides the question
+    # text and a declared audience phrase resolves it
+    assert picked("On behalf of the CFO: what was our revenue in March 2026?") == [
+        ("net invoiced revenue (Finance / CFO world)", "cfo")
+    ]
+    assert picked("On behalf of the Head of Sales: what was our revenue in March 2026?") == [
+        ("bookings (Sales / VP Sales world)", "head of sales")
+    ]
+    # a caller no rule maps must NOT default — genuinely unresolved
+    assert picked("On behalf of the CEO: what was our revenue in March 2026?") == []
+    assert picked("what was our revenue in March 2026?") == []
+    # naming both readings is still contested, and a question whose wording
+    # picks one mapping while its audience picks the other never resolves
+    assert picked("compare net invoiced revenue and bookings revenue for March") == []
+    assert picked("On behalf of the CFO: how was our bookings revenue?") == []
+    # a decisive term that IS the trigger surface cannot settle the ambiguity:
+    # a mapping labeled with the bare term never auto-resolves
+    bare = model.model_copy(
+        update={
+            "definitions": [
+                Definition(
+                    term="revenue",
+                    body="ASK",
+                    status="ambiguous",
+                    possible_mappings=["revenue - invoices.amount", "bookings - deals.value"],
+                )
+            ]
+        }
+    )
+    assert ambiguity.resolve("what was revenue in March?", bare) == []
+
+
+def test_question_naming_one_decisive_term_serves_instead_of_clarifying() -> None:
+    """The measured probe: 'net invoiced revenue' IS one mapping's own meaning,
+    and the old rail clarified on the 'revenue' inside it. Resolution is pinned
+    and auditable — the trace's context_refs and the citations name it — but
+    stays out of the prose: the caller's own wording named the reading."""
+    result = _run_revenue("What was net invoiced revenue in Q1 2026?")
+    resp = result.response
+    assert resp.status == "ok" and resp.clarification is None
+    ref = "ambiguity-resolution: revenue -> net invoiced revenue (Finance / CFO world)"
+    assert ref in result.trace.context_refs
+    assert any(c.type == "context" and c.ref == ref for c in resp.citations)
+    assert "Reading applied" not in resp.answer
+
+
+def test_declared_audience_resolves_and_disclosure_names_the_reading() -> None:
+    """The caller-rail probes: the question's wording never names a mapping, so
+    the served reading is said out loud — in the prose and in trust_summary —
+    exactly like an ambiguity disclosure, never silently."""
+    cfo = _run_revenue("On behalf of the CFO: what was our revenue in March 2026?")
+    assert cfo.response.status == "ok" and cfo.response.clarification is None
+    assert (
+        "ambiguity-resolution: revenue -> net invoiced revenue (Finance / CFO world)"
+        in cfo.trace.context_refs
+    )
+    line = (
+        "Reading applied: 'revenue' was read as net invoiced revenue (Finance / CFO "
+        "world) — declared audience 'cfo' resolves it"
+    )
+    assert line in cfo.response.answer
+    assert cfo.response.trust_summary is not None and line in cfo.response.trust_summary
+
+    sales = _run_revenue("On behalf of the Head of Sales: what was our revenue in March 2026?")
+    assert sales.response.status == "ok"
+    assert (
+        "ambiguity-resolution: revenue -> bookings (Sales / VP Sales world)"
+        in sales.trace.context_refs
+    )
+    assert "read as bookings (Sales / VP Sales world)" in sales.response.answer
+
+
+def test_unresolved_ambiguity_still_clarifies_never_defaults() -> None:
+    """The negative half of the guarantee: a bare ambiguous ask, and a caller
+    no audience rule maps, both still clarify — before any generator."""
+
+    class ExplodingGenerator:
+        model = "test"
+
+        def generate(self, **kwargs):  # noqa: ANN003
+            raise AssertionError("generator must not run for a deterministic clarify")
+
+    for question in [
+        "what was our revenue in March 2026?",
+        "On behalf of the CEO: what was our revenue in March 2026?",
+    ]:
+        result = run_query(
+            question=question,
+            lens_name="t",
+            org_id="org-1",
+            caller="test",
+            semantic_model=_revenue_model(),
+            connector=_ExplodingConnector(),
+            generator=ExplodingGenerator(),
+            composer=None,  # type: ignore[arg-type] — never reached on a pre-check clarify
+        )
+        assert result.response.status == "clarification"
+        assert result.response.clarification is not None
+        assert result.response.clarification.options == REVENUE.possible_mappings
+        assert not result.trace.context_refs
+
+
+def test_pinned_model_steers_generation_and_stands_the_clarify_down() -> None:
+    """What the generator sees: the resolved term serves as an active
+    definition carrying the mapping, so the prompt steers to the reading and
+    stops demanding a clarify the pre-check already settled."""
+    from services.runtime import ambiguity
+
+    model = _revenue_model()
+    resolved = ambiguity.resolve("On behalf of the CFO: what was our revenue?", model)
+    section = serialize_model(ambiguity.pin(model, resolved)).split("=== Semantic model ===")[1]
+    assert "AMBIGUOUS" not in section
+    assert (
+        "'revenue' means: net invoiced revenue (Finance / CFO world) - invoices.amount" in section
+    )
+
+
+def test_apply_warns_when_an_audience_selects_no_single_mapping() -> None:
+    # DEAD-GOVERNANCE lint, same class as the no-aliases warning: an
+    # `audiences:` value selecting zero (or several) mappings never fires.
+    from services.contracts.lens_config import LensConfig
+    from services.lenses.store import LensBundle
+    from services.validate.report import validate_bundle
+
+    def _issues(defn: Definition):
+        bundle = LensBundle(
+            config=LensConfig(name="t", display_name="T", connections=["wh"]),
+            semantic_model=SemanticModel(
+                lens="t", dialect="duckdb", entities=[], definitions=[defn]
+            ),
+        )
+        report = validate_bundle(bundle, [], [])
+        return [i for i in report.issues if i.code == "ambiguous_audience_unmapped"]
+
+    assert not _issues(REVENUE)  # every declared audience selects exactly one
+    zero = REVENUE.model_copy(update={"audiences": {"board": "gross revenue"}})
+    assert len(_issues(zero)) == 1
+    two = REVENUE.model_copy(update={"audiences": {"cfo": "world"}})  # matches both labels
+    assert len(_issues(two)) == 1
+
+
+def test_audiences_round_trip_the_definition_page() -> None:
+    """The authoring surface: `audiences:` frontmatter parses into the
+    Definition and renders back — the page format stays the product artifact."""
+    from services.semantic.files import definition_to_page, page_to_definition
+
+    page = definition_to_page(REVENUE)
+    assert "audiences:" in page and "head of sales: bookings" in page
+    parsed = page_to_definition(page)
+    assert parsed.audiences == REVENUE.audiences

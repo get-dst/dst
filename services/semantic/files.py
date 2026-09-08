@@ -1,7 +1,9 @@
-"""Shared-layer file I/O: `semantic/` on disk ⇄ SharedEntity / Definition.
+"""Shared-layer file I/O: `semantic/` on disk ⇄ SharedEntity / Definition /
+SharedRelationship.
 
-Entities render one YAML file each (`semantic/entities/<name>.yaml`, full
-model_dump); definitions render the same frontmatter pages lenses use
+Entities and relationships render one YAML file each
+(`semantic/entities/<name>.yaml`, `semantic/relationships/<left>__<right>.yaml`,
+full model_dump); definitions render the same frontmatter pages lenses use
 (`semantic/definitions/<slug>.md`), so the whole project speaks one page
 format. Parse is the pure inverse — malformed files raise ValueError naming
 the path (machine-actionable, per the era principle).
@@ -22,10 +24,11 @@ from services.certdefs import (
 )
 from services.contracts.authoring import parse_authored
 from services.contracts.semantic_model import Definition
-from services.contracts.shared_semantic import SharedEntity
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 
 ENTITY_DIR = "semantic/entities"
 DEFINITION_DIR = "semantic/definitions"
+RELATIONSHIP_DIR = "semantic/relationships"
 
 
 def slug(term: str) -> str:
@@ -43,6 +46,7 @@ def definition_to_page(d: Definition) -> str:
             status=d.status,
             possible_mappings=d.possible_mappings,
             aliases=d.aliases,
+            audiences=d.audiences,
             summary=d.summary,
             grain=d.grain,
             sources=d.sources,
@@ -78,6 +82,7 @@ def page_to_definition(
         status=page.status,
         possible_mappings=page.possible_mappings,
         aliases=page.aliases,
+        audiences=page.audiences,
         summary=page.summary,
         grain=page.grain,
         sources=page.sources,
@@ -109,7 +114,9 @@ def _note_certified_only(page: CertifiedDefinition, path: str, notes: list[str])
 
 
 def render_semantic_files(
-    entities: list[SharedEntity], definitions: list[Definition]
+    entities: list[SharedEntity],
+    definitions: list[Definition],
+    relationships: list[SharedRelationship],
 ) -> dict[str, str]:
     files: dict[str, str] = {}
     for e in entities:
@@ -118,12 +125,16 @@ def render_semantic_files(
         )
     for d in definitions:
         files[f"{DEFINITION_DIR}/{slug(d.term)}.md"] = definition_to_page(d)
+    for r in relationships:
+        files[f"{RELATIONSHIP_DIR}/{slug(r.name)}.yaml"] = yaml.safe_dump(
+            r.model_dump(mode="json", exclude_none=True), sort_keys=False, allow_unicode=True
+        )
     return files
 
 
 def parse_semantic_file(
     path: str, content: str, *, notes: list[str] | None = None
-) -> SharedEntity | Definition | None:
+) -> SharedEntity | Definition | SharedRelationship | None:
     """One `semantic/**` file → its asset, or None when the path isn't one.
 
     The single validation seam: plan and apply both go through it, so plan can
@@ -131,17 +142,20 @@ def parse_semantic_file(
     and so an unknown key is rejected in exactly one place. Raises ValueError
     naming the path; ``notes`` collects the inert-key findings."""
     is_entity = path.startswith(ENTITY_DIR + "/") and path.endswith((".yaml", ".yml"))
+    is_relationship = path.startswith(RELATIONSHIP_DIR + "/") and path.endswith((".yaml", ".yml"))
     is_definition = path.startswith(DEFINITION_DIR + "/") and path.endswith(".md")
-    if not (is_entity or is_definition):
+    if not (is_entity or is_relationship or is_definition):
         return None
     try:
-        if not is_entity:
+        if is_definition:
             return page_to_definition(content, path=path, notes=notes)
         data = yaml.safe_load(content) or {}
     except ValueError:
         raise  # the authoring seam already names the path
     except Exception as exc:  # YAMLError incl. — not a ValueError, so name the file here
         raise ValueError(f"{path}: {exc}") from exc
+    if is_relationship:
+        return parse_authored(SharedRelationship, data, path, notes=notes)
     return parse_authored(SharedEntity, data, path, notes=notes)
 
 
@@ -162,12 +176,15 @@ def validate_semantic_files(files: dict[str, str]) -> dict[str, str]:
 
 def parse_semantic_files(
     files: dict[str, str], *, notes: list[str] | None = None
-) -> tuple[dict[str, SharedEntity], dict[str, Definition]]:
-    """`semantic/**` paths → (entities by name, definitions by term)."""
+) -> tuple[dict[str, SharedEntity], dict[str, Definition], dict[str, SharedRelationship]]:
+    """`semantic/**` paths → (entities by name, definitions by term,
+    relationships by derived name)."""
     entities: dict[str, SharedEntity] = {}
     definitions: dict[str, Definition] = {}
+    relationships: dict[str, SharedRelationship] = {}
     entity_paths: dict[str, str] = {}
     definition_paths: dict[str, str] = {}
+    pair_paths: dict[frozenset[str], str] = {}
     for path, content in sorted(files.items()):
         asset = parse_semantic_file(path, content, notes=notes)
         # Silent last-file-wins here would be exactly the drift the shared layer
@@ -180,6 +197,18 @@ def parse_semantic_files(
                 )
             entity_paths[asset.name] = path
             entities[asset.name] = asset
+        elif isinstance(asset, SharedRelationship):
+            # The pair is the identity, unordered: a second file for the same
+            # two entities — reversed included — is a competing claim, not a
+            # second relationship.
+            pair = frozenset((asset.left, asset.right))
+            if pair in pair_paths:
+                raise ValueError(
+                    f"the {asset.left} <-> {asset.right} relationship is declared in "
+                    f"both {pair_paths[pair]} and {path} — a pair has one relationship"
+                )
+            pair_paths[pair] = path
+            relationships[asset.name] = asset
         elif isinstance(asset, Definition):
             if asset.term in definition_paths:
                 raise ValueError(
@@ -188,4 +217,4 @@ def parse_semantic_files(
                 )
             definition_paths[asset.term] = path
             definitions[asset.term] = asset
-    return entities, definitions
+    return entities, definitions, relationships

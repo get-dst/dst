@@ -32,11 +32,13 @@ from services.contracts.response import (
 )
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.trace import TraceLog
+from services.lenses.profile_enrich import EntityCoverage
 from services.observability import cost
 from services.reviews.judge import judge_trace
 from services.reviews.store import Trace as ReviewTrace
 from services.runtime import (
     adversary,
+    ambiguity,
     cte_guard,
     faithfulness,
     filter_guard,
@@ -160,15 +162,13 @@ def deterministic_clarification(question: str, model: SemanticModel) -> Clarific
     for d in model.definitions:
         if d.status != "ambiguous":
             continue
-        # The trigger LEXICON is the term plus its authored aliases:
+        # The trigger LEXICON is the term plus its authored aliases
+        # (ambiguity.triggered — one lexicon, shared with the resolution rail):
         # identifier-only matching makes the rail unreachable for every
         # realistic phrasing — the declaration reads as governance while
         # behaving as documentation. Still literal word-boundary matches; the
         # aliases widen what users SAY, never what the rail JUDGES.
-        surfaces = [d.term.replace("_", " ").lower().strip()] + [
-            a.replace("_", " ").lower().strip() for a in d.aliases
-        ]
-        if not any(s and re.search(rf"\b{re.escape(s)}\b", q) for s in surfaces):
+        if not ambiguity.triggered(question, d):
             continue
         meanings = [(m.rpartition(" - ")[0] or m).strip().lower() for m in d.possible_mappings]
         if any(m and m in q for m in meanings):
@@ -428,6 +428,8 @@ def run_query(
     generator_tier: str | None = None,
     log_samples: bool = False,
     value_domains: dict[str, list[str]] | None = None,
+    entity_coverage: dict[str, EntityCoverage] | None = None,
+    scan_text: str | None = None,
 ) -> PipelineResult:
     """Ground → generate → guard → execute → compose, with execution-guided self-repair.
 
@@ -466,7 +468,7 @@ def run_query(
     """
     rid = request_id or "req_" + uuid.uuid4().hex[:16]
     org = str(org_id)
-    prose = prose_context or []
+    prose = list(prose_context or [])
     # Which context actually rode in the prompt. The answer contract is an
     # instruction, not a source the answer drew on — excluded here exactly as the
     # composer excludes it from citations.
@@ -607,6 +609,13 @@ def run_query(
             ),
         )
 
+    # What the deterministic rails below are allowed to read. It is the caller's
+    # question for every natural-language door; the structured door passes a
+    # NAMES-ONLY rendering, because its `question` is a rendering the server
+    # itself wrote — filter VALUES and all — and a governed term appearing in a
+    # customer's row label is not the caller asking about that term.
+    rails_text = scan_text or question
+
     # Selection is a visible boundary, deterministically: a question naming a
     # metric the curator DROPPED from this lens's selection refuses before any
     # generator or warehouse — no LLM gets the chance to reconstruct the
@@ -617,7 +626,7 @@ def run_query(
     # exempt (a human approved that exact question→SQL).
     ungoverned_reason: str | None = None
     if certification != "certified":
-        dropped = deterministic_exclusion(question, semantic_model)
+        dropped = deterministic_exclusion(rails_text, semantic_model)
         if dropped is not None:
             if not serve_ungoverned_shapes:
                 return _trace_failure(
@@ -634,19 +643,48 @@ def run_query(
     # alternative was the model finding the nearest available column and
     # answering confidently about a different measure.
     if certification != "certified":
-        nc = deterministic_refusal_not_computable(question, semantic_model)
+        nc = deterministic_refusal_not_computable(rails_text, semantic_model)
         if nc is not None:
             return _trace_failure("refused", None, nc)
+
+    # An ambiguity the question already settles must not clarify (a refusal is
+    # an outcome, but a clarify on a resolved ask is the rail misfiring): when
+    # the question names exactly one mapping's own decisive term, or an
+    # authored `audiences:` phrase resolves it, the term is PINNED to that
+    # reading for this request — deterministically, before any generator. The
+    # resolution is never silent: it rides the generation prompt as a context
+    # chunk whose source lands on the trace (context_refs) and in the
+    # citations, and an audience-resolved answer names the reading in prose
+    # (resolution_disclosures, appended below in ambiguity_disclosure's idiom).
+    resolution_disclosures: list[str] = []
+    if certification != "certified":
+        resolved_readings = ambiguity.resolve(rails_text, semantic_model)
+        if resolved_readings:
+            semantic_model = ambiguity.pin(semantic_model, resolved_readings)
+            for r in resolved_readings:
+                label = ambiguity.mapping_label(r.mapping)
+                chunk = ContextChunk(
+                    text=(
+                        f"GOVERNED RESOLUTION — the ambiguous term '{r.term}' is "
+                        f"pinned for this question to: {r.mapping} ({r.via}). "
+                        "Compute that reading; do not ask for clarification."
+                    ),
+                    source=f"ambiguity-resolution: {r.term} -> {label}",
+                )
+                prose.append(chunk)
+                context_refs.append(chunk.source)
+                if r.audience is not None:
+                    resolution_disclosures.append(ambiguity.disclosure_line(r))
 
     # Ask-don't-answer is a GUARANTEE, not a model behavior: the intent path's
     # leaner prompt never renders definitions, so a metric whose name collides
     # with an ambiguous term's surface form ("average value" → avg_clv) would
     # answer without ever seeing the ambiguity, and a prompt rule cannot
     # cover it. Deterministic pre-check, before any
-    # generator. Certified answers are exempt by design (a human approved that
-    # exact question→SQL).
+    # generator (on the pinned model, so a resolved term stands down). Certified
+    # answers are exempt by design (a human approved that exact question→SQL).
     if certification != "certified":
-        det = deterministic_clarification(question, semantic_model)
+        det = deterministic_clarification(rails_text, semantic_model)
         if det is not None:
             return _clarification_result(det)
 
@@ -668,6 +706,12 @@ def run_query(
     # "unresolved" (probes taught nothing — the zero serves but never as
     # `verified`), or None (no investigation applied).
     investigation: Literal["confirmed", "unresolved"] | None = None
+    # Governed-filter demands the filter guard WAIVED for the served SQL (the
+    # question named no metric of the flagged group — filter_guard's question
+    # rule). Overwritten on every attempt that reaches the guard, so it always
+    # describes the SQL that actually serves; non-empty means the serve must
+    # disclose, grade at most partial, and leave the miss on the trace.
+    filter_waived: list[tuple[str, str]] = []
     while True:
         active = generator if attempt == 0 else (escalate_generator or generator)
         gen_started = time.perf_counter()
@@ -810,10 +854,18 @@ def run_query(
         # part of its meaning, and the raw-SQL path's "REQUIRES filters" prompt line is
         # advisory — a serving model can ignore it. Deterministic check in code;
         # certified SQL is exempt like table trust (a human approved it).
+        # A demand the QUESTION never bound is not enforced — it is WAIVED and
+        # the serve falls through to the remaining gates: a lens whose only
+        # count metric is filtered must not dead-end every phrasing of the
+        # plain-total question (the guard's question rule decides which side
+        # each demand lands on). Waivers are disclosed on the answer, the
+        # report, and the trace below — a fall-through is loud, never silent.
         if certification != "certified":
-            unfiltered = filter_guard.missing_metric_filters(
+            findings = filter_guard.metric_filter_findings(
                 guard.sql, semantic_model, question=question
             )
+            filter_waived = findings.waived
+            unfiltered = findings.missing
             if unfiltered:
                 demands = "; ".join(f"metric '{name}' REQUIRES {frag}" for name, frag in unfiltered)
                 if attempt < max_repairs:
@@ -1036,6 +1088,13 @@ def run_query(
     definition_used = _known_term(gen.definition_used, semantic_model) or attributed_definition(
         guard.sql, semantic_model
     )
+    if definition_used in {name for name, _frag in filter_waived}:
+        # A waived metric must not become the basis: the waiver's whole claim is
+        # that this figure is NOT that metric (the bare aggregation matches the
+        # metric's expression, which is exactly what attribution keys on), and
+        # "Computed as `overdue_invoice_count`" over the unfiltered total would
+        # be a confidently mislabelled answer — the class basis exists to kill.
+        definition_used = None
 
     # The engine-side cap bit: the query matched MORE than we fetched, so the true
     # count is unknown and everything downstream must say "more than", never a
@@ -1181,8 +1240,29 @@ def run_query(
         if certification != "certified"
         else None
     )
+    # An audience-resolved reading is disclosed the same way — the pinned
+    # definition is active for this request, so the structural floor above
+    # cannot see it, and the caller's wording did not name it (a
+    # question-named resolution stays quiet, the floor's own escape hatch).
+    if resolution_disclosures:
+        disclosure = " ".join(filter(None, [disclosure, *resolution_disclosures]))
     if disclosure:
         ans.text = f"{ans.text.rstrip()} {disclosure}" if ans.text else disclosure
+
+    # One sentence for every surface a waived filter demand rides (answer note,
+    # trust_summary, verification check): the governed metric's claim, said out
+    # loud, and the honest label for what served instead. Appended AFTER
+    # build_report like the truncation notes — the fragment carries the
+    # filter's own literals, and numeric_grounding must not read them as
+    # numbers the model invented.
+    filter_waiver_note = (
+        f"{_governed_metric_clauses(filter_waived)} — that filter was NOT applied "
+        "here: the question did not ask for the governed metric, so this figure "
+        "is the plain aggregate without it. Ask for the metric by name to get "
+        "the governed number."
+        if filter_waived
+        else None
+    )
 
     report = verification.build_report(
         question=question,
@@ -1198,6 +1278,7 @@ def run_query(
         uncomposed_reason=static_prose,
         investigation=investigation,
         data_as_of=data_as_of,
+        entity_coverage=entity_coverage,
     )
     # Figure gate: a composed answer whose numeric_grounding check FAILS
     # is an invented figure on its way to a caller. Retry composition ONCE with
@@ -1266,6 +1347,7 @@ def run_query(
                     certification=certification,
                     composed=True,
                     investigation=investigation,
+                    entity_coverage=entity_coverage,
                 )
                 regate = regraded.check("numeric_grounding")
                 if regate is None or regate.status != "fail":
@@ -1379,6 +1461,12 @@ def run_query(
         )
         _mark("adversary", adversary_started)
         report = verification.fold_challenges(report, challenges)
+    # The waived snap lands on the REPORT — response and trace both carry it, so
+    # the miss is auditable wherever the serve is read, and the grade caps at
+    # partial (the question↔metric alignment is the one thing nothing here can
+    # confirm). Folded after judge/adversary so a regrade cannot lose it.
+    if filter_waiver_note is not None:
+        report = verification.fold_metric_filter_waived(report, filter_waiver_note)
     # Folded LAST so nothing upgrades past it: a serve that exists only because
     # serve_ungoverned_shapes bypassed the selection boundary grades unverified.
     if ungoverned_reason is not None:
@@ -1418,6 +1506,17 @@ def run_query(
             "result rows; the full result is in the data payload."
         )
 
+    # The prose itself can be cut off even when no ROW cap applied: the composer
+    # hits its token limit partway through an enumeration and stops mid-list.
+    # An answer that listed 44 of 137 ids then read as the complete list, with
+    # every row present in the data payload and nothing saying otherwise — a cap
+    # that hides data. Deterministic signal, same append idiom as above.
+    if getattr(ans, "finish_reason", None) == "length":
+        answer_text += (
+            " Note: this answer was cut off by the response limit — anything it "
+            "enumerates is incomplete, and the full result is in the data payload."
+        )
+
     # A departure from a governed definition is said OUT LOUD, in the same
     # deterministic-append idiom as the truncation notes above and for the same
     # reason: a composer hint is advisory, this is not. Attribution, not
@@ -1433,6 +1532,13 @@ def run_query(
     if departure is not None and departure.reason:
         answer_text += f" Note: {departure.reason} — this answer is not governed by it."
 
+    # A waived governed filter is said OUT LOUD in the same idiom: the metric's
+    # claim on this aggregation shape, and that the served figure is the plain
+    # aggregate without it — the caller who actually meant the governed metric
+    # gets the exact name to re-ask with, never a silently different number.
+    if filter_waiver_note is not None:
+        answer_text += f" Note: {filter_waiver_note}"
+
     # The freshness contract's violation is said in-band, same deterministic-append
     # idiom: the caller reading only the prose must not hold month-old data as
     # current when the lens itself declares it stale.
@@ -1442,6 +1548,17 @@ def run_query(
     )
     if stale is not None and stale.reason:
         answer_text += f" Note: {stale.reason}."
+
+    # A period beyond the measured coverage, likewise: the number the caller is
+    # reading is a zero over rows that were never loaded, and only this rail
+    # knows it — "data ends 2026-05-31" must arrive with the zero, not be
+    # inferred from its absence.
+    beyond = next(
+        (c for c in report.checks if c.name == "date_coverage" and c.status == "fail"),
+        None,
+    )
+    if beyond is not None and beyond.reason:
+        answer_text += f" Note: {beyond.reason}."
 
     # The data's age is stated UNPROMPTED: marts routinely run a day or two
     # behind, and a whole class of wrong answers is "current" resolved against
@@ -1499,6 +1616,12 @@ def run_query(
         # a consumer that never renders the answer text still sees which
         # meaning the number carries.
         trust_summary = f"{trust_summary} {disclosure}" if trust_summary else disclosure
+    if filter_waiver_note is not None:
+        # Same rule as the ambiguity disclosure: a consumer that never renders
+        # the prose must still see this figure is NOT the governed metric.
+        trust_summary = (
+            f"{trust_summary} {filter_waiver_note}" if trust_summary else filter_waiver_note
+        )
     # Abstentions are announced, not just recorded: the full check ledger
     # already rides `verification`, but `degraded` would stay empty exactly
     # when the answer was graded on partial evidence, leaving no

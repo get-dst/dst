@@ -38,9 +38,10 @@ from services.contracts.shared_semantic import (
     SelectEntity,
     SelectSpec,
     SharedEntity,
-    SharedJoin,
+    SharedRelationship,
     asset_content_hash,
     asset_hash,
+    relationship_name,
 )
 from services.contracts.trace import TraceLog
 from services.contracts.warehouse import (
@@ -84,10 +85,11 @@ __all__ = [
     "SelectEntity",
     "SelectSpec",
     "SharedEntity",
-    "SharedJoin",
     "SharedProvenance",
+    "SharedRelationship",
     "asset_content_hash",
     "asset_hash",
+    "relationship_name",
     "SchemaSnapshot",
     "SemanticModel",
     "TableSchema",

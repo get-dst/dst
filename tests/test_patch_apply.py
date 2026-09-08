@@ -436,8 +436,8 @@ def test_approve_instruction_patch_proposes_the_lens_yaml(
 
 
 def _project_files() -> dict[str, str]:
-    entities, definitions = jaffle_shared_assets()
-    files = dict(render_semantic_files(entities, definitions))
+    entities, definitions, relationships = jaffle_shared_assets()
+    files = dict(render_semantic_files(entities, definitions, relationships))
     for path, content in render_lens_repo(jaffle_customer_value_bundle()).items():
         files[f"lenses/customer_value/{path}"] = content
     return files

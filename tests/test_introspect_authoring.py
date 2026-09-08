@@ -19,7 +19,12 @@ import pytest
 from pydantic import ValidationError
 
 from services.connectors.duckdb import DuckDBConnector
-from services.contracts.profile import EXACT_PROFILE_MAX_ROWS, ColumnProfile, TableProfile
+from services.contracts.profile import (
+    EXACT_PROFILE_MAX_ROWS,
+    ColumnProfile,
+    TableProfile,
+    TimeCoverage,
+)
 from services.contracts.semantic_model import (
     FIELD_TYPES,
     Dimension,
@@ -595,6 +600,43 @@ def test_the_sampling_boundary_is_on_screen_when_it_is_crossed(
     table = payload["tables"][0]  # type: ignore[index]
     assert table["sampled_rows"] == 10_000
     assert table["columns"][0]["distinct_is_exact"] is False  # a parser never has to infer
+
+
+def test_date_coverage_rides_the_table_line_and_the_json() -> None:
+    """The per-table date-coverage map authoring agents otherwise hand-derive:
+    where the data starts and ends, and which tables are one-day snapshots."""
+    from datetime import UTC, datetime
+
+    snapshot = SchemaSnapshot(
+        connection="wh",
+        dialect="duckdb",
+        tables=[
+            TableSchema(
+                name="invoices", row_count=100, columns=[ColumnSchema(name="d", type="DATE")]
+            )
+        ],
+    )
+    prof = TableProfile(
+        connection="wh",
+        table="invoices",
+        row_count=100,
+        time_coverage=TimeCoverage(
+            column="d",
+            min=datetime(2025, 1, 2, tzinfo=UTC),
+            max=datetime(2026, 5, 31, tzinfo=UTC),
+        ),
+    )
+    text = serialize_schema(snapshot, [prof], None)
+    assert "COVERS 2025-01-02..2026-05-31 (d)" in text
+
+    as_of = datetime(2026, 6, 5, tzinfo=UTC)
+    snap = prof.model_copy(update={"time_coverage": TimeCoverage(column="d", min=as_of, max=as_of)})
+    assert "SNAPSHOT as of 2026-06-05 (d)" in serialize_schema(snapshot, [snap], None)
+
+    payload = schema_json(snapshot, [prof], None)
+    table = payload["tables"][0]  # type: ignore[index]
+    assert table["time_coverage"]["column"] == "d"
+    assert table["time_coverage"]["max"].startswith("2026-05-31")
 
 
 def test_the_smaller_authoring_traps_in_the_same_listing(

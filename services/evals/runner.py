@@ -151,6 +151,7 @@ def run_behavioral(
                 prose_context=assembled.prose,
                 model_name=model_name,
                 data_as_of=assembled.data_as_of,
+                entity_coverage=assembled.entity_coverage,
             )
             t = pr.trace
             sql = t.sql
@@ -235,6 +236,7 @@ def run_health(
             prose_context=assembled.prose,
             model_name=model_name,
             data_as_of=assembled.data_as_of,
+            entity_coverage=assembled.entity_coverage,
         )
         t = pr.trace
         if t.status != "ok":

@@ -18,7 +18,7 @@ from services.definitions import drift
 from services.definitions.standards import OrgStandard
 from services.lenses.store import LensBundle
 from services.llm import registry
-from services.runtime import sql_guard
+from services.runtime import ambiguity, sql_guard
 
 Severity = Literal["error", "warning"]
 
@@ -491,6 +491,27 @@ def _check_bundle(
                     subject=d.term,
                 )
             )
+        if d.status == "ambiguous":
+            # DEAD GOVERNANCE, same class: an `audiences:` value that selects
+            # zero (or several) of the term's possible_mappings never resolves
+            # anything — the declaration reads as a per-role rule while the
+            # rail clarifies exactly as if it weren't there. Static
+            # inconsistency dies at plan/apply, not in a serve-time surprise.
+            for aud_phrase, aud_target in d.audiences.items():
+                picked = ambiguity.audience_mappings(d, aud_target)
+                if len(picked) != 1:
+                    count = "none" if not picked else str(len(picked))
+                    issues.append(
+                        Issue(
+                            severity="warning",
+                            code="ambiguous_audience_unmapped",
+                            message=f"audience '{aud_phrase}' on ambiguous term '{d.term}' "
+                            f"selects {count} of its possible_mappings — the value "
+                            f"('{aud_target}') must match exactly one mapping's meaning "
+                            "(word-for-word, case-insensitive) or the rule never fires",
+                            subject=d.term,
+                        )
+                    )
 
     # Metric filters are compiled verbatim into WHERE clauses — they must at least
     # parse as boolean expressions in the lens dialect.
@@ -563,11 +584,19 @@ def _check_bundle(
                 )
 
     if not bundle.config.access.allow:
+        # "admin-only until callers are added" read as a note about a default,
+        # so three business users spent days blocked on a lens that applied
+        # clean and tested green: `dst test` runs as ADMIN, which bypasses the
+        # allow-list, so a green suite says nothing about who can reach this.
+        # Name the consequence, not the state.
         issues.append(
             Issue(
                 severity="warning",
                 code="no_callers",
-                message="no callers on the allow-list (admin-only until callers are added)",
+                message="access.allow is empty — EVERY caller key is refused (403) on this "
+                "lens; only admin tokens can query it, and `dst test` runs as admin, so a "
+                "green suite does not prove anyone can reach it. Add callers/groups under "
+                "`access.allow`, then verify with `dst query <lens> --key <caller>.key`",
             )
         )
 

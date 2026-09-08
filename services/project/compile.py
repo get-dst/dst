@@ -26,7 +26,11 @@ from services.contracts.semantic_model import (
     SemanticModel,
     SharedProvenance,
 )
-from services.contracts.shared_semantic import SharedEntity, asset_content_hash
+from services.contracts.shared_semantic import (
+    SharedEntity,
+    SharedRelationship,
+    asset_content_hash,
+)
 from services.semantic.resolve import resolve_model
 
 # Connection type → SQL dialect. 1:1 today; the seam for gateway types later.
@@ -92,6 +96,7 @@ def compile_lens_model(
     config: LensConfig,
     shared_entities: dict[str, SharedEntity],
     shared_definitions: dict[str, Definition],
+    shared_relationships: dict[str, SharedRelationship],
     local_definitions: list[Definition],
     use_when: list[str],
     sample_queries: list[SampleQuery],
@@ -125,7 +130,7 @@ def compile_lens_model(
                 f"lens '{config.name}' selects unknown entity '{pick.name}' — "
                 f"no semantic/entities/{pick.name}.yaml"
             )
-        entity_dict = shared.model_dump(exclude={"joins"})
+        entity_dict = shared.model_dump()
         if pick.metrics is not None:
             known = {m.name for m in shared.metrics}
             missing = set(pick.metrics) - known
@@ -153,22 +158,30 @@ def compile_lens_model(
         entities.append(Entity.model_validate(entity_dict))
         selected_names.add(pick.name)
         consumed[f"entity/{pick.name}"] = hashes.get(f"entity/{pick.name}", "")
-    for pick_name in sorted(selected_names):
-        for sj in shared_entities[pick_name].joins:
-            if sj.right not in selected_names:
-                warnings.append(
-                    f"join {pick_name} -> {sj.right} dropped: '{sj.right}' is not selected"
-                )
-                continue
-            joins.append(
-                Join(
-                    left=pick_name,
-                    right=sj.right,
-                    on=sj.on,
-                    type=sj.type,
-                    relationship=sj.relationship,
-                )
+    # A relationship rides iff the lens selects BOTH endpoints; with exactly one
+    # selected it is dropped with a warning (the author meant to join something
+    # this lens cannot see). Neither endpoint selected = not this lens's fact.
+    for rel_name in sorted(shared_relationships):
+        rel = shared_relationships[rel_name]
+        picked = [e for e in (rel.left, rel.right) if e in selected_names]
+        if len(picked) == 1:
+            absent = rel.right if picked[0] == rel.left else rel.left
+            warnings.append(
+                f"relationship {rel.left} <-> {rel.right} dropped: '{absent}' is not selected"
             )
+            continue
+        if not picked:
+            continue
+        joins.append(
+            Join(
+                left=rel.left,
+                right=rel.right,
+                on=rel.on,
+                type=rel.type,
+                relationship=rel.relationship,
+            )
+        )
+        consumed[f"relationship/{rel_name}"] = hashes.get(f"relationship/{rel_name}", "")
 
     # ── definitions: shared selection + local extras ─────────────────────────
     def_picks = list(config.select.definitions)
@@ -321,3 +334,15 @@ def shared_entity_hash(entity: SharedEntity) -> str:
 
 def shared_definition_hash(definition: Definition) -> str:
     return asset_content_hash("definition", definition.model_dump(mode="json"))
+
+
+def shared_relationship_hash(relationship: SharedRelationship) -> str:
+    return asset_content_hash("relationship", relationship.model_dump(mode="json"))
+
+
+def relationship_pairs(
+    relationships: dict[str, SharedRelationship],
+) -> dict[str, tuple[str, str]]:
+    """Asset key → endpoints, the shape ``stale_asset_keys`` reads: the name
+    alone cannot be split back into a pair (entity names may contain '__')."""
+    return {f"relationship/{name}": (r.left, r.right) for name, r in relationships.items()}

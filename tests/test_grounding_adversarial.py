@@ -451,3 +451,86 @@ def test_note_numbers_ground_plain_claims_too_documented_tradeoff() -> None:
     assert (
         numeric_check("3 regions improved, averaging 4.2.", result, notes_text=notes)[0] == "pass"
     )
+
+
+# ── Round 5, Class L: locale-grouped spellings ───────────────────────────────
+# "195 419,94" is the fi-FI rendering of 195419.94 — space-grouped thousands,
+# decimal comma. Scanned as two claims it demoted a correct Finnish answer to
+# unverified: the guarantee fired for the wrong reason. The grouped shape must
+# ground — without opening a merge hole between unrelated adjacent numbers.
+
+
+def test_fi_grouped_money_grounds_its_cell() -> None:
+    result = QueryResult(columns=["overdue_eur"], rows=[[195419.94]])
+    assert numeric_check("Overdue receivables are 195 419,94 EUR.", result)[0] == "pass"
+    # …and a wrong fi-formatted figure still fails: recognition, not leniency.
+    assert numeric_check("Overdue receivables are 199 419,94 EUR.", result)[0] == "fail"
+
+
+def test_fi_grouping_accepts_all_three_space_kinds() -> None:
+    # Regular, no-break, and narrow no-break space all reach prose from
+    # Finnish-locale composition (escapes: two of the three are invisible).
+    result = QueryResult(columns=["total_eur"], rows=[[1192531.81]])
+    for sep in (" ", "\u00a0", "\u202f"):
+        prose = f"Total receivables: 1{sep}192{sep}531,81 EUR."
+        assert numeric_check(prose, result)[0] == "pass", repr(sep)
+
+
+def test_fi_grouped_integer_grounds_without_decimals() -> None:
+    result = QueryResult(columns=["rows_total"], rows=[[1192531]])
+    assert numeric_check("The ledger holds 1 192 531 rows.", result)[0] == "pass"
+
+
+def test_si_grouping_with_dot_decimal_grounds_too() -> None:
+    # The SI sibling of the fi shape: space groups with a dot decimal.
+    result = QueryResult(columns=["overdue"], rows=[[195419.94]])
+    assert numeric_check("Overdue receivables are 195 419.94 EUR.", result)[0] == "pass"
+
+
+def test_space_grouping_merges_only_the_unambiguous_shape() -> None:
+    # Groups after the first must be EXACTLY 3 digits and end the digit run —
+    # anything else stays separate numbers.
+    pieces = QueryResult(columns=["a", "b"], rows=[[195, 4192]])
+    assert numeric_check("Segments held 195 4192.", pieces)[0] == "pass"  # 4-digit tail
+    two = QueryResult(columns=["a", "b"], rows=[[12, 34]])
+    assert numeric_check("Codes 12 34 apply.", two)[0] == "pass"  # 2-digit tail
+    # A 4-digit first group is not fi grouping — the year stays a year.
+    year = QueryResult(columns=["orders"], rows=[[195]])
+    assert numeric_check("In 2026 195 orders shipped.", year, clock_years=(2026,))[0] == "pass"
+
+
+def test_adjacent_number_weld_is_a_documented_tradeoff() -> None:
+    # LEAK-adjacent, accepted: "195 419" IS read as the grouped 195419, so two
+    # unrelated numbers joined by a single space no longer ground their pieces.
+    # English prose separates figures with punctuation or words; the bare
+    # digit-space-3-digits shape in the wild is locale grouping, not a list.
+    result = QueryResult(columns=["a", "b"], rows=[[195, 419]])
+    assert numeric_check("Values were 195 419.", result)[0] == "fail"
+
+
+def test_grouped_figure_before_a_duration_noun_still_claims() -> None:
+    # The descriptor guard's separator rule extends to group spaces:
+    # "1 500 days of history" is a real figure, exactly like "1,500 days".
+    result = QueryResult(columns=["n"], rows=[[99]])
+    assert numeric_check("We hold 1 500 days of history.", result)[0] == "fail"
+
+
+def test_reconcile_leaves_an_exact_fi_spelling_alone() -> None:
+    # An exact claim stands as written — the author's locale is not churn.
+    # (This also pins the PARSE: read as 195419.0 or 19541994.0, the claim
+    # would be rewritten or flagged instead of standing.)
+    result = QueryResult(columns=["overdue_eur"], rows=[[195419.94]])
+    prose = "Saldo on 195 419,94 euroa."
+    assert reconcile(prose, result) == prose
+
+
+def test_en_us_separators_and_dates_parse_exactly_as_before() -> None:
+    # REGRESSION: the grouped shape must not touch comma grouping or dates.
+    prose = "We shipped 1,500 units."
+    assert numeric_check(prose, QueryResult(columns=["u"], rows=[[1500]]))[0] == "pass"
+    assert numeric_check(prose, QueryResult(columns=["u"], rows=[[1.5]]))[0] == "fail"
+    dated = QueryResult(columns=["rev"], rows=[[963451]])
+    assert (
+        numeric_check("As of August 15, revenue is 963451.", dated, clock_years=(2026,))[0]
+        == "pass"
+    )

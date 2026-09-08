@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from services.contracts.semantic_model import Definition, EntitySource, Field, Metric
-from services.contracts.shared_semantic import SharedEntity, SharedJoin
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.osi import from_osi, to_osi
 from services.osi.load import read_ai_context
 
@@ -139,13 +139,12 @@ def test_is_time_becomes_the_default_time_field() -> None:
 
 def test_a_relationship_arrives_with_its_cardinality_already_safe() -> None:
     """The spec defines `from` as the MANY side, which is exactly what the compiler
-    needs — so an imported join is the safe kind, not the inferred kind, which is
-    often wrong."""
-    sales = next(e for e in from_osi(_document(), connection="wh").entities if e.name == "sales")
-    join = sales.joins[0]
-    assert join.right == "customer"
-    assert join.relationship == "many_to_one"
-    assert join.on == "sales.customer_id = customer.customer_id"
+    needs — so an imported relationship is the safe kind, not the inferred kind,
+    which is often wrong."""
+    rel = from_osi(_document(), connection="wh").relationships[0]
+    assert (rel.left, rel.right) == ("sales", "customer")
+    assert rel.relationship == "many_to_one"
+    assert rel.on == "sales.customer_id = customer.customer_id"
 
 
 @pytest.mark.parametrize(
@@ -227,13 +226,6 @@ def _entities() -> list[SharedEntity]:
             Field(name="buyer_email", type="string"),
         ],
         metrics=[Metric(name="revenue", agg="sum", expr="orders.amount")],
-        joins=[
-            SharedJoin(
-                right="customers",
-                on="orders.customer_id = customers.customer_id",
-                relationship="many_to_one",
-            )
-        ],
     )
     customers = SharedEntity(
         name="customers",
@@ -243,15 +235,26 @@ def _entities() -> list[SharedEntity]:
     return [orders, customers]
 
 
+def _relationships() -> list[SharedRelationship]:
+    return [
+        SharedRelationship(
+            left="orders",
+            right="customers",
+            on="orders.customer_id = customers.customer_id",
+            relationship="many_to_one",
+        )
+    ]
+
+
 def test_export_writes_the_judgment_into_the_slot_the_spec_reserves() -> None:
-    doc, _skipped = to_osi(_entities(), name="sales", dialect="duckdb")
+    doc, _skipped = to_osi(_entities(), _relationships(), name="sales", dialect="duckdb")
     dataset = next(d for d in doc["semantic_model"][0]["datasets"] if d["name"] == "orders")
     assert "one row per order" in dataset["ai_context"]["instructions"]
     assert dataset["ai_context"]["examples"] == ["What did we sell?"]
 
 
 def test_export_marks_the_time_field() -> None:
-    doc, _skipped = to_osi(_entities(), name="sales", dialect="duckdb")
+    doc, _skipped = to_osi(_entities(), _relationships(), name="sales", dialect="duckdb")
     fields = next(d for d in doc["semantic_model"][0]["datasets"] if d["name"] == "orders")[
         "fields"
     ]
@@ -259,7 +262,7 @@ def test_export_marks_the_time_field() -> None:
 
 
 def test_export_writes_the_relationship_many_side_first() -> None:
-    doc, _skipped = to_osi(_entities(), name="sales", dialect="duckdb")
+    doc, _skipped = to_osi(_entities(), _relationships(), name="sales", dialect="duckdb")
     rel = doc["semantic_model"][0]["relationships"][0]
     assert (rel["from"], rel["to"]) == ("orders", "customers")
     assert (rel["from_columns"], rel["to_columns"]) == (["customer_id"], ["customer_id"])
@@ -269,11 +272,11 @@ def test_an_undeclared_relationship_is_skipped_rather_than_guessed() -> None:
     """OSI relationships are directional by definition; there is no way to write
     "unknown cardinality", and guessing is how a join fan-out silently multiplies
     a metric."""
-    entities = _entities()
-    entities[0].joins[0].relationship = None
-    doc, skipped = to_osi(entities, name="sales", dialect="duckdb")
+    rels = _relationships()
+    rels[0].relationship = None
+    doc, skipped = to_osi(_entities(), rels, name="sales", dialect="duckdb")
     assert "relationships" not in doc["semantic_model"][0]
-    assert any("no declared relationship" in s for s in skipped)
+    assert any("no declared cardinality" in s for s in skipped)
 
 
 def test_definitions_ride_along_in_the_models_ai_context() -> None:
@@ -286,14 +289,16 @@ def test_definitions_ride_along_in_the_models_ai_context() -> None:
             possible_mappings=["billing - finance", "usage - product"],
         ),
     ]
-    doc, _skipped = to_osi(_entities(), name="sales", dialect="duckdb", definitions=definitions)
+    doc, _skipped = to_osi(
+        _entities(), _relationships(), name="sales", dialect="duckdb", definitions=definitions
+    )
     context = doc["semantic_model"][0]["ai_context"]["instructions"]
     assert "active: ordered in 30d" in context
     assert "AMBIGUOUS TERM 'churn'" in context  # the warning must survive the border
 
 
 def test_bigquery_expressions_are_written_in_bigquerys_dialect_slot() -> None:
-    doc, _skipped = to_osi(_entities(), name="sales", dialect="bigquery")
+    doc, _skipped = to_osi(_entities(), _relationships(), name="sales", dialect="bigquery")
     field = doc["semantic_model"][0]["datasets"][0]["fields"][0]
     assert field["expression"]["dialects"][0]["dialect"] == "BIGQUERY"
 
@@ -302,14 +307,14 @@ def test_bigquery_expressions_are_written_in_bigquerys_dialect_slot() -> None:
 
 
 def test_dst_survives_a_round_trip_through_the_open_format() -> None:
-    doc, skipped = to_osi(_entities(), name="sales", dialect="duckdb")
+    doc, skipped = to_osi(_entities(), _relationships(), name="sales", dialect="duckdb")
     assert not skipped
     back = from_osi(doc, connection="wh")
     assert {e.name for e in back.entities} == {"orders", "customers"}
     orders = next(e for e in back.entities if e.name == "orders")
     assert orders.source.table == "db.orders"
     assert orders.default_time_field == "created_at"
-    assert orders.joins[0].relationship == "many_to_one"
+    assert back.relationships[0].relationship == "many_to_one"
     revenue = next(m for m in orders.metrics if m.name == "revenue")
     assert (revenue.agg, revenue.expr) == ("sum", "orders.amount")
     assert not back.skipped
@@ -319,9 +324,9 @@ def test_the_second_lap_loses_nothing_more_than_the_first() -> None:
     """Whatever the format cannot carry is lost once, at the first border — a
     translation that kept degrading each pass would be unusable for interchange."""
     once = from_osi(_document(), connection="wh")
-    doc, _skipped = to_osi(once.entities, name="retail", dialect="duckdb")
+    doc, _skipped = to_osi(once.entities, once.relationships, name="retail", dialect="duckdb")
     twice = from_osi(doc, connection="wh")
     assert len(twice.entities) == len(once.entities)
     assert sum(len(e.metrics) for e in twice.entities) == sum(len(e.metrics) for e in once.entities)
-    assert sum(len(e.joins) for e in twice.entities) == sum(len(e.joins) for e in once.entities)
+    assert len(twice.relationships) == len(once.relationships)
     assert not twice.skipped

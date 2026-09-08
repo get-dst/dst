@@ -1,11 +1,11 @@
-"""An OSI semantic model -> dst `semantic/entities/*.yaml` assets.
+"""An OSI semantic model -> dst `semantic/` assets.
 
 The structural half is faithful: datasets become entities, fields become fields (or
-dimensions when they carry a real expression), relationships become joins. The
-relationship direction is the valuable part — the spec defines `from` as the many side
-and `to` as the one side, which is exactly the cardinality the compiler needs to decide
-whether a join may be emitted, so an imported model arrives with safe joins declared
-rather than guessed.
+dimensions when they carry a real expression), relationships become relationship
+assets. The relationship direction is the valuable part — the spec defines `from` as
+the many side and `to` as the one side, which is exactly the cardinality the compiler
+needs to decide whether a join may be emitted, so an imported model arrives with safe
+relationships declared rather than guessed.
 
 Metrics are the lossy half and are treated honestly. OSI carries a metric as a full SQL
 aggregate (`SUM(orders.amount)`) with no separate agg/column, while dst's metric is
@@ -25,7 +25,7 @@ import sqlglot
 from sqlglot import exp
 
 from services.contracts.semantic_model import Dimension, EntitySource, Field, FieldType, Metric
-from services.contracts.shared_semantic import SharedEntity, SharedJoin
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 
 # The spec's portable datatypes -> dst's `fields[].type`.
 _FIELD_TYPE: dict[str, FieldType] = {
@@ -53,6 +53,7 @@ _AGG_NODES: dict[type[exp.Expression], str] = {
 @dataclass
 class OsiImport:
     entities: list[SharedEntity] = field(default_factory=list)
+    relationships: list[SharedRelationship] = field(default_factory=list)
     ai_context: str | None = None
     use_when: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
@@ -198,6 +199,7 @@ def from_osi(document: dict[str, Any], *, connection: str, dialect: str = "ANSI_
         by_name[name] = entity
         out.entities.append(entity)
 
+    seen_pairs: dict[frozenset[str], str] = {}
     for rel in model.get("relationships") or []:
         many, one = rel.get("from"), rel.get("to")
         from_cols = rel.get("from_columns") or []
@@ -209,12 +211,24 @@ def from_osi(document: dict[str, Any], *, connection: str, dialect: str = "ANSI_
         if len(from_cols) != len(to_cols) or not from_cols:
             out.skipped.append(f"relationship '{label}': from_columns/to_columns do not pair up")
             continue
+        # dst holds one relationship per pair; a second OSI entry for the same
+        # two datasets would silently overwrite the first at the file layer.
+        pair = frozenset((str(many), str(one)))
+        if pair in seen_pairs:
+            out.skipped.append(
+                f"relationship '{label}': the pair is already declared by "
+                f"'{seen_pairs[pair]}' — dst keeps one relationship per pair"
+            )
+            continue
+        seen_pairs[pair] = label
         on = " AND ".join(
             f"{many}.{a} = {one}.{b}" for a, b in zip(from_cols, to_cols, strict=True)
         )
         # `from` is the many side by the spec's own definition, which is precisely the
-        # cardinality the compiler needs — an imported join is safe by construction.
-        by_name[many].joins.append(SharedJoin(right=one, on=on, relationship="many_to_one"))
+        # cardinality the compiler needs — an imported relationship is safe by construction.
+        out.relationships.append(
+            SharedRelationship(left=many, right=one, on=on, relationship="many_to_one")
+        )
 
     for m in model.get("metrics") or []:
         mname = m.get("name")

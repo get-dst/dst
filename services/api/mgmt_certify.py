@@ -196,6 +196,59 @@ def _bindings(session: Session, lens: str, sql: str) -> dict[str, str] | None:
     return certified_bindings(sql, bundle.semantic_model)
 
 
+def _ruled_correction_sql(session: Session, request_id: str) -> str | None:
+    """The corrected SQL a human ruled onto this request, if any.
+
+    `dst rule --certify` promotes by request_id, so the correction the reviewer
+    just wrote lives one hop away on the ticket. Reading it here is what makes
+    "correct, then certify" mean what it says — the alternative (certifying the
+    SQL the reviewer rejected) is defect A in the field ledger.
+    """
+    from services.reviews import store as review_store
+
+    for t in review_store.list_queue(session, None):
+        if t.request_id == request_id and t.correction and t.correction.corrected_sql:
+            return t.correction.corrected_sql
+    return None
+
+
+def _replace_same_question(session: Session, lens: str, question: str) -> int:
+    """Delete existing pairs for the exact question — one question, one pair.
+
+    Without this, every re-certification stacked another active row: which one
+    served was decided by pgvector over identical embeddings, and `dst apply`'s
+    question-keyed map could not see (or retire) the extras.
+    """
+    q = question.strip().lower()
+    return sum(
+        store.delete(session, a.id)
+        for a in store.list_for_lens(session, lens)
+        if a.question.strip().lower() == q
+    )
+
+
+@router.post("/{answer_id}/retire", status_code=200)
+def retire_certified(
+    lens: str,
+    answer_id: str,
+    session: Session = Depends(get_app_session),
+) -> dict[str, object]:
+    """Stop serving a certified answer, keeping its history.
+
+    The counterpart to DELETE: retiring is what you want when the answer was
+    real and is now wrong — it is never served, matched, or tested again, but
+    the row (and its provenance) survives. Server-origin answers had no other
+    way out: files own only file-originated rows, so a review-promoted pair was
+    unremovable without destroying the record.
+    """
+    answer = store.get(session, answer_id)
+    if answer is None or answer.lens != lens:
+        raise HTTPException(status_code=404, detail=f"certified answer '{answer_id}' not found")
+    if not store.set_status(session, answer_id, "retired"):
+        raise HTTPException(status_code=409, detail="answer could not be retired")
+    return {"id": answer_id, "lens": lens, "status": "retired", "question": answer.question}
+
+
 @router.post("/from-request/{request_id}", status_code=201)
 def certify_request(
     lens: str,
@@ -203,7 +256,7 @@ def certify_request(
     body: CertifyFromRequestBody | None = None,
     session: Session = Depends(get_app_session),
     identity: AdminIdentity = Depends(get_admin_identity),
-) -> dict[str, str]:
+) -> dict[str, object]:
     """Certify a prior answer: snapshot its question + SQL from the request log.
 
     Without an embedding provider the promotion still succeeds — the answer is stored
@@ -216,20 +269,36 @@ def certify_request(
         raise HTTPException(status_code=404, detail=f"no traced SQL for request '{request_id}'")
     source = (body.source if body else None) or f"review:{request_id}"
     verified_by = body.verified_by if body else None
-    bindings = _bindings(session, lens, trace.sql)
+    # A ruled correction OUTRANKS the traced SQL. Certifying a corrected answer
+    # against the original SQL is the one thing this endpoint must never do: it
+    # is what the reviewer just declared wrong, and it then serves verbatim
+    # forever.
+    sql = trace.sql
+    corrected = _ruled_correction_sql(session, request_id)
+    if corrected and corrected.strip() and corrected.strip() != trace.sql.strip():
+        sql = corrected.strip()
+    bindings = _bindings(session, lens, sql)
     # The trace already holds the prose that was composed ONCE from
     # this SQL's executed result — and certifying the request approves that
     # exact answer, so it becomes the verbatim serve (no per-request composer
     # call from here on). Only a served data answer qualifies: a graded
     # confidence is the tell that prose was written over real rows, never an
     # error/refusal message.
-    verified_prose = trace.answer if trace.answer and trace.confidence else None
+    # Prose belongs to the SQL it was composed from: keep it only when the
+    # traced SQL is what we are certifying (a correction invalidates it).
+    verified_prose = (
+        trace.answer if trace.answer and trace.confidence and sql == trace.sql else None
+    )
+    # One question, one certified pair. Re-certifying the same question REPLACES
+    # (the same rule `_apply_certified` follows) — stacking a second active row
+    # made the served answer arbitrary and unreachable from files.
+    replaced = _replace_same_question(session, lens, trace.question)
     if registry.resolve_embedder() is None:
         cid = store.create(
             session,
             lens,
             trace.question,
-            trace.sql,
+            sql,
             None,
             created_by=identity.actor,
             source=source,
@@ -237,13 +306,19 @@ def certify_request(
             bindings=bindings,
             verified_prose=verified_prose,
         )
-        return {"id": cid, "lens": lens, "warning": NO_EMBEDDER_WARNING}
+        return {
+            "id": cid,
+            "lens": lens,
+            "replaced": replaced,
+            "corrected": sql != trace.sql,
+            "warning": NO_EMBEDDER_WARNING,
+        }
     emb = _embed(session, trace.question)
     cid = store.create(
         session,
         lens,
         trace.question,
-        trace.sql,
+        sql,
         emb,
         created_by=identity.actor,
         source=source,
@@ -251,7 +326,7 @@ def certify_request(
         bindings=bindings,
         verified_prose=verified_prose,
     )
-    return {"id": cid, "lens": lens}
+    return {"id": cid, "lens": lens, "replaced": replaced, "corrected": sql != trace.sql}
 
 
 @router.delete("/{answer_id}", status_code=204)

@@ -173,6 +173,15 @@ def _table_line(table: TableSchema, profile: TableProfile) -> str:
         marks.append("VIEW")  # derived, not stored — nothing used to say so
     if profile.sampled_rows is not None:
         marks.append(f"SAMPLED {profile.sampled_rows} rows")
+    if profile.time_coverage is not None:
+        # The per-table date-coverage map every authoring agent otherwise
+        # hand-derives: where the data starts and ends, and which tables are a
+        # single snapshot (their date IS the AS-OF every answer must carry).
+        tc = profile.time_coverage
+        lo, hi = tc.min.date().isoformat(), tc.max.date().isoformat()
+        marks.append(
+            f"SNAPSHOT as of {hi} ({tc.column})" if lo == hi else f"COVERS {lo}..{hi} ({tc.column})"
+        )
     return line + (f" [{'; '.join(marks)}]" if marks else "")
 
 
@@ -228,6 +237,13 @@ def schema_json(
                 # None = every row was counted; a number = that many rows were
                 # sampled and the column facts below are estimates.
                 "sampled_rows": prof.sampled_rows,
+                # Whole-table span of the best time column; min == max is a
+                # single snapshot and its date the table's AS-OF. None = unprobed.
+                "time_coverage": (
+                    prof.time_coverage.model_dump(mode="json")
+                    if prof.time_coverage is not None
+                    else None
+                ),
                 "columns": [_column_json(c, col_profiles.get(c.name)) for c in t.columns],
             }
         )

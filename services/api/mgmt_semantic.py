@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from services.auth.deps import get_admin_org, get_app_session
 from services.contracts.protocols import TargetedIntrospect
 from services.contracts.semantic_model import Definition
-from services.contracts.shared_semantic import SharedEntity
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.lenses import profile_store
 from services.lenses.connections import resolve_connector
 from services.semantic import store
@@ -36,8 +36,8 @@ class DraftBody(BaseModel):
 def list_assets(
     kind: store.AssetKind | None = None, session: Session = Depends(get_app_session)
 ) -> list[store.StoredAsset]:
-    """The shared semantic layer's stored assets — entities and definitions,
-    optionally filtered to one kind."""
+    """The shared semantic layer's stored assets — entities, definitions and
+    relationships, optionally filtered to one kind."""
     return store.list_assets(session, kind)
 
 
@@ -62,11 +62,21 @@ def upsert_asset(
     session: Session = Depends(get_app_session),
 ) -> store.StoredAsset:
     """Upsert one shared asset; the body is the asset body (entity YAML shape /
-    definition fields). The name in the path wins over any name in the body."""
+    definition fields / relationship fields). The name in the path wins over any
+    name in the body — except a relationship's, whose name is derived from its
+    (left, right) pair and cannot be chosen."""
     try:
-        model: SharedEntity | Definition
+        model: SharedEntity | Definition | SharedRelationship
         if kind == "entity":
             model = SharedEntity.model_validate({**body, "name": name})
+        elif kind == "relationship":
+            model = SharedRelationship.model_validate(body)
+            if model.name != name:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"a relationship's name is derived from its pair — this body "
+                    f"names '{model.name}', so PUT it there, not at '{name}'",
+                )
         else:
             model = Definition.model_validate({**body, "term": name})
     except ValidationError as exc:

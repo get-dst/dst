@@ -3,12 +3,14 @@
 Never authored — computed at apply/certify time by sqlglot extraction against
 the lens's compiled model, and stored on the row as ``{asset_key: content_hash}``
 using the SAME hashes the lens's SharedProvenance carries, so certified
-staleness and lens staleness can never disagree. Two extraction rules:
+staleness and lens staleness can never disagree. Three extraction rules:
 entities bind at TABLE level (column-level is not attempted; CTE names are not
-source tables; aliases resolve to the real table), and shared DEFINITIONS bind
-by sql_expr containment — the SQL canonically embeds the definition's
-expression (the stale-sample idiom), so a changed governed definition flags
-(and re-tests) exactly the answers that implement it. A binding MISS
+source tables; aliases resolve to the real table), RELATIONSHIPS bind when both
+their endpoints' tables are read (a changed ON clause must re-test the answers
+that join over it), and shared DEFINITIONS bind by sql_expr containment — the
+SQL canonically embeds the definition's expression (the stale-sample idiom), so
+a changed governed definition flags (and re-tests) exactly the answers that
+implement it. A binding MISS
 means a re-verify flag doesn't fire — never a wrong answer (the sql_guard +
 read-only credential stay the execution boundary).
 """
@@ -19,6 +21,7 @@ import sqlglot
 from sqlglot import exp
 
 from services.contracts.semantic_model import SemanticModel
+from services.contracts.shared_semantic import relationship_name
 
 
 def source_tables(sql: str, dialect: str) -> set[str]:
@@ -117,6 +120,13 @@ def certified_bindings(sql: str, model: SemanticModel) -> dict[str, str]:
         for e in model.entities
         if (key := f"entity/{e.name}") in provenance and _matches(referenced, e.source.table)
     }
+    # A query reading both sides of a compiled join rides that relationship: a
+    # changed ON clause or cardinality is exactly what must re-test the answer
+    # (the entity hashes no longer carry the join, so they can't flag it).
+    for j in model.joins:
+        key = f"relationship/{relationship_name(j.left, j.right)}"
+        if key in provenance and {f"entity/{j.left}", f"entity/{j.right}"} <= out.keys():
+            out[key] = provenance[key]
     canon_sql = _canon(sql, model.dialect)
     if canon_sql:
         for d in model.definitions:

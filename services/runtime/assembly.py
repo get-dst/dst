@@ -146,6 +146,9 @@ class AssembledInputs:
     # column name -> its complete value dictionary (value_guard.value_domains):
     # the pipeline's deterministic check that a filter literal exists at all.
     value_domains: dict[str, list[str]] = field(default_factory=dict)
+    # entity name -> its measured date coverage (profile_enrich.entity_coverage):
+    # the pipeline's deterministic check that the asked period was ever loaded.
+    entity_coverage: dict[str, profile_enrich.EntityCoverage] = field(default_factory=dict)
 
 
 def certified_equivalent(llm: LLMProvider, model: str, question: str, approved: str) -> bool:
@@ -426,9 +429,11 @@ def assemble(
     # descriptions, partition-pruning hints land in the (cached) system prompt.
     profiles, as_of = profile_facts(bundle, org_id)
     domains: dict[str, list[str]] = {}
+    coverage: dict[str, profile_enrich.EntityCoverage] = {}
     if profiles:
         model = profile_enrich.enrich_model(model, profiles)
         domains = value_guard.value_domains(model, profiles)
+        coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
 
     # Certified-answer repository: serve an approved SQL directly on an exact match,
     # or fold near-matches in as few-shot exemplars to guide generation.
@@ -452,6 +457,7 @@ def assemble(
         data_as_of=as_of,
         degraded=() if embed_failure is None else (MATCHING_DOWN.format(why=embed_failure),),
         value_domains=domains,
+        entity_coverage=coverage,
         counts={
             "context_chunks": n_chunks,
             "certified_exemplars": len(exemplars),

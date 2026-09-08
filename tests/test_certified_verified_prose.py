@@ -101,8 +101,8 @@ _PROSE = "Repeat customers hold steady this period."
 
 
 def _files(answers: list[dict[str, object]]) -> dict[str, str]:
-    entities, definitions = jaffle_shared_assets()
-    files = dict(render_semantic_files(entities, definitions))
+    entities, definitions, relationships = jaffle_shared_assets()
+    files = dict(render_semantic_files(entities, definitions, relationships))
     for path, content in render_lens_repo(jaffle_customer_value_bundle()).items():
         files[f"lenses/customer_value/{path}"] = content
     files["lenses/customer_value/certified_answers.yaml"] = yaml.safe_dump(

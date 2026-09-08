@@ -11,6 +11,17 @@
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import {
+  Bar,
+  BarChart,
+  LabelList,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  type TooltipContentProps,
+} from 'recharts'
 import { getToken } from '../api/auth'
 import { useAuditStatement, type AuditLensRow, type AuditStatement } from '../api/observe'
 import { InfoHint } from '../components/ui/InfoHint'
@@ -33,10 +44,38 @@ function Delta({ pp }: { pp: number | null }) {
   )
 }
 
-/** The daily-volume area chart — inline SVG, no library. */
+const fmtDay = (day: string, long = false) =>
+  new Date(`${day}T00:00:00`).toLocaleDateString(undefined, {
+    ...(long ? { weekday: 'short' } : {}),
+    month: 'short',
+    day: 'numeric',
+  })
+
+/** The largest round step ({1,2,5}·10^k) at or below the peak — one labeled
+ * guide line gives the eye a scale without spending a full axis on it. */
+const guideStep = (peak: number) => {
+  const pow = 10 ** Math.floor(Math.log10(Math.max(peak, 1)))
+  for (const m of [5, 2, 1]) if (m * pow <= peak) return m * pow
+  return pow
+}
+
+function VolumeTip({ active, payload }: TooltipContentProps) {
+  if (!active || !payload?.length) return null
+  const p = payload[0].payload as AuditStatement['series'][number]
+  return (
+    <div
+      className="rounded-md bg-accent px-2.5 py-1.5 font-mono text-[11px] text-accent-fg tabular-nums"
+      style={{ boxShadow: 'var(--shadow-popover)' }}
+    >
+      {fmtDay(p.day, true)} · {p.asked} asked
+    </div>
+  )
+}
+
+/** The daily-volume chart — recharts owns the scale, ticks, and hover; the
+ * statement styling stays ours. Marks wear the accent token, so the pending
+ * ledger-green sweep recolors this chart in the token swap, not a rename. */
 function VolumeChart({ series }: { series: AuditStatement['series'] }) {
-  const W = 340
-  const H = 88
   if (series.length < 2) {
     return (
       <p className="text-[12px] text-muted mt-2">
@@ -44,29 +83,77 @@ function VolumeChart({ series }: { series: AuditStatement['series'] }) {
       </p>
     )
   }
-  const max = Math.max(...series.map((p) => p.asked), 1)
-  const x = (i: number) => (i / (series.length - 1)) * W
-  const y = (v: number) => H - 6 - (v / max) * (H - 14)
-  const pts = series.map((p, i) => `${x(i).toFixed(1)},${y(p.asked).toFixed(1)}`).join(' ')
   const last = series[series.length - 1]
   const peak = series.reduce((a, b) => (b.asked > a.asked ? b : a))
+  const peakIdx = series.findIndex((p) => p.day === peak.day)
+  const guide = guideStep(peak.asked)
+  // Weekly ticks on the short windows; monthly once Mondays would crowd.
+  const ticks =
+    series.length > 45
+      ? series.filter((p) => p.day.endsWith('-01')).map((p) => p.day)
+      : series.filter((p) => new Date(`${p.day}T00:00:00`).getDay() === 1).map((p) => p.day)
+  const animate =
+    typeof window.matchMedia === 'function'
+      ? !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false
   return (
     <div>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
-        height={H}
+      <div
+        className="h-[112px] w-full font-mono"
         role="img"
         aria-label={`Questions per day over the window, peaking at ${peak.asked}`}
       >
-        <polygon
-          points={`0,${H} ${pts} ${W},${H}`}
-          fill="var(--color-accent)"
-          opacity="0.12"
-        />
-        <polyline points={pts} fill="none" stroke="var(--color-accent)" strokeWidth="2" />
-        <circle cx={x(series.length - 1)} cy={y(last.asked)} r="3" fill="var(--color-accent-dark)" />
-      </svg>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={series} margin={{ top: 14, right: 4, bottom: 0, left: 4 }}>
+            <XAxis
+              dataKey="day"
+              ticks={ticks}
+              interval={0}
+              tickLine={false}
+              axisLine={{ stroke: 'var(--color-text)' }}
+              tick={{ fontSize: 10, fill: 'var(--color-muted-2)' }}
+              tickFormatter={(d: string) => fmtDay(d)}
+            />
+            <YAxis hide domain={[0, Math.ceil(peak.asked * 1.15)]} />
+            <ReferenceLine
+              y={guide}
+              stroke="var(--color-border-strong)"
+              label={{
+                value: `${guide}/day`,
+                position: 'insideTopRight',
+                fontSize: 9,
+                fill: 'var(--color-muted-2)',
+              }}
+            />
+            <Tooltip content={VolumeTip} cursor={{ fill: 'var(--color-surface-3)' }} />
+            <Bar
+              dataKey="asked"
+              fill="var(--color-accent)"
+              radius={[2, 2, 0, 0]}
+              maxBarSize={9}
+              isAnimationActive={animate}
+            >
+              <LabelList
+                dataKey="asked"
+                content={({ x, y, width, index }) =>
+                  index === peakIdx ? (
+                    <text
+                      x={Number(x) + Number(width) / 2}
+                      y={Number(y) - 5}
+                      textAnchor="middle"
+                      fontSize={9.5}
+                      fontWeight={600}
+                      fill="var(--color-text)"
+                    >
+                      {peak.asked}
+                    </text>
+                  ) : null
+                }
+              />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
       <p className="mt-1.5 font-mono text-[11px] text-muted-2 tabular-nums">
         peak {peak.asked}/day ({peak.day.slice(5)}) · latest {last.asked}
       </p>
@@ -87,7 +174,7 @@ function ConfidenceBands({ histogram }: { histogram: Record<string, number> }) {
   const pctOf = (n: number) => Math.round((100 * n) / total)
   return (
     <div className="mt-3 max-w-[38ch]">
-      <div className="flex h-1.5 w-full overflow-hidden rounded-full" aria-hidden="true">
+      <div className="flex h-1.5 w-full gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
         {verified > 0 && (
           <span className="bg-green" style={{ width: `${(100 * verified) / total}%` }} />
         )}
@@ -304,12 +391,23 @@ export function AuditStatementPanel() {
                 ['Answered', d.answered, 'served with receipts'],
                 ['Clarified', d.clarified, 'asked which meaning — not errors'],
                 ['Refused', d.refused, 'governed boundary held'],
-                ['Flagged', served['unverified'] ?? 0, 'failed verification — said so on its face'],
+                [
+                  'Flagged',
+                  served['unverified'] ?? 0,
+                  'served, but a figure could not be traced to the result rows',
+                ],
                 ['Faults', d.faults, 'dst defects — each one ticketed'],
                 [
                   'Spend',
-                  `${formatCost(d.ai_cost_usd + d.wh_cost_usd)}`,
-                  `${formatCost(d.ai_cost_usd)} AI · ${formatCost(d.wh_cost_usd)} warehouse`,
+                  // Unpriced calls make this a floor, not a total — a
+                  // confident "$0.00" over uncounted spend is the failure
+                  // this trailing + exists to prevent.
+                  (d.unpriced ?? 0) > 0
+                    ? `${formatCost(d.ai_cost_usd + d.wh_cost_usd)}+`
+                    : `${formatCost(d.ai_cost_usd + d.wh_cost_usd)}`,
+                  (d.unpriced ?? 0) > 0
+                    ? `${d.unpriced} call(s) unpriced — spend uncounted, not $0`
+                    : `${formatCost(d.ai_cost_usd)} AI · ${formatCost(d.wh_cost_usd)} warehouse`,
                 ],
                 [
                   'Per answer',

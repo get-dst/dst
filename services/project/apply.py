@@ -46,7 +46,11 @@ from services.contracts.authoring import collapse_notes
 from services.contracts.lens_config import LensConfig
 from services.contracts.protocols import Connector, Embedder
 from services.contracts.semantic_model import Definition, SemanticModel
-from services.contracts.shared_semantic import SharedEntity, asset_content_hash
+from services.contracts.shared_semantic import (
+    SharedEntity,
+    SharedRelationship,
+    asset_content_hash,
+)
 from services.contracts.warehouse import QueryResult
 from services.db import embedding_meta
 from services.definitions import standards as std_store
@@ -59,8 +63,10 @@ from services.project.compile import (
     compile_lens_model,
     default_qualifier,
     dialect_for,
+    relationship_pairs,
 )
 from services.project.loader import LensSource
+from services.project.plan import stale_asset_keys
 from services.project.schema import ConnectionDecl, ProjectConfig
 from services.router import anchor_store
 from services.runtime import sql_guard
@@ -324,15 +330,20 @@ def apply_semantic_assets(session: Session, files: dict[str, str]) -> tuple[list
     inert-key findings (frontmatter keys that parsed and are read by nothing).
     An unknown key never reaches this point — it is an error at the parse seam."""
     notes: list[str] = []
-    entities, definitions = parse_semantic_files(files, notes=notes)
+    entities, definitions, relationships = parse_semantic_files(files, notes=notes)
     before = semantic_store.asset_hashes(session)
     applied: list[str] = []
-    items: list[tuple[str, str, dict[str, object]]] = [
-        ("entity", name, entity.model_dump(mode="json")) for name, entity in entities.items()
-    ] + [
-        ("definition", term, definition.model_dump(mode="json"))
-        for term, definition in definitions.items()
-    ]
+    items: list[tuple[str, str, dict[str, object]]] = (
+        [("entity", name, entity.model_dump(mode="json")) for name, entity in entities.items()]
+        + [
+            ("definition", term, definition.model_dump(mode="json"))
+            for term, definition in definitions.items()
+        ]
+        + [
+            ("relationship", name, relationship.model_dump(mode="json"))
+            for name, relationship in relationships.items()
+        ]
+    )
     for kind, name, body in sorted(items):
         key = f"{kind}/{name}"
         if asset_content_hash(kind, body) == before.get(key):
@@ -466,18 +477,25 @@ def _embedder() -> Embedder | None:
     return registry.resolve_embedder()
 
 
-def _shared_layer(session: Session) -> tuple[dict[str, SharedEntity], dict[str, Definition]]:
-    """The DB's shared assets as compile inputs (entities by name, defs by term)."""
+def _shared_layer(
+    session: Session,
+) -> tuple[dict[str, SharedEntity], dict[str, Definition], dict[str, SharedRelationship]]:
+    """The DB's shared assets as compile inputs (entities by name, defs by
+    term, relationships by name)."""
     entities: dict[str, SharedEntity] = {}
     definitions: dict[str, Definition] = {}
+    relationships: dict[str, SharedRelationship] = {}
     for asset in semantic_store.list_assets(session):
         if asset.kind == "entity":
             entity = SharedEntity.model_validate(asset.body)
             entities[entity.name] = entity
+        elif asset.kind == "relationship":
+            relationship = SharedRelationship.model_validate(asset.body)
+            relationships[relationship.name] = relationship
         else:
             definition = Definition.model_validate(asset.body)
             definitions[definition.term] = definition
-    return entities, definitions
+    return entities, definitions, relationships
 
 
 def _default_qualifiers(
@@ -718,11 +736,12 @@ def apply_lens(
         )
     try:
         dialect = _lens_dialect(session, config)
-        shared_entities, shared_definitions = _shared_layer(session)
+        shared_entities, shared_definitions, shared_relationships = _shared_layer(session)
         model, compile_warnings = compile_lens_model(
             config=config,
             shared_entities=shared_entities,
             shared_definitions=shared_definitions,
+            shared_relationships=shared_relationships,
             local_definitions=source.local_definitions,
             use_when=source.use_when,
             sample_queries=source.sample_queries,
@@ -849,6 +868,7 @@ def check_lens(
     *,
     incoming_entities: dict[str, SharedEntity],
     incoming_definitions: dict[str, Definition],
+    incoming_relationships: dict[str, SharedRelationship],
     incoming_connections: dict[str, ConnectionDecl],
     asset_hashes: dict[str, str],
 ) -> list[str]:
@@ -870,14 +890,16 @@ def check_lens(
     config = source.config
     if config.name != name:
         return [f"lens.yaml names '{config.name}' but the tree is lenses/{name}/"]
-    shared_entities, shared_definitions = _shared_layer(session)
+    shared_entities, shared_definitions, shared_relationships = _shared_layer(session)
     shared_entities.update(incoming_entities)
     shared_definitions.update(incoming_definitions)
+    shared_relationships.update(incoming_relationships)
     try:
         model, _warnings = compile_lens_model(
             config=config,
             shared_entities=shared_entities,
             shared_definitions=shared_definitions,
+            shared_relationships=shared_relationships,
             local_definitions=source.local_definitions,
             use_when=source.use_when,
             sample_queries=source.sample_queries,
@@ -909,6 +931,7 @@ def check_recompiles(
     *,
     incoming_entities: dict[str, SharedEntity],
     incoming_definitions: dict[str, Definition],
+    incoming_relationships: dict[str, SharedRelationship],
     asset_hashes: dict[str, str],
     incoming_connections: dict[str, ConnectionDecl] | None = None,
     skip: frozenset[str] | set[str] = frozenset(),
@@ -921,15 +944,17 @@ def check_recompiles(
     Plan announced "will recompile on apply" and left it at that; this tries it.
     ``skip`` names the lenses the push carries (``check_lens`` covers those, and
     apply republishes them with fresh provenance before the recompile pass runs)."""
-    shared_entities, shared_definitions = _shared_layer(session)
+    shared_entities, shared_definitions, shared_relationships = _shared_layer(session)
     shared_entities.update(incoming_entities)
     shared_definitions.update(incoming_definitions)
+    shared_relationships.update(incoming_relationships)
+    pairs = relationship_pairs(shared_relationships)
     out: dict[str, list[str]] = {}
     for name, _dn, _desc, bundle in store.list_published(session):
         provenance = bundle.semantic_model.shared_provenance
         if name in skip or provenance is None:
             continue
-        if not any(asset_hashes.get(k, "") != d for k, d in provenance.assets.items()):
+        if not stale_asset_keys(provenance.assets, asset_hashes, pairs):
             continue
         sm = bundle.semantic_model
         try:
@@ -937,6 +962,7 @@ def check_recompiles(
                 config=bundle.config,
                 shared_entities=shared_entities,
                 shared_definitions=shared_definitions,
+                shared_relationships=shared_relationships,
                 local_definitions=[d for d in sm.definitions if d.source != "shared"],
                 use_when=sm.use_when,
                 sample_queries=sm.sample_queries,
@@ -966,7 +992,8 @@ def recompile_stale(
     lenses this apply already rejected: re-gating one against its own staged
     failing run would 'recompile' the very definition the gate just blocked."""
     hashes = semantic_store.asset_hashes(session)
-    shared_entities, shared_definitions = _shared_layer(session)
+    shared_entities, shared_definitions, shared_relationships = _shared_layer(session)
+    pairs = relationship_pairs(shared_relationships)
     # Connections landed before this pass, so the records ARE the push's own.
     qualifiers = _default_qualifiers(session)
     results: list[LensApplyResult] = []
@@ -976,11 +1003,7 @@ def recompile_stale(
         provenance = bundle.semantic_model.shared_provenance
         if provenance is None:
             continue  # never compiled from the shared layer — nothing to be stale against
-        changed = [
-            key
-            for key, digest in sorted(provenance.assets.items())
-            if hashes.get(key, "") != digest
-        ]
+        changed = stale_asset_keys(provenance.assets, hashes, pairs)
         if not changed:
             continue
         sm = bundle.semantic_model
@@ -989,6 +1012,7 @@ def recompile_stale(
                 config=bundle.config,
                 shared_entities=shared_entities,
                 shared_definitions=shared_definitions,
+                shared_relationships=shared_relationships,
                 local_definitions=[d for d in sm.definitions if d.source != "shared"],
                 use_when=sm.use_when,
                 sample_queries=sm.sample_queries,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import decimal
 import re
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
@@ -25,8 +26,10 @@ from services.contracts.verification import (
     VerificationReport,
 )
 from services.contracts.warehouse import QueryResult
+from services.lenses.profile_enrich import EntityCoverage
 from services.runtime import adversary, faithfulness, sql_guard
 from services.runtime.answer import data_notes as answer_data_notes
+from services.runtime.timewindow import sql_engages_time, temporal_terms, window_ranges
 
 _DISTINCT_ASK = re.compile(r"\b(unique|distinct|individual|deduplicated)\b", re.IGNORECASE)
 _COUNT_ASK = re.compile(r"\b(how many|count|number of)\b", re.IGNORECASE)
@@ -240,8 +243,8 @@ def _definition_applied(
     its SQL was written and approved by a person, and serving it runs no model
     at all. "fail" would assert a departure that cannot have happened, and the
     grade already carves certified out for exactly this reason (see
-    ``_with_grade``: only numeric_grounding, not_truncated and freshness demote
-    it). Abstaining keeps the two layers saying the same thing, and keeps the
+    ``_with_grade``: only numeric_grounding, not_truncated, freshness and
+    date_coverage demote it). Abstaining keeps the two layers saying the same thing, and keeps the
     honest reading — the definition was not checked here, which is not the same
     as checked and clean."""
     if certification == "certified":
@@ -388,8 +391,6 @@ def _window_applied(question: str, sql: str, model: SemanticModel) -> Verificati
     function, no date/year literal, no declared time field. A fail caps at
     `partial` (never unverified): a legitimately pre-windowed source view is
     the false-positive to stay safe against, and the reason says so."""
-    from services.runtime.timewindow import sql_engages_time, temporal_terms
-
     terms = temporal_terms(question)
     if not terms:
         return VerificationCheck(
@@ -708,6 +709,88 @@ def _aggregation_scope(sql: str, model: SemanticModel) -> VerificationCheck:
     )
 
 
+def _filtered_columns(sql: str, dialect: str | None) -> set[str]:
+    """Column names appearing under any WHERE clause (subqueries included) —
+    the columns whose predicates decide which rows exist. An unparseable query
+    returns the empty set: the caller must skip, never guess."""
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:  # noqa: BLE001
+        return set()
+    if not isinstance(tree, exp.Expression):
+        return set()
+    return {c.name.lower() for w in tree.find_all(exp.Where) for c in w.find_all(exp.Column)}
+
+
+def date_coverage_check(
+    question: str,
+    sql: str,
+    model: SemanticModel,
+    coverage: Mapping[str, EntityCoverage] | None,
+) -> VerificationCheck:
+    """The asked period vs the tables' MEASURED date span — `freshness_check`'s
+    sibling on the same declared-clock rail. A question about a period the
+    warehouse never loaded produces a confident zero: the aggregate runs, the
+    number grounds, and nothing says the rows could not exist. Deterministic by
+    construction, false positives forbidden: it fires only when a window that
+    RESOLVES to calendar dates lies ENTIRELY outside the whole-table MIN/MAX of
+    a time column the SQL actually filters on, and the "data begins" direction
+    additionally requires the measured column to be the entity's own declared
+    time field (a load stamp's MIN says when loading started, not where history
+    does). Anything unmeasurable or ambiguous is a skip with its reason."""
+    if not coverage:
+        return VerificationCheck(
+            name="date_coverage",
+            status="skip",
+            reason="date coverage not measured — the scope's tables have no probed time span",
+        )
+    terms = temporal_terms(question)
+    if not terms:
+        return VerificationCheck(
+            name="date_coverage", status="skip", reason="the question states no time window"
+        )
+    ranges = window_ranges(terms, _lens_today(model.timezone))
+    if not ranges:
+        return VerificationCheck(
+            name="date_coverage",
+            status="skip",
+            reason="the stated window does not resolve to calendar dates",
+        )
+    filtered = _filtered_columns(sql, model.dialect)
+    problems: list[str] = []
+    for name, cov in sorted(coverage.items()):
+        if cov.column.lower() not in filtered:
+            # Nothing pinned rows to this table's clock — its span cannot have
+            # zero-filled the result (a customers.created_at ending years ago
+            # must not flag a revenue question that filters invoice_date).
+            continue
+        table = cov.table.split(".")[-1]
+        if not re.search(rf"\b{re.escape(name)}\b|\b{re.escape(table)}\b", sql, re.IGNORECASE):
+            continue
+        if all(start > cov.end for start, _ in ranges):
+            if cov.snapshot:
+                problems.append(
+                    f"{name} is a single snapshot as of {cov.end.isoformat()} ({cov.column})"
+                )
+            else:
+                problems.append(f"{name} data ends {cov.end.isoformat()} ({cov.column})")
+        elif cov.declared and all(end < cov.start for _, end in ranges):
+            problems.append(f"{name} data begins {cov.start.isoformat()} ({cov.column})")
+    if problems:
+        stated = ", ".join(sorted(terms))
+        return VerificationCheck(
+            name="date_coverage",
+            status="fail",
+            reason=(
+                f"the question asks about '{stated}' but "
+                + "; ".join(problems)
+                + " — an empty or zero result here means the period was never "
+                "loaded, not that nothing happened"
+            ),
+        )
+    return VerificationCheck(name="date_coverage", status="pass")
+
+
 def freshness_check(data_as_of: str | None, model: SemanticModel) -> VerificationCheck:
     """The declared freshness contract vs the MEASURED scope freshness — a plain
     date comparison, deterministic by construction: false positives are
@@ -770,6 +853,7 @@ def build_report(
     uncomposed_reason: str | None = None,
     investigation: Literal["confirmed", "unresolved"] | None = None,
     data_as_of: str | None = None,
+    entity_coverage: Mapping[str, EntityCoverage] | None = None,
 ) -> VerificationReport:
     numeric_status: CheckStatus
     if composed:
@@ -833,6 +917,7 @@ def build_report(
         _population_declared(sql, semantic_model),
         _aggregation_scope(sql, semantic_model),
         freshness_check(data_as_of, semantic_model),
+        date_coverage_check(question, sql, semantic_model, entity_coverage),
         VerificationCheck(
             name="has_rows",
             status="pass" if has_rows else "fail",
@@ -889,6 +974,25 @@ def fold_ungoverned(report: VerificationReport, reason: str) -> VerificationRepo
         VerificationCheck(name="governed_shape", status="fail", reason=reason),
     ]
     return VerificationReport(grade="unverified", checks=checks)
+
+
+def fold_metric_filter_waived(report: VerificationReport, reason: str) -> VerificationReport:
+    """The filter-guard waiver, recorded where nothing can lose it: the served
+    SQL computes an aggregation shape a governed metric claims, WITHOUT that
+    metric's mandatory filter — waived because the question named no metric of
+    the group (filter_guard's question rule), so the figure is a plain
+    ungoverned aggregate, not the metric. The serve is the point (the
+    alternative was a dead-end rejection of a trivially answerable question),
+    but question↔metric alignment is exactly what nothing deterministic can
+    confirm here: the check records the miss and the grade caps at partial —
+    inside auto_review's net, where the authoring gap behind the waiver (the
+    missing unfiltered sibling metric) becomes visible instead of silent."""
+    checks = [
+        *report.checks,
+        VerificationCheck(name="metric_filter_waived", status="fail", reason=reason),
+    ]
+    grade: Grade = "partial" if report.grade == "verified" else report.grade
+    return VerificationReport(grade=grade, checks=checks)
 
 
 def fold_judge(report: VerificationReport, verdict: str, reasoning: str) -> VerificationReport:
@@ -953,8 +1057,12 @@ def _with_grade(
         # for rows the caller never received. Stale is the
         # third demotion: approval vouches for the SQL, not for month-old data —
         # a certified serve past the declared freshness contract is still stale.
+        # Coverage is the fourth, for the same reason: approval vouches for the
+        # SQL's meaning, never for a period the warehouse hasn't loaded.
         grade = (
-            "partial" if fails & {"numeric_grounding", "not_truncated", "freshness"} else "verified"
+            "partial"
+            if fails & {"numeric_grounding", "not_truncated", "freshness", "date_coverage"}
+            else "verified"
         )
     elif fails & {"numeric_grounding", "intent_alignment"}:
         grade = "unverified"
@@ -982,7 +1090,7 @@ def _semantic_abstained(checks: list[VerificationCheck]) -> bool:
     not fail it), and an answer can legitimately grade verified on an applied
     definition while intent abstains. Only the serve where NOTHING
     semantic confirmed loses the badge; payload checks (has_rows /
-    not_truncated / freshness) are structural and never count either way.
+    not_truncated / freshness / date_coverage) are structural and never count either way.
     Every skip's reason stays visible on the checks array the caller receives."""
     semantic = [c for c in checks if c.name in ("definition_applied", "intent_alignment")]
     # A list with no semantic checks at all is a synthetic/partial one (tests,

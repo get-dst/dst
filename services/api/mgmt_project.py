@@ -38,13 +38,18 @@ from services.auth.deps import AdminIdentity, get_admin_identity, get_admin_org,
 from services.certify import store as certify_store
 from services.contracts.lens_config import LensConfig
 from services.contracts.semantic_model import Definition
-from services.contracts.shared_semantic import SharedEntity
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.evals import store as eval_store
 from services.lenses import connection_store, store
 from services.lenses.repo import render_lens_repo
 from services.project import apply as apply_engine
 from services.project import plan as plan_engine
-from services.project.compile import shared_definition_hash, shared_entity_hash
+from services.project.compile import (
+    relationship_pairs,
+    shared_definition_hash,
+    shared_entity_hash,
+    shared_relationship_hash,
+)
 from services.project.loader import load_lens_source, split_by_lens, split_semantic
 from services.project.schema import ConnectionDecl, parse_project_yaml
 from services.semantic import store as semantic_store
@@ -98,6 +103,7 @@ def _db_semantic(session: Session) -> dict[str, str]:
     return render_semantic_files(
         [SharedEntity.model_validate(a.body) for a in assets if a.kind == "entity"],
         [Definition.model_validate(a.body) for a in assets if a.kind == "definition"],
+        [SharedRelationship.model_validate(a.body) for a in assets if a.kind == "relationship"],
     )
 
 
@@ -148,6 +154,7 @@ def _effective_hashes(
     session: Session,
     incoming_entities: dict[str, SharedEntity],
     incoming_definitions: dict[str, Definition],
+    incoming_relationships: dict[str, SharedRelationship],
 ) -> dict[str, str]:
     """Current DB asset hashes with the push's incoming assets layered on."""
     effective = semantic_store.asset_hashes(session)
@@ -155,17 +162,42 @@ def _effective_hashes(
     effective.update(
         {f"definition/{t}": shared_definition_hash(d) for t, d in incoming_definitions.items()}
     )
+    effective.update(
+        {
+            f"relationship/{n}": shared_relationship_hash(r)
+            for n, r in incoming_relationships.items()
+        }
+    )
     return effective
 
 
-def _stale_map(session: Session, effective: dict[str, str]) -> dict[str, list[str]]:
+def _effective_relationship_pairs(
+    session: Session, incoming_relationships: dict[str, SharedRelationship] | None = None
+) -> dict[str, tuple[str, str]]:
+    """DB relationships with the push's layered on, as endpoint pairs — what
+    lets staleness flag a lens for a relationship its compile never saw."""
+    relationships = {
+        SharedRelationship.model_validate(a.body).name: SharedRelationship.model_validate(a.body)
+        for a in semantic_store.list_assets(session, "relationship")
+    }
+    relationships.update(incoming_relationships or {})
+    return relationship_pairs(relationships)
+
+
+def _stale_map(
+    session: Session,
+    effective: dict[str, str],
+    incoming_relationships: dict[str, SharedRelationship] | None = None,
+) -> dict[str, list[str]]:
     """Published-lens staleness against the effective hashes."""
     provenances = {
         name: bundle.semantic_model.shared_provenance.assets
         for (name, _dn, _desc, bundle) in store.list_published(session)
         if bundle.semantic_model.shared_provenance is not None
     }
-    return plan_engine.stale_lenses(provenances, effective)
+    return plan_engine.stale_lenses(
+        provenances, effective, _effective_relationship_pairs(session, incoming_relationships)
+    )
 
 
 def _certified_stale(session: Session, effective: dict[str, str]) -> dict[str, dict[str, object]]:
@@ -302,11 +334,14 @@ def plan_project(
         )
     incoming_entities: dict[str, SharedEntity] = {}
     incoming_definitions: dict[str, Definition] = {}
+    incoming_relationships: dict[str, SharedRelationship] = {}
     semantic_ok = not semantic_errors
     try:
         # Cross-file checks (one name, two files) only once every file parses.
         if semantic_ok:
-            incoming_entities, incoming_definitions = parse_semantic_files(incoming_semantic)
+            incoming_entities, incoming_definitions, incoming_relationships = parse_semantic_files(
+                incoming_semantic
+            )
     except ValueError as exc:
         semantic_ok = False
         out.append({"scope": "semantic", "status": "invalid", "error": str(exc)})
@@ -315,9 +350,11 @@ def plan_project(
     # and only when the push actually carries semantic/ files: a lens-only push
     # must not spam orphans.
     if incoming_semantic and semantic_ok:
-        incoming_keys = {f"entity/{n}" for n in incoming_entities} | {
-            f"definition/{t}" for t in incoming_definitions
-        }
+        incoming_keys = (
+            {f"entity/{n}" for n in incoming_entities}
+            | {f"definition/{t}" for t in incoming_definitions}
+            | {f"relationship/{n}" for n in incoming_relationships}
+        )
         db_keys = semantic_store.asset_hashes(session)
         for key in plan_engine.semantic_orphans(db_keys, incoming_keys):
             out.append(
@@ -329,8 +366,10 @@ def plan_project(
                 }
             )
 
-    effective = _effective_hashes(session, incoming_entities, incoming_definitions)
-    stale = _stale_map(session, effective)
+    effective = _effective_hashes(
+        session, incoming_entities, incoming_definitions, incoming_relationships
+    )
+    stale = _stale_map(session, effective, incoming_relationships)
     certified_stale = _certified_stale(session, effective)
 
     # ── lenses: managed-file diffs + staleness markers + APPLY'S OWN GATES ────
@@ -356,6 +395,7 @@ def plan_project(
                     source,
                     incoming_entities=incoming_entities,
                     incoming_definitions=incoming_definitions,
+                    incoming_relationships=incoming_relationships,
                     incoming_connections=incoming_connections,
                     asset_hashes=effective,
                 )
@@ -394,6 +434,7 @@ def plan_project(
         session,
         incoming_entities=incoming_entities,
         incoming_definitions=incoming_definitions,
+        incoming_relationships=incoming_relationships,
         asset_hashes=effective,
         incoming_connections=incoming_connections or None,
         skip=set(incoming),

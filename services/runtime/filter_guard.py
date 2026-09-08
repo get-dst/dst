@@ -29,12 +29,26 @@ not satisfy — an unfiltered twin (session_count next to converted_sessions,
 both COUNT(session_id)) legitimizes the bare form, as does a filtered twin
 whose every filter is satisfied. The obvious false positive —
 "how many sessions" attributed to the filtered twin — dies here.
+
+The twin rule needs a twin, and a lens whose ONLY count metric is filtered
+(overdue_invoice_count, days_overdue > 0) has none — every phrasing of the
+plain-total question then generated a bare COUNT, the guard demanded a filter
+the question never asked for, and a trivially answerable question had no
+governed path at all. So the question rule extends past twin-choice to group
+membership: when the question names NO member of the group (zero name-token
+signal on every twin — the same deterministic signal ``_question_resolved``
+already trusts to pick one), the demand is WAIVED, not missing — the bare
+aggregation is an ordinary ungoverned aggregate, not the metric unfiltered.
+Waivers are reported separately so the pipeline serves the query through every
+remaining gate while recording the near-miss out loud; a question that DOES
+name the metric ("how many overdue invoices") keeps the full demand.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import cast
 
@@ -430,8 +444,19 @@ def corrected_aggregation(metric_name: str, model: SemanticModel) -> str | None:
     return None
 
 
+def _question_tokens(question: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", question.lower()))
+
+
+def _name_signal(metric: Metric, qtokens: set[str]) -> int:
+    """How many of the metric's name tokens the question uses — the one
+    deterministic link between a phrasing and a governed metric this module
+    trusts (no prose-sniffing beyond the metric's own declared name)."""
+    return len(set(metric.name.lower().split("_")) & qtokens)
+
+
 def _question_resolved(
-    twins: list[tuple[Metric, list[tuple[str, list[str]]]]], question: str
+    twins: list[tuple[Metric, list[tuple[str, list[str]]]]], qtokens: set[str]
 ) -> tuple[Metric, list[tuple[str, list[str]]]] | None:
     """The twin the QUESTION names, when it names exactly one.
 
@@ -443,12 +468,9 @@ def _question_resolved(
     Strictly-best name-token overlap wins; a tie or zero signal returns None
     (the union stays, and the rejection names the conflict instead of the
     phrasing)."""
-    qtokens = set(re.findall(r"[a-z0-9]+", question.lower()))
-
-    def score(m: Metric) -> int:
-        return len(set(m.name.lower().split("_")) & qtokens)
-
-    scored = sorted(((score(m), i) for i, (m, _f) in enumerate(twins)), reverse=True)
+    scored = sorted(
+        ((_name_signal(m, qtokens), i) for i, (m, _f) in enumerate(twins)), reverse=True
+    )
     best_score, best_i = scored[0]
     if best_score == 0 or (len(scored) > 1 and scored[1][0] == best_score):
         return None
@@ -486,17 +508,43 @@ def conflict_note(unfiltered: list[tuple[str, str]], model: SemanticModel) -> st
     return None
 
 
+@dataclass
+class FilterFindings:
+    """One scan's verdicts, split by what the pipeline may do with them.
+
+    ``missing``: the demand stands — repair, then reject. ``waived``: a governed
+    metric matched the aggregation's shape but the question named no member of
+    its group, so the demand is dropped and the serve proceeds as an ordinary
+    ungoverned aggregate — recorded, never silent (the pipeline discloses it on
+    the answer, the report, and the trace)."""
+
+    missing: list[tuple[str, str]] = field(default_factory=list)
+    waived: list[tuple[str, str]] = field(default_factory=list)
+
+
 def missing_metric_filters(
     sql: str, model: SemanticModel, question: str | None = None
 ) -> list[tuple[str, str]]:
+    """The standing demands alone — ``metric_filter_findings(...).missing``."""
+    return metric_filter_findings(sql, model, question).missing
+
+
+def metric_filter_findings(
+    sql: str, model: SemanticModel, question: str | None = None
+) -> FilterFindings:
     """For each entity metric with filters that *sql* provably COMPUTES, report
-    the filter fragments the statement does not satisfy — ``[(metric_name,
-    filter_fragment), ...]``, empty when the governance contract holds.
+    the filter fragments the statement does not satisfy — ``missing`` holds
+    ``(metric_name, filter_fragment)`` pairs, both lists empty when the
+    governance contract holds.
 
     ``question``, when given, resolves filter demands within a group of metrics
     sharing one canonical aggregation: only the metric the question names is
     demanded (see ``_question_resolved``) — the union of incompatible twins is
-    permanently unsatisfiable.
+    permanently unsatisfiable. A question naming NO member of the group moves
+    the group's demands to ``waived`` instead (see the module docstring): the
+    bare form is an ungoverned plain aggregate, and rejecting it would leave a
+    trivially answerable question with no governed path. Without a question
+    nothing is ever waived — the guard has no signal to hear.
 
     A metric is computed when its canonical aggregation (compiler.metric_sql —
     e.g. ``SUM(deals.contract_value_eur)``) appears as an expression node, the
@@ -508,12 +556,13 @@ def missing_metric_filters(
     try:
         stmt = sqlglot.parse_one(sql, read=model.dialect)
     except Exception:  # noqa: BLE001 — unparseable SQL is sql_guard's rejection, not ours
-        return []
+        return FilterFindings()
     if not isinstance(stmt, exp.Expression):
-        return []
+        return FilterFindings()
     from services.runtime.generator import business_today
 
     today = date.fromisoformat(business_today(model.timezone))
+    qtokens = _question_tokens(question) if question else set()
     alias_map = _alias_map(stmt)
     all_refs = set().union(*alias_map.values()) if alias_map else set()
 
@@ -527,7 +576,7 @@ def missing_metric_filters(
         )
         return {s for s in canon if s is not None}
 
-    missing: list[tuple[str, str]] = []
+    findings = FilterFindings()
     for entity in model.entities:
         src = entity.source.table
         sole_source = bool(all_refs) and all(_ref_matches(r, src) for r in all_refs)
@@ -619,18 +668,24 @@ def missing_metric_filters(
                     continue
                 # The question resolves twins before the union is demanded:
                 # "current ARR" binds current_arr's filters alone; only a tie
-                # or zero signal keeps the whole group.
+                # WITH signal keeps the whole group. Zero signal on EVERY
+                # member waives the group instead: the question asked for none
+                # of these metrics, so the bare form is a plain aggregate — a
+                # demand here would reject a question the metric never claimed.
                 members = twins
-                if question and len(twins) > 1:
-                    picked = _question_resolved(twins, question)
+                target = findings.missing
+                if question:
+                    picked = _question_resolved(twins, qtokens) if len(twins) > 1 else None
                     if picked is not None:
                         members = [picked]
+                    elif all(_name_signal(m, qtokens) == 0 for m, _f in twins):
+                        target = findings.waived
                 for metric, fcs in members:
                     for frag, conjs in fcs:
                         hit = (metric.name, frag)
-                        if hit not in missing and any(
+                        if hit not in target and any(
                             c not in satisfied and not _bound_implied(c, satisfied, today)
                             for c in conjs
                         ):
-                            missing.append(hit)
-    return missing
+                            target.append(hit)
+    return findings

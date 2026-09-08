@@ -3,7 +3,8 @@
 No LLM, one-shot: `dst import dbt` turns a dbt project's compiled artifacts
 into dst-owned `semantic/` files — SharedEntities (table, grain, primary
 key, fields, dimensions, queryable metrics incl. ratio/derived compounds whose
-inputs all resolve on one entity, FK-side many_to_one joins) and Definitions
+inputs all resolve on one entity), SharedRelationships (FK-side many_to_one,
+one per pair) and Definitions
 (source="authored": from the moment they land, dst's own drift audit and
 review cycle maintain them; dbt is never re-synced). Constructs we can't
 faithfully compile (unsupported aggregations, cross-entity or unresolvable
@@ -30,7 +31,7 @@ from services.contracts.semantic_model import (
     Metric,
     warehouse_field_type,
 )
-from services.contracts.shared_semantic import SharedEntity, SharedJoin
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.dbt.artifacts import (
     DbtArtifacts,
     DbtMeasure,
@@ -65,6 +66,7 @@ class SkippedConstruct:
 @dataclass
 class ImportResult:
     entities: list[SharedEntity] = field(default_factory=list)
+    relationships: list[SharedRelationship] = field(default_factory=list)
     definitions: list[Definition] = field(default_factory=list)
     skipped: list[SkippedConstruct] = field(default_factory=list)
 
@@ -301,34 +303,38 @@ def _translate_filter(template: str, entity_map: dict[str, str]) -> str | None:
     return out.strip()
 
 
-def _fk_side_joins(semantic_models: list[DbtSemanticModel]) -> dict[str, list[SharedJoin]]:
-    """A foreign entity in model A that is a primary entity in model B → a join OWNED
-    by A (the FK side), many_to_one by construction."""
+def _relationships(semantic_models: list[DbtSemanticModel]) -> list[SharedRelationship]:
+    """A foreign entity in model A that is a primary entity in model B → a
+    relationship with A on the left (the FK side), many_to_one by construction.
+    One per UNORDERED pair — dst holds one relationship per pair, so a mutual
+    FK (each model foreign-keying the other) keeps its first direction only."""
     primary_by_entity: dict[str, tuple[str, str]] = {}  # entity name -> (model, key col)
     for sm in semantic_models:
         for e in sm.entities:
             if e.type == "primary":
                 primary_by_entity[e.name] = (sm.name, e.expr or e.name)
-    joins: dict[str, list[SharedJoin]] = {}
-    seen: set[tuple[str, str]] = set()
+    out: list[SharedRelationship] = []
+    seen: set[frozenset[str]] = set()
     for sm in semantic_models:
         for e in sm.entities:
             if e.type != "foreign" or e.name not in primary_by_entity:
                 continue
             right_model, right_col = primary_by_entity[e.name]
-            if right_model == sm.name or (sm.name, right_model) in seen:
+            pair = frozenset((sm.name, right_model))
+            if right_model == sm.name or pair in seen:
                 continue
             left_col = e.expr or e.name
-            joins.setdefault(sm.name, []).append(
-                SharedJoin(
+            out.append(
+                SharedRelationship(
+                    left=sm.name,
                     right=right_model,
                     on=f"{sm.name}.{left_col} = {right_model}.{right_col}",
                     type="left",
                     relationship="many_to_one",
                 )
             )
-            seen.add((sm.name, right_model))
-    return joins
+            seen.add(pair)
+    return out
 
 
 def import_shared_assets(
@@ -365,7 +371,6 @@ def import_shared_assets(
         artifacts, measures_by_entity, owner_of, skipped, entity_map, entities, compound_owner
     )
 
-    joins_by_owner = _fk_side_joins(artifacts.semantic_models)
     grain_by_model = {
         sm.name: next((e.name for e in sm.entities if e.type == "primary"), None)
         for sm in artifacts.semantic_models
@@ -378,11 +383,15 @@ def import_shared_assets(
                 if grain_by_model.get(entity.name)
                 else None
             ),
-            joins=joins_by_owner.get(entity.name, []),
         )
         for entity in entities
     ]
-    return ImportResult(entities=shared, definitions=definitions, skipped=skipped)
+    return ImportResult(
+        entities=shared,
+        relationships=_relationships(artifacts.semantic_models),
+        definitions=definitions,
+        skipped=skipped,
+    )
 
 
 def _apply_extra_metrics(

@@ -117,7 +117,7 @@ test('the confidence split is a visible three-band story, and flagged is the ala
   // 2731 / 923 / 193 of 3847 served → the band legend states each share.
   expect(await screen.findByText(/71% verified · 24% caveated ·/)).toBeInTheDocument()
   // Flagged rides the outcome strip as a count, red because it is nonzero.
-  const flagged = screen.getByText('failed verification — said so on its face')
+  const flagged = screen.getByText('served, but a figure could not be traced to the result rows')
   const cell = flagged.parentElement!
   expect(cell.textContent).toContain('193')
   expect(cell.querySelector('.text-red')).not.toBeNull()

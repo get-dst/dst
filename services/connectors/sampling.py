@@ -3,7 +3,8 @@
 Every `SamplingProfiler` connector delegates here: `sample_tables` runs, per
 table, a two-phase read — one aggregate query for null rates / cardinality /
 min-max, then one tiny top-k query per low-cardinality column — plus a
-full-table ``MAX(time column)`` probe for logical freshness, all through the
+full-table ``MIN/MAX(time column)`` probe for logical freshness and date
+coverage, all through the
 connector's own read-only query path. Only the FROM clause differs per dialect
 (``USING SAMPLE`` / ``TABLESAMPLE SYSTEM`` / ``SAMPLE (n ROWS)`` / plain
 ``LIMIT``) — see `_sampled_relation`.
@@ -44,6 +45,7 @@ from services.contracts.profile import (
     ColumnSampleSpec,
     TableProfile,
     TableSampleSpec,
+    TimeCoverage,
     is_numeric_type,
     is_temporal_type,
 )
@@ -171,14 +173,22 @@ def sample_table(
                 run, spec, specs, columns, dialect=dialect, max_rows=max_rows, exact=exact
             )
     last_logical: datetime | None = None
+    coverage: TimeCoverage | None = None
     if spec.freshness_column is not None and not _freshness_blocked(spec.freshness_column, specs):
-        last_logical = _probe_freshness(run, spec.table, spec.freshness_column, dialect=dialect)
+        earliest, last_logical = _probe_freshness(
+            run, spec.table, spec.freshness_column, dialect=dialect
+        )
+        if earliest is not None and last_logical is not None:
+            # Whole-table MIN/MAX, never sampled — the one source exact enough
+            # to state where the data starts and ends.
+            coverage = TimeCoverage(column=spec.freshness_column, min=earliest, max=last_logical)
     if not columns and last_logical is None:
         return None
     return TableProfile(
         connection=connection,
         table=spec.table,
         last_updated_logical=last_logical,
+        time_coverage=coverage,
         source="sampled",
         # None means "every row was counted" and nothing else may set it — a
         # sample that happened to return 0 rows (block-level TABLESAMPLE on a
@@ -312,8 +322,12 @@ def top_values_sql(
 
 
 def freshness_sql(table: str, column: str, *, dialect: SamplingDialect) -> str:
-    """The logical-freshness probe: full-table MAX of the partition/best time column."""
-    return f"SELECT MAX({_quote_name(column, dialect)}) AS v FROM {_quote_table(table, dialect)}"
+    """The logical-freshness/coverage probe: full-table MIN and MAX of the
+    partition/best time column — MAX is logical freshness, the pair is the
+    table's measured date coverage. One aggregate query either way, so the
+    coverage fact costs no extra scan."""
+    qc = _quote_name(column, dialect)
+    return f"SELECT MIN({qc}) AS mn, MAX({qc}) AS mx FROM {_quote_table(table, dialect)}"
 
 
 def _sampled_relation(
@@ -611,14 +625,16 @@ def _collect_top_values(
 
 def _probe_freshness(
     run: RunQuery, table: str, column: str, *, dialect: SamplingDialect
-) -> datetime | None:
+) -> tuple[datetime | None, datetime | None]:
+    """(min, max) of the time column, whole-table — (None, None) when unprobeable."""
     try:
         result = run(freshness_sql(table, column, dialect=dialect))
     except SampleBudgetExceeded:
-        return None
+        return None, None
     if not result.rows:
-        return None
-    return _as_datetime(result.rows[0][0])
+        return None, None
+    row = result.rows[0]
+    return _as_datetime(row[0]), _as_datetime(row[1])
 
 
 def _freshness_blocked(column: str, specs: list[ColumnSampleSpec]) -> bool:

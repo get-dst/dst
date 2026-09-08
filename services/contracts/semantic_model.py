@@ -6,6 +6,7 @@ grounded against it and `sql_guard` derives its allow-list from it.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import AliasChoices, BaseModel, BeforeValidator, field_validator, model_validator
@@ -409,6 +410,19 @@ class Definition(Authored):
         default_factory=list,
         description="for ambiguous terms: each entry 'meaning - where it lives'",
     )
+    # The per-role rule, as a declared fact instead of page prose: prose like
+    # "asked on behalf of Finance, revenue means net invoiced" cannot fire at
+    # the deterministic pre-generation check, so the caller rail's identity
+    # ("On behalf of the CFO: …") clarified anyway. Same discipline as aliases:
+    # literal word-boundary matches on author-declared strings, zero model
+    # judgment — a phrase resolves the term only when its value selects exactly
+    # one possible_mapping and no other channel contests it.
+    audiences: dict[str, str] = PField(
+        default_factory=dict,
+        description="for ambiguous terms: audience phrase -> the meaning it resolves "
+        "to (e.g. {cfo: net invoiced revenue}) — a question naming the phrase serves "
+        "that possible_mapping instead of clarifying, with the reading disclosed",
+    )
     # The trigger LEXICON. The clarify rail is deterministic by contract — a
     # governance promise must not depend on a model's mood — but keyed to the
     # term's identifier alone it is unreachable for realistic phrasings: authors
@@ -460,6 +474,42 @@ class SharedProvenance(BaseModel):
     assets: dict[str, str] = PField(default_factory=dict)  # "entity/orders" -> content hash
 
 
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_STRING_LITERAL = re.compile(r"'[^']*'")
+# SQL words that show up in an expr or predicate and are never column names.
+_SQL_WORDS = frozenset(
+    """and or not in is null between like ilike case when then else end
+    cast as distinct count sum avg min max coalesce nullif date interval
+    current_date current_timestamp true false extract from where select
+    on left right inner join group by order having asc desc limit""".split()
+)
+
+
+def _referenced_columns(expr: str | None, entity_name: str) -> set[str]:
+    """Column names an authored expression references, best-effort.
+
+    Deliberately lexical, not a SQL parse: this widens a guard allow-list, and
+    a missed name only restores today's behaviour (a rejection), while a false
+    name grants nothing — the guard still checks the column exists on an
+    allowed TABLE. String literals are stripped first so a filter value like
+    'Revenue (SE)' cannot smuggle in an identifier, and `entity.column` is
+    reduced to `column` because the allow-list is keyed by physical table.
+    """
+    if not expr:
+        return set()
+    cleaned = _STRING_LITERAL.sub(" ", expr)
+    out: set[str] = set()
+    for m in _IDENT.finditer(cleaned):
+        tok = m.group(0)
+        after = cleaned[m.end() : m.end() + 1]
+        if tok.lower() in _SQL_WORDS or after == "(":  # keywords and function calls
+            continue
+        if tok == entity_name:  # the qualifier itself, not a column
+            continue
+        out.add(tok)
+    return out
+
+
 class SemanticModel(BaseModel):
     # No `version` field. There was one, defaulted to 1, written into every
     # stored bundle and every compiled.yaml, and read by nothing — a schema
@@ -508,10 +558,38 @@ class SemanticModel(BaseModel):
     shared_provenance: SharedProvenance | None = None
 
     def allowed_columns(self) -> dict[str, set[str]]:
-        """Map physical table -> allowed column names. Consumed by sql_guard."""
+        """Map physical table -> allowed column names. Consumed by sql_guard.
+
+        A column is in scope if the model REFERENCES it, not only if it is
+        listed under ``fields:``. Fields were the whole allow-list once, and
+        that made three authoring shapes compile clean and then fail at query
+        time with "column X is out of lens scope": a bare passthrough dimension, a
+        column named only inside a metric's ``expr``, and a column named only
+        by ``population_filter`` — the last one worse than a rejection, because
+        a scalar question dropped the filter and served an undeduped number.
+
+        The guard's job is to stop SQL from reaching columns the curator did
+        not model. A dimension or population filter the curator wrote IS the
+        curator modelling that column.
+        """
         out: dict[str, set[str]] = {}
         for e in self.entities:
-            out.setdefault(e.source.table, set()).update(f.name for f in e.fields)
+            cols = out.setdefault(e.source.table, set())
+            cols.update(f.name for f in e.fields)
+            # Dimensions: a bare one is the field of the same name; an expr one
+            # names its columns inline.
+            for d in e.dimensions:
+                cols.add(d.name)
+                cols.update(_referenced_columns(d.expr, e.name))
+            for m in e.metrics:
+                cols.update(_referenced_columns(m.expr, e.name))
+                for f_ in m.filters or []:
+                    cols.update(_referenced_columns(f_, e.name))
+            cols.update(_referenced_columns(e.population_filter, e.name))
+            cols.update(e.pinned_dimensions)
+            if e.default_time_field:
+                cols.add(e.default_time_field)
+            cols.update(e.primary_key or [])
         return out
 
     def allowed_tables(self) -> set[str]:

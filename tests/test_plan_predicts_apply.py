@@ -108,8 +108,8 @@ def org(monkeypatch):
 
 
 def _project_files() -> dict[str, str]:
-    entities, definitions = jaffle_shared_assets()
-    files = dict(render_semantic_files(entities, definitions))
+    entities, definitions, relationships = jaffle_shared_assets()
+    files = dict(render_semantic_files(entities, definitions, relationships))
     for path, content in render_lens_repo(jaffle_customer_value_bundle()).items():
         files[f"lenses/customer_value/{path}"] = content
     return files
@@ -131,10 +131,10 @@ def _cross_entity(files: dict[str, str]) -> dict[str, str]:
     # orders: joining customers onto orders is safe, the other direction is not.
     # This metric lives on `orders`, reaching customers — safe — so break the
     # declaration instead: an undeclared relationship is read as unsafe.
-    entity = yaml.safe_load(files["semantic/entities/orders.yaml"])
-    for join in entity["joins"]:
-        join.pop("relationship", None)
-    files["semantic/entities/orders.yaml"] = yaml.safe_dump(entity, sort_keys=False)
+    path = "semantic/relationships/orders-customers.yaml"
+    rel = yaml.safe_load(files[path])
+    rel.pop("relationship", None)
+    files[path] = yaml.safe_dump(rel, sort_keys=False)
     return _with_metric(files, "orders.amount * customers.customer_lifetime_value")
 
 

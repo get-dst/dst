@@ -13,6 +13,8 @@ export interface Kpis {
   declined: number
   /** Requests whose model had no configured price — AI spend unknown, not $0. */
   unpriced: number
+  /** Served queries whose connector reports no bytes/cost — unmetered, not free. */
+  wh_unpriced: number
   outcomes: {
     ok: number
     refused: number
@@ -68,6 +70,8 @@ export interface AuditStatement {
   verified_delta_pp: number | null
   ai_cost_usd: number
   wh_cost_usd: number
+  /** Calls whose model had no configured price — the spend totals are a FLOOR. */
+  unpriced: number
   cost_per_answer_usd: number | null
   confidence_histogram: Record<string, number>
   series: { day: string; asked: number }[]

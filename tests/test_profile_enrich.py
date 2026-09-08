@@ -14,7 +14,12 @@ from services.app import app
 from services.auth.tokens import hash_token, new_admin_token
 from services.config import settings
 from services.contracts.fakes import ScriptedLLM, fake_llm_providers
-from services.contracts.profile import ColumnProfile, PartitioningProfile, TableProfile
+from services.contracts.profile import (
+    ColumnProfile,
+    PartitioningProfile,
+    TableProfile,
+    TimeCoverage,
+)
 from services.contracts.semantic_model import (
     Entity,
     EntitySource,
@@ -157,6 +162,67 @@ def test_range_renders_only_for_ordered_types() -> None:
     # one bound alone is not a range
     one_bound = ColumnProfile(name="f", type="DATE", min="2020-01-01")
     assert _enrich_one(one_bound, field_type="date")[0] == "Base"
+
+
+def test_time_coverage_rides_the_time_field_even_without_column_stats() -> None:
+    # The coverage column is documented, so the sampling pass never profiled it —
+    # the measured span must reach the prompt anyway.
+    model = SemanticModel(
+        lens="l",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="orders",
+                source=EntitySource(connection="c", table="t"),
+                default_time_field="order_date",
+                fields=[Field(name="order_date", type="date", description="Order day.")],
+            )
+        ],
+    )
+    prof = TableProfile(
+        connection="c",
+        table="t",
+        time_coverage=TimeCoverage(
+            column="order_date",
+            min=datetime(2025, 1, 2, tzinfo=UTC),
+            max=datetime(2026, 5, 31, tzinfo=UTC),
+        ),
+    )
+    enriched = profile_enrich.enrich_model(model, [prof])
+    desc = enriched.entities[0].fields[0].description
+    assert desc == (
+        "Order day. — data covers 2025-01-02..2026-05-31 — no rows exist beyond this span"
+    )
+
+
+def test_snapshot_coverage_names_its_as_of_and_supersedes_the_sampled_range() -> None:
+    cp = ColumnProfile(name="f", type="DATE", min="2026-06-01", max="2026-06-05")
+    model = SemanticModel(
+        lens="l",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="ar",
+                source=EntitySource(connection="c", table="t"),
+                fields=[Field(name="f", type="date")],
+            )
+        ],
+    )
+    prof = TableProfile(
+        connection="c",
+        table="t",
+        columns=[cp],
+        time_coverage=TimeCoverage(
+            column="f",
+            min=datetime(2026, 6, 5, tzinfo=UTC),
+            max=datetime(2026, 6, 5, tzinfo=UTC),
+        ),
+    )
+    desc = profile_enrich.enrich_model(model, [prof]).entities[0].fields[0].description
+    assert desc is not None
+    assert "single snapshot as of 2026-06-05" in desc
+    # the exact whole-table span supersedes the sampled per-column range
+    assert "range:" not in desc
 
 
 def test_warehouse_table_description_fills_a_blank_entity() -> None:

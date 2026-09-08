@@ -55,6 +55,7 @@ def _compile(qualifiers: dict[str, str] | None, *, table: str = "marts.orders"):
             select=SelectSpec.model_validate({"entities": [{"name": "orders"}]}),
         ),
         shared_entities={"orders": entity},
+        shared_relationships={},
         shared_definitions={},
         local_definitions=[],
         use_when=["board numbers"],
@@ -164,6 +165,7 @@ def test_certified_sql_written_against_the_short_name_is_not_foreign() -> None:
     model, _ = compile_lens_model(
         config=config,
         shared_entities={"orders": ORDERS},
+        shared_relationships={},
         shared_definitions={},
         local_definitions=[],
         use_when=["board numbers"],

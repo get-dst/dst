@@ -104,7 +104,15 @@ class EvalRun(BaseModel):
     lens: str
     lens_version: str | None = None
     started_at: str  # ISO-8601 timestamp
-    mode: Literal["regression", "health", "behavioral"]
+    # Every value a writer actually persists, and what each MEANS to a reader:
+    #   regression — the publish gate inside `dst apply` (rolls back with it)
+    #   test       — a human ran `dst test` (the full-corpus sweep)
+    #   health     — the judge-scored live check (`POST .../evals/run`)
+    #   behavioral — a shape-only suite (expect: clarify|refuse|answer)
+    # `test` was missing here while services/cli/main.py wrote it on every
+    # sweep, so a strict parse of eval_run rows failed on exactly the runs a
+    # user triggers by hand — and the dashboard renders that value as a badge.
+    mode: Literal["regression", "test", "health", "behavioral"]
     score: float | None = None
     passed: int = 0
     failed: int = 0

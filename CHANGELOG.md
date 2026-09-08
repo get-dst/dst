@@ -29,6 +29,80 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.2.0] — 2026-09-07
+
+Schema changes ship with this release: run `dst migrate` before serving (the
+upgrade contract above).
+
+### Changed — relationships are their own files
+
+A join is a fact about a *pair* of entities, so it no longer lives inside one
+of them. Each pair gets one file:
+
+```yaml
+# semantic/relationships/orders__customers.yaml
+left: orders          # the FK side (the many side of many_to_one)
+right: customers
+"on": orders.customer_id = customers.customer_id
+type: left
+relationship: many_to_one
+```
+
+**To migrate an existing project:** move each entity's `joins:` list into
+per-pair files — `left:` is the entity that carried the block, the other
+fields are unchanged. An entity file still carrying `joins:` fails at plan
+and apply with a pointer to the new home; nothing is silently ignored.
+
+What one home per pair buys:
+
+- Declaring the same two entities twice — reversed direction included — is
+  refused at plan and apply as a competing claim, instead of both declarations
+  silently compiling.
+- A lens gets the join exactly when it selects both endpoints; lens files are
+  unchanged.
+- Staleness and re-verification get sharper: adding, editing or deleting a
+  relationship recompiles exactly the published lenses that select both
+  endpoints, and flags for re-verification exactly the certified answers
+  whose SQL joins over it.
+- `dst drift` names the relationships a schema change breaks (a dropped
+  column referenced in an ON clause, a dropped table a pair joins through).
+- `dst import dbt` and OSI import/export read and write the new shape;
+  `dst introspect --check-joins` measures the declared cardinalities as
+  before.
+
+### Added
+
+- **Ambiguity that resolves itself.** An ambiguous definition can declare
+  `audiences:` — which meaning each audience of a lens gets — and a question
+  that already settles the ambiguity is answered deterministically instead of
+  triggering a clarify round. Genuinely open ambiguity still asks.
+- **Freshness measures coverage, not just recency.** Profiling records the
+  date coverage of a table, and a period the warehouse never loaded is
+  disclosed in the answer rather than served as a silent zero.
+- **Certified corrections converge.** A reviewed correction wins over the
+  answer it corrects, each question holds one certified pair, and
+  un-certifying is a first-class path back out.
+- A composed answer whose prose was cut off by the token cap now says so
+  instead of ending mid-sentence as if complete.
+
+### Fixed
+
+- Numbers formatted in locales that use space grouping and decimal commas
+  (e.g. `1 234,56`) ground correctly during answer verification.
+- A filter the lens demands but the question never bound is waived with a
+  disclosure instead of dead-ending the request.
+- A cost total that could not be fully counted is labeled as such instead of
+  reading as a counted total.
+- A lens with an empty access allow-list reports that it refuses every
+  caller, instead of implying admin-only access.
+- Columns the model references in expressions count as modelled for the
+  read allow-list.
+- Authoring errors got sharper: a required key names what it is for, and the
+  YAML flow-map comma trap (`{a: one, two}` inventing a phantom key) is
+  named as such with the fix.
+- The eval gate runs cases at concurrency 16 by default (was 4), so a
+  full-corpus gate finishes in minutes.
+
 ## [0.1.1] — 2026-08-29
 
 ### Security

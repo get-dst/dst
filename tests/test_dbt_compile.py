@@ -39,6 +39,7 @@ def _model():
     model, _warnings = compile_lens_model(
         config=config,
         shared_entities={e.name: e for e in res.entities},
+        shared_relationships={r.name: r for r in res.relationships},
         shared_definitions={d.term: d for d in res.definitions},
         local_definitions=[],
         use_when=[],
@@ -56,12 +57,11 @@ def test_imports_tables_columns_and_grain_from_dbt() -> None:
     assert orders.source.table == "orders" and orders.primary_key == ["order_id"]
     assert orders.grain == "one row per order"
     assert any(f.name == "amount" for f in orders.fields)
-    # FK-side join, cardinality declared
-    assert len(orders.joins) == 1
-    join = orders.joins[0]
-    assert (join.right, join.relationship) == ("customers", "many_to_one")
-    assert join.on == "orders.customer_id = customers.customer_id"
-    assert by_name["customers"].joins == []
+    # one relationship per pair, FK side left, cardinality declared
+    assert len(res.relationships) == 1
+    rel = res.relationships[0]
+    assert (rel.left, rel.right, rel.relationship) == ("orders", "customers", "many_to_one")
+    assert rel.on == "orders.customer_id = customers.customer_id"
 
 
 def test_supported_measures_and_business_metrics() -> None:
@@ -152,9 +152,10 @@ def test_cli_import_writes_reviewable_files(tmp_path: Path) -> None:
     orders = written["semantic/entities/orders.yaml"]
     assert orders.startswith("# imported from dbt project")  # provenance stamp
     assert all(ord(c) < 128 for c in orders)  # scaffold stays ASCII-clean
-    entities, definitions = parse_semantic_files(written)  # header doesn't break parsing
-    assert entities["orders"].grain == "one row per order"
+    entities, definitions, relationships = parse_semantic_files(written)
+    assert entities["orders"].grain == "one row per order"  # header doesn't break parsing
     assert definitions["revenue"].source == "authored"
+    assert relationships["orders__customers"].relationship == "many_to_one"
 
 
 def test_agg_time_dimension_becomes_time_fields() -> None:

@@ -8,14 +8,14 @@ Mapping, and where it is lossy (every lossy edge is reported, never silently dro
   field                  -> dataset.field with expression + datatype
   dimension              -> dataset.field carrying the authored expression
   metric                 -> model-level metric, expression = the compiled aggregate
-  join                   -> relationship, ALWAYS written many -> one
+  relationship           -> relationship, ALWAYS written many -> one
 
 OSI relationships are directional by definition: `from` is the many side, `to` is the
-one side. That is the same fact `Join.relationship` carries, so a `many_to_one` join
-writes `from=left`, and a `one_to_many` writes `from=right`. A join whose relationship
-is undeclared cannot be written honestly and is skipped with that reason — the spec has
-no way to say "unknown cardinality", and guessing is how a metric layer reports seven
-times the truth.
+one side. That is the same fact `SharedRelationship.relationship` carries, so a
+`many_to_one` writes `from=left`, and a `one_to_many` writes `from=right`. A pair whose
+cardinality is undeclared cannot be written honestly and is skipped with that reason —
+the spec has no way to say "unknown cardinality", and guessing is how a metric layer
+reports seven times the truth.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from services.contracts.semantic_model import Definition, Entity, Metric
-from services.contracts.shared_semantic import SharedEntity
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.runtime.compiler import CompileError, metric_sql
 
 OSI_VERSION = "0.2.0"
@@ -127,6 +127,7 @@ def _metric_entry(metric: Metric, entity: Entity, dialect: str) -> dict[str, Any
 
 def to_osi(
     entities: list[SharedEntity],
+    shared_relationships: list[SharedRelationship],
     *,
     name: str,
     dialect: str,
@@ -187,36 +188,37 @@ def to_osi(
             else:
                 metrics.append(entry_or_none)
 
-        for join in entity.joins:
-            if join.right not in known:
-                skipped.append(f"join {entity.name} -> {join.right}: no such entity")
-                continue
-            if join.relationship == "one_to_many":
-                many, one = join.right, entity.name
-            elif join.relationship in ("many_to_one", "one_to_one"):
-                many, one = entity.name, join.right
-            else:
-                skipped.append(
-                    f"join {entity.name} -> {join.right}: no declared relationship, and OSI "
-                    "relationships are directional (from = the many side)"
-                )
-                continue
-            from_cols, to_cols = _join_columns(join.on, many, one)
-            if not from_cols or not to_cols:
-                skipped.append(
-                    f"join {entity.name} -> {join.right}: could not read one column per side "
-                    f"out of `{join.on}`"
-                )
-                continue
-            relationships.append(
-                {
-                    "name": f"{many}_to_{one}",
-                    "from": many,
-                    "to": one,
-                    "from_columns": from_cols,
-                    "to_columns": to_cols,
-                }
+    for rel in shared_relationships:
+        if rel.left not in known or rel.right not in known:
+            missing = rel.left if rel.left not in known else rel.right
+            skipped.append(f"relationship {rel.left} <-> {rel.right}: no such entity '{missing}'")
+            continue
+        if rel.relationship == "one_to_many":
+            many, one = rel.right, rel.left
+        elif rel.relationship in ("many_to_one", "one_to_one"):
+            many, one = rel.left, rel.right
+        else:
+            skipped.append(
+                f"relationship {rel.left} <-> {rel.right}: no declared cardinality, and OSI "
+                "relationships are directional (from = the many side)"
             )
+            continue
+        from_cols, to_cols = _join_columns(rel.on, many, one)
+        if not from_cols or not to_cols:
+            skipped.append(
+                f"relationship {rel.left} <-> {rel.right}: could not read one column per side "
+                f"out of `{rel.on}`"
+            )
+            continue
+        relationships.append(
+            {
+                "name": f"{many}_to_{one}",
+                "from": many,
+                "to": one,
+                "from_columns": from_cols,
+                "to_columns": to_cols,
+            }
+        )
 
     model: dict[str, Any] = {"name": name, "datasets": datasets}
     if description:

@@ -115,7 +115,7 @@ def _jaffle_scalar(sql: str) -> object:
 
 
 def _definitions(broken: bool = False) -> list[Definition]:
-    _entities, definitions = jaffle_shared_assets()
+    _entities, definitions, relationships = jaffle_shared_assets()
     if not broken:
         return definitions
     return [
@@ -143,7 +143,7 @@ def _files(
     """The jaffle project with eval_gate: block and NO sample queries (a sample
     embedding the old definition logic would trip the stale-sample gate first —
     the same-push doctrine would demand updating it, which is not under test)."""
-    entities, _ = jaffle_shared_assets()
+    entities, _, relationships = jaffle_shared_assets()
     definitions = _definitions(broken=broken_definition)
     if resolve_ambiguity:
         # "value" made guessable — the push the must-clarify pin exists to catch.
@@ -160,7 +160,7 @@ def _files(
             else d
             for d in definitions
         ]
-    files = dict(render_semantic_files(entities, definitions))
+    files = dict(render_semantic_files(entities, definitions, relationships))
     if entity_tweak:
         customers = files["semantic/entities/customers.yaml"]
         files["semantic/entities/customers.yaml"] = customers.replace(
@@ -192,7 +192,7 @@ def _apply(headers: dict[str, str], files: dict[str, str]) -> list[dict[str, obj
 
 def _gate_llm(monkeypatch, responses: list[str]) -> None:
     # These tests pin GATE SEMANTICS (divergence, starvation, override) with
-    # exact scripted-response consumption; the #55 retry policy has its own
+    # exact scripted-response consumption; the retry policy has its own
     # dedicated suite (test_gate_retry.py) — one attempt here keeps the
     # scripts aligned.
     from services.evals import runner as _runner

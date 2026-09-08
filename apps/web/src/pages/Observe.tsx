@@ -184,7 +184,7 @@ function AccuracyPanel() {
             <span className="inline-flex items-center gap-1.5 ml-2">
               <span className="h-2 w-2 rounded-sm bg-red" aria-hidden="true" /> failed
             </span>
-            {' '}— hover a square for the run kind and date.
+            . The latest run's kind, counts, and time are under each card.
           </p>
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {evals.data.map((t) => (
@@ -233,16 +233,39 @@ function CostAndRequests() {
             label="Queries"
             value={kpis.data.queries.toLocaleString()}
           />
+          {/* An uncounted total must not read as a counted one. With unpriced
+              calls in the window the figure is a FLOOR, not the spend — a
+              keyless install showed a confident "$0.00" while 184 of 244 calls
+              used a model with no configured price. The trailing + says "at
+              least"; the sub says how many are missing and how to fix it. */}
           <Kpi
             label="AI cost"
-            value={formatCost(kpis.data.ai_cost_usd)}
+            value={
+              (kpis.data.unpriced ?? 0) > 0
+                ? `${formatCost(kpis.data.ai_cost_usd)}+`
+                : formatCost(kpis.data.ai_cost_usd)
+            }
             sub={`${kpis.data.input_tokens.toLocaleString()} in / ${kpis.data.output_tokens.toLocaleString()} out${
-              (kpis.data.unpriced ?? 0) > 0 ? ` · ${kpis.data.unpriced} unpriced` : ''
+              (kpis.data.unpriced ?? 0) > 0
+                ? ` · ${kpis.data.unpriced} call(s) UNPRICED — spend uncounted, not $0; add the model to ai_pricing in dst.yaml`
+                : ''
             }`}
           />
+          {/* Same rule for the warehouse meter: BigQuery bytes price, a
+              self-hosted engine genuinely costs $0 per query, and an
+              unmetered connector is a GAP — only the last one gets a +. */}
           <Kpi
             label="Warehouse cost"
-            value={formatCost(kpis.data.warehouse_cost_usd)}
+            value={
+              (kpis.data.wh_unpriced ?? 0) > 0
+                ? `${formatCost(kpis.data.warehouse_cost_usd)}+`
+                : formatCost(kpis.data.warehouse_cost_usd)
+            }
+            sub={
+              (kpis.data.wh_unpriced ?? 0) > 0
+                ? `${kpis.data.wh_unpriced} query(s) unmetered — not billed at $0, just not measured`
+                : undefined
+            }
           />
           <Kpi
             label="Errors"

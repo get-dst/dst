@@ -22,7 +22,12 @@ import yaml
 from services.contracts.authoring import check_entry_keys, parse_authored
 from services.contracts.lens_config import LensConfig
 from services.contracts.semantic_model import Definition, SampleQuery
-from services.semantic.files import DEFINITION_DIR, ENTITY_DIR, page_to_definition
+from services.semantic.files import (
+    DEFINITION_DIR,
+    ENTITY_DIR,
+    RELATIONSHIP_DIR,
+    page_to_definition,
+)
 
 MANAGED_EXACT = ("lens.yaml", "queries.yaml", "certified_answers.yaml", "evals/cases.yaml")
 
@@ -86,6 +91,8 @@ def asset_dir(path: str) -> str | None:
     nothing has to restate it and drift."""
     if path.startswith(ENTITY_DIR + "/") and path.endswith((".yaml", ".yml")):
         return ENTITY_DIR
+    if path.startswith(RELATIONSHIP_DIR + "/") and path.endswith((".yaml", ".yml")):
+        return RELATIONSHIP_DIR
     if path.startswith(DEFINITION_DIR + "/") and path.endswith(".md"):
         return DEFINITION_DIR
     parts = path.split("/")
@@ -116,6 +123,12 @@ def asset_key(path: str, content: str) -> tuple[str, str] | None:
     try:
         if path.endswith(".md"):
             name = page_to_definition(content).term
+        elif directory == RELATIONSHIP_DIR:
+            # A relationship's identity is derived from its pair, never authored.
+            data = parse_yaml(content, path)
+            left = data.get("left", "") if isinstance(data, dict) else ""
+            right = data.get("right", "") if isinstance(data, dict) else ""
+            name = f"{left}__{right}" if left and right else ""
         else:
             data = parse_yaml(content, path)
             name = data.get("name", "") if isinstance(data, dict) else ""
@@ -223,11 +236,13 @@ def split_by_lens(files: dict[str, str]) -> dict[str, dict[str, str]]:
 
 def split_semantic(files: dict[str, str]) -> dict[str, str]:
     """The project-level shared layer: ``semantic/entities/*.yaml`` +
-    ``semantic/definitions/*.md`` (never under lenses/)."""
+    ``semantic/relationships/*.yaml`` + ``semantic/definitions/*.md``
+    (never under lenses/)."""
     return {
         path: content
         for path, content in files.items()
         if (path.startswith(ENTITY_DIR + "/") and path.endswith((".yaml", ".yml")))
+        or (path.startswith(RELATIONSHIP_DIR + "/") and path.endswith((".yaml", ".yml")))
         or (path.startswith(DEFINITION_DIR + "/") and path.endswith(".md"))
     }
 

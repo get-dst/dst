@@ -136,10 +136,10 @@ def _lens(extra: str) -> dict[str, str]:
             "agg",
         ),
         (
-            "entity joins[]",
+            "relationship file",
             lambda: parse_semantic_file(
-                "semantic/entities/o.yaml",
-                ENTITY + "joins:\n  - right: p\n    on: a = b\n    relation: many_to_one\n",
+                "semantic/relationships/o--p.yaml",
+                "left: o\nright: p\ncondition: a = b\nrelation: many_to_one\n",
             ),
             "relation",
             "relationship",
@@ -200,6 +200,28 @@ def test_the_error_names_the_file_and_the_key_path() -> None:
     assert "access.allow.0" in message
     assert "did you mean `caller`" in message
     assert "keys here: caller, group" in message
+
+
+def test_a_flow_map_comma_is_blamed_on_the_comma() -> None:
+    """`{description: order total, net of discounts}` parses as a phantom key
+    `net of discounts` with no value — the error must name the actual mistake
+    (the unquoted comma), not just accuse the author of a key nobody typed."""
+    with pytest.raises(ValueError) as exc:
+        parse_semantic_file(
+            "semantic/entities/orders.yaml",
+            ENTITY
+            + "fields:\n"
+            + "- {name: amount, type: number, description: order total, net of discounts}\n",
+        )
+    message = str(exc.value)
+    assert "net of discounts" in message  # the phantom key, still named
+    assert "unquoted comma" in message and "block style" in message  # the real fix
+    # a plain misspelled key (no space, or a value present) keeps the terse error
+    with pytest.raises(ValueError) as exc2:
+        parse_semantic_file(
+            "semantic/entities/orders.yaml", ENTITY + "fields:\n- {name: amount, typ: number}\n"
+        )
+    assert "unquoted comma" not in str(exc2.value)
 
 
 # ── a REQUIRED field with no default is announced, missing it is a named error ──
@@ -289,11 +311,11 @@ def test_an_alias_is_not_an_unknown_key() -> None:
     """`condition:` for a join's `on:`, and `term:`/`sql_expr:` on a definition
     page, are documented spellings — rejecting them would be the false positive
     this pass exists to avoid."""
-    entity = parse_semantic_file(
-        "semantic/entities/o.yaml",
-        ENTITY + "joins:\n  - right: p\n    condition: a = b\n",
+    rel = parse_semantic_file(
+        "semantic/relationships/o--p.yaml",
+        "left: o\nright: p\ncondition: a = b\n",
     )
-    assert entity is not None
+    assert rel is not None
     page = parse_definition_page(
         "---\nterm: repeat_customer\nsql_expr: c.orders > 1\n---\n\nbody",
         path="semantic/definitions/x.md",

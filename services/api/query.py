@@ -29,6 +29,7 @@ from services.db.session import org_session
 from services.governance import audit, drift_watch, ratelimit
 from services.governance.credentials import CallerIdentity
 from services.governance.policy import authorize
+from services.lenses import profile_enrich
 from services.lenses import store as lens_store
 from services.lenses.connections import resolve_connector
 from services.lenses.describe import LensDescription, describe_model
@@ -598,6 +599,7 @@ def run_lens_query(
             request_id=rid,
             semantic_model=assembled.model,
             value_domains=assembled.value_domains,
+            entity_coverage=assembled.entity_coverage,
             connector=connector,
             generator=generator,
             escalate_generator=escalate,
@@ -705,6 +707,30 @@ def describe_intent(intent: QueryIntent) -> str:
     return " ".join(parts)
 
 
+def intent_scan_text(intent: QueryIntent) -> str:
+    """What the deterministic rails may read from a structured intent: NAMES ONLY.
+
+    ``describe_intent`` renders filter VALUES so the request log stays readable —
+    and that rendering used to be handed to the pipeline as the caller's
+    question, which meant the ambiguity/exclusion/not-computable pre-checks read
+    the customer's own row labels as if a human had typed them. A filter value of
+    'Revenue (SE)' then forced a clarify on the governed term "revenue"; the same
+    hole could force a reject or a refusal.
+
+    A caller who NAMES a metric, dimension or definition is asking about it, so
+    those still scan. Data values are not the question.
+    """
+    parts = [", ".join(intent.metrics) or "rows"]
+    if intent.dimensions:
+        parts.append("by " + ", ".join(intent.dimensions))
+    names = [f.field for f in intent.filters] + [f"[{term}]" for term in intent.definitions]
+    if names:
+        parts.append("where " + " and ".join(names))
+    if intent.order_by:
+        parts.append("ordered by " + ", ".join(o.field for o in intent.order_by))
+    return " ".join(parts)
+
+
 def run_lens_metrics(
     name: str,
     intent: QueryIntent,
@@ -747,7 +773,8 @@ def run_lens_metrics(
         model_name = resolved.name
         composer = AnswerComposer(resolved.llm, model=model_name)
 
-    _, as_of = assembly.profile_facts(bundle, caller.org_id)
+    profiles, as_of = assembly.profile_facts(bundle, caller.org_id)
+    coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     with attributed(
         Attribution(
             principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
@@ -755,6 +782,8 @@ def run_lens_metrics(
     ):
         result = run_query(
             question=describe_intent(intent),
+            # The rails read names, never values — the log keeps the values.
+            scan_text=intent_scan_text(intent),
             lens_name=name,
             org_id=caller.org_id,
             caller=caller.name,
@@ -772,6 +801,7 @@ def run_lens_metrics(
             # either — every name came from the model and the SQL was built by code.
             certification="none",
             data_as_of=as_of,
+            entity_coverage=coverage,
             generator_tier="metrics",
             log_samples=bundle.config.logging.log_samples,
         )
@@ -924,7 +954,8 @@ def run_certified_for_caller(
 
     resolved = require_llm(bundle.config.model.model_ref())
     llm, model_name = resolved.llm, resolved.name
-    _, as_of = assembly.profile_facts(bundle, caller.org_id)
+    profiles, as_of = assembly.profile_facts(bundle, caller.org_id)
+    coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     fmt: AnswerFormat = body.format if body else "both"
     with attributed(
         Attribution(
@@ -956,6 +987,7 @@ def run_certified_for_caller(
                 bound_values=bound,
             ),
             data_as_of=as_of,
+            entity_coverage=coverage,
             generator_tier="certified",
             log_samples=bundle.config.logging.log_samples,
         )

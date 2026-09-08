@@ -351,6 +351,21 @@ def update(
     return int(res.rowcount)  # type: ignore[attr-defined]
 
 
+def set_status(session: Session, answer_id: str, status: str) -> int:
+    """Flip an answer's status — the non-destructive counterpart to ``delete``.
+
+    ``retired`` is the one status that opts out of serving/matching/testing
+    (see ``is_active``) while keeping the row and its provenance. Server-origin
+    answers have no file to carry ``status: retired``, so without this they
+    could only be destroyed, taking their history with them.
+    """
+    res = session.execute(
+        text("UPDATE certified_answer SET status = :s WHERE id = :i"),
+        {"s": status, "i": answer_id},
+    )
+    return int(res.rowcount)  # type: ignore[attr-defined]
+
+
 def delete(session: Session, answer_id: str) -> int:
     res = session.execute(text("DELETE FROM certified_answer WHERE id = :i"), {"i": answer_id})
     return int(res.rowcount)  # type: ignore[attr-defined]

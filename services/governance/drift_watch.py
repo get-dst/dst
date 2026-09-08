@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from services.contracts.correction import CorrectionDelta
 from services.contracts.semantic_model import Definition
-from services.contracts.shared_semantic import SharedEntity
+from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.lenses import profile_store
 from services.lenses.connections import resolve_connector
 from services.lenses.profiler_catalog import catalog_profiles
@@ -54,7 +54,12 @@ class DriftReport:
         """One deterministic paragraph naming what changed and what reads it."""
         heads = "; ".join(f"{f.table}: {f.kind} `{f.detail}`" for f in self.findings[:5])
         more = f" (+{len(self.findings) - 5} more)" if len(self.findings) > 5 else ""
-        named: dict[str, list[str]] = {"entity": [], "definition": [], "certified": []}
+        named: dict[str, list[str]] = {
+            "entity": [],
+            "definition": [],
+            "relationship": [],
+            "certified": [],
+        }
         for f in self.findings:
             for r in f.refs:
                 if r.name not in named[r.kind]:
@@ -64,6 +69,7 @@ class DriftReport:
             for label, names in (
                 ("entities", named["entity"]),
                 ("definitions", named["definition"]),
+                ("relationships", named["relationship"]),
                 ("certified answers", named["certified"]),
             )
             if names
@@ -80,18 +86,23 @@ def fingerprint(connection: str, parts: list[str]) -> str:
 
 def _layer(
     session: Session,
-) -> tuple[dict[str, SharedEntity], dict[str, Definition]]:
+) -> tuple[dict[str, SharedEntity], dict[str, Definition], dict[str, SharedRelationship]]:
     """The org's applied shared layer, keyed by its canonical file path — the
     pointer a finding carries so the fix starts in the right file."""
     from services.semantic import store as semantic_store
 
     entities: dict[str, SharedEntity] = {}
     definitions: dict[str, Definition] = {}
+    relationships: dict[str, SharedRelationship] = {}
     for asset in semantic_store.list_assets(session):
         try:
             if asset.kind == "entity":
                 entities[f"semantic/entities/{asset.name}.yaml"] = SharedEntity.model_validate(
                     asset.body
+                )
+            elif asset.kind == "relationship":
+                relationships[f"semantic/relationships/{asset.name}.yaml"] = (
+                    SharedRelationship.model_validate(asset.body)
                 )
             else:
                 definitions[f"semantic/definitions/{asset.name}.md"] = Definition.model_validate(
@@ -99,7 +110,7 @@ def _layer(
                 )
         except ValueError:
             continue  # one malformed stored asset must not blind the diff
-    return entities, definitions
+    return entities, definitions, relationships
 
 
 def _certified(session: Session) -> list[wd.CertifiedRef]:
@@ -135,12 +146,12 @@ def check_connection(
         return None
     connector = resolve_connector(connection, org_id)
     current = catalog_profiles(connector, connection)
-    entities, definitions = _layer(session)
+    entities, definitions, relationships = _layer(session)
     baseline = [s.profile for s in stored]
     drift = wd.baseline_drift(baseline, current)
     if not drift:
         return None
-    findings = wd.cross_reference(drift, entities, definitions, _certified(session))
+    findings = wd.cross_reference(drift, entities, definitions, _certified(session), relationships)
     return DriftReport(
         connection=connection,
         fingerprint=fingerprint(connection, [f"{d.table}:{d.kind}:{d.detail}" for d in drift]),

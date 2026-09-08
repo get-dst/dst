@@ -262,8 +262,10 @@ def _canonical_semantic(path: str, content: str) -> tuple[str, str]:
     from services.semantic.files import parse_semantic_files, render_semantic_files
 
     try:
-        entities, definitions = parse_semantic_files({path: content})
-        rendered = render_semantic_files(list(entities.values()), list(definitions.values()))
+        entities, definitions, relationships = parse_semantic_files({path: content})
+        rendered = render_semantic_files(
+            list(entities.values()), list(definitions.values()), list(relationships.values())
+        )
         return next(iter(rendered.items()), (path, content))
     except Exception:
         return path, content
@@ -306,8 +308,35 @@ def server_only(db_names: Iterable[str], incoming_names: Iterable[str]) -> list[
     return sorted(set(db_names) - set(incoming_names))
 
 
+def stale_asset_keys(
+    assets: dict[str, str],
+    effective_hashes: dict[str, str],
+    relationship_pairs: dict[str, tuple[str, str]],
+) -> list[str]:
+    """The asset keys that make one compiled provenance stale: every consumed
+    asset whose effective hash moved (deletion included — an absent asset reads
+    as ""), PLUS any relationship that exists NOW between two entities the lens
+    compiled with but was absent at compile time. Without that second clause a
+    brand-new relationship never appears in any provenance, no lens is flagged,
+    and the published layer keeps refusing a join the project files declare —
+    plan/apply reporting success the whole time. ``relationship_pairs`` maps the
+    effective ``relationship/<name>`` keys to their (left, right) endpoints."""
+    changed = [
+        key for key, digest in sorted(assets.items()) if effective_hashes.get(key, "") != digest
+    ]
+    selected = {key.removeprefix("entity/") for key in assets if key.startswith("entity/")}
+    changed += sorted(
+        key
+        for key, (left, right) in relationship_pairs.items()
+        if key not in assets and left in selected and right in selected
+    )
+    return changed
+
+
 def stale_lenses(
-    provenances: dict[str, dict[str, str]], effective_hashes: dict[str, str]
+    provenances: dict[str, dict[str, str]],
+    effective_hashes: dict[str, str],
+    relationship_pairs: dict[str, tuple[str, str]],
 ) -> dict[str, list[str]]:
     """{lens: changed asset keys} for every published lens whose compiled
     provenance no longer matches ``effective_hashes`` (current DB hashes with the
@@ -315,9 +344,7 @@ def stale_lenses(
     apply recompiles them."""
     out: dict[str, list[str]] = {}
     for lens, assets in provenances.items():
-        changed = [
-            key for key, digest in sorted(assets.items()) if effective_hashes.get(key, "") != digest
-        ]
+        changed = stale_asset_keys(assets, effective_hashes, relationship_pairs)
         if changed:
             out[lens] = changed
     return out

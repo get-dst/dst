@@ -205,9 +205,11 @@ class Settings(BaseSettings):
     # How many eval-gate cases score at once. The work is provider-bound HTTP
     # with no shared mutable state, and serial execution made a full apply
     # 15-30 minutes of back-to-back round-trips (a measured flat ~2.7s
-    # inter-call gap with zero overlap). Conservative default; DST_GATE_CONCURRENCY
-    # raises it per install, 1 restores strictly-serial.
-    gate_concurrency: int = 4
+    # inter-call gap with zero overlap). 16 keeps a 300-case suite in the
+    # low minutes and sits well under provider throttling and warehouse
+    # concurrent-query ceilings; DST_GATE_CONCURRENCY tunes it per install,
+    # 1 restores strictly-serial.
+    gate_concurrency: int = 16
 
     # LLM providers, JSON keyed by name (declaration order IS the tier/cost
     # preference — put the cheap provider first). BYOK: a provider is a name +

@@ -22,6 +22,18 @@ it does not rank them, and it never silently decides.
     dst returns the options and waits; naming a meaning in the question
     answers normally.
 
+Two resolutions are just as deterministic and skip the round-trip. A question
+that contains exactly one mapping's own meaning — "what was net invoiced
+revenue in Q1?" when *net invoiced revenue* is a listed reading — serves that
+reading. And a definition can declare who resolves it: `audiences:`
+frontmatter maps a phrase to the meaning it settles (`cfo: net invoiced
+revenue`), so a question asked on a declared audience's behalf serves their
+reading. Both channels are literal word-boundary matches on authored strings,
+resolve only when they select exactly one mapping — naming two readings, or a
+wording that picks one while the audience picks another, still clarifies —
+and are never silent: the trace and citations record the pinned reading, and
+an audience-resolved answer names it in the prose.
+
 Certified answers are exempt by design: a human approved that exact
 question→SQL pair, so there is nothing left to clarify.
 

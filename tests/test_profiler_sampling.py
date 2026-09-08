@@ -42,6 +42,7 @@ from services.contracts.profile import (
     PartitioningProfile,
     TableProfile,
     TableSampleSpec,
+    TimeCoverage,
 )
 from services.contracts.protocols import Connector, SamplingProfiler
 from services.db.session import org_session
@@ -166,7 +167,7 @@ def test_top_values_and_freshness_sql() -> None:
     assert "GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 25" in top
     assert "IS NOT NULL" in top and "USING SAMPLE 50 ROWS" in top
     fresh = freshness_sql("p.d.t", "ordered_at", dialect="bigquery")
-    assert fresh == "SELECT MAX(`ordered_at`) AS v FROM `p.d.t`"
+    assert fresh == "SELECT MIN(`ordered_at`) AS mn, MAX(`ordered_at`) AS mx FROM `p.d.t`"
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +236,11 @@ def test_duckdb_sampling_on_jaffle(monkeypatch: pytest.MonkeyPatch) -> None:
     assert order_date.min == "2018-01-01" and order_date.max == "2018-03-27"
     assert order_date.top_values is None  # 68 distinct dates is not an enum
     assert orders.last_updated_logical == datetime(2018, 3, 27, tzinfo=UTC)
+    # …and the same probe measured the table's date coverage, whole-table
+    assert orders.time_coverage is not None
+    assert orders.time_coverage.column == "order_date"
+    assert orders.time_coverage.min == datetime(2018, 1, 1, tzinfo=UTC)
+    assert orders.time_coverage.max == datetime(2018, 3, 27, tzinfo=UTC)
 
     amount = _col(orders, "amount")
     assert amount.min is not None and amount.max is not None
@@ -472,8 +478,8 @@ class _FakeBQSamplingClient:
                 {"v": "churned", "n": 3000},
                 {"v": "trial", "n": 900},
             ]
-        if sql.startswith("SELECT MAX("):  # the freshness probe
-            return [{"v": _BQ_FRESH}]
+        if sql.startswith("SELECT MIN("):  # the freshness/coverage probe
+            return [{"mn": datetime(2024, 1, 1, tzinfo=UTC), "mx": _BQ_FRESH}]
         raise AssertionError(f"unexpected SQL executed: {sql}")
 
 
@@ -522,6 +528,7 @@ def test_bigquery_sampling_sql_and_gate() -> None:
     ordered_at = _col(events, "ordered_at")
     assert ordered_at.min is not None and ordered_at.min.startswith("2024-01-01")
     assert events.last_updated_logical == _BQ_FRESH
+    assert events.time_coverage is not None and events.time_coverage.max == _BQ_FRESH
 
 
 def test_bigquery_small_table_counts_exactly_and_falls_back_on_budget() -> None:
@@ -611,8 +618,8 @@ class _FakeMySQLSamplingCursor:
                 {"v": "void", "n": 100},
                 {"v": "draft", "n": 42},
             ]
-        elif sql.startswith("SELECT MAX("):
-            self._rows = [{"v": _MY_FRESH}]
+        elif sql.startswith("SELECT MIN("):
+            self._rows = [{"mn": datetime(2026, 1, 2, 8, 0), "mx": _MY_FRESH}]
         else:  # pragma: no cover — guarded by the asserts below
             raise AssertionError(sql)
         self.description = [(k,) for k in self._rows[0]]
@@ -678,6 +685,9 @@ def test_mysql_sampling_plain_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     issued = _col(invoices, "issued_on")
     assert issued.min == "2026-01-02" and issued.max == "2026-06-08"
     assert invoices.last_updated_logical == _MY_FRESH.replace(tzinfo=UTC)
+    assert invoices.time_coverage is not None
+    assert invoices.time_coverage.column == "updated_at"
+    assert invoices.time_coverage.min == datetime(2026, 1, 2, 8, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -796,6 +806,20 @@ def test_merge_sampled_strips_literals_at_the_last_gate() -> None:
     assert email.top_values is None and email.min is None and email.max is None  # values stripped
     assert _col(merged, "plan").top_values == ["pro", "free"]
     assert merged.last_updated_logical == datetime(2026, 6, 1, tzinfo=UTC)
+
+    # coverage over an excluded column is a pair of literals — same last gate
+    covered = fragment.model_copy(
+        update={
+            "time_coverage": TimeCoverage(
+                column="email",
+                min=datetime(2026, 1, 1, tzinfo=UTC),
+                max=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+        }
+    )
+    assert merge_sampled(base, covered, frozenset({"email"})).time_coverage is None
+    kept = merge_sampled(base, covered)
+    assert kept.time_coverage is not None and kept.time_coverage.column == "email"
     assert merged.source == "sampled"  # the catalog knew nothing about this table
     assert merged.row_count == 3  # catalog facts survive
     assert merged.connection == "shop"  # keyed to the registered connection, not the fragment
@@ -892,7 +916,7 @@ def test_run_sampling_pass_fills_gaps_merges_and_persists(
         _record_duckdb(conn, monkeypatch, recorded)
         with org_session(org) as s:
             again = run_sampling_pass(s, conn, "jaffle", tables=["orders", "customers"])
-        assert recorded and all(q.startswith("SELECT MAX(") for q in recorded)
+        assert recorded and all(q.startswith("SELECT MIN(") for q in recorded)
         orders_again = {p.table: p for p in again}["orders"]
         assert orders_again.source == "sampled"  # provenance sticks
         assert _col(orders_again, "status").top_values == status.top_values

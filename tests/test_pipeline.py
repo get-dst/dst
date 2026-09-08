@@ -621,6 +621,154 @@ def test_pipeline_certified_sql_is_exempt_from_filter_check() -> None:
     assert res.response.sql and "is_new_customer" not in res.response.sql
 
 
+# --- A mandatory filter the question never asked for is waived, ---------------
+# --- not a dead end: the plain aggregate serves through every  ---------------
+# --- remaining gate, disclosed, with the near-miss on the trace. -------------
+
+
+def _overdue_only_model() -> SemanticModel:
+    """The dead-end shape: the lens's ONLY count metric is mandatorily
+    filtered, so every bare COUNT used to be condemned as that metric
+    unfiltered — including the one answering the plain-total question."""
+    return SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="invoices",
+                source=EntitySource(connection="duckdb", table="finance.invoices"),
+                fields=[
+                    Field(name="invoice_id", type="number"),
+                    Field(name="days_overdue", type="number"),
+                ],
+                metrics=[
+                    Metric(
+                        name="overdue_invoice_count",
+                        agg="count",
+                        expr="invoices.invoice_id",
+                        filters=["invoices.days_overdue > 0"],
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def _seed_invoices(tmp_path: object) -> DuckDBConnector:
+    import duckdb
+
+    path = str(tmp_path / "wh.duckdb")  # type: ignore[operator]
+    con = duckdb.connect(path)
+    con.execute("CREATE SCHEMA finance")
+    con.execute("CREATE TABLE finance.invoices (invoice_id INTEGER, days_overdue INTEGER)")
+    con.execute(
+        "INSERT INTO finance.invoices "
+        "SELECT range, CASE WHEN range < 2 THEN 30 ELSE 0 END FROM range(6)"
+    )
+    con.close()
+    return DuckDBConnector(path)
+
+
+_PLAIN_INVOICE_COUNT = "SELECT COUNT(invoices.invoice_id) AS n FROM finance.invoices AS invoices"
+_INVOICES_UNFILTERED = f'{{"sql": "{_PLAIN_INVOICE_COUNT}", "definition_used": null}}'
+_INVOICES_FILTERED = (
+    '{"sql": "SELECT COUNT(invoices.invoice_id) AS n FROM finance.invoices AS invoices '
+    'WHERE invoices.days_overdue > 0", "definition_used": null}'
+)
+
+
+def test_total_question_falls_through_when_the_only_count_metric_is_filtered(
+    tmp_path: object,
+) -> None:
+    """The availability defect, pinned end-to-end: 'how many X in total' on a
+    lens whose only count metric demands a filter the question never asked for
+    must SERVE the plain count — through every remaining gate — instead of
+    dead-ending on `governed metric filter missing`. The serve is loud: the
+    waiver rides the answer prose, trust_summary, and the verification report
+    on both response and trace, and the grade never reads verified."""
+    res = run_query(
+        question="How many invoices have we issued in total, all statuses?",
+        lens_name="finance",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=_overdue_only_model(),
+        connector=_seed_invoices(tmp_path),
+        generator=FixedSQLGenerator(_PLAIN_INVOICE_COUNT),
+        composer=AnswerComposer(ScriptedLLM(["There are 6 invoices in total."])),
+    )
+    assert res.trace.status == "ok"
+    # The plain count actually served — unfiltered, from the real warehouse.
+    assert res.response.sql == _PLAIN_INVOICE_COUNT
+    assert res.response.data is not None and res.response.data.rows == [[6]]
+    # No repair was burned demanding a filter the question never bound —
+    # the old behavior spent the repair on a wrong-direction instruction.
+    assert res.trace.repairs == 0
+    # The waived snap is recorded where nothing can lose it: the verification
+    # report rides BOTH the response and the trace, so the miss is auditable.
+    for report in (res.response.verification, res.trace.verification):
+        assert report is not None
+        waived = report.check("metric_filter_waived")
+        assert waived is not None and waived.status == "fail"
+        assert waived.reason is not None
+        assert "overdue_invoice_count" in waived.reason
+        assert "invoices.days_overdue > 0" in waived.reason
+    # Never `verified`: question-metric alignment is the one thing nothing
+    # deterministic could confirm here.
+    assert res.response.confidence == "partial"
+    # Said out loud on the prose and the field agents lead with.
+    assert res.response.answer is not None
+    assert "Note: this lens's 'overdue_invoice_count' metric" in res.response.answer
+    assert "NOT applied" in res.response.answer
+    assert res.response.trust_summary is not None
+    assert "overdue_invoice_count" in res.response.trust_summary
+    # The bare aggregation matches the metric's expression, which is exactly
+    # what basis attribution keys on — a waived metric must not be cited as
+    # what this figure was computed as.
+    assert res.response.definition_used is None
+
+
+def test_overdue_question_still_snaps_and_serves_the_governed_metric(tmp_path: object) -> None:
+    """The negative case the escape must not widen: a question that names the
+    metric ('overdue') binds its filter — the unfiltered attempt is repaired
+    to the governed form and the metric serves, with nothing waived."""
+    llm = ScriptedLLM([_INVOICES_UNFILTERED, _INVOICES_FILTERED, "2 invoices are overdue."])
+    res = run_query(
+        question="How many overdue invoices do we have?",
+        lens_name="finance",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=_overdue_only_model(),
+        connector=_seed_invoices(tmp_path),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+    assert res.trace.status == "ok"
+    assert res.response.sql is not None and "days_overdue > 0" in res.response.sql
+    assert res.response.data is not None and res.response.data.rows == [[2]]
+    assert res.trace.repairs == 1
+    assert res.response.verification is not None
+    assert res.response.verification.check("metric_filter_waived") is None
+
+
+def test_overdue_question_that_never_repairs_still_rejects(tmp_path: object) -> None:
+    """A bound demand keeps its teeth: when the question asks for the governed
+    metric and the model keeps emitting the unfiltered form, the serve is
+    still rejected — the waiver never fires for a question that binds."""
+    llm = ScriptedLLM([_INVOICES_UNFILTERED])  # repeats the violation on every attempt
+    res = run_query(
+        question="How many overdue invoices do we have?",
+        lens_name="finance",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=_overdue_only_model(),
+        connector=_seed_invoices(tmp_path),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+    assert res.trace.status == "rejected"
+    assert "governed metric filter missing" in (res.trace.error or "")
+
+
 # --- Selection is a visible boundary: a metric the curator -------------------
 # --- DROPPED from the lens's selection refuses deterministically — no LLM,  ---
 # --- no warehouse — instead of being reconstructed from raw columns.        ---

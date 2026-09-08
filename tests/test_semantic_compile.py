@@ -6,7 +6,7 @@ import pytest
 
 from services.contracts.lens_config import LensConfig
 from services.contracts.semantic_model import Definition, SampleQuery, SemanticModel
-from services.contracts.shared_semantic import SelectSpec, SharedEntity
+from services.contracts.shared_semantic import SelectSpec, SharedEntity, SharedRelationship
 from services.project.compile import CompileError, compile_lens_model, dialect_for
 from services.semantic.files import parse_semantic_files, render_semantic_files
 
@@ -34,13 +34,6 @@ ORDERS = SharedEntity.model_validate(
             },
             {"name": "order_count", "agg": "count", "expr": "orders.order_id"},
         ],
-        "joins": [
-            {
-                "right": "customers",
-                "on": "orders.customer_id = customers.id",
-                "relationship": "many_to_one",
-            }
-        ],
     }
 )
 CUSTOMERS = SharedEntity.model_validate(
@@ -59,8 +52,17 @@ WORKLOAD = Definition(
     status="ambiguous",
     possible_mappings=["usage - product_usage", "projects - projects"],
 )
+ORDERS_CUSTOMERS = SharedRelationship.model_validate(
+    {
+        "left": "orders",
+        "right": "customers",
+        "on": "orders.customer_id = customers.id",
+        "relationship": "many_to_one",
+    }
+)
 SHARED_E = {"orders": ORDERS, "customers": CUSTOMERS}
 SHARED_D = {"net_revenue": NET_REV, "workload": WORKLOAD}
+SHARED_R = {ORDERS_CUSTOMERS.name: ORDERS_CUSTOMERS}
 
 
 def _config(**select: object) -> LensConfig:
@@ -77,11 +79,16 @@ def _compile(config: LensConfig, **over: object):
         config=config,
         shared_entities=SHARED_E,
         shared_definitions=SHARED_D,
+        shared_relationships=SHARED_R,
         local_definitions=[],
         use_when=["board numbers"],
         sample_queries=[SampleQuery(question="q", sql="SELECT 1")],
         dialect="duckdb",
-        asset_hashes={"entity/orders": "h1", "definition/net_revenue": "h2"},
+        asset_hashes={
+            "entity/orders": "h1",
+            "definition/net_revenue": "h2",
+            "relationship/orders__customers": "h3",
+        },
     )
     kwargs.update(over)
     return compile_lens_model(**kwargs)  # type: ignore[arg-type]
@@ -91,20 +98,27 @@ def _compile(config: LensConfig, **over: object):
 
 
 def test_semantic_files_round_trip() -> None:
-    files = render_semantic_files([ORDERS, CUSTOMERS], [NET_REV, WORKLOAD])
+    files = render_semantic_files([ORDERS, CUSTOMERS], [NET_REV, WORKLOAD], [ORDERS_CUSTOMERS])
     assert set(files) == {
         "semantic/entities/orders.yaml",
         "semantic/entities/customers.yaml",
         "semantic/definitions/net-revenue.md",
         "semantic/definitions/workload.md",
+        "semantic/relationships/orders-customers.yaml",
     }
-    entities, definitions = parse_semantic_files(files)
+    entities, definitions, relationships = parse_semantic_files(files)
     assert entities["orders"] == ORDERS and entities["customers"] == CUSTOMERS
     assert definitions["net_revenue"] == NET_REV
     assert definitions["workload"].status == "ambiguous"
     assert definitions["workload"].possible_mappings == WORKLOAD.possible_mappings
+    assert relationships["orders__customers"] == ORDERS_CUSTOMERS
     # render ∘ parse ∘ render is the identity
-    assert render_semantic_files(list(entities.values()), list(definitions.values())) == files
+    assert (
+        render_semantic_files(
+            list(entities.values()), list(definitions.values()), list(relationships.values())
+        )
+        == files
+    )
 
 
 def test_malformed_semantic_file_names_the_path() -> None:
@@ -171,10 +185,16 @@ def test_star_selects_every_entity() -> None:
     assert {e.name for e in model.entities} == {"orders", "customers"}
 
 
-def test_join_to_unselected_entity_drops_with_warning() -> None:
+def test_relationship_with_one_unselected_endpoint_drops_with_warning() -> None:
     model, warnings = _compile(_config(entities=["orders"]))
     assert model.joins == []
-    assert warnings == ["join orders -> customers dropped: 'customers' is not selected"]
+    assert warnings == ["relationship orders <-> customers dropped: 'customers' is not selected"]
+    # neither endpoint selected: not this lens's fact — silence, not noise
+    _, warnings = _compile(
+        _config(entities=["orders"]),
+        shared_relationships={"a__b": SharedRelationship(left="a", right="b", on="a.x = b.x")},
+    )
+    assert warnings == []
 
 
 def test_unknown_entity_and_metric_error() -> None:
@@ -214,6 +234,7 @@ def test_provenance_records_only_consumed_assets() -> None:
         "entity/orders": "h1",
         "entity/customers": "",
         "definition/net_revenue": "h2",
+        "relationship/orders__customers": "h3",
     }
     assert model.use_when == ["board numbers"]
     assert model.sample_queries[0].question == "q"
@@ -323,11 +344,12 @@ def test_demo_two_mapping_case_unchanged() -> None:
     # The jaffle teaching example serves both meanings — nothing drops, still asks.
     from services.lenses.demo import jaffle_customer_value_config, jaffle_shared_assets
 
-    entities, definitions = jaffle_shared_assets()
+    entities, definitions, relationships = jaffle_shared_assets()
     model, warnings = compile_lens_model(
         config=jaffle_customer_value_config(),
         shared_entities={e.name: e for e in entities},
         shared_definitions={d.term: d for d in definitions},
+        shared_relationships={r.name: r for r in relationships},
         local_definitions=[],
         use_when=[],
         sample_queries=[],
@@ -350,7 +372,7 @@ def test_dialect_mapping() -> None:
 
 def test_duplicate_shared_names_raise() -> None:
     """Two files claiming one name must error, not last-file-win."""
-    files = render_semantic_files([ORDERS], [NET_REV])
+    files = render_semantic_files([ORDERS], [NET_REV], [])
     dup_entity = {
         **files,
         "semantic/entities/orders-copy.yaml": files["semantic/entities/orders.yaml"],
@@ -365,12 +387,61 @@ def test_duplicate_shared_names_raise() -> None:
         parse_semantic_files(dup_def)
 
 
+def test_duplicate_relationship_pair_raises_even_reversed() -> None:
+    """The pair is the identity: a second file for the same two entities —
+    reversed direction included — is a competing claim, killed at the parse
+    seam so plan and apply both refuse it."""
+    files = render_semantic_files([], [], [ORDERS_CUSTOMERS])
+    same = {
+        **files,
+        "semantic/relationships/copy.yaml": files["semantic/relationships/orders-customers.yaml"],
+    }
+    with pytest.raises(ValueError, match="a pair has one relationship"):
+        parse_semantic_files(same)
+    reversed_rel = SharedRelationship(
+        left="customers", right="orders", on="orders.customer_id = customers.id"
+    )
+    both = {
+        **files,
+        **{
+            f"semantic/relationships/rev-{k.rsplit('/', 1)[1]}": v
+            for k, v in render_semantic_files([], [], [reversed_rel]).items()
+        },
+    }
+    with pytest.raises(ValueError, match="a pair has one relationship"):
+        parse_semantic_files(both)
+
+
+def test_new_relationship_between_selected_entities_flags_stale() -> None:
+    """A relationship created AFTER a lens compiled never appears in its
+    provenance — without the endpoint clause no lens would be flagged and the
+    published layer would keep refusing a join the project files declare."""
+    from services.project.plan import stale_asset_keys
+
+    provenance = {"entity/orders": "h1", "entity/customers": "h2"}
+    effective = {
+        "entity/orders": "h1",
+        "entity/customers": "h2",
+        "relationship/orders__customers": "hr",
+    }
+    pairs = {"relationship/orders__customers": ("orders", "customers")}
+    assert stale_asset_keys(provenance, effective, pairs) == ["relationship/orders__customers"]
+    # a lens selecting only one endpoint is untouched by the new relationship
+    assert stale_asset_keys({"entity/orders": "h1"}, effective, pairs) == []
+    # already consumed and unchanged: quiet
+    consumed = {**provenance, "relationship/orders__customers": "hr"}
+    assert stale_asset_keys(consumed, effective, pairs) == []
+    # deleted relationship still flags through the ordinary hash comparison
+    gone = {k: v for k, v in effective.items() if not k.startswith("relationship/")}
+    assert stale_asset_keys(consumed, gone, {}) == ["relationship/orders__customers"]
+
+
 def test_plan_canonicalizes_lean_files() -> None:
     """A hand-authored lean file (defaults omitted) must plan
     as 'unchanged' against the DB's canonical render — no phantom diffs."""
     from services.project.plan import plan_semantic
 
-    canonical = render_semantic_files([CUSTOMERS], [])
+    canonical = render_semantic_files([CUSTOMERS], [], [])
     path = "semantic/entities/customers.yaml"
     lean = (
         "name: customers\nsource: {connection: wh, table: analytics.customers}\n"

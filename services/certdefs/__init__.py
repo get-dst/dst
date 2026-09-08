@@ -113,6 +113,12 @@ class CertifiedDefinition(Authored):
         "ambiguous terms these are what make the clarification reachable for the "
         "questions users actually type",
     )
+    audiences: dict[str, str] = Field(
+        default_factory=dict,
+        description="for ambiguous terms: audience phrase -> the meaning it resolves "
+        "to — a question naming the phrase serves that possible_mapping instead of "
+        "clarifying, with the reading disclosed (Definition.audiences)",
+    )
     body: str = Field(
         default="",
         description="not a frontmatter key — the markdown prose below it: the governed "

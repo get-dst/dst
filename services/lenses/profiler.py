@@ -184,10 +184,14 @@ def merge_sampled(
         if _shape_only(base.table, merged.name, excluded):  # the last gate before persistence
             merged = merged.model_copy(update={"top_values": None, "min": None, "max": None})
         columns.append(merged)
+    coverage = fragment.time_coverage or base.time_coverage
+    if coverage is not None and _shape_only(base.table, coverage.column, excluded):
+        coverage = None  # MIN/MAX are literals too — same last gate as the columns
     return base.model_copy(
         update={
             "columns": columns,
             "last_updated_logical": fragment.last_updated_logical or base.last_updated_logical,
+            "time_coverage": coverage,
             "profiled_at": fragment.profiled_at,
             "sampled_rows": fragment.sampled_rows,
             "source": _merged_source(base),

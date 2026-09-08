@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import duckdb
+import pytest
 import yaml
 
 from services.certdefs import parse_definition_page, render_definition_page
@@ -15,10 +16,11 @@ from services.contracts import (
     SelectSpec,
     SemanticModel,
     SharedEntity,
-    SharedJoin,
+    SharedRelationship,
     asset_content_hash,
     asset_hash,
 )
+from services.contracts.authoring import parse_authored
 from services.contracts.lens_config import LensConfig
 from services.runtime.compiler import metric_sql
 
@@ -93,22 +95,41 @@ def test_select_spec_coerces_bare_entity_names() -> None:
     assert spec.definitions == []  # deny-by-default: no shared terms unless selected
 
 
-def test_shared_entity_carries_fk_side_joins() -> None:
-    se = SharedEntity.model_validate(
-        _entity(
-            joins=[
-                {
-                    "right": "customers",
-                    "on": "orders.customer_id = customers.id",
-                    "relationship": "many_to_one",
-                }
-            ]
-        )
+def test_a_relationship_is_its_own_asset_with_a_derived_name() -> None:
+    rel = SharedRelationship.model_validate(
+        {
+            "left": "orders",
+            "right": "customers",
+            "on": "orders.customer_id = customers.id",
+            "relationship": "many_to_one",
+        }
     )
-    assert se.joins[0].type == "left"  # default
-    # SharedEntity minus joins is a plain Entity — the compile flattening contract
-    plain = Entity.model_validate(se.model_dump(exclude={"joins"}))
-    assert plain.name == "orders"
+    assert rel.type == "left"  # default
+    assert rel.name == "orders__customers"  # derived from the pair, never authored
+
+
+def test_a_relationship_spans_two_entities() -> None:
+    with pytest.raises(ValueError, match="self-join"):
+        SharedRelationship.model_validate({"left": "orders", "right": "orders", "on": "a = b"})
+
+
+def test_an_entity_file_with_a_joins_block_gets_the_pointer_not_a_generic_error() -> None:
+    """The old home fails LOUD at the authoring seam, naming the new one — a
+    silently-ignored `joins:` key would compile a lens without its joins."""
+    with pytest.raises(ValueError, match="semantic/relationships/"):
+        parse_authored(
+            SharedEntity,
+            _entity(joins=[{"right": "customers", "condition": "a = b"}]),
+            "semantic/entities/orders.yaml",
+        )
+    # Storage stays tolerant (the class is also the storage schema): an old
+    # stored body still validates, the retired key simply ignored.
+    assert (
+        SharedEntity.model_validate(
+            _entity(joins=[{"right": "customers", "condition": "a = b"}])
+        ).name
+        == "orders"
+    )
 
 
 # ── authoring papercuts: the YAML `on` key, and COUNT(*) ─────────────────────
@@ -120,26 +141,24 @@ def test_join_authored_with_a_bare_on_key_survives_yaml() -> None:
     unreadable as a diagnosis of "quote your key". Author it the obvious way."""
     body = yaml.safe_load(
         """
-        name: orders
-        source: {connection: wh, table: analytics.orders}
-        joins:
-          - right: customers
-            on: orders.customer_id = customers.id
-            relationship: many_to_one
+        left: orders
+        right: customers
+        on: orders.customer_id = customers.id
+        relationship: many_to_one
         """
     )
-    assert True in body["joins"][0]  # the mechanism, pinned: YAML really ate it
-    assert SharedEntity.model_validate(body).joins[0].on == "orders.customer_id = customers.id"
+    assert True in body  # the mechanism, pinned: YAML really ate it
+    assert SharedRelationship.model_validate(body).on == "orders.customer_id = customers.id"
 
 
 def test_join_condition_authors_quoted_or_by_alias() -> None:
     """The two spellings that never depended on the repair: a quoted key, and
     the `condition:` alias the reference points at."""
-    quoted = yaml.safe_load('{right: customers, "on": a.id = b.id}')
-    assert SharedJoin.model_validate(quoted).on == "a.id = b.id"
-    assert SharedJoin.model_validate({"right": "customers", "condition": "a.id = b.id"}).on == (
-        "a.id = b.id"
-    )
+    quoted = yaml.safe_load('{left: orders, right: customers, "on": a.id = b.id}')
+    assert SharedRelationship.model_validate(quoted).on == "a.id = b.id"
+    assert SharedRelationship.model_validate(
+        {"left": "orders", "right": "customers", "condition": "a.id = b.id"}
+    ).on == ("a.id = b.id")
     # model-level Join too (left is explicit there), by alias and by field name
     assert Join.model_validate({"left": "o", "right": "c", "condition": "a = b"}).on == "a = b"
     assert Join(left="o", right="c", on="a = b").on == "a = b"

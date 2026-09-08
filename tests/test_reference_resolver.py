@@ -22,7 +22,7 @@ from services.contracts.semantic_model import (
     Metric,
     SemanticModel,
 )
-from services.contracts.shared_semantic import SelectSpec, SharedEntity
+from services.contracts.shared_semantic import SelectSpec, SharedEntity, SharedRelationship
 from services.project.compile import CompileError, compile_lens_model
 from services.semantic.resolve import resolve_model
 
@@ -61,7 +61,11 @@ CUSTOMERS = SharedEntity.model_validate(
 )
 
 
-def _compile(entities: list[SharedEntity], definitions: list[Definition] | None = None):
+def _compile(
+    entities: list[SharedEntity],
+    definitions: list[Definition] | None = None,
+    relationships: list[SharedRelationship] | None = None,
+):
     config = LensConfig(
         name="probe",
         display_name="Probe",
@@ -77,6 +81,7 @@ def _compile(entities: list[SharedEntity], definitions: list[Definition] | None 
         config=config,
         shared_entities={e.name: e for e in entities},
         shared_definitions={d.term: d for d in definitions or []},
+        shared_relationships={r.name: r for r in relationships or []},
         local_definitions=[],
         use_when=[],
         sample_queries=[],
@@ -218,11 +223,11 @@ def test_ratio_and_derived_refs_error_at_compile() -> None:
 
 
 def test_join_on_and_definition_sql_expr_are_resolved() -> None:
-    joined = _sessions(
-        joins=[{"right": "customers", "on": "sessions.customer_idx = customers.customer_id"}]
+    rel = SharedRelationship(
+        left="sessions", right="customers", on="sessions.customer_idx = customers.customer_id"
     )
     with pytest.raises(CompileError, match="join sessions -> customers: 'sessions.customer_idx'"):
-        _compile([joined, CUSTOMERS])
+        _compile([_sessions(), CUSTOMERS], relationships=[rel])
     bad_def = Definition(term="converted", body="b", sql_expr="sessions.conversion = true")
     with pytest.raises(CompileError, match="definition converted: 'sessions.conversion'"):
         _compile([_sessions()], [bad_def])
@@ -267,10 +272,10 @@ def test_table_qualified_refs_rewrite_to_entity_form_with_warning() -> None:
 def test_qualified_source_table_ref_also_rewrites() -> None:
     # bindings idiom: a bare modeled table matches the ref's last segment and
     # vice versa — authors pasting fully-qualified BI SQL get the same kindness.
-    joined = _sessions(
-        joins=[{"right": "customers", "on": "sessions.session_id = crm.customers.customer_id"}]
+    rel = SharedRelationship(
+        left="sessions", right="customers", on="sessions.session_id = crm.customers.customer_id"
     )
-    model, warnings = _compile([joined, CUSTOMERS])
+    model, warnings = _compile([_sessions(), CUSTOMERS], relationships=[rel])
     assert model.joins[0].on == "sessions.session_id = customers.customer_id"
     assert any(
         "'crm.customers.customer_id' rewritten to 'customers.customer_id'" in w for w in warnings

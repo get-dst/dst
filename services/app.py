@@ -147,7 +147,8 @@ _openapi_tags = [
     },
     {
         "name": "semantic",
-        "description": "The shared semantic layer — entity/definition assets + introspection.",
+        "description": "The shared semantic layer — entity/definition/relationship "
+        "assets + introspection.",
     },
     {
         "name": "reviews",

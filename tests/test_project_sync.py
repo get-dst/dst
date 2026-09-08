@@ -156,8 +156,8 @@ def test_plan_statuses_and_diffs() -> None:
 
 
 def test_plan_semantic_statuses_and_diffs() -> None:
-    entities, definitions = jaffle_shared_assets()
-    db_files = render_semantic_files(entities, definitions)
+    entities, definitions, relationships = jaffle_shared_assets()
+    db_files = render_semantic_files(entities, definitions, relationships)
     incoming = dict(db_files)
     plans = plan_semantic(db_files, incoming)
     assert {p.status for p in plans} == {"unchanged"}
@@ -188,7 +188,7 @@ def test_stale_lenses_compares_provenance_to_effective_hashes() -> None:
         "fresh": {"entity/customers": "h3"},
     }
     effective = {"entity/orders": "CHANGED", "definition/ltv": "h2", "entity/customers": "h3"}
-    assert stale_lenses(provenances, effective) == {
+    assert stale_lenses(provenances, effective, {}) == {
         "board": ["entity/orders"],
         "ops": ["entity/orders"],
     }
@@ -251,8 +251,8 @@ def org(monkeypatch):
 
 
 def _project_files() -> dict[str, str]:
-    entities, definitions = jaffle_shared_assets()
-    files = dict(render_semantic_files(entities, definitions))
+    entities, definitions, relationships = jaffle_shared_assets()
+    files = dict(render_semantic_files(entities, definitions, relationships))
     lens_tree = render_lens_repo(jaffle_customer_value_bundle())
     for path, content in lens_tree.items():
         files[f"lenses/customer_value/{path}"] = content
@@ -280,6 +280,7 @@ def test_apply_export_plan_fixed_point(org) -> None:
         "created definition/value",
         "created entity/customers",
         "created entity/orders",
+        "created relationship/orders__customers",
     ]
     lens = next(e for e in out if e.get("lens") == "customer_value")
     assert lens["action"] == "created" and lens["version"] == 1
@@ -842,7 +843,7 @@ def test_multi_lens_apply_with_one_rejection_lands_nothing(org, monkeypatch) -> 
     with org_session(_oid) as s:
         assert lens_store.lens_names(s) == ["customer_value"]
         assert len(lens_store.list_versions(s, "customer_value")) == 1
-        assert len(semantic_store.list_assets(s)) == 5
+        assert len(semantic_store.list_assets(s)) == 6
         assert connection_store.get_connection(s, "fresh") is not None
 
 
@@ -1394,7 +1395,7 @@ def test_plan_lists_orphans_only_for_semantic_pushes(org) -> None:
         "entity/orders: in DB but no file — remove with dst semantic rm, "
         "or export to recover the file"
     ) in orphans
-    assert len(orphans) == 4  # entity/orders + the three shared definitions
+    assert len(orphans) == 5  # entity/orders + the relationship + three definitions
     assert not any(n.startswith("entity/customers:") for n in orphans)
 
     # A lens-only push must not spam orphans.
@@ -2003,8 +2004,8 @@ def test_plan_semantic_matches_foldered_files_by_identity():
     from services.project.plan import plan_semantic
     from services.semantic.files import render_semantic_files
 
-    entities, definitions = jaffle_shared_assets()
-    db_files = render_semantic_files(entities, definitions)
+    entities, definitions, relationships = jaffle_shared_assets()
+    db_files = render_semantic_files(entities, definitions, relationships)
     orders = db_files["semantic/entities/orders.yaml"]
     plans = plan_semantic(db_files, {"semantic/entities/sales/orders.yaml": orders})
     assert [(p.path, p.status) for p in plans] == [

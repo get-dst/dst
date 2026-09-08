@@ -203,6 +203,16 @@ def test_default_includes_example_lens(tmp_path: Path) -> None:
     context = (root / ".claude/skills/dst-context/SKILL.md").read_text(encoding="utf-8")
     assert "Decide, don't describe" in context
     assert "status: ambiguous" in context and "negative form" in context
+    # the reconciliation-proof standard: a trap claim carries the query that
+    # proved it, a FAILED reconciliation is a documented fact with a
+    # source-of-truth rule, and "measured, not assumed" is a checklist step
+    assert '"Measured, not assumed" is a checklist' in context
+    assert "cites the query that proved" in context
+    assert "reconciliation that FAILS" in context
+    assert "which-question rule" in context
+    # certified-outranks-clarify is a documented pattern, not folk knowledge
+    assert "Certified outranks clarify" in certify
+    assert "clarify round-trip" in certify and "still clarify instead of guessing" in certify
     assert "verified_by" in certify and "source" in certify
     # and the history-bootstrap loop
     history = (root / ".claude/skills/dst-history-bootstrap/SKILL.md").read_text(encoding="utf-8")
@@ -223,6 +233,12 @@ def test_default_includes_example_lens(tmp_path: Path) -> None:
     # a caller guesses {"question": ...} and gets a 422
     for doc in (agents_md, readme):
         assert "/v1/lenses/<lens>/query" in doc and '{"q": "..."}' in doc
+    # the consumer handoff SLOT: AGENTS.md owns WHERE the handoff doc goes and
+    # what it must cover (doors, relayed confidence, verbatim declines,
+    # never-bypass) — the content stays the author's
+    assert "CONSUMER.md" in agents_md
+    assert "relayed verbatim" in agents_md and "never dropped" in agents_md
+    assert "the lens is the interface" in agents_md
 
 
 def test_scaffold_list_files_survive_an_append(tmp_path: Path) -> None:
@@ -274,8 +290,9 @@ def test_scaffold_is_an_appliable_project(tmp_path: Path) -> None:
         for p in root.rglob("*")
         if p.is_file() and p.suffix in {".yaml", ".yml", ".md"} and ".git" not in p.parts
     }
-    entities, definitions = parse_semantic_files(split_semantic(files))
+    entities, definitions, relationships = parse_semantic_files(split_semantic(files))
     assert set(entities) == {"customers", "orders"}
+    assert set(relationships) == {"orders__customers"}
     assert definitions["value"].status == "ambiguous"
     lens_files = {
         p.removeprefix("lenses/customer_value/"): c
@@ -286,6 +303,7 @@ def test_scaffold_is_an_appliable_project(tmp_path: Path) -> None:
     model, warnings = compile_lens_model(
         config=source.config,
         shared_entities=entities,
+        shared_relationships=relationships,
         shared_definitions=definitions,
         local_definitions=source.local_definitions,
         use_when=source.use_when,
@@ -314,10 +332,14 @@ def test_no_example_still_documents_the_surface(tmp_path: Path) -> None:
     # used to reproduce the YAML-boolean bug (`on:` loads as True), and a
     # reference an author can paste is the whole point of generating one.
     doc = (root / "semantic/README.md").read_text(encoding="utf-8")
-    assert '# "on": <required>' in doc  # the join-fields reference block
-    assert '"on": <required>' in doc.split("joins:")[1]  # and the inline item shape
+    assert '# "on": <required>' in doc  # the relationship-file reference block
+    assert '"on": <required>' in doc.split("Relationships (")[1]  # and the field shape
     assert "\non: " not in doc and "{right: <required>, on:" not in doc
     assert "a YAML boolean" in doc and "condition:" in doc
+    # the other YAML trap: an unquoted comma inside a flow-map value splits the
+    # prose into a phantom key and the parse error blames a key nobody wrote
+    assert "QUOTE any flow-map value holding a comma" in doc
+    assert "an unknown key you never wrote" in doc
     # COUNT(*) is authorable: the metric reference says expr is optional for it
     assert "COUNT(*)" in doc
 

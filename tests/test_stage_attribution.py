@@ -152,6 +152,10 @@ def test_prose_signature_is_claims_not_wording():
     assert prose_signature("Revenue was 1,600 EUR across 3 orders.") != a
     assert prose_signature(None) is None
     assert prose_signature("No numbers here.") == "∅"
+    # one scanner, two callers: the fi-FI spelling signs like the en-US one
+    assert prose_signature("Saldo on 195 419,94 EUR.") == prose_signature(
+        "Balance is 195,419.94 EUR."
+    )
 
 
 def test_prose_agreement_catches_same_rows_different_responses():

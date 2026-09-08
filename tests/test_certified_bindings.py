@@ -25,6 +25,7 @@ from services.contracts.semantic_model import (
     Entity,
     EntitySource,
     Field,
+    Join,
     SemanticModel,
     SharedProvenance,
 )
@@ -82,6 +83,28 @@ def test_join_with_aliases_binds_both_tables() -> None:
         "entity/orders": "h_orders",
         "entity/customers": "h_customers",
     }
+
+
+def test_sql_reading_both_endpoints_binds_their_relationship() -> None:
+    """A changed ON clause or cardinality must re-test the answers that join
+    over it — the entity hashes no longer carry the join, so only the
+    relationship key can flag them. SQL touching one endpoint stays unbound."""
+    provenance = {
+        "entity/orders": "h_orders",
+        "entity/customers": "h_customers",
+        "relationship/orders__customers": "h_rel",
+    }
+    model = _model(provenance)
+    model.joins = [
+        Join(left="orders", right="customers", on="orders.customer_id = customers.customer_id")
+    ]
+    both = (
+        "SELECT o.amount FROM orders AS o "
+        "JOIN jaffle.customers AS c ON o.customer_id = c.customer_id"
+    )
+    assert certified_bindings(both, model) == provenance
+    one = certified_bindings("SELECT count(*) FROM orders", model)
+    assert "relationship/orders__customers" not in one
 
 
 def test_cte_names_are_not_source_tables() -> None:
@@ -270,8 +293,8 @@ _SQL = "SELECT count(*) FROM customers WHERE number_of_orders > 1"
 
 
 def _project_files(sql: str = _SQL) -> dict[str, str]:
-    entities, definitions = jaffle_shared_assets()
-    files = dict(render_semantic_files(entities, definitions))
+    entities, definitions, relationships = jaffle_shared_assets()
+    files = dict(render_semantic_files(entities, definitions, relationships))
     for path, content in render_lens_repo(jaffle_customer_value_bundle()).items():
         files[f"lenses/customer_value/{path}"] = content
     files["lenses/customer_value/certified_answers.yaml"] = yaml.safe_dump(
@@ -528,7 +551,7 @@ def test_the_restamp_leaves_a_genuinely_drifted_answer_flagged(org, monkeypatch)
 
 @needs_db
 def test_provenance_edit_is_the_reverify_act(org, monkeypatch) -> None:
-    """Acceptance #3 item 6a: the documented way to clear a re-verify flag
+    """The documented way to clear a re-verify flag
     WITHOUT touching sql — explicitly updating verified_by (or source) counts
     as the re-verify act (_provenance_edited), bindings recompute against the
     current model, and the plan line clears. The note itself names the act."""
@@ -559,7 +582,7 @@ def test_provenance_edit_is_the_reverify_act(org, monkeypatch) -> None:
 
 @needs_db
 def test_certified_stale_never_leaks_across_lenses(org, monkeypatch) -> None:
-    """Acceptance #3 item 6b: a customers edit flags ONLY lenses whose answers
+    """A customers edit flags ONLY lenses whose answers
     bind customers. A sibling lens whose one answer reads orders alone must
     stay clean on the same plan — the computation is per-lens over per-answer
     bindings; the probe's 'phantom' on another lens can only be that lens's own

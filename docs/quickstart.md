@@ -139,7 +139,8 @@ knowledge you are here to write down. Without `--profile` the listing is
 schema only, and says so.
 Add `--json` when something parses the output instead of reading it.
 
-Write `semantic/entities/*.yaml` and `semantic/definitions/*.md` from the introspect
+Write `semantic/entities/*.yaml`, `semantic/relationships/*.yaml` and
+`semantic/definitions/*.md` from the introspect
 output (the scaffolded `.claude/skills/dst-semantic/` skill walks an agent through
 it), select them in a lens's `lens.yaml`, then `dst plan` → `dst apply` →
 `dst query` to verify. Details: [Connect a warehouse](guides/connect-a-warehouse.md)

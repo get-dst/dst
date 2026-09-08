@@ -76,6 +76,11 @@ class AnswerResult:
     confidence: Literal["high", "low"] | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    # "length" means the model was CUT OFF mid-sentence by the token cap. The
+    # row caps are disclosed loudly; prose that stopped enumerating partway
+    # through was not, so an answer listing 44 of 137 ids read as the whole
+    # list. Carried so the pipeline can say so.
+    finish_reason: str | None = None
 
 
 def _format_rows(columns: list[str], rows: list[list[object]]) -> str:
@@ -430,4 +435,5 @@ class AnswerComposer:
             confidence=confidence,
             input_tokens=res.input_tokens,
             output_tokens=res.output_tokens,
+            finish_reason=getattr(res, "finish_reason", None),
         )

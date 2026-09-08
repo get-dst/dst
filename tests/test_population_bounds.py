@@ -325,8 +325,8 @@ def test_population_round_trips_through_semantic_files() -> None:
             "population_filter": "channel_id IN ('A','B')",
         }
     )
-    files = render_semantic_files([entity], [])
-    entities, _ = parse_semantic_files(files)
+    files = render_semantic_files([entity], [], [])
+    entities, _, _ = parse_semantic_files(files)
     back = entities["pilot_orders"]
     assert back.population == "enrolled accounts only"
     assert back.population_filter == "channel_id IN ('A','B')"

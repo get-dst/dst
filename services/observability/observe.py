@@ -314,7 +314,11 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
                 "count(*) FILTER (WHERE status IN ('refused', 'rejected')), "
                 "count(*) FILTER (WHERE status = 'error'), "
                 "COALESCE(SUM(ai_cost_usd), 0), COALESCE(SUM(wh_cost_usd), 0), "
-                "count(*) FILTER (WHERE status = 'ok' AND confidence = 'verified') "
+                "count(*) FILTER (WHERE status = 'ok' AND confidence = 'verified'), "
+                # A spend total with unpriced calls behind it is a FLOOR. The
+                # statement has to carry the gap or its cost line reads as a
+                # measurement when it is a partial count.
+                "count(*) FILTER (WHERE ai_cost_usd IS NULL AND ai_output_tokens IS NOT NULL) "
                 f"FROM request_log WHERE {governed} AND {where}"
             ),
             {"d": days, "d2": days * 2},
@@ -329,6 +333,7 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
             "ai_cost_usd": round(float(row[5]), 4),
             "wh_cost_usd": round(float(row[6]), 4),
             "verified": int(row[7]),
+            "unpriced": int(row[8]),
         }
 
     current, previous = _window(win), _window(prior)
@@ -426,6 +431,7 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
         else None,
         "ai_cost_usd": current["ai_cost_usd"],
         "wh_cost_usd": current["wh_cost_usd"],
+        "unpriced": int(current["unpriced"]),
         "cost_per_answer_usd": round(total_cost / answered, 4) if answered else None,
         "confidence_histogram": histogram,
         "series": series,

@@ -19,20 +19,27 @@ from services.contracts.semantic_model import (
     SampleQuery,
     SemanticModel,
 )
-from services.contracts.shared_semantic import SelectEntity, SelectSpec, SharedEntity, SharedJoin
+from services.contracts.shared_semantic import (
+    SelectEntity,
+    SelectSpec,
+    SharedEntity,
+    SharedRelationship,
+)
 from services.lenses.store import LensBundle
 from services.project.compile import (
     compile_lens_model,
     shared_definition_hash,
     shared_entity_hash,
+    shared_relationship_hash,
 )
 
 LENS_NAME = "customer_value"
 CONNECTION = "jaffle"
 
 
-def jaffle_shared_assets() -> tuple[list[SharedEntity], list[Definition]]:
-    """The jaffle shared layer: customers + orders entities, two governed terms."""
+def jaffle_shared_assets() -> tuple[list[SharedEntity], list[Definition], list[SharedRelationship]]:
+    """The jaffle shared layer: customers + orders entities, their relationship,
+    two governed terms."""
     entities = [
         SharedEntity(
             name="customers",
@@ -82,15 +89,16 @@ def jaffle_shared_assets() -> tuple[list[SharedEntity], list[Definition]]:
                     description="Revenue divided by order count.",
                 ),
             ],
-            # Joins live on the FK side: many orders -> one customer.
-            joins=[
-                SharedJoin(
-                    right="customers",
-                    on="customers.customer_id = orders.customer_id",
-                    relationship="many_to_one",
-                )
-            ],
         ),
+    ]
+    # The FK side is `left`: many orders -> one customer.
+    relationships = [
+        SharedRelationship(
+            left="orders",
+            right="customers",
+            on="customers.customer_id = orders.customer_id",
+            relationship="many_to_one",
+        )
     ]
     definitions = [
         Definition(
@@ -125,7 +133,7 @@ def jaffle_shared_assets() -> tuple[list[SharedEntity], list[Definition]]:
             ],
         ),
     ]
-    return entities, definitions
+    return entities, definitions, relationships
 
 
 def _demo_model_config() -> ModelConfig:
@@ -165,11 +173,12 @@ def jaffle_customer_value_bundle() -> LensBundle:
 
 
 def jaffle_customer_value() -> SemanticModel:
-    entities, definitions = jaffle_shared_assets()
+    entities, definitions, relationships = jaffle_shared_assets()
     model, _warnings = compile_lens_model(
         config=jaffle_customer_value_config(),
         shared_entities={e.name: e for e in entities},
         shared_definitions={d.term: d for d in definitions},
+        shared_relationships={r.name: r for r in relationships},
         local_definitions=[],
         use_when=[],
         sample_queries=[
@@ -186,6 +195,7 @@ def jaffle_customer_value() -> SemanticModel:
         asset_hashes={
             **{f"entity/{e.name}": shared_entity_hash(e) for e in entities},
             **{f"definition/{d.term}": shared_definition_hash(d) for d in definitions},
+            **{f"relationship/{r.name}": shared_relationship_hash(r) for r in relationships},
         },
     )
     return model

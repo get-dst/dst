@@ -564,6 +564,19 @@ Rule on a review ticket. Flags: `--verdict approve|changes|reject` (required),
 certified answer in the same act; requires `--verdict approve`). See
 [The correction loop](../guides/correction-loop.md).
 
+### `dst retire <lens> <answer_id>`
+
+Stop serving a certified answer, keeping its history — the way out when an approved
+answer turns out to be wrong. A retired answer is never served, matched, or tested
+again, but its row and provenance survive, so the record of what you once vouched
+for stays intact. (Deleting it instead would take that record with it.)
+
+Reach for this when a definition change makes a certified pair wrong and re-certifying
+is not what you want, or when a promoted answer should never have been promoted. File
+authored answers can also carry `status: retired` in `certified_answers.yaml`; this
+verb is how you retire one that came from a review ruling, which no file owns. Flags:
+`--url`, `--token`.
+
 ### `dst patches list --lens <name>` / `dst patches approve <id>`
 
 The self-healing loop's ruling from the repo: approving a definition/skill patch writes

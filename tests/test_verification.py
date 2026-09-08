@@ -42,6 +42,13 @@ def test_faithfulness_allows_rounding_and_thousands() -> None:
     assert is_grounded("Average is about 1234.", result)  # rounded
 
 
+def test_fi_grouped_spellings_parse_to_one_claim() -> None:
+    # "195 419,94" is ONE figure (fi-FI: space-grouped thousands, decimal
+    # comma) — not the two claims 195 and 419.94, and never a phantom 19541994.
+    assert _claims("Yhteensä 195 419,94 euroa.") == [(195419.94, "plain")]
+    assert _claims("Yhteensä 1 192 531,81 euroa.") == [(1192531.81, "plain")]
+
+
 def test_magnitude_abbreviations_ground_raw_values() -> None:
     # The rounding artifact this check must look past: prose abbreviates the magnitude
     # ("€6.66M") while the result holds the raw figure (6661765.89).

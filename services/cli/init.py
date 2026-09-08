@@ -431,13 +431,14 @@ def run_init(args: argparse.Namespace) -> int:
         + "```\n"
     )
     from services.contracts.semantic_model import FIELD_TYPES, Metric
-    from services.contracts.shared_semantic import SelectSpec, SharedEntity, SharedJoin
+    from services.contracts.shared_semantic import SelectSpec, SharedEntity, SharedRelationship
 
     semantic_doc = (
         "# The shared semantic layer\n\n"
         "(This file is server-ignored; delete it freely.)\n\n"
-        "Entities and definitions live HERE, once, at project scope:\n"
-        "`semantic/entities/<name>.yaml` and `semantic/definitions/<term>.md`.\n"
+        "Entities, definitions and relationships live HERE, once, at project scope:\n"
+        "`semantic/entities/<name>.yaml`, `semantic/definitions/<term>.md` and\n"
+        "`semantic/relationships/<left>__<right>.yaml` (one file per join pair).\n"
         "Folder freely for organization (`entities/sales/deals.yaml`,\n"
         "`definitions/finance/...`) - paths are yours, the asset NAME is the\n"
         "identity and must stay unique project-wide. Demo assets ship under\n"
@@ -447,23 +448,32 @@ def run_init(args: argparse.Namespace) -> int:
         "shows it, apply recompiles them. A term defined both shared and\n"
         "lens-locally is an apply ERROR, never a silent override.\n"
         "A definition with `status: ambiguous` makes dst ask which meaning\n"
-        "is intended instead of guessing (see definitions/examples/value.md).\n\n"
+        "is intended instead of guessing (see definitions/examples/value.md).\n"
+        "`audiences:` frontmatter (phrase -> meaning, e.g. `cfo: net invoiced\n"
+        "revenue`) resolves the term for a question naming that audience -\n"
+        "served with the reading disclosed - instead of clarifying.\n\n"
         "`fields[].type` and `dimensions[].type` are a CLOSED enum of SEMANTIC\n"
         "types - " + " | ".join(FIELD_TYPES) + " - never the\n"
         "warehouse's own type. BIGINT/INT64 -> integer, VARCHAR/TEXT -> string,\n"
         "NUMERIC/DOUBLE -> number, TIMESTAMP_NTZ -> timestamp, STRUCT/ARRAY ->\n"
         "json. `dst introspect` already prints the semantic type for every\n"
         "column (warehouse type in parentheses) - copy that.\n\n"
+        "Write block style, and QUOTE any flow-map value holding a comma:\n"
+        "`{description: total, net of fees}` silently splits at the comma and\n"
+        "the error blames an unknown key you never wrote.\n\n"
         "Every entity field:\n\n```yaml"
         + reference_section("Reference: entity file (semantic/entities/*.yaml)", SharedEntity)
         + "```\n\nMetric fields (under metrics:):\n\n```yaml"
         + reference_section("Reference: metric fields", Metric)
-        + "```\n\nJoin fields (under joins:, owned by the FK side). Type the join\n"
-        'condition key QUOTED - `"on":` - or spell it `condition:`: a bare `on:`\n'
-        "is a YAML boolean, so the key loads as True and the join reads as if it\n"
-        "had no condition at all (dst repairs that one, but quoting is what\n"
-        "you mean):\n\n```yaml"
-        + reference_section("Reference: join fields", SharedJoin)
+        + "```\n\nRelationships (semantic/relationships/<left>__<right>.yaml - one\n"
+        "file per pair, `left` = the FK side; a lens gets the join when it\n"
+        'selects both endpoints). Type the join condition key QUOTED - `"on":` -\n'
+        "or spell it `condition:`: a bare `on:` is a YAML boolean, so the key\n"
+        "loads as True and the join reads as if it had no condition at all\n"
+        "(dst repairs that one, but quoting is what you mean):\n\n```yaml"
+        + reference_section(
+            "Reference: relationship file (semantic/relationships/*.yaml)", SharedRelationship
+        )
         + "```\n\nWhat a lens can select (lens.yaml select:):\n\n```yaml"
         + reference_section("Reference: select block", SelectSpec)
         + "```\n"
@@ -474,13 +484,13 @@ def run_init(args: argparse.Namespace) -> int:
         from services.lenses.repo import render_lens_repo
         from services.semantic.files import render_semantic_files
 
-        entities, definitions = jaffle_shared_assets()
-        for path, content in render_semantic_files(entities, definitions).items():
+        entities, definitions, relationships = jaffle_shared_assets()
+        for path, content in render_semantic_files(entities, definitions, relationships).items():
             # Demo assets nest under examples/ so they never mix with the real
             # layer - folders are organization only, the asset name is identity.
             out = root / path.replace("/entities/", "/entities/examples/").replace(
                 "/definitions/", "/definitions/examples/"
-            )
+            ).replace("/relationships/", "/relationships/examples/")
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(content, encoding="utf-8")
         (root / "semantic" / "README.md").write_text(semantic_doc, encoding="utf-8")
@@ -717,8 +727,10 @@ description: Use when asked to author, extend, or fix this project's semantic
 
    SELECT-only, row-capped, and logged to the audit trail, so the probe behind
    a business rule is evidence rather than a private detour. Use it for rows,
-   cross-column facts and join checks; --profile already gives per-column enum
-   values, null rates and ranges in one pass, so do not re-derive those here.
+   cross-column facts, join checks and the reconciliations that prove trap
+   claims (the dst-context skill holds that standard); --profile already gives
+   per-column enum values, null rates and ranges in one pass, so do not
+   re-derive those here.
    Do NOT open the warehouse client yourself - dst holds that credential
    so you do not have to, and SQL run around it is ungoverned and unlogged.
    (This verb runs server-side, so the connection must be applied; introspect
@@ -727,15 +739,17 @@ description: Use when asked to author, extend, or fix this project's semantic
 2. Author from it - file shapes are documented in semantic/README.md:
    - semantic/entities/<entity>.yaml - one per business object: grain, source
      (connection + table), fields, dimensions, metrics (type simple | ratio |
-     derived, filters, format, default_time_field), FK-side joins with
-     relationship. Relationships live HERE, as joins with a declared
-     relationship - a join described in definition prose is a smell: the
-     compiler cannot enforce it and every query re-derives it. Column-qualify
+     derived, filters, format, default_time_field). Column-qualify
      every expression (entity.column, never a bare column) - the validator
      rejects ambiguity late, at apply. `fields[].type` is a closed SEMANTIC
      enum (string | number | integer | boolean | timestamp | date | json),
      never the warehouse type - copy the type introspect prints, and leave
      the parenthesised warehouse type behind.
+   - semantic/relationships/<left>__<right>.yaml - one per join pair:
+     left (the FK side), right, "on":, type, and a declared relationship
+     (cardinality). A join described in definition prose is a smell: the
+     compiler cannot enforce it and every query re-derives it. One file per
+     pair - declaring the same two entities twice is an apply error.
    - semantic/definitions/<term>.md - what business words mean. Bind meaning
      to structure with about: <entity>.<member>, and make it ENFORCEABLE
      with `sql: <expression>` in the frontmatter (alias sql_expr) - without
@@ -839,9 +853,14 @@ a rule, pick the data-side one.
    you don't forbid.
 
 3. Contested terms decide or ask - never just define vocabulary. If "revenue"
-   means net invoiced to finance and bookings to sales, either write the
-   per-caller rule (so each audience gets its own reading) or mark the term
-   status: ambiguous with possible_mappings so dst clarifies.
+   means net invoiced to finance and bookings to sales, mark the term
+   status: ambiguous with possible_mappings so dst clarifies, and declare
+   the per-caller rule as `audiences:` frontmatter (phrase -> the meaning it
+   resolves to, e.g. `cfo: net invoiced revenue`): a question naming a
+   declared audience, or exactly one mapping's own meaning, serves that
+   reading - disclosed, never silent - instead of clarifying. A per-role
+   rule written only in the page PROSE cannot fire: the clarify check is
+   deterministic and runs before any model reads the page.
    Vocabulary alone de-inhibits: the model stops declining and guesses a
    third meaning. A wrong answer is worse than no answer.
 
@@ -885,6 +904,18 @@ a rule, pick the data-side one.
    --profile, which is where enum values come from).
    A definition that misnames a bucket label plants the trap it should
    remove.
+
+   "Measured, not assumed" is a checklist, not a mood: profile first
+   (introspect --profile, dst probe), RECONCILE the tables that must
+   agree (dst sql), THEN write. A trap claim cites the query that proved
+   it: "manager rows are team rollups - proven: each manager's booked ==
+   SUM of their reps' booked - so never sum attainment across roles" is
+   a rule; the same sentence without its proof query is an assumption in
+   a rule's clothes.
+   A reconciliation that FAILS is itself a finding to write down, never
+   a probe to discard: record both numbers and the which-source-answers-
+   which-question rule ("events and attribution disagree on counts by
+   design; per-rep questions read attribution").
 
 8. Pin what must not wobble. Generated SQL varies run to run even at
    temperature 0 - the same lens can grade correct on one rep and wrong on
@@ -1016,6 +1047,22 @@ exemplars injected (the assisted tier). Certify EARLY, as a mid-loop ratchet
 after each verified win - not as a final polish. The question text does not
 need to be the user's exact phrasing: matching is by meaning (embedding +
 paraphrase gate), so one well-written question covers its whole family.
+
+## Certified outranks clarify
+
+A certified match is exempt from the ambiguity rail by design - a human
+approved that exact question->SQL - so it serves verified with no
+clarify round-trip. Use that deliberately for an ambiguous term's HOT
+phrasings: keep `status: ambiguous` as the net, and certify a template
+per decisive per-role phrasing so each audience's own wording serves its
+own reading instantly:
+
+    - question: sales attainment for {rep} in {period}
+      sql: SELECT ...   # the bookings reading sales means
+    - question: finance attainment for {rep} in {period}
+      sql: SELECT ...   # the net-invoiced reading finance means
+
+Phrasings you did not certify still clarify instead of guessing.
 
 ## Verify the corpus MATCHES, not just that it applied
 
@@ -1371,8 +1418,9 @@ never author in a UI.
 - `dst.yaml` - providers (LLM endpoints, BYOK), connection declarations.
   Every available field is listed at the bottom, commented, with defaults.
 - `semantic/` - the SHARED semantic layer, edited in one place:
-  `entities/<name>.yaml` (grain, fields, dimensions, metrics incl. filters,
-  FK-side joins with relationship) and `definitions/<term>.md` (governed
+  `entities/<name>.yaml` (grain, fields, dimensions, metrics incl. filters),
+  `relationships/<left>__<right>.yaml` (one join pair per file, left = the
+  FK side, with declared relationship) and `definitions/<term>.md` (governed
   terms; `status: ambiguous` + possible_mappings makes dst ASK instead
   of guessing). Full field references in `semantic/README.md`.
 - `lenses/<name>/` - one governed lens per dir: selection + policy + extras:
@@ -1455,6 +1503,22 @@ attributable to a person.
 - Verifying access: `dst query <lens> "<q>" --key dst_...` asks AS that
   caller. The admin token bypasses every allow-list, so it is the only way to
   prove a grant works - and that an ungranted caller is refused.
+
+## Handing this project to consumers
+
+The consumer-facing handoff is CONSUMER.md at the project root - write it
+when the project is handed to the agents that will QUERY it (they read that
+file, not this one). Its content is yours; what it must cover is fixed:
+- The doors: MCP (`/mcp`, bearer = the caller's key) and
+  `POST /v1/lenses/<lens>/query {{"q": "..."}}` - and that every caller uses
+  their OWN key, one per person.
+- What `status`, `confidence` (verified | partial | unverified) and
+  `certification` mean, and that they are RELAYED with the answer - the
+  grade travels with the number, never dropped.
+- A refusal or clarification is relayed verbatim: a governed outcome, not
+  an error to route around.
+- Never bypass: no direct warehouse access to "check" or extend an answer -
+  the lens is the interface.
 
 Reference documentation (every verb, every field): https://www.dataservetool.com
 """

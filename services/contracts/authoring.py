@@ -126,6 +126,13 @@ class AuthoringScope:
             self.notes.append(line)
 
 
+def authoring_scope(info: ValidationInfo) -> AuthoringScope | None:
+    """The AuthoringScope riding this validation, or None on a storage/wire
+    parse — for validators that must be strict only at the authoring seam."""
+    scope = (info.context or {}).get(_CONTEXT_KEY) if info.context else None
+    return scope if isinstance(scope, AuthoringScope) else None
+
+
 class Authored(BaseModel):
     """Base for every model parsed from a file a human writes.
 
@@ -146,7 +153,16 @@ class Authored(BaseModel):
         # to the string key by the time this sees it.
         unknown = [str(k) for k in data if str(k) not in keys]
         if unknown:
-            raise ValueError(unknown_keys_message(unknown, sorted(keys)))
+            msg = unknown_keys_message(unknown, sorted(keys))
+            # An unquoted comma in a flow-map value splits the prose into a
+            # phantom key with no value — blame the comma, not a "key" the
+            # author never typed.
+            if any(" " in k and data.get(k) is None for k in unknown):
+                msg += (
+                    " — an unquoted comma inside a flow map `{...}` splits the value"
+                    " into a phantom key: quote the string, or use block style"
+                )
+            raise ValueError(msg)
         for k in data:
             reason = inert_reason(cls.model_fields[keys[str(k)]])
             if reason is not None:

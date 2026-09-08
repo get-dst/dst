@@ -9,6 +9,7 @@ your code.
 dst.yaml                      providers + connection declarations
 .env                              secrets, referenced by env-var NAME only (gitignored)
 semantic/entities/<name>.yaml     shared entities (name is identity, unique project-wide)
+semantic/relationships/<left>__<right>.yaml  one join pair per file (left = the FK side)
 semantic/definitions/<term>.md    shared governed terms (frontmatter + prose)
 lenses/<name>/lens.yaml           selection + policy (+ `timezone:` — the lens's business clock)
 lenses/<name>/queries.yaml        use_when (router anchors) + sample_queries
@@ -23,7 +24,8 @@ profiles/<connection>.json        drift baseline (`dst drift --accept`, also wri
 
 Subfolders are organization only — the asset *name* is identity — so anything
 under `semantic/entities/**.yaml` loads. That is why `dst init --example`
-parks its demo assets in `semantic/entities/examples/` and
+parks its demo assets in `semantic/entities/examples/`,
+`semantic/relationships/examples/` and
 `semantic/definitions/examples/`, clear of the layer you author. Without
 `--example`, `init` creates those directories and writes no assets at all.
 
