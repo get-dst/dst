@@ -42,6 +42,7 @@ nav:
       - Receipts: concepts/receipts.md
       - What the model sees: concepts/what-the-model-sees.md
       - Clarify & refusal: concepts/clarify-and-refusal.md
+      - Typed decisions: concepts/typed-decisions.md
   - Guides:
       - Project files: guides/project-files.md
       - Connect a warehouse: guides/connect-a-warehouse.md

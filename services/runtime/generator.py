@@ -19,6 +19,7 @@ from services.contracts.protocols import (
     LLMProvider,
     Message,
 )
+from services.contracts.query_intent import QueryIntent
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
 from services.runtime.compiler import CompileError, metric_sql
@@ -328,9 +329,16 @@ class FixedSQLGenerator:
     """A `QueryGenerator` that returns a pre-approved SQL string (a certified answer),
     skipping the LLM entirely. Consumes no tokens; still passes through guard + execute."""
 
-    def __init__(self, sql: str, *, definition_used: str | None = None) -> None:
+    def __init__(
+        self,
+        sql: str,
+        *,
+        definition_used: str | None = None,
+        intent: QueryIntent | None = None,
+    ) -> None:
         self._sql = sql
         self._definition_used = definition_used
+        self._intent = intent
         self.model = "certified"
 
     def generate(
@@ -342,7 +350,9 @@ class FixedSQLGenerator:
         dialect: str,
         feedback: str | None = None,
     ) -> GeneratedQuery:
-        return GeneratedQuery(sql=self._sql, definition_used=self._definition_used)
+        return GeneratedQuery(
+            sql=self._sql, definition_used=self._definition_used, intent=self._intent
+        )
 
 
 class GroundedSQLGenerator:

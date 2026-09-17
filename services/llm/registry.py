@@ -16,7 +16,7 @@ from typing import Literal
 
 from services.config import ProviderConfig, resolve_env_ref, settings
 from services.contracts.errors import ProviderError
-from services.contracts.protocols import Embedder, LLMProvider
+from services.contracts.protocols import Decider, Embedder, LLMProvider
 
 log = logging.getLogger("dst")
 
@@ -29,7 +29,7 @@ _ANTHROPIC_SMART = "claude-sonnet-4-6"
 @dataclass(frozen=True)
 class ProviderSpec:
     name: str
-    type: Literal["anthropic", "openai-compatible", "local"]
+    type: Literal["anthropic", "openai-compatible", "local", "typesafe"]
     api_key: str | None
     key_hint: str  # what to set to supply the secret (for actionable 503s)
     base_url: str | None
@@ -229,6 +229,8 @@ def resolve(ref: str) -> ResolvedModel | None:
     spec = specs().get(provider_name) if provider_name else None
     if spec is None or not spec.api_key or not model:
         return None
+    if spec.type == "typesafe":
+        return None  # a typed-decision provider serves decisions, never text
     from services.llm.retry import RetryingLLM
 
     if spec.type == "anthropic":
@@ -245,6 +247,23 @@ def resolve(ref: str) -> ResolvedModel | None:
             )
         )
     return ResolvedModel(client, spec.name, model)
+
+
+def resolve_decider(*, k: int | None = None) -> Decider | None:
+    """The install's closed-set decider: a configured typed-decision provider
+    with a key wins; else the voting chat decider on the fast tier; None when
+    nothing qualifies (callers fall back to pure cosine / no gate)."""
+    for s in specs().values():
+        if s.type == "typesafe" and s.api_key:
+            from services.llm.typesafe import TypesafeDecider
+
+            return TypesafeDecider(s.api_key, s.base_url)
+    fast = resolve(tier("fast"))
+    if fast is None:
+        return None
+    from services.llm.vote_decider import DEFAULT_K, VoteDecider
+
+    return VoteDecider(fast.llm, fast.name, k=DEFAULT_K if k is None else k)
 
 
 def unservable_reason(ref: str) -> str | None:

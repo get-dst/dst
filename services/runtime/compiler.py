@@ -426,8 +426,10 @@ def _predicate(col: str, f: IntentFilter, dialect: str) -> str:
 def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # Before resolving anything: an empty intent has no entity to be ambiguous
     # about, and "ambiguous entity" is a confusing way to say "you asked for nothing".
-    if not intent.metrics and not intent.dimensions:
+    if not intent.metrics and not intent.dimensions and not intent.fields:
         raise CompileError("intent selects neither a metric nor a dimension")
+    if intent.fields and intent.metrics:
+        raise CompileError("a listing (fields) and an aggregate (metrics) cannot mix")
 
     entity = _resolve_entity(model, intent.entity, intent.metrics)
     metrics_by = {m.name: m for m in entity.metrics}
@@ -464,6 +466,9 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     dim_exprs: list[tuple[Entity, str]] = [
         _resolve_member(model, entity, d, dialect) for d in intent.dimensions
     ]
+    field_exprs: list[tuple[Entity, str]] = [
+        _resolve_member(model, entity, f, dialect) for f in intent.fields
+    ]
     filter_exprs: list[tuple[Entity, str]] = [
         _resolve_member(model, entity, f.field, dialect) for f in intent.filters
     ]
@@ -475,7 +480,12 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     definition_exprs: list[str] = [_definition_sql(model, term) for term in intent.definitions]
     # An ORDER BY on a selected alias needs nothing resolved; anything else is a real
     # member reference and can pull in its own entity, exactly like a filter.
-    selected_aliases = set(metrics_by) | set(intent.dimensions) | ({bucket[0]} if bucket else set())
+    selected_aliases = (
+        set(metrics_by)
+        | set(intent.dimensions)
+        | set(intent.fields)
+        | ({bucket[0]} if bucket else set())
+    )
     order_exprs: list[tuple[Entity, str] | None] = [
         None if o.field in selected_aliases else _resolve_member(model, entity, o.field, dialect)
         for o in intent.order_by
@@ -491,6 +501,9 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     for d, (_owner, expr) in zip(intent.dimensions, dim_exprs, strict=True):
         select.append(f"{expr} AS {quote_ident(d, dialect)}")
         group.append(expr)
+    for f, (_owner, expr) in zip(intent.fields, field_exprs, strict=True):
+        # A listing projects members row by row: no aggregation, no GROUP BY.
+        select.append(f"{expr} AS {quote_ident(f, dialect)}")
     for m in intent.metrics:
         select.append(
             f"{metric_sql(metrics_by[m], entity, inline_filters=mixed)} "
@@ -522,7 +535,7 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     )
     definition_entities = [by_name[ref.partition(".")[0]] for ref in definition_refs]
     needed = (
-        [o for o, _ in (*dim_exprs, *filter_exprs, *[x for x in order_exprs if x])]
+        [o for o, _ in (*dim_exprs, *field_exprs, *filter_exprs, *[x for x in order_exprs if x])]
         + metric_entities
         + definition_entities
     )

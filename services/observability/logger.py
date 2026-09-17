@@ -40,14 +40,16 @@ _INSERT = text(
         org_id, request_id, lens, caller, agent, question, sql, valid, row_count, sample,
         answer, citations, definition_used, confidence, verification, certification,
         latency, ai_input_tokens, ai_output_tokens, ai_cost_usd, wh_bytes, wh_cost_usd,
-        status, error, prompt_hash, generator_tier, repairs, context_refs, degraded
+        status, error, prompt_hash, generator_tier, repairs, context_refs, degraded,
+        resolution, resolution_tag, typed, clarification
     ) VALUES (
         :org_id, :request_id, :lens, :caller, :agent, :question, :sql, :valid, :row_count,
         CAST(:sample AS jsonb), :answer, CAST(:citations AS jsonb), :definition_used,
         :confidence, CAST(:verification AS jsonb), :certification,
         CAST(:latency AS jsonb), :ai_input_tokens, :ai_output_tokens,
         :ai_cost_usd, :wh_bytes, :wh_cost_usd, :status, :error, :prompt_hash,
-        :generator_tier, :repairs, CAST(:context_refs AS jsonb), CAST(:degraded AS jsonb)
+        :generator_tier, :repairs, CAST(:context_refs AS jsonb), CAST(:degraded AS jsonb),
+        CAST(:resolution AS jsonb), :resolution_tag, :typed, CAST(:clarification AS jsonb)
     )
     """
 )
@@ -89,6 +91,15 @@ def log_trace(trace: TraceLog) -> None:
         "context_refs": json.dumps(trace.context_refs),
         # Which governance capabilities could not run for this answer (0037).
         "degraded": json.dumps(trace.degraded),
+        # The resolution ledger and its tag (0063) — None on non-answers.
+        "resolution": json.dumps(trace.resolution.model_dump()) if trace.resolution else None,
+        "resolution_tag": trace.resolution_tag,
+        # Typed serving (0066): the ledger's typed flag, and the clarification a
+        # non-answer asked for.
+        "typed": trace.resolution.typed if trace.resolution else None,
+        "clarification": (
+            json.dumps(trace.clarification.model_dump()) if trace.clarification else None
+        ),
     }
     try:
         with org_session(trace.org_id) as session:

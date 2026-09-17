@@ -53,24 +53,25 @@ def verify_receipt(body: Receipt, caller: CallerIdentity = Depends(get_caller)) 
     with org_session(caller.org_id) as session:
         row = session.execute(
             text(
-                "SELECT lens, caller, question, sql, confidence, certification "
-                "FROM request_log WHERE request_id = :r"
+                "SELECT lens, caller, question, sql, confidence, certification, "
+                "resolution_tag FROM request_log WHERE request_id = :r"
             ),
             {"r": body.request_id},
         ).first()
     if row is None:
         return ReceiptVerdict(ok=False, signature=signature, trace_found=False, mismatches=[])
-    logged_lens, logged_caller, question, logged_sql, logged_conf, logged_cert = row
-    mismatches = [
-        name
-        for name, claimed, logged in (
-            ("lens", body.lens, logged_lens),
-            ("confidence", body.confidence, logged_conf),
-            ("certification", body.certification, logged_cert or "none"),
-            ("sql_sha256", body.sql_sha256, receipt_mod.sql_hash(logged_sql)),
-        )
-        if claimed != logged
+    logged_lens, logged_caller, question, logged_sql, logged_conf, logged_cert, logged_tag = row
+    claims = [
+        ("lens", body.lens, logged_lens),
+        ("confidence", body.confidence, logged_conf),
+        ("certification", body.certification, logged_cert or "none"),
+        ("sql_sha256", body.sql_sha256, receipt_mod.sql_hash(logged_sql)),
     ]
+    if body.resolution_tag is not None:
+        # Only a receipt that CLAIMS a tag is held to one: receipts issued
+        # before the ledger carry none, and their traces may carry none.
+        claims.append(("resolution_tag", body.resolution_tag, logged_tag))
+    mismatches = [name for name, claimed, logged in claims if claimed != logged]
     return ReceiptVerdict(
         ok=signature == "valid" and not mismatches,
         signature=signature,

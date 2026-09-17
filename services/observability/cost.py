@@ -41,6 +41,9 @@ _BUILTIN_AI_PRICES: dict[str, tuple[float, float]] = {
     "deepseek-v4-flash": (0.14, 0.28),
     # cache-miss rate; DeepSeek's cached-input tier (~$0.004/M) is not modeled
     "deepseek-v4-pro": (0.435, 0.87),
+    # typesafe.ai's typed-decision model, per its usage page 2026-09-17: input
+    # only, output free. A decision's tokens are its option set.
+    "jev-latest": (0.042, 0.0),
 }
 
 # BigQuery on-demand analysis pricing (USD per TB scanned).
@@ -79,6 +82,26 @@ def ai_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | No
         return None
     price_in, price_out = price
     return round(input_tokens / 1e6 * price_in + output_tokens / 1e6 * price_out, 6)
+
+
+def decision_model(provider: str) -> str:
+    """The priceable model name inside a decider's provider id:
+    ``vote:deepseek-v4-flash:k=5`` → deepseek-v4-flash, ``typesafe:jev-latest``
+    → jev-latest (priced under that name in ``ai_pricing``)."""
+    parts = provider.split(":")
+    return parts[1] if len(parts) > 1 else provider
+
+
+def decisions_cost_usd(usage_by_provider: dict[str, tuple[float, float]]) -> float | None:
+    """USD for a set of decisions, given per-provider (input, output) token
+    sums. None when any provider is unpriced — never a partial sum shown as
+    the total. No tokens at all is $0."""
+    total: float | None = 0.0
+    for provider, (tokens_in, tokens_out) in usage_by_provider.items():
+        total = add_cost(
+            total, ai_cost_usd(decision_model(provider), int(tokens_in), int(tokens_out))
+        )
+    return total
 
 
 def add_cost(total: float | None, delta: float | None) -> float | None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -289,3 +290,62 @@ def test_any_positive_embedding_dim_parses(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_no_vendor_named_key_settings_exist_including_voyage() -> None:
     assert "voyage_api_key" not in set(type(settings).model_fields)
+
+
+# ── the decision seam: who decides ──────────────────────────────────────────
+
+
+def test_decider_prefers_a_keyed_typed_decision_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `typesafe` provider with a key owns the decision seam; it serves
+    decisions, never text (resolve() is None for it), and until the client is
+    built it raises loudly instead of masquerading as an unmeasured decision."""
+    from services.contracts.errors import ProviderError
+    from services.contracts.protocols import Decider, Option
+    from services.llm.typesafe import TypesafeDecider
+
+    _use(
+        monkeypatch,
+        {
+            "jev": ProviderConfig(type="typesafe", api_key="ts-key"),
+            **_CHEAP_PLUS_ANTHROPIC,
+        },
+    )
+    decider = registry.resolve_decider()
+    assert isinstance(decider, TypesafeDecider) and isinstance(decider, Decider)
+    assert registry.resolve("jev/anything") is None
+    req = decider.request(
+        question="q", context="pick", options=[Option("a", "first"), Option("b")], allow_none=True
+    )
+    assert req["state"] == {"question": "q"} and req["model"] == "jev-latest"
+    assert req["questions"]["decision"]["criteria"] == {
+        "a": "first",
+        "b": None,
+        "none": "none of the options fits",
+    }
+    # An unreachable provider is an outage, never a decision.
+    down = TypesafeDecider(
+        "ts-key",
+        transport=httpx.MockTransport(lambda r: httpx.Response(529, json={})),
+        attempts=1,
+    )
+    with pytest.raises(ProviderError):
+        down.decide(question="q", context="pick", options=[Option("a")], allow_none=False)
+
+
+def test_decider_falls_back_to_the_voting_chat_model_on_the_fast_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.llm.vote_decider import VoteDecider
+
+    _use(monkeypatch, _CHEAP_PLUS_ANTHROPIC)
+    decider = registry.resolve_decider(k=3)
+    assert isinstance(decider, VoteDecider)
+    assert decider.provider == "vote:cheap-flash:k=3"
+    # A keyless typed-decision provider is skipped, never "configured".
+    _use(monkeypatch, {"jev": ProviderConfig(type="typesafe"), **_CHEAP_PLUS_ANTHROPIC})
+    assert isinstance(registry.resolve_decider(), VoteDecider)
+
+
+def test_decider_is_none_when_nothing_qualifies(monkeypatch: pytest.MonkeyPatch) -> None:
+    _use(monkeypatch, {})
+    assert registry.resolve_decider() is None

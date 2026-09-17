@@ -72,7 +72,13 @@ def test_route_runs_the_second_hop_and_stamps_provenance(monkeypatch: pytest.Mon
     captured: dict[str, str] = {}
 
     def fake_run(
-        name: str, q: str, caller: object, background: object, fmt: str = "both"
+        name: str,
+        q: str,
+        caller: object,
+        background: object,
+        fmt: str = "both",
+        bindings: dict[str, str] | None = None,
+        allow_untyped: bool = False,
     ) -> QueryResponse:
         captured["lens"], captured["q"], captured["fmt"] = name, q, fmt
         return _fake_answer(name)

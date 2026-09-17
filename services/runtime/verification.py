@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import sqlglot
 from sqlglot import expressions as exp
 
+from services.contracts.resolution import DecisionRecord
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.verification import (
     CheckStatus,
@@ -990,6 +991,25 @@ def fold_metric_filter_waived(report: VerificationReport, reason: str) -> Verifi
     checks = [
         *report.checks,
         VerificationCheck(name="metric_filter_waived", status="fail", reason=reason),
+    ]
+    grade: Grade = "partial" if report.grade == "verified" else report.grade
+    return VerificationReport(grade=grade, checks=checks)
+
+
+def fold_low_confidence(
+    report: VerificationReport, low: list[tuple[DecisionRecord, float]]
+) -> VerificationReport:
+    """An acted decision below its slot's measured bar, folded in as one more
+    check: the slot, the choice and the probability are named, and the grade
+    caps at partial — disclosed, never refused (decision_policy: the typed
+    regime acts unless none wins)."""
+    from services.runtime import decision_policy
+
+    checks = [
+        *report.checks,
+        VerificationCheck(
+            name="decision_confidence", status="fail", reason=decision_policy.describe_low(low)
+        ),
     ]
     grade: Grade = "partial" if report.grade == "verified" else report.grade
     return VerificationReport(grade=grade, checks=checks)

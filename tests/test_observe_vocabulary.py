@@ -12,6 +12,7 @@ declines, `outcomes` carries the full per-status decomposition.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 
@@ -277,3 +278,132 @@ def test_a_lens_query_count_excludes_probe_rows(org: object) -> None:
     with org_session(org) as session:
         summary = next(s for s in lens_store.list_lenses(session) if s.name == "customer_value")
     assert summary.query_count == 1
+
+
+@needs_db
+def test_governed_basis_counts_the_ledger_and_names_the_unmeasured(org: object) -> None:
+    """The headline number: % of answers whose figure came from a
+    certified or declared definition. Pre-ledger rows (NULL tag) are `unknown`:
+    counted beside the percentage and left OUT of its denominator, so a window
+    of old rows reads untested, never 0% governed. Declines carry no tag."""
+    from services.lenses import store as lens_store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    with org_session(org) as session:
+        lens_store.create_lens(session, jaffle_customer_value_bundle())
+        rows = [
+            ("ok", "certified", "1 day"),
+            ("ok", "declared", "2 days"),
+            ("ok", "mixed", "3 days"),
+            ("ok", "inferred", "4 days"),
+            ("ok", None, "5 days"),  # written before the ledger existed
+            ("refused", None, "6 days"),  # a decline: no figure, no tag
+            ("ok", "inferred", "40 days"),  # prior window: 0% governed
+        ]
+        for status, tag, age in rows:
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, question, "
+                    "status, resolution_tag, created_at) VALUES (:o, :r, 'customer_value', "
+                    "'a', 'q?', :s, :t, NOW() - CAST(:age AS interval))"
+                ),
+                {"o": org, "r": f"req-{uuid.uuid4()}", "s": status, "t": tag, "age": age},
+            )
+
+    with org_session(org) as session:
+        d = observe.audit_statement(session, days=30)
+        k = observe.kpis(session)
+        recent = observe.recent_requests(session)
+
+    assert d["answered"] == 5
+    assert d["resolution_unknown"] == 1
+    assert d["declared_pct"] == 50.0  # 2 of the 4 graded answers
+    assert d["declared_delta_pp"] == 50.0  # prior window: 0 of 1
+    assert d["resolution_histogram"] == {
+        "certified": 1,
+        "declared": 1,
+        "mixed": 1,
+        "inferred": 1,
+        "unknown": 1,
+    }
+    (lens_row,) = [r for r in d["lenses"] if r["lens"] == "customer_value"]
+    assert lens_row["declared_pct"] == 50.0
+    assert k["resolution_histogram"]["unknown"] == 1
+    assert {r["resolution_tag"] for r in recent} >= {"certified", "declared", None}
+
+
+@needs_db
+def test_governed_basis_is_untested_when_nothing_was_graded(org: object) -> None:
+    with org_session(org) as session:
+        session.execute(
+            text(
+                "INSERT INTO request_log (org_id, request_id, lens, caller, question, status) "
+                "VALUES (:o, :r, 'reporting', 'a', 'q?', 'ok')"
+            ),
+            {"o": org, "r": f"req-{uuid.uuid4()}"},
+        )
+    with org_session(org) as session:
+        d = observe.audit_statement(session, days=30)
+    assert d["declared_pct"] is None and d["resolution_unknown"] == 1
+
+
+@needs_db
+def test_typed_share_and_dictionary_gaps_are_counted(org: object) -> None:
+    """Typed serving on the statement: % of answers where every slot typed
+    (NULL = before typed serving, counted apart), and the slots that keep
+    clarifying for want of a value the question could not type."""
+    from services.lenses import store as lens_store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    with org_session(org) as session:
+        lens_store.create_lens(session, jaffle_customer_value_bundle())
+        rows = [
+            ("ok", True, None),
+            ("ok", True, None),
+            ("ok", False, None),
+            ("ok", None, None),  # served before typed serving
+            ("clarification", None, {"kind": "unresolved_slot", "term": "customer_name"}),
+            ("clarification", None, {"kind": "unresolved_slot", "term": "customer_name"}),
+            ("clarification", None, {"kind": "unresolved_slot", "term": "month"}),
+            ("clarification", None, {"kind": "ambiguous_term", "term": "revenue"}),
+        ]
+        for status, typed, clar in rows:
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, question, "
+                    "status, typed, clarification) VALUES (:o, :r, 'customer_value', 'a', "
+                    "'q?', :s, :t, CAST(:c AS jsonb))"
+                ),
+                {
+                    "o": org,
+                    "r": f"req-{uuid.uuid4()}",
+                    "s": status,
+                    "t": typed,
+                    "c": json.dumps(clar) if clar else None,
+                },
+            )
+    with org_session(org) as session:
+        d = observe.audit_statement(session, days=30)
+    assert d["typed_pct"] == round(100 * 2 / 3, 1)  # 2 typed of the 3 that were graded
+    assert d["typed_unknown"] == 1
+    assert d["unresolved_slots"] == [
+        {"slot": "customer_name", "count": 2},
+        {"slot": "month", "count": 1},
+    ]
+    (lens_row,) = [r for r in d["lenses"] if r["lens"] == "customer_value"]
+    assert lens_row["typed_pct"] == round(100 * 2 / 3, 1)
+
+
+@needs_db
+def test_eval_trend_carries_the_latest_calibration(org: object) -> None:
+    from services.evals import store as eval_store
+
+    with org_session(org) as session:
+        first = eval_store.create_run(session, "customer_value", "test", score=1.0)
+        eval_store.set_calibration(session, first, {"old": {"n": 1}})
+        second = eval_store.create_run(session, "customer_value", "test", score=1.0)
+        eval_store.set_calibration(session, second, {"vote:m:k=5 [lens]": {"n": 20}})
+        eval_store.create_run(session, "customer_value", "test", score=0.5)  # no table
+    with org_session(org) as session:
+        (row,) = [t for t in observe.eval_trend(session) if t["lens"] == "customer_value"]
+    assert row["calibration"] == {"vote:m:k=5 [lens]": {"n": 20}}

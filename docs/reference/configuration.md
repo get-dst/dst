@@ -36,7 +36,7 @@ provider first.
 
 | Field | What |
 |---|---|
-| `type` | wire protocol: `anthropic`, `openai-compatible` (covers OpenAI, DeepSeek, Ollama, vLLM, Groq, most gateways), or `local` (in-process embeddings, no key; the `dst-core[local-embed]` extra) |
+| `type` | wire protocol: `anthropic`, `openai-compatible` (covers OpenAI, DeepSeek, Ollama, vLLM, Groq, most gateways), `local` (in-process embeddings, no key; the `dst-core[local-embed]` extra), or `typesafe` (a typed-decision provider: closed-set decisions with a probability per option — [Typed decisions](../concepts/typed-decisions.md)) |
 | `api_key_env` | name of the env var holding the key (convention: `DST_API_KEY_<NAME>`); the only right choice in a committed file |
 | `base_url` | API base URL; required for `openai-compatible` |
 | `fast_model` | this provider's cheap first-pass model; the first declared provider with one carries the fast tier |
@@ -155,6 +155,17 @@ connections:
     secret_env: DST_API_KEY_WH
 ```
 
+A typed-decision provider is one more entry; with it configured and
+`DST_TYPED_SERVING=auto` (the default), every lens serves typed and the router
+decides over every published lens with no similarity shortlist:
+
+```yaml
+providers:
+  jev:
+    type: typesafe
+    api_key_env: DST_API_KEY_JEV
+```
+
 !!! warning "Snowflake: move off passwords"
     Snowflake is retiring single-factor password authentication, with final
     enforcement landing **August–October 2026**. Point `secret_env` at a **PEM
@@ -205,6 +216,8 @@ older installs. The interesting ones:
 | `DATABASE_ADMIN_URL` | local dev URL | migrations + bootstrap (role/org creation) |
 | `DST_SECRET_KEY` | — | Fernet key(s) encrypting stored warehouse/context credentials, **comma-separated**: the first encrypts, all decrypt. `dst secret` mints one; `dst init` generates it into `.env`. To rotate, deploy `<new>,<old>`, run `dst rotate-key`, then drop `<old>`. Changing it without that sequence makes stored credentials unreadable; the server checks the key against an encrypted sentinel at startup and refuses to boot on a mismatch |
 | `DST_PROVIDERS` | `{}` | providers as JSON, same shape as the `dst.yaml` `providers` map; inline `api_key` is allowed *here* (env-only), never in files |
+| `DST_TYPED_SERVING` | `auto` | `auto`: typed serving whenever a `typesafe` provider resolves; `on`: typed serving on any decider (a voting chat model, five samples per decision); `off`: the one-shot intent emission ([Typed decisions](../concepts/typed-decisions.md)) |
+| `DST_GATE_CONCURRENCY` | `16` | workers for the test lanes and the apply gate — the slot lane's wall time is the provider's round trips divided by this |
 | `DST_DEFAULT_PROVIDER` | first declared | bare-model-ref fallback |
 | `DST_LLM_DESCRIPTIONS` | `true` | the profiling chain's LLM description pass, which sends table/column names and sampled values to the configured provider to fill undocumented columns. `false` turns it off; profiling then stays entirely between dst and the warehouse. See [Security and data flow](../security.md) |
 | `DST_AI_PRICING` | `{}` | per-model pricing JSON, same shape as the file key |

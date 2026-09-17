@@ -68,6 +68,10 @@ def kpis(session: Session) -> dict[str, object]:
             )
         )
     }
+    # Same shape for the ledger tag: what share of served figures rested on a
+    # certified or declared definition. NULL rows predate the ledger and are
+    # reported as `unknown`, never folded into "not governed".
+    resolution_histogram = _resolution_histogram(session, f"status = 'ok' AND {governed}", {})
     return {
         "queries": int(row[0]),
         "ai_cost_usd": round(float(row[1]), 4),
@@ -91,6 +95,7 @@ def kpis(session: Session) -> dict[str, object]:
             "error": int(row[5]),
         },
         "confidence_histogram": histogram,
+        "resolution_histogram": resolution_histogram,
         # Raw-SQL probes, reported as what they are — never as governed
         # queries. `admin_sql` is the connection passthrough (an admin's own
         # SQL against an org credential); `lens_scoped` is a caller probing
@@ -101,6 +106,21 @@ def kpis(session: Session) -> dict[str, object]:
             "lens_scoped": int(probe_row[0]) - int(probe_row[1]),
             "warehouse_cost_usd": round(float(probe_row[2]), 4),
         },
+    }
+
+
+def _resolution_histogram(
+    session: Session, where: str, params: dict[str, object]
+) -> dict[str, int]:
+    return {
+        str(r[0]): int(r[1])
+        for r in session.execute(
+            text(
+                "SELECT COALESCE(resolution_tag, 'unknown'), count(*) FROM request_log "
+                f"WHERE {where} GROUP BY 1"
+            ),
+            params,
+        )
     }
 
 
@@ -128,7 +148,7 @@ def recent_requests(
         text(
             "SELECT request_id, lens, caller, status, row_count, confidence, "
             "COALESCE(ai_cost_usd,0) + COALESCE(wh_cost_usd,0) AS cost, created_at, question, "
-            "generator_tier "
+            "generator_tier, resolution_tag "
             f"FROM request_log {where} ORDER BY created_at DESC LIMIT :k"
         ),
         params,
@@ -148,6 +168,8 @@ def recent_requests(
             # consumer must not need to know that a 'sql:' lens-name prefix
             # means the admin passthrough. For probes, `question` holds SQL.
             "kind": _row_kind(r[9], r[1]),
+            # The ledger tag; None on declines and on rows written before 0063.
+            "resolution_tag": r[10],
         }
         for r in rows
     ]
@@ -168,7 +190,8 @@ def request_detail(session: Session, request_id: str) -> dict[str, object] | Non
             "SELECT request_id, lens, caller, question, sql, valid, row_count, answer, "
             "citations, definition_used, confidence, verification, certification, latency, "
             "ai_input_tokens, ai_output_tokens, ai_cost_usd, wh_bytes, wh_cost_usd, "
-            "status, error, created_at, prompt_hash, generator_tier, repairs, context_refs "
+            "status, error, created_at, prompt_hash, generator_tier, repairs, context_refs, "
+            "resolution, resolution_tag, typed, clarification "
             "FROM request_log WHERE request_id = :r"
         ),
         {"r": request_id},
@@ -209,6 +232,11 @@ def request_detail(session: Session, request_id: str) -> dict[str, object] | Non
         "repairs": row[24],
         "context_refs": row[25],
         "kind": _row_kind(row[23], row[1]),
+        # Where each part of the figure's meaning came from (0063); NULL before.
+        "resolution": row[26],
+        "resolution_tag": row[27],
+        "typed": row[28],
+        "clarification": row[29],
     }
 
 
@@ -219,11 +247,12 @@ def eval_trend(session: Session) -> list[dict[str, object]]:
     (there is no warehouse-native mirror)."""
     rows = session.execute(
         text(
-            "SELECT lens, mode, score, passed, failed, errored, started_at "
+            "SELECT lens, mode, score, passed, failed, errored, started_at, calibration "
             "FROM eval_run ORDER BY lens, started_at ASC"
         )
     ).all()
     by_lens: dict[str, list[dict[str, object]]] = {}
+    calibration_by_lens: dict[str, object] = {}
     for r in rows:
         by_lens.setdefault(r[0], []).append(
             {
@@ -235,10 +264,22 @@ def eval_trend(session: Session) -> list[dict[str, object]]:
                 "started_at": r[6].isoformat() if r[6] else None,
             }
         )
+        if r[7]:
+            calibration_by_lens[r[0]] = r[7]  # rows are in time order: last wins
     out: list[dict[str, object]] = []
     for lens, runs in sorted(by_lens.items()):
         latest = next((x["score"] for x in reversed(runs) if x["score"] is not None), None)
-        out.append({"lens": lens, "latest_score": latest, "runs": runs})
+        out.append(
+            {
+                "lens": lens,
+                "latest_score": latest,
+                "runs": runs,
+                # The deciders' calibration table from the latest sweep that
+                # recorded one (per decider and slot; UNTESTED / n too small
+                # rows say so) — no accuracy is derived from production traffic.
+                "calibration": calibration_by_lens.get(lens),
+            }
+        )
     return out
 
 
@@ -318,7 +359,19 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
                 # A spend total with unpriced calls behind it is a FLOOR. The
                 # statement has to carry the gap or its cost line reads as a
                 # measurement when it is a partial count.
-                "count(*) FILTER (WHERE ai_cost_usd IS NULL AND ai_output_tokens IS NOT NULL) "
+                "count(*) FILTER (WHERE ai_cost_usd IS NULL AND ai_output_tokens IS NOT NULL), "
+                # Governed basis: the figure's meaning came from a certified or
+                # declared definition. `unknown` is counted beside it so a window
+                # of pre-ledger rows reads untested, never "0% governed".
+                "count(*) FILTER (WHERE status = 'ok' "
+                "AND resolution_tag IN ('certified', 'declared')), "
+                "count(*) FILTER (WHERE status = 'ok' "
+                "AND COALESCE(resolution_tag, 'unknown') = 'unknown'), "
+                # Typed share: every slot a typed decision, a deterministic parse
+                # or a caller binding, no escalation. NULL = served before typed
+                # serving — counted apart, never as untyped.
+                "count(*) FILTER (WHERE status = 'ok' AND typed IS TRUE), "
+                "count(*) FILTER (WHERE status = 'ok' AND typed IS NULL) "
                 f"FROM request_log WHERE {governed} AND {where}"
             ),
             {"d": days, "d2": days * 2},
@@ -334,18 +387,45 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
             "wh_cost_usd": round(float(row[6]), 4),
             "verified": int(row[7]),
             "unpriced": int(row[8]),
+            "declared": int(row[9]),
+            "resolution_unknown": int(row[10]),
+            "typed": int(row[11]),
+            "typed_unknown": int(row[12]),
         }
 
     current, previous = _window(win), _window(prior)
 
-    def _rates(w: dict[str, float]) -> tuple[float | None, float | None]:
+    def _rates(
+        w: dict[str, float],
+    ) -> tuple[float | None, float | None, float | None, float | None]:
         asked, answered = int(w["asked"]), int(w["answered"])
         yield_pct = round(100 * answered / asked, 1) if asked else None
         verified_pct = round(100 * int(w["verified"]) / answered, 1) if answered else None
-        return yield_pct, verified_pct
+        # Over answers the ledger actually graded: a pre-ledger window has no
+        # declared share, and reporting 0% would launder "unmeasured" as "bad".
+        graded = answered - int(w["resolution_unknown"])
+        declared_pct = round(100 * int(w["declared"]) / graded, 1) if graded else None
+        typed_known = answered - int(w["typed_unknown"])
+        typed_pct = round(100 * int(w["typed"]) / typed_known, 1) if typed_known else None
+        return yield_pct, verified_pct, declared_pct, typed_pct
 
-    yield_pct, verified_pct = _rates(current)
-    prior_yield, prior_verified = _rates(previous)
+    yield_pct, verified_pct, declared_pct, typed_pct = _rates(current)
+    prior_yield, prior_verified, prior_declared, prior_typed = _rates(previous)
+
+    # The columns that keep clarifying for want of a value the question could
+    # not type — profiling completeness (a complete dictionary) is the lever.
+    unresolved_slots = [
+        {"slot": str(r[0]), "count": int(r[1])}
+        for r in session.execute(
+            text(
+                "SELECT clarification->>'term', count(*) FROM request_log "
+                f"WHERE status = 'clarification' AND {governed} AND {win} "
+                "AND clarification->>'kind' = 'unresolved_slot' "
+                "GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 8"
+            ),
+            {"d": days},
+        )
+    ]
 
     series = [
         {"day": r[0].isoformat(), "asked": int(r[1])}
@@ -369,6 +449,10 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
         )
     }
 
+    resolution_histogram = _resolution_histogram(
+        session, f"status = 'ok' AND {governed} AND {win}", {"d": days}
+    )
+
     # Per-lens rollup over the window: owner and the degraded mark from the
     # lens row, the latest regression-gate score from eval_run. Verified share
     # is per SERVED answer — the same denominator the headline uses.
@@ -377,6 +461,12 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
             "SELECT r.lens, count(*) AS asked, "
             "count(*) FILTER (WHERE r.status = 'ok') AS answered, "
             "count(*) FILTER (WHERE r.status = 'ok' AND r.confidence = 'verified') AS verified, "
+            "count(*) FILTER (WHERE r.status = 'ok' "
+            "AND r.resolution_tag IN ('certified', 'declared')) AS declared, "
+            "count(*) FILTER (WHERE r.status = 'ok' "
+            "AND COALESCE(r.resolution_tag, 'unknown') = 'unknown') AS res_unknown, "
+            "count(*) FILTER (WHERE r.status = 'ok' AND r.typed IS TRUE) AS typed, "
+            "count(*) FILTER (WHERE r.status = 'ok' AND r.typed IS NULL) AS typed_unknown, "
             "COALESCE(SUM(r.ai_cost_usd), 0) + COALESCE(SUM(r.wh_cost_usd), 0) AS cost, "
             "COALESCE(l.published_json->'config'->>'owner', '') AS owner, l.degraded, "
             "(SELECT er.score FROM eval_run er WHERE er.lens = r.lens AND er.mode = 'regression' "
@@ -394,10 +484,20 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
             "asked": int(r[1]),
             "answered": int(r[2]),
             "verified_pct": round(100 * int(r[3]) / int(r[2]), 1) if int(r[2]) else None,
-            "cost_usd": round(float(r[4]), 4),
-            "owner": r[5] or "",
-            "degraded": r[6],
-            "gate_score": float(r[7]) if r[7] is not None else None,
+            "declared_pct": (
+                round(100 * int(r[4]) / (int(r[2]) - int(r[5])), 1)
+                if int(r[2]) - int(r[5])
+                else None
+            ),
+            "typed_pct": (
+                round(100 * int(r[6]) / (int(r[2]) - int(r[7])), 1)
+                if int(r[2]) - int(r[7])
+                else None
+            ),
+            "cost_usd": round(float(r[8]), 4),
+            "owner": r[9] or "",
+            "degraded": r[10],
+            "gate_score": float(r[11]) if r[11] is not None else None,
         }
         for r in lens_rows
     ]
@@ -429,6 +529,24 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
         "verified_delta_pp": round(verified_pct - prior_verified, 1)
         if verified_pct is not None and prior_verified is not None
         else None,
+        # Governed basis (the ledger): % of graded answers whose figure came
+        # from a certified or declared definition, and how many answers the
+        # ledger never graded (pre-0063 rows) — printed beside it, rule 4.
+        "declared_pct": declared_pct,
+        "declared_delta_pp": round(declared_pct - prior_declared, 1)
+        if declared_pct is not None and prior_declared is not None
+        else None,
+        "resolution_unknown": int(current["resolution_unknown"]),
+        "resolution_histogram": resolution_histogram,
+        # Typed serving: % of answers where every slot typed (no escalation),
+        # the answers served before typed serving existed, and the slots that
+        # keep clarifying — the dictionary gaps to profile.
+        "typed_pct": typed_pct,
+        "typed_delta_pp": round(typed_pct - prior_typed, 1)
+        if typed_pct is not None and prior_typed is not None
+        else None,
+        "typed_unknown": int(current["typed_unknown"]),
+        "unresolved_slots": unresolved_slots,
         "ai_cost_usd": current["ai_cost_usd"],
         "wh_cost_usd": current["wh_cost_usd"],
         "unpriced": int(current["unpriced"]),

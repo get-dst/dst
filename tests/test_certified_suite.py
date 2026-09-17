@@ -719,3 +719,117 @@ def test_compare_tolerates_float_summation_drift_in_multirow_results() -> None:
         [["2020-02-01", 103512.29]],
     )
     assert not ok
+
+
+# ── the resolution lane: meaning is graded beside values ─────────────────────
+
+_COUNT_Q = "How many orders are there?"
+_COUNT_ORACLE = "SELECT count(orders.order_id) AS order_count FROM orders"
+
+
+def test_right_rows_by_an_ungoverned_path_passes_and_says_so() -> None:
+    """The rows match the oracle, but generation counted rows instead of
+    computing the declared `order_count` metric. Rows are the gate — the case
+    PASSES — and the resolution stage records the miss so the ledger can say
+    'right number, ungoverned path' instead of a clean green."""
+    out = _suite([_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)], ["SELECT count(*) FROM orders"])
+    r = out.results[0]
+    assert r.passed and r.wrong_at is None
+    assert r.stages["rows"] == "passed" and r.stages["resolution"] == "failed"
+    assert r.ungoverned_pass
+    assert r.resolution_expected == "declared" and r.resolution_got == "inferred"
+    assert "order_count" in r.stage_evidence and "COUNT(*)" in r.stage_evidence
+
+
+def test_wrong_rows_from_the_wrong_metric_attribute_to_resolution_first() -> None:
+    """Wrong meaning ⇒ wrong values: the first failed stage is resolution, so
+    the summary points at the layer/generation seam, not at 'rows'."""
+    out = _suite(
+        [_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)],
+        ["SELECT count(*) FROM customers", "SELECT count(*) FROM customers"],
+    )
+    r = out.results[0]
+    assert not r.passed
+    assert r.stages["resolution"] == "failed" and r.stages["rows"] == "failed"
+    assert r.wrong_at == "resolution"
+
+
+def test_generation_more_governed_than_the_oracle_passes_and_says_so() -> None:
+    """The certified SQL sums a raw column; generation used the declared
+    metric. Not a miss — a note for the certifier, and the case passes the
+    resolution stage."""
+    raw_oracle = "SELECT status, count(*) AS n FROM orders GROUP BY 1"
+    out = _suite(
+        [_answer(sql=raw_oracle, question=_COUNT_Q)],
+        ["SELECT status, count(o.order_id) AS order_count FROM orders AS o GROUP BY 1"],
+    )
+    r = out.results[0]
+    assert r.passed and r.stages["resolution"] == "passed" and not r.ungoverned_pass
+    assert "computes COUNT(*) raw" in r.stage_evidence and "order_count" in r.stage_evidence
+
+
+def test_governed_generation_passes_the_resolution_stage() -> None:
+    out = _suite(
+        [_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)],
+        ["SELECT count(o.order_id) AS order_count FROM orders AS o"],
+    )
+    r = out.results[0]
+    assert r.passed and r.stages["resolution"] == "passed" and not r.ungoverned_pass
+
+
+def test_an_oracle_naming_nothing_governed_skips_the_lane_out_loud() -> None:
+    """A listing oracle declares no metric: the lane grades nothing and says
+    `skipped` with the reason — never a clean pass for a stage that ran nothing."""
+    listing = "SELECT customer_name FROM customers ORDER BY customer_name LIMIT 3"
+    out = _suite([_answer(sql=listing, question="First three customers?")], [listing])
+    r = out.results[0]
+    assert r.passed and r.stages["resolution"] == "skipped"
+    assert "names no declared" in r.stage_evidence
+
+
+def test_a_green_typed_case_carries_its_ledger_as_gold_an_untyped_one_does_not() -> None:
+    """The result carries the typed ledger only when the answer typed by
+    construction: raw-SQL generation (attributed) carries none, so nothing
+    attributed ever becomes typed gold."""
+    from services.contracts.protocols import GeneratedQuery
+    from services.contracts.query_intent import QueryIntent
+
+    answers = [
+        CertifiedAnswer(
+            "c1",
+            "customer_value",
+            "how many customers",
+            "SELECT count(*) AS n FROM customers",
+            "t",
+            "2026-01-01",
+        )
+    ]
+    out = _suite(answers, ['{"sql": "SELECT count(*) AS n FROM customers", "rationale": "r"}'])
+    (r,) = out.results
+    assert r.passed and r.resolution is None  # attributed, not typed
+
+    class _Typed:
+        """A typed generator: the same SQL, carried with its intent."""
+
+        model = "typed"
+
+        def generate(self, **kw):  # type: ignore[no-untyped-def]
+            intent = QueryIntent(entity="customers", metrics=["customer_count"])
+            return GeneratedQuery(
+                sql="SELECT count(*) AS n FROM customers", intent=intent, typed=True
+            )
+
+    assemble_for, _g = _fake_harness(_Typed())
+    typed_out = run_certified_suite(
+        connector=DuckDBConnector(settings.duckdb_jaffle_path),
+        lens="customer_value",
+        answers=answers,
+        assemble_for=assemble_for,
+        generators_for=lambda _a: (_Typed(), None),
+        composer=AnswerComposer(ScriptedLLM(["scripted answer"]), model="m"),
+        model_name="m",
+    )
+    (t,) = typed_out.results
+    assert t.passed, t.reason
+    assert t.resolution is not None and t.resolution["typed"] is True
+    assert t.resolution["method"] == "construction"

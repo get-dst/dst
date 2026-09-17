@@ -1388,3 +1388,18 @@ def test_uncomposed_numeric_skip_still_does_not_demote() -> None:
         _check("not_truncated", "pass"),
     ]
     assert _with_grade(checks, "none", "skip", composed=False).grade == "verified"
+
+
+def test_fold_low_confidence_names_the_decision_and_caps_at_partial() -> None:
+    from services.contracts.resolution import DecisionRecord
+    from services.contracts.verification import VerificationReport
+    from services.runtime.verification import fold_low_confidence
+
+    rec = DecisionRecord(slot="lens", chosen="sales", p=0.7, verdict="act", provider="typesafe:j")
+    folded = fold_low_confidence(VerificationReport(grade="verified", checks=[]), [(rec, 0.9)])
+    (check,) = folded.checks
+    assert check.name == "decision_confidence" and check.status == "fail"
+    assert "lens decided as sales at p=0.70, below the measured 0.90 bar" in (check.reason or "")
+    assert folded.grade == "partial"
+    kept = fold_low_confidence(VerificationReport(grade="unverified", checks=[]), [(rec, 0.9)])
+    assert kept.grade == "unverified"

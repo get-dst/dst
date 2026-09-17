@@ -10,6 +10,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from services.api.llm import require_embedder
@@ -183,6 +184,9 @@ NO_EMBEDDER_WARNING = (
 class CertifyFromRequestBody(BaseModel):
     source: str | None = None  # defaults to "review:<request_id>" — trust must be traceable
     verified_by: str | None = None
+    # An UNTYPED serve (the raw-SQL escalation a caller accepted) is a
+    # different certification: a human has read the SQL. Say so.
+    allow_untyped: bool = False
 
 
 def _bindings(session: Session, lens: str, sql: str) -> dict[str, str] | None:
@@ -293,6 +297,20 @@ def certify_request(
     # (the same rule `_apply_certified` follows) — stacking a second active row
     # made the served answer arbitrary and unreachable from files.
     replaced = _replace_same_question(session, lens, trace.question)
+    # The typed gold: the trace's resolution ledger, when the traced SQL is
+    # what we certify (a correction resolves differently; it carries none).
+    resolution = _trace_resolution(session, request_id) if sql == trace.sql else None
+    if (
+        resolution is not None
+        and resolution.get("typed") is False
+        and not (body is not None and body.allow_untyped)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="this answer was served UNTYPED — raw-SQL generation the caller opted into, "
+            "not a typed resolution. Certifying it is a different act: read the SQL, then "
+            "pass allow_untyped: true (dst reviews rule … --certify --allow-untyped).",
+        )
     if registry.resolve_embedder() is None:
         cid = store.create(
             session,
@@ -305,6 +323,7 @@ def certify_request(
             verified_by=verified_by,
             bindings=bindings,
             verified_prose=verified_prose,
+            resolution=resolution,
         )
         return {
             "id": cid,
@@ -325,8 +344,16 @@ def certify_request(
         verified_by=verified_by,
         bindings=bindings,
         verified_prose=verified_prose,
+        resolution=resolution,
     )
     return {"id": cid, "lens": lens, "replaced": replaced, "corrected": sql != trace.sql}
+
+
+def _trace_resolution(session: Session, request_id: str) -> dict[str, object] | None:
+    row = session.execute(
+        text("SELECT resolution FROM request_log WHERE request_id = :r"), {"r": request_id}
+    ).first()
+    return row[0] if row and isinstance(row[0], dict) else None
 
 
 @router.delete("/{answer_id}", status_code=204)

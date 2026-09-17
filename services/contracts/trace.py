@@ -9,7 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from services.contracts.response import Citation
+from services.contracts.resolution import Resolution
+from services.contracts.response import Citation, ClarificationRequest
 from services.contracts.verification import VerificationReport
 
 
@@ -58,3 +59,12 @@ class TraceLog(BaseModel):
     # `dst lens prompt` prints the same tier's prompt for a question.
     generator_tier: str | None = None
     repairs: int = 0
+    # The resolution ledger (contracts/resolution.py) and its derived tag,
+    # denormalised so the audit statement can count governed basis in SQL.
+    # None on non-answers and on rows written before the ledger existed —
+    # observe reads those as `unknown`, never as "not governed".
+    resolution: Resolution | None = None
+    resolution_tag: str | None = None
+    # The clarification a non-answer asked for (kind + the slot it named), so
+    # "which columns keep clarifying for want of a dictionary" is a query.
+    clarification: ClarificationRequest | None = None

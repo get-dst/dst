@@ -11,7 +11,9 @@ import re
 from collections.abc import Sequence
 from typing import Literal
 
+import sqlglot
 from pydantic import BaseModel
+from sqlglot import expressions as exp
 
 from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.definitions import drift
@@ -65,6 +67,134 @@ _IMPERATIVE_PROSE = re.compile(
     r"|use[d]? for|analysis|analytics)",
     re.IGNORECASE,
 )
+
+
+def _population_filter_unbound(e: Entity, dialect: str | None) -> list[str]:
+    """Column qualifiers in a population_filter that bind to nothing in the
+    compiled query. The compiler aliases the entity's table AS the entity name,
+    so inside the predicate the entity is reachable only by that name (or by
+    an alias the predicate's own subqueries declare — an aliased FROM hides its
+    table's name, as SQL does). A schema-qualified reference to the physical
+    table (`raw.contract_events.event_id`) never binds: the alias carries no
+    schema. Static, so it dies at plan, not on the 28th served question."""
+    pf = (e.population_filter or "").strip()
+    if not pf:
+        return []
+    try:
+        tree = sqlglot.parse_one(f"SELECT 1 WHERE {pf}", read=dialect)
+    except Exception:  # noqa: BLE001 — a predicate that does not parse is its own lint
+        return []
+    available = {e.name.lower()}
+    for table in tree.find_all(exp.Table):
+        available.add((table.alias or table.name).lower())
+    physical = e.source.table.lower()
+    unbound: list[str] = []
+    for col in tree.find_all(exp.Column):
+        if not col.table:
+            continue
+        qualified = ".".join(p for p in (col.catalog, col.db, col.table) if p).lower()
+        if col.db and (qualified == physical or physical.endswith("." + qualified)):
+            ref = f"{qualified}.{col.name}"
+        elif col.table.lower() not in available:
+            ref = f"{qualified}.{col.name}"
+        else:
+            continue
+        if ref not in unbound:
+            unbound.append(ref)
+    return unbound
+
+
+def _lint_population_filter_binds(e: Entity, dialect: str | None, issues: list[Issue]) -> None:
+    unbound = _population_filter_unbound(e, dialect)
+    if not unbound:
+        return
+    issues.append(
+        Issue(
+            severity="error",
+            code="population_filter_unbound",
+            message=f"entity '{e.name}': population_filter references {', '.join(unbound)} — "
+            f"compiled SQL aliases {e.source.table} AS `{e.name}`, so that reference binds to "
+            f"nothing and every query against the entity fails at the warehouse. Reference the "
+            f"entity by its name (`{e.name}.<column>`) or alias the subquery's table.",
+            subject=e.name,
+        )
+    )
+
+
+def _lint_readings_name_metrics(sm: SemanticModel, issues: list[Issue]) -> None:
+    """An ambiguous term's readings describe POPULATIONS (which invoices,
+    whose revenue); the metric is the metric slot's own decision. A reading
+    labelled with a specific metric ("invoiced revenue (invoices.net_revenue)")
+    steers every question under that reading to that metric — a question
+    about a sibling (gross invoiced) lands on net. Warn at plan."""
+    metric_refs = {
+        f"{e.name}.{m.name}".lower(): (e.name, m.name) for e in sm.entities for m in e.metrics
+    }
+    for d in sm.definitions:
+        if d.status != "ambiguous":
+            continue
+        for mapping in d.possible_mappings:
+            label = ambiguity.mapping_label(mapping).lower()
+            hit = next((ref for ref in metric_refs if ref in label), None)
+            if hit is None:
+                continue
+            entity, metric = metric_refs[hit]
+            label_text = ambiguity.mapping_label(mapping)
+            issues.append(
+                Issue(
+                    severity="warning",
+                    code="reading_names_a_metric",
+                    message=f"ambiguous term '{d.term}': the reading '{label_text}' "
+                    f"names the metric {entity}.{metric} — a reading describes a population; "
+                    f"the metric is decided separately, so a question about a sibling metric "
+                    f"of '{entity}' is steered to '{metric}'. Describe the reading by what it "
+                    "covers and leave the metric out of its label.",
+                    subject=d.term,
+                )
+            )
+
+
+def _lint_compiles(sm: SemanticModel, issues: list[Issue]) -> None:
+    """Every entity with a declared metric compiles — at its base shape and,
+    when it declares a time field, by month. The compiler is dst's; a typed
+    intent that does not compile is a product defect the author must not meet
+    at serve time as a clarification. Dialect parse included (transpile)."""
+    from services.contracts.query_intent import QueryIntent
+    from services.runtime.compiler import CompileError, compile_intent
+
+    for e in sm.entities:
+        if not e.metrics:
+            continue
+        shapes = [("base", QueryIntent(entity=e.name, metrics=[e.metrics[0].name]))]
+        if e.default_time_field:
+            shapes.append(
+                ("by month", QueryIntent(entity=e.name, metrics=[e.metrics[0].name], grain="month"))
+            )
+        for label, intent in shapes:
+            try:
+                compile_intent(intent, sm)
+            except CompileError as exc:
+                issues.append(
+                    Issue(
+                        severity="error",
+                        code="entity_does_not_compile",
+                        message=f"entity '{e.name}' does not compile ({label} shape, metric "
+                        f"'{e.metrics[0].name}'): {exc}",
+                        subject=e.name,
+                    )
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 — a compiler crash is the loudest defect
+                issues.append(
+                    Issue(
+                        severity="error",
+                        code="entity_does_not_compile",
+                        message=f"entity '{e.name}': the compiler raised on the {label} shape "
+                        f"— a dst defect, report it: {type(exc).__name__}: {exc}",
+                        subject=e.name,
+                    )
+                )
+                break
 
 
 def _lint_imperative_prose(e: Entity, issues: list[Issue]) -> None:
@@ -346,6 +476,7 @@ def _check_bundle(
     for e in sm.entities:
         _lint_imperative_prose(e, issues)
         _lint_twin_metric_filters(e, sm.dialect, issues)
+        _lint_population_filter_binds(e, sm.dialect, issues)
         if e.source.connection not in allowed_connections:
             issues.append(
                 Issue(
@@ -365,6 +496,8 @@ def _check_bundle(
                 )
             )
 
+    _lint_compiles(sm, issues)
+    _lint_readings_name_metrics(sm, issues)
     issues.extend(_competing_metrics(sm))
 
     if sm.timezone:

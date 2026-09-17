@@ -233,3 +233,42 @@ def test_certify_from_request_stamps_review_source(org, monkeypatch) -> None:
         assert stored is not None
         assert stored.source == "metabase:card/7 'Repeat customers'"
         assert stored.verified_by == "maija"
+
+
+def _seed_untyped_trace(oid: object, request_id: str) -> None:
+    admin = create_engine(settings.database_admin_url)
+    with admin.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO request_log (org_id, request_id, lens, caller, question, sql, "
+                "valid, row_count, answer, definition_used, confidence, certification, "
+                "latency, status, resolution) VALUES "
+                "(:o, :r, 'customer_value', 'agent-1', 'how many repeat customers?', "
+                "'SELECT count(*) FROM customers WHERE number_of_orders > 1', true, 1, "
+                "'There are 19 repeat customers.', 'repeat_customer', 'high', 'none', "
+                "'{}'::jsonb, 'ok', "
+                '\'{"method": "attributed", "tag": "inferred", "slots": [], '
+                '"typed": false}\'::jsonb)'
+            ),
+            {"o": oid, "r": request_id},
+        )
+    admin.dispose()
+
+
+@needs_db
+def test_an_untyped_serve_is_a_different_certification(org, monkeypatch) -> None:
+    """The ordinary door refuses an answer served by the raw-SQL escalation;
+    a ruling that says it read the SQL (allow_untyped) certifies it."""
+    oid, headers = org
+    _seed_untyped_trace(oid, "req-untyped")
+    monkeypatch.setattr("services.llm.registry.resolve_embedder", lambda: None)
+    r = client.post(
+        "/mgmt/lenses/customer_value/certified/from-request/req-untyped", headers=headers
+    )
+    assert r.status_code == 409 and "UNTYPED" in r.json()["detail"]
+    r = client.post(
+        "/mgmt/lenses/customer_value/certified/from-request/req-untyped",
+        headers=headers,
+        json={"allow_untyped": True},
+    )
+    assert r.status_code == 201, r.text

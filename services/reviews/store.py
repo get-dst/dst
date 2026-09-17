@@ -36,6 +36,14 @@ class Trace(BaseModel):
     # ("certified" | "none" | null) and the graded verification breakdown.
     certification: str | None = None
     verification: dict[str, object] | None = None
+    # The judge's input contract (T2): the result rows when available (the
+    # full payload or a disclosed cap), whether the prose is intentionally
+    # empty (a structured serve — never "no data"), and a correction's SQL
+    # when the ticket carries one (the thing under review, not the original).
+    columns: list[str] | None = None
+    rows: list[list[object]] | None = None
+    structured: bool = False
+    correction_sql: str | None = None
 
 
 class Ticket(BaseModel):
@@ -72,7 +80,7 @@ def get_trace(session: Session, request_id: str) -> Trace | None:
     row = session.execute(
         text(
             "SELECT request_id, lens, caller, question, sql, answer, definition_used, "
-            "confidence, row_count, certification, verification "
+            "confidence, row_count, certification, verification, sample "
             "FROM request_log WHERE request_id = :r"
         ),
         {"r": request_id},
@@ -91,6 +99,10 @@ def get_trace(session: Session, request_id: str) -> Trace | None:
         row_count=row[8],
         certification=row[9],
         verification=row[10],
+        # The logged sample (when the lens logs samples) is the only row
+        # evidence the queue has; absent, the judge is told so.
+        rows=row[11] if isinstance(row[11], list) else None,
+        structured=not (row[5] or "").strip(),
     )
 
 

@@ -173,3 +173,51 @@ def test_certified_store_search_and_delete() -> None:
             assert len(store.list_for_lens(s, "churn")) == 1
     finally:
         _cleanup(org)
+
+
+def test_certified_equivalence_is_a_measured_decision_under_the_policy() -> None:
+    """On the seam: the approved SQL serves only on a measured `act` for
+    `equivalent`; a decision the policy cannot act on falls through to
+    generation (today's fail-closed), and the decision rides the ledger."""
+    from services.contracts.fakes import ScriptedDecider, ScriptedLLM
+    from services.contracts.protocols import Decision
+    from services.runtime import assembly
+
+    sure = Decision(
+        chosen="equivalent", probs={"equivalent": 0.95, "different": 0.05}, provider="v"
+    )
+    unsure = Decision(
+        chosen="equivalent", probs={"equivalent": 0.6, "different": 0.4}, provider="v"
+    )
+    sure_no = Decision(
+        chosen="different", probs={"equivalent": 0.0, "different": 1.0}, provider="v"
+    )
+    recorded: list = []
+    llm = ScriptedLLM(["unused"])
+    assert assembly.certified_equivalent(
+        llm,
+        "m",
+        "revenue last quarter?",
+        "what was revenue last quarter",
+        decider=ScriptedDecider([sure]),
+        record_to=recorded,
+    )
+    assert not assembly.certified_equivalent(
+        llm, "m", "revenue?", "revenue last quarter?", decider=ScriptedDecider([unsure])
+    )
+    assert not assembly.certified_equivalent(
+        llm, "m", "revenue?", "revenue last quarter?", decider=ScriptedDecider([sure_no])
+    )
+    (rec,) = recorded
+    assert rec.slot == "certified_equivalent" and rec.chosen == "equivalent"
+    assert rec.p == 0.95 and rec.verdict == "act" and rec.provider == "v"
+
+
+def test_legacy_yes_no_gate_measures_nothing_and_still_serves() -> None:
+    from services.contracts.fakes import ScriptedLLM
+    from services.runtime import assembly
+
+    recorded: list = []
+    assert assembly.certified_equivalent(ScriptedLLM(["yes"]), "m", "a?", "a", record_to=recorded)
+    assert recorded[0].p is None and recorded[0].verdict == "act"
+    assert recorded[0].provider == "legacy:m"

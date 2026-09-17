@@ -540,18 +540,22 @@ def apply_project(
     # "who allowed this red publish, and why" must be answerable from history.
     allow_failing_cases: bool = Query(default=False),
     override_reason: str = Query(default=""),
+    # Per-case: the override names the failing case ids it covers (repeatable);
+    # it applies only when every failing case is named.
+    allow_case: list[str] = Query(default=[]),
 ) -> list[dict[str, object]]:
     """Apply a pushed file tree — the single deployment door (`dst apply`).
     One transaction per org under an advisory lock (a concurrent apply gets a
     409), landing connections → profiles → semantic layer → lenses blue/green.
     Returns one result row per scope."""
-    if allow_failing_cases and not override_reason.strip():
+    if (allow_failing_cases or allow_case) and not override_reason.strip():
         raise HTTPException(
             status_code=422,
-            detail="allow_failing_cases needs override_reason — the audited one-off "
+            detail="an override needs override_reason — the audited one-off "
             "must say why (e.g. 'intended behaviour change: term now ambiguous')",
         )
-    gate_override = override_reason.strip() if allow_failing_cases else None
+    gate_override = override_reason.strip() if (allow_failing_cases or allow_case) else None
+    allow_cases = frozenset(c.strip() for c in allow_case if c.strip()) if allow_case else None
     # One apply per org at a time: a transaction-scoped advisory lock, released
     # with this request's commit/rollback. A concurrent apply would interleave
     # asset upserts and recompiles halfway through another's — refuse it cleanly.
@@ -660,6 +664,7 @@ def apply_project(
             probe_certified=probe_certified,
             created_by=identity.actor,
             gate_override=gate_override,
+            allow_cases=allow_cases,
         )
         out.append(_lens_row(result))
         if result.errors:

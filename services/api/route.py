@@ -30,7 +30,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
 
 from services.api import route_store
-from services.api.query import FORMAT_HELP, AnswerFormat, run_lens_query
+from services.api.query import (
+    BINDINGS_HELP,
+    FORMAT_HELP,
+    UNTYPED_HELP,
+    AnswerFormat,
+    run_lens_query,
+)
 from services.auth.deps import get_caller
 from services.contracts.response import QueryResponse
 from services.db import embedding_meta
@@ -119,10 +125,10 @@ def _resolve_decider() -> LlmDecider | None:
     scripts/router_experiment.py; tests/test_router_gate.py pins the decider's
     accuracy floor. None falls the router back to pure cosine. The signal is
     dst's machinery to own — no customer knob."""
-    resolved = registry.resolve(registry.tier("fast"))
-    if resolved is None:
+    decider = registry.resolve_decider()
+    if decider is None:
         return None
-    return LlmDecider(resolved.llm, resolved.name)
+    return LlmDecider(None, "", decider=decider)
 
 
 def _stored_scorer(
@@ -192,6 +198,8 @@ def _route(caller: CallerIdentity, question: str) -> RouteDecision:
 class JustAskBody(BaseModel):
     q: str = Field(description="the natural-language question — the only required field")
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
+    bindings: dict[str, str] = Field(default_factory=dict, description=BINDINGS_HELP)
+    allow_untyped: bool = Field(default=False, description=UNTYPED_HELP)
 
 
 class RouteProvenance(BaseModel):
@@ -240,13 +248,38 @@ def _persist(
     score: float,
     covered: bool,
     degraded: str | None = None,
+    decision: RouteDecision | None = None,
 ) -> None:
     """Record the routing decision off the deny/error paths (best-effort)."""
     try:
         with org_session(caller.org_id) as session:
-            route_store.record(session, question, lens, score, covered, degraded=degraded)
+            route_store.record(
+                session,
+                question,
+                lens,
+                score,
+                covered,
+                degraded=degraded,
+                decision=_decision_record(decision),
+            )
     except Exception:
         log.exception("routing-decision persist failed")
+
+
+def _decision_record(d: RouteDecision | None) -> dict[str, object] | None:
+    """The measured half of a route, as the row stores it — None when the
+    decider was not consulted (cosine paths, outages)."""
+    if d is None or d.decision is None:
+        return None
+    m = d.decision
+    return {
+        "provider": m.provider,
+        "chosen": m.chosen,
+        "p": m.p,
+        "runner_up": m.runner_up,
+        "margin": m.margin,
+        "verdict": d.verdict,
+    }
 
 
 @router.post("/query", response_model=RoutedAnswer | UncoveredEnvelope)
@@ -264,13 +297,20 @@ async def just_ask(
         # Persist BEFORE the second hop: the routing decision happened regardless of
         # whether the routed lens's query then succeeds — persisting after meant a
         # routed-then-errored request left no row and was invisible to surface area.
-        _persist(caller, body.q, decision.lens, decision.score, True)
+        _persist(caller, body.q, decision.lens, decision.score, True, decision=decision)
         # Second hop: the routed lens's full governed pipeline (allow-list, rate
         # limit, certified definitions, certified answers, guard, trace) — like a direct call.
         # Off the event loop too: the second hop blocks exactly as long as the first
         # (generation + warehouse over sync httpx).
         answer = await asyncio.to_thread(
-            run_lens_query, decision.lens, body.q, caller, background, body.format
+            run_lens_query,
+            decision.lens,
+            body.q,
+            caller,
+            background,
+            body.format,
+            body.bindings,
+            body.allow_untyped,
         )
         return RoutedAnswer(
             routed_to=RouteProvenance(
@@ -284,7 +324,9 @@ async def just_ask(
         if decision.alternatives
         else None
     )
-    _persist(caller, body.q, None, decision.score, False, degraded=decision.degraded)
+    _persist(
+        caller, body.q, None, decision.score, False, degraded=decision.degraded, decision=decision
+    )
     return UncoveredEnvelope(
         reason=decision.reason, nearest_miss=nearest, degraded=decision.degraded
     )

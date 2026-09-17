@@ -591,6 +591,26 @@ def _deterministic_gates(
     return _samples_embedding_stale_definitions(session, name, bundle), report
 
 
+def override_applies(
+    decision: eval_service.GateDecision,
+    gate_override: str | None,
+    allow_cases: frozenset[str] | None,
+) -> bool:
+    """May a reasoned override carry a blocked publish past the gate?
+
+    Never past a certified divergence (a served-answer contradiction is fixed or
+    re-certified in the same push). A per-case override (``--allow-case``)
+    applies only when it names EVERY failing case — an override for yesterday's
+    red case cannot silently cover today's new one, which is how the blanket
+    flag became standing policy. The blanket form (no cases named) still works
+    for now and is reported as blanket, so its use is visible in review."""
+    if not (decision.blocked and gate_override) or decision.certified_failures:
+        return False
+    if allow_cases is None:
+        return True
+    return bool(decision.failing) and set(decision.failing) <= set(allow_cases)
+
+
 def _publish_bundle(
     session: Session,
     name: str,
@@ -600,6 +620,7 @@ def _publish_bundle(
     summary: str,
     created_by: str = "",
     gate_override: str | None = None,
+    allow_cases: frozenset[str] | None = None,
 ) -> tuple[int | None, list[str], list[str], str | None, dict[str, Any] | None]:
     """validate → eval gate → upsert draft → publish → snapshot. Returns (version,
     errors, warnings, gate outcome, gate detail); errors non-empty means no lens rows were
@@ -646,18 +667,24 @@ def _publish_bundle(
             f"score {decision.score} < prev {decision.prev_score}"
             f" — failing: {', '.join(decision.failing) or 'none listed'}"
         )
-        if decision.blocked and gate_override and not decision.certified_failures:
+        if override_applies(decision, gate_override, allow_cases):
             # The audited one-off: publish proceeds, the gate
-            # stays `block` in the file, and the override + reason are loud on
-            # the row and durable in the version history.
+            # stays `block` in the file, and the override + reason + the cases
+            # it named are loud on the row and durable in the version history.
+            by = (
+                f"--allow-case {', '.join(sorted(allow_cases))}"
+                if allow_cases
+                else "--allow-failing-cases"
+            )
+            cases = f" — cases {', '.join(sorted(allow_cases))}" if allow_cases else ""
             gate = f"overridden ({gate_report})"
             warnings.append(
                 _degraded(
                     f"eval gate blocked publish ({gate_report}) — PUBLISHED ANYWAY by "
-                    f"--allow-failing-cases: {gate_override}"
+                    f"{by}: {gate_override}"
                 )
             )
-            summary = f"{summary} [gate override: {gate_override}]"
+            summary = f"{summary} [gate override: {gate_override}{cases}]"
         elif decision.blocked:
             # Certified divergences are errors in their own right (reported
             # verbatim) — each named, then any score regression or failing
@@ -726,6 +753,7 @@ def apply_lens(
     probe_certified: bool = False,
     created_by: str = "",
     gate_override: str | None = None,
+    allow_cases: frozenset[str] | None = None,
 ) -> LensApplyResult:
     config = source.config
     if config.name != name:
@@ -828,6 +856,7 @@ def apply_lens(
         summary=store.APPLY_SUMMARY,
         created_by=created_by,
         gate_override=gate_override,
+        allow_cases=allow_cases,
     )
     if errors:
         return LensApplyResult(

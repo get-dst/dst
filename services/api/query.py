@@ -112,6 +112,17 @@ def _auto_review(org_id: uuid.UUID, request_id: str) -> None:
 #   prose      the written answer without the data payload
 AnswerFormat = Literal["both", "structured", "data", "prose"]
 _ROWS_ONLY = ("structured", "data")
+BINDINGS_HELP = (
+    "typed values for open slots the question cannot type on its own — "
+    "column -> value (a customer name, a number, a YYYY-MM-DD date, a "
+    "YYYY-Qn period); the answer's `clarification` of kind `unresolved_slot` "
+    "names the slot to bind and its grammar"
+)
+UNTYPED_HELP = (
+    "when the question does not type (a slot clarifies), fall to raw-SQL "
+    "generation instead — always disclosed with an UNTYPED line and tagged by "
+    "what it earns, never `declared`. Default false: ask, don't guess"
+)
 FORMAT_HELP = (
     "answer shape: `both` (default), `structured` (rows only — skips the prose LLM "
     "call entirely, far faster), `data` (alias for `structured`), or `prose`"
@@ -128,6 +139,8 @@ class QueryBody(BaseModel):
         "(accepted under `q` or `question`)",
     )
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
+    bindings: dict[str, str] = Field(default_factory=dict, description=BINDINGS_HELP)
+    allow_untyped: bool = Field(default=False, description=UNTYPED_HELP)
 
 
 router = APIRouter(prefix="/v1", tags=["query"])
@@ -539,6 +552,8 @@ def run_lens_query(
     caller: CallerIdentity,
     background: BackgroundTasks,
     fmt: AnswerFormat = "both",
+    bindings: dict[str, str] | None = None,
+    allow_untyped: bool = False,
 ) -> QueryResponse:
     """Authorize + run the governed query pipeline for one lens question.
 
@@ -571,7 +586,9 @@ def run_lens_query(
     except (IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
 
-    assembled = assembly.assemble(bundle, q, caller.org_id)
+    assembled = assembly.assemble(
+        bundle, q, caller.org_id, bindings=bindings or {}, allow_untyped=allow_untyped
+    )
     generator, escalate, certification, certified_match = assembly.select_generators(
         assembled, resolved, config=bundle.config
     )
@@ -600,6 +617,7 @@ def run_lens_query(
             semantic_model=assembled.model,
             value_domains=assembled.value_domains,
             entity_coverage=assembled.entity_coverage,
+            decisions=assembled.decisions,
             connector=connector,
             generator=generator,
             escalate_generator=escalate,
@@ -684,7 +702,16 @@ async def query_lens(
     # which proxy back into this same loop, could not make progress. Same pattern as
     # /v1/query in route.py; the sibling handlers here are sync `def`, which FastAPI
     # already dispatches to this same threadpool.
-    return await run_in_threadpool(run_lens_query, name, body.q, caller, background, body.format)
+    return await run_in_threadpool(
+        run_lens_query,
+        name,
+        body.q,
+        caller,
+        background,
+        body.format,
+        body.bindings,
+        body.allow_untyped,
+    )
 
 
 def describe_intent(intent: QueryIntent) -> str:
@@ -792,7 +819,7 @@ def run_lens_metrics(
             connector=connector,
             # The caller's own intent names the metric — basis provenance is a
             # fact here, not an attribution guess.
-            generator=FixedSQLGenerator(sql, definition_used=intent_term(intent)),
+            generator=FixedSQLGenerator(sql, definition_used=intent_term(intent), intent=intent),
             composer=composer,
             max_rows=bundle.config.model.max_rows_to_return,
             compose_rows=bundle.config.model.max_rows_to_compose,

@@ -123,3 +123,34 @@ def test_from_traffic_creates_the_file_when_absent(
         )
     )
     assert len(cases) == 5  # 4 from outcomes + the previously-unseen pinned question
+
+
+def test_from_traffic_skips_answers_by_an_ungoverned_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An answer the ledger tags mixed/inferred is not a known-good expectation:
+    drafting it would pin the ungoverned path as the suite's idea of correct.
+    Declared/certified answers draft; pre-ledger rows (no tag) keep the old
+    contract; declines never carry a tag and draft as before."""
+    traffic = [
+        {"question": "Revenue by country?", "status": "ok", "resolution_tag": "declared"},
+        {"question": "Sum of amounts times two?", "status": "ok", "resolution_tag": "inferred"},
+        {"question": "Half-governed thing?", "status": "ok", "resolution_tag": "mixed"},
+        {"question": "Old answer?", "status": "ok", "resolution_tag": None},
+        {"question": "Churn?", "status": "refused", "resolution_tag": None},
+    ]
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return httpx.Response(200, json=traffic, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    root = _project(tmp_path)
+    assert (
+        _run_cli(monkeypatch, ["evals", "from-traffic", "customer_value", "--dir", str(root)]) == 0
+    )
+    cases = yaml.safe_load(
+        (root / "lenses" / "customer_value" / "evals" / "cases.yaml").read_text(encoding="utf-8")
+    )
+    drafted = {c["question"] for c in cases if c.get("source") == "harvested"}
+    assert drafted == {"Revenue by country?", "Old answer?", "Churn?"}
+    assert "2 ungoverned-path answer(s) skipped" in capsys.readouterr().out

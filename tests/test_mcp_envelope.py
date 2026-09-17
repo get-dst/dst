@@ -290,12 +290,22 @@ def test_answer_format_reaches_the_data_plane(monkeypatch: pytest.MonkeyPatch) -
         ),
     )
     asyncio.run(srv.query("churn", "how many?", ctx=None, format="structured"))
-    assert sent["/v1/lenses/churn/query"] == {"q": "how many?", "format": "structured"}
+    assert sent["/v1/lenses/churn/query"] == {
+        "q": "how many?",
+        "format": "structured",
+        "bindings": {},
+        "allow_untyped": False,
+    }
     asyncio.run(srv.run_certified("churn", ctx=None, cert_id="c9", format="structured"))
     assert sent["/v1/lenses/churn/certified/c9/run"] == {"bindings": {}, "format": "structured"}
     # ...and the default every existing agent already sends is still prose + rows.
     asyncio.run(srv.route_query("how many?", ctx=None))
-    assert sent["/v1/query"] == {"q": "how many?", "format": "both"}
+    assert sent["/v1/query"] == {
+        "q": "how many?",
+        "format": "both",
+        "bindings": {},
+        "allow_untyped": False,
+    }
 
 
 def test_tools_are_async_so_remote_transport_cannot_self_deadlock() -> None:

@@ -12,6 +12,7 @@ plane was removed. The ``snapshot_ref`` column stays, inert.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -308,6 +309,14 @@ def get_run(session: Session, run_id: str) -> EvalRunRow | None:
         int(r[7]),
         r[8],
         r[9].isoformat() if r[9] else None,
+    )
+
+
+def set_calibration(session: Session, run_id: str, calibration: Mapping[str, object]) -> None:
+    """Attach the deciders' calibration table (evals.calibration.report) to a run."""
+    session.execute(
+        text("UPDATE eval_run SET calibration = CAST(:c AS jsonb) WHERE id = CAST(:r AS uuid)"),
+        {"c": json.dumps(calibration), "r": run_id},
     )
 
 

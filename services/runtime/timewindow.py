@@ -15,27 +15,67 @@ from datetime import date, timedelta
 
 _REL_NORM = {"current": "this", "previous": "last", "prior": "last", "past": "last"}
 _MTD = {"ytd": "this year", "qtd": "this quarter", "mtd": "this month"}
+_MONTHS = "january|february|march|april|may|june|july|august|september|october|november|december"
+# Abbreviations count only beside a year or inside a span ("Aug 2026",
+# "Jan–Aug 2026"): bare "mar", "dec", "jan" are words and names, so on their
+# own they are not a window and are never flagged as an unplaced month.
+_ABBR = {
+    "jan": "january",
+    "feb": "february",
+    "mar": "march",
+    "apr": "april",
+    "jun": "june",
+    "jul": "july",
+    "aug": "august",
+    "sept": "september",
+    "sep": "september",
+    "oct": "october",
+    "nov": "november",
+    "dec": "december",
+}
+_MONTH_ANY = _MONTHS + "|sept|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec"
 _TEMPORAL = re.compile(
     r"\b(?:"
     r"(?P<rel>this|current|last|previous|prior|next|past|trailing)\s+"
     r"(?:(?P<n>\d+)\s+)?(?P<grain>day|week|month|quarter|year)s?"
     r"|(?P<word>today|yesterday|ytd|qtd|mtd)"
-    r"|q(?P<qn>[1-4])(?:\s*(?:of\s*)?(?P<qyear>(?:19|20)\d{2}))?"
-    r"|(?P<month>january|february|march|april|may|june|july|august|september|october"
-    r"|november|december)\s+(?P<myear>(?:19|20)\d{2})"
+    r"|(?<![\w-])q(?P<qn>[1-4])(?:\s*(?:of\s*)?(?P<qyear>(?:19|20)\d{2}))?"
+    rf"|(?P<month>{_MONTH_ANY})\.?\s+(?P<myear>(?:19|20)\d{{2}})"
     r"|(?P<year>(?:19|20)\d{2})"
     r")\b",
     re.IGNORECASE,
 )
 
 
+def _month_name(raw: str) -> str:
+    return _ABBR.get(raw.lower(), raw.lower())
+
+
+# "January through August 2026", "March to June 2026", "Apr–Jun 2026": one
+# span, first month's start to last month's end, in the stated year.
+_SPAN = re.compile(
+    rf"\b(?P<m1>{_MONTH_ANY})\.?\s*(?:through|thru|to|until|till|-|–|—)\s*"
+    rf"(?P<m2>{_MONTH_ANY})\.?\s+(?P<syear>(?:19|20)\d{{2}})\b",
+    re.IGNORECASE,
+)
+_MONTH_WORD = re.compile(rf"\b(?P<month>{_MONTHS})\b", re.IGNORECASE)
+
+
 def temporal_terms(text: str) -> frozenset[str]:
     """The normalized time-window terms a question states. Deliberately small:
     relative windows (this/last/next × grain, incl. 'last 30 days'), the *td
-    shorthands, explicit quarters/months with years, and bare years. A month
+    shorthands, explicit quarters/months with years, month spans with a year
+    ("January through August 2026" → one span term), and bare years. A month
     name alone is NOT a window ('may' is a modal verb)."""
     out: set[str] = set()
+    spanned: list[tuple[int, int]] = []
+    for s in _SPAN.finditer(text):
+        out.add(f"span:{_month_name(s.group('m1'))}-{_month_name(s.group('m2'))}")
+        out.add(s.group("syear"))
+        spanned.append(s.span())
     for m in _TEMPORAL.finditer(text):
+        if any(a <= m.start() < b for a, b in spanned):
+            continue  # the span already carries this month and year
         if rel := m.group("rel"):
             rel = _REL_NORM.get(rel.lower(), rel.lower())
             rel = "last" if rel == "trailing" else rel
@@ -49,11 +89,35 @@ def temporal_terms(text: str) -> frozenset[str]:
             if m.group("qyear"):
                 out.add(m.group("qyear"))
         elif month := m.group("month"):
-            out.add(month.lower())
+            out.add(_month_name(month))
             out.add(m.group("myear"))
         elif year := m.group("year"):
             out.add(year)
     return frozenset(out)
+
+
+def unplaced_months(text: str, terms: frozenset[str]) -> list[str]:
+    """Month names the question states that no term carries — "January and
+    August 2026" parses August 2026 and drops January; served as August alone
+    that is a silently wrong period, so the caller of the window must ask.
+    A bare "may" is left alone (the modal verb)."""
+    covered: set[str] = set()
+    for t in terms:
+        if t in _MONTH_NUM:
+            covered.add(t)
+        elif t.startswith("span:"):
+            a, b = t[5:].split("-", 1)
+            if a in _MONTH_NUM and b in _MONTH_NUM and _MONTH_NUM[a] <= _MONTH_NUM[b]:
+                covered.update(
+                    n for n, i in _MONTH_NUM.items() if _MONTH_NUM[a] <= i <= _MONTH_NUM[b]
+                )
+    out: list[str] = []
+    for m in _MONTH_WORD.finditer(text):
+        name = m.group("month").lower()
+        if name == "may" or name in covered or name in out:
+            continue
+        out.append(name)
+    return out
 
 
 def temporal_mismatch(asked: str, approved: str) -> bool:
@@ -128,14 +192,25 @@ def window_ranges(terms: frozenset[str], today: date) -> list[tuple[date, date]]
     an unresolvable window is simply not a range."""
     ranges: list[tuple[date, date]] = []
     months = sorted(_MONTH_NUM[t] for t in terms if t in _MONTH_NUM)
+    span_terms = [t for t in terms if t.startswith("span:")]
+    spans: list[tuple[int, int]] = []
+    for t in span_terms:
+        first, last = t[5:].split("-", 1)
+        if first in _MONTH_NUM and last in _MONTH_NUM and _MONTH_NUM[first] <= _MONTH_NUM[last]:
+            spans.append((_MONTH_NUM[first], _MONTH_NUM[last]))
+        # a backwards span ("August through January 2026") resolves to nothing
     quarters = sorted(int(t[1]) for t in terms if re.fullmatch(r"q[1-4]", t))
     years = sorted(int(t) for t in terms if re.fullmatch(r"(?:19|20)\d{2}", t))
     for y in years:
         for m in months:
             ranges.append((date(y, m, 1), _month_end(y, m)))
+        for m_from, m_to in spans:
+            ranges.append((date(y, m_from, 1), _month_end(y, m_to)))
         for q in quarters:
             ranges.append((date(y, 3 * (q - 1) + 1, 1), _month_end(y, 3 * q)))
-        if not months and not quarters:
+        # A bare year stands alone only when no sub-year period was stated —
+        # a span that did not resolve (backwards) still WAS stated.
+        if not months and not quarters and not span_terms:
             ranges.append((date(y, 1, 1), date(y, 12, 31)))
     for t in terms:
         rel_match = _REL_TERM.fullmatch(t)

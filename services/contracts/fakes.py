@@ -15,9 +15,11 @@ if TYPE_CHECKING:
 from services.contracts.protocols import (
     CacheableBlock,
     ContextChunk,
+    Decision,
     GeneratedQuery,
     LLMResult,
     Message,
+    Option,
 )
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.warehouse import DryRunResult, QueryResult, SchemaSnapshot
@@ -71,6 +73,28 @@ class ScriptedLLM:
         text = self._responses[min(self._i, len(self._responses) - 1)]
         self._i += 1
         return LLMResult(text=text, input_tokens=1, output_tokens=1)
+
+
+class ScriptedDecider:
+    """A `Decider` that replays pre-set decisions in order (last repeats)."""
+
+    def __init__(self, decisions: list[Decision]) -> None:
+        self._decisions = decisions
+        self._i = 0
+        self.calls: list[dict[str, object]] = []
+
+    def decide(
+        self,
+        *,
+        question: str,
+        context: str,
+        options: list[Option],
+        allow_none: bool,
+    ) -> Decision:
+        self.calls.append({"question": question, "options": [o.name for o in options]})
+        d = self._decisions[min(self._i, len(self._decisions) - 1)]
+        self._i += 1
+        return d
 
 
 class HashEmbedder:

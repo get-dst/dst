@@ -35,13 +35,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.benchmark.grading import first_failed_stage, stage_statuses
 from services.certify import binding as certify_binding
 from services.certify.generate import _value_summary
 from services.certify.store import CertifiedAnswer, is_active
 from services.connectors.tagging import query_context
 from services.contracts.protocols import Connector, QueryGenerator
+from services.contracts.resolution import Resolution
 from services.evals import runner
 from services.evals.runner import _SCALAR_RTOL
+from services.runtime import resolution as resolution_mod
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
 from services.runtime.pipeline import _jsonable, run_query
@@ -80,6 +83,27 @@ class CertifiedCaseResult:
     assembly: dict[str, int] = field(default_factory=dict)
     # Wall-clock for this case (generation + both executions), for the ledger.
     elapsed_s: float | None = None
+    # Stage attribution (benchmark.grading): each stage's verdict, the first
+    # failed stage when the case is wrong, and what the resolution lane saw.
+    # Rows stay the gate — a resolution miss on a rows-pass is REPORTED (the
+    # answer took an ungoverned path to the right number) and never flips
+    # ``passed``.
+    stages: dict[str, str] = field(default_factory=dict)
+    wrong_at: str | None = None
+    stage_evidence: str = ""
+    resolution_expected: str | None = None  # the oracle SQL's ledger tag
+    resolution_got: str | None = None  # generation's ledger tag
+    # Did the answer type end to end (no raw-SQL escalation)? None when no
+    # answer was served. Reported beside pass/fail, never folded into it.
+    typed: bool | None = None
+    # The typed ledger the answer resolved BY CONSTRUCTION — the gold `dst test`
+    # stores on a certified answer that has none, once the rows matched the
+    # certified oracle (a green run is the proof the typed intent is right).
+    resolution: dict[str, Any] | None = None
+
+    @property
+    def ungoverned_pass(self) -> bool:
+        return self.passed and self.stages.get("resolution") == "failed"
 
 
 @dataclass
@@ -398,10 +422,22 @@ def _score_one(
         )
     oracle_rows = [[_jsonable(v) for v in row] for row in oracle.rows]
     oracle_summary = _value_summary(oracle.columns, oracle_rows)
+    # The oracle's own resolution, attributed at test time: no stored
+    # expectation to go stale when a metric is renamed, one attributor for
+    # both sides.
+    expected = (
+        Resolution.model_validate(a.resolution)
+        if a.resolution
+        else resolution_mod.attribute(oracle_sql, assembled.model, assembled.value_domains)
+    )
     generator, escalate_generator = generators_for(assembled)
     passed, reason = False, None
     gen_summary: dict[str, Any] = {}
     gen_sql: str | None = None
+    got = None
+    typed: bool | None = None
+    grounding: str | None = None
+    delivered = False
     # Retry-before-fail: a case fails only after failing
     # every attempt; retries are paid only on failures. GATE_ATTEMPTS is
     # shared with the behavioral runner so the whole gate has one policy.
@@ -425,6 +461,15 @@ def _score_one(
         )
         t = pr.trace
         gen_sql = t.sql
+        got = pr.response.resolution
+        typed = got.typed if got is not None else None
+        check = (
+            pr.response.verification.check("numeric_grounding")
+            if pr.response.verification
+            else None
+        )
+        grounding = check.status if check else None
+        delivered = t.status == "ok" and pr.response.data is not None
         if t.status != "ok" or pr.response.data is None:
             reason = t.error or f"generation ended in status '{t.status}'"
             gen_summary, passed = {"error": reason}, False
@@ -441,6 +486,10 @@ def _score_one(
                     f"of {runner.GATE_ATTEMPTS}"
                 )
             break
+    res_verdict, res_evidence = resolution_mod.grade(expected, got)
+    stages = stage_statuses(
+        rows_correct=passed, delivered=delivered, grounding=grounding, resolution=res_verdict
+    )
     return CertifiedCaseResult(
         answer_id=a.id,
         question=case_question,
@@ -450,4 +499,15 @@ def _score_one(
         reason=reason,
         generated_sql=gen_sql,
         assembly=dict(assembled.counts),
+        stages=stages,
+        wrong_at=first_failed_stage(stages, "correct" if passed else "wrong"),
+        stage_evidence=res_evidence,
+        resolution_expected=expected.tag,
+        resolution_got=got.tag if got is not None else None,
+        typed=typed,
+        resolution=(
+            got.model_dump(mode="json")
+            if got is not None and got.typed and got.method == "construction"
+            else None
+        ),
     )

@@ -6,6 +6,7 @@ import {
   useKpis,
   useRequestDetail,
   useRequests,
+  type CalibrationEntry,
   type LensEvalTrend,
   type RequestTrace,
 } from '../api/observe'
@@ -32,6 +33,15 @@ const scoreColor = (s: number | null) =>
       : s >= 0.7
         ? 'bg-amber'
         : 'bg-red'
+
+/** The ledger tag's weight: governed basis in ink, the generator's own choices
+ * muted, pre-ledger rows dim. Never red — inferred is not an error. */
+const resolutionTone = (tag: string) =>
+  tag === 'certified' || tag === 'declared'
+    ? 'text-accent'
+    : tag === 'unknown'
+      ? 'text-muted-2'
+      : 'text-muted'
 
 function Kpi({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -95,6 +105,49 @@ export function Observe({ initialTab = 'audit' }: { initialTab?: ObserveTab }) {
   )
 }
 
+/** The deciders' calibration from the latest `dst test` sweep that recorded
+ * one: one row per decider and slot. A measured row carries brier and ECE; an
+ * UNTESTED or n-too-small row says so in words — no figure is invented for it,
+ * and none of this is derived from production traffic. */
+function CalibrationTable({ calibration }: { calibration: Record<string, CalibrationEntry> }) {
+  const rows = Object.entries(calibration)
+  if (rows.length === 0) return null
+  const pct = (v: number) => `${Math.round(v * 100)}%`
+  return (
+    <table className="mt-3 w-full font-mono text-[11px] tabular-nums" aria-label="Calibration">
+      <thead>
+        <tr className="text-muted-2">
+          <th className="text-left font-normal pb-1">decider [slot]</th>
+          <th className="text-right font-normal pb-1">n</th>
+          <th className="text-right font-normal pb-1">acc</th>
+          <th className="text-right font-normal pb-1">brier · ece</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-border">
+        {rows.map(([key, e]) => (
+          <tr key={key}>
+            <td className="py-1 pr-2 text-text break-words">{key}</td>
+            <td className="py-1 text-right text-text">{e.n}</td>
+            <td className="py-1 text-right text-text">{pct(e.accuracy)}</td>
+            <td className="py-1 pl-2 text-right">
+              {e.status === 'measured' && e.brier != null && e.ece != null ? (
+                <span className="text-text">
+                  {e.brier.toFixed(3)} · {e.ece.toFixed(3)}
+                </span>
+              ) : (
+                <span className="text-muted" title={e.reason ?? undefined}>
+                  {e.status}
+                  {e.reason ? ` — ${e.reason}` : ''}
+                </span>
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 function AccuracyTrendCard({ trend }: { trend: LensEvalTrend }) {
   const scored = trend.runs.filter((r) => r.score != null)
   const last = scored[scored.length - 1]
@@ -143,6 +196,7 @@ function AccuracyTrendCard({ trend }: { trend: LensEvalTrend }) {
           {last.started_at ? ` · ${new Date(last.started_at).toLocaleString()}` : ''}
         </p>
       )}
+      {trend.calibration && <CalibrationTable calibration={trend.calibration} />}
     </div>
   )
 }
@@ -425,6 +479,15 @@ function RequestExplorer() {
                     <Badge variant={statusVariant(r.status)} dot>
                       {r.status}
                     </Badge>
+                    {/* The ledger tag rides beside the outcome; declines carry none. */}
+                    {r.resolution_tag && (
+                      <span
+                        className={['ml-1.5 font-mono text-[10px]', resolutionTone(r.resolution_tag)].join(' ')}
+                        title="resolution: where the figure's meaning came from"
+                      >
+                        {r.resolution_tag}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 text-[13px] tabular-nums text-text">
                     {r.row_count ?? <span className="text-muted-2">—</span>}
@@ -546,6 +609,91 @@ function TraceDetail({ trace, onClose }: { trace: RequestTrace; onClose: () => v
         {trace.confidence && metaRow(
           'Confidence',
           <ConfidenceBadge confidence={trace.confidence} dot />
+        )}
+        {trace.resolution && metaRow(
+          'Resolution',
+          <span className="block">
+            <span className="font-mono text-[12px]">
+              <span className={resolutionTone(trace.resolution.tag)}>{trace.resolution.tag}</span>
+              <span className="text-muted-2"> · {trace.resolution.method}</span>
+              {/* typed rides the meta line; a pre-typed-serving row (null)
+                  says nothing, so it prints nothing — never "untyped". */}
+              {trace.resolution.typed === true && (
+                <span className="text-accent" title="typed: every slot a closed-set decision, a parse, or a binding; no raw SQL ran">
+                  {' '}· typed
+                </span>
+              )}
+              {trace.resolution.typed === false && (
+                <span className="text-muted" title="a raw-SQL escalation ran — the caller opted in with allow_untyped">
+                  {' '}· untyped
+                </span>
+              )}
+            </span>
+            {trace.resolution.slots.length > 0 && (
+              <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] text-text">
+                {trace.resolution.slots.map((s, i) => (
+                  <span
+                    key={`${s.kind}-${s.name}-${i}`}
+                    className={
+                      s.source === 'inferred'
+                        ? 'text-muted underline decoration-dotted underline-offset-2'
+                        : s.source === 'unknown'
+                          ? 'text-muted-2'
+                          : ''
+                    }
+                    title={
+                      s.source === 'inferred'
+                        ? 'inferred: chosen by the generator, not a name in the semantic model'
+                        : undefined
+                    }
+                  >
+                    {s.kind} {s.name}
+                    {s.value ? ` = ${s.value}` : ''}
+                    <span className="text-muted-2"> [{s.source}]</span>
+                  </span>
+                ))}
+              </span>
+            )}
+            {/* The measured decisions, one line each: slot, what was chosen,
+                the probability the decider measured, the policy verdict. A
+                clarify or decline verdict is a governed outcome — muted, not red. */}
+            {trace.resolution.decisions && trace.resolution.decisions.length > 0 && (
+              <ul className="mt-1.5 font-mono text-[11px] tabular-nums" aria-label="Decisions">
+                {trace.resolution.decisions.map((dcs, i) => (
+                  <li
+                    key={`${dcs.slot}-${i}`}
+                    className={dcs.verdict === 'act' ? 'text-text' : 'text-muted'}
+                    title={`${dcs.provider}${dcs.runner_up != null ? ` · runner-up ${dcs.runner_up.toFixed(2)}` : ''}${dcs.margin != null ? ` · margin ${dcs.margin.toFixed(2)}` : ''}`}
+                  >
+                    {dcs.slot} {dcs.chosen ?? '—'}{' '}
+                    <span className="text-muted-2">{dcs.p != null ? `p=${dcs.p.toFixed(2)}` : 'p=—'}</span>{' '}
+                    {dcs.verdict}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </span>
+        )}
+        {trace.clarification && metaRow(
+          'Clarification',
+          <span className="block">
+            <span className="font-mono text-[12px]">
+              <span className="text-text">{trace.clarification.kind}</span>
+              <span className="text-muted-2"> · {trace.clarification.term}</span>
+            </span>
+            {trace.clarification.options.length > 0 && (
+              <span className="mt-1 flex flex-wrap gap-1.5">
+                {trace.clarification.options.map((o) => (
+                  <code
+                    key={o}
+                    className="font-mono text-[11px] text-text bg-surface-2 px-1.5 py-0.5 rounded border border-border"
+                  >
+                    {o}
+                  </code>
+                ))}
+              </span>
+            )}
+          </span>
         )}
         {trace.verification?.checks?.length ? metaRow(
           'Verification',

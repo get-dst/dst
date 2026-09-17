@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import logging
 
-from services.contracts.protocols import CacheableBlock, LLMProvider, Message
+from services.contracts.protocols import Decider, Decision, LLMProvider, Option
+from services.llm.vote_decider import DEFAULT_K, DeciderStarved, VoteDecider
 from services.router import DECIDER_DOWN, CoverageProfile, RouteDecision, Router
+from services.runtime import decision_policy
 
 log = logging.getLogger("dst")
 
@@ -41,29 +43,27 @@ def shortlist_k(catalogue_size: int) -> int:
     return min(max(PREFILTER_K, -(-catalogue_size // 2)), _MAX_SHORTLIST)
 
 
-class DeciderStarved(RuntimeError):
-    """The decider returned an empty or unparseable reply. This is an outage
-    signal — a reasoning model starved of output budget returns an empty string,
-    not a refusal — never a genuine 'none': treating it as a decline silently
-    declines everything."""
+__all__ = ["DeciderStarved", "LlmDecider", "route_with_llm", "shortlist_k"]
 
-
-_SYSTEM = (
-    "You route a data question to the ONE governed lens that covers it, or decline if none "
-    "does. A lens covers a question when the answer lies within its governed metrics OR its "
-    "stated purpose/domain — a question that names a lens's subject area is covered even if it "
-    "does not name a specific metric (e.g. 'numbers for the board' → the board-reporting lens). "
-    "Reply 'none' only when NO lens's metrics or purpose fit; never stretch an unrelated lens. "
-    "Reply with ONLY a lens name or the word none."
+_CONTEXT = (
+    "Route a data question to the ONE governed lens that covers it, or none. A lens covers "
+    "a question when the answer lies within its governed metrics OR its stated "
+    "purpose/domain — a question that names a lens's subject area is covered even if it "
+    "does not name a specific metric (e.g. 'numbers for the board' → the board-reporting "
+    "lens). Reply none only when NO lens's metrics or purpose fit; never stretch an "
+    "unrelated lens."
 )
 
 
-def _catalogue(profiles: list[CoverageProfile]) -> str:
-    return "\n".join(
-        f"- {p.lens}: governed metrics: {'; '.join(p.anchors)}."
-        + (f" ({p.description})" if p.description else "")
+def _options(profiles: list[CoverageProfile]) -> list[Option]:
+    return [
+        Option(
+            p.lens,
+            f"governed metrics: {'; '.join(p.anchors)}."
+            + (f" ({p.description})" if p.description else ""),
+        )
         for p in profiles
-    )
+    ]
 
 
 def _parse(text: str, names: set[str]) -> str | None:
@@ -77,42 +77,47 @@ def _parse(text: str, names: set[str]) -> str | None:
 
 
 class LlmDecider:
-    """Picks the covering lens among shortlisted candidates, or declines. Provider-injected.
+    """Picks the covering lens among shortlisted candidates, or declines.
+
+    Sits on the typed-decision seam: the lens choice is a closed-set decision
+    over the shortlist, made by a ``Decider`` (today ``VoteDecider`` over the
+    fast tier; a typed-decision model plugs in at the same seam). ``k`` is the
+    vote count — 1 measures nothing and is the legacy single call.
 
     Raises ``DeciderStarved`` on an empty/unparseable reply — only an explicit
     'none' is a decline; everything else is an outage the caller must surface.
     """
 
-    def __init__(self, provider: LLMProvider, model: str) -> None:
-        self._provider = provider
-        self._model = model
+    def __init__(
+        self,
+        provider: LLMProvider | None,
+        model: str,
+        *,
+        k: int = DEFAULT_K,
+        decider: Decider | None = None,
+    ) -> None:
+        if decider is None:
+            assert provider is not None, "LlmDecider needs a provider or a decider"
+            decider = VoteDecider(provider, model, k=k)
+        self._decider: Decider = decider
+        # Routes over every lens, no cosine, when the wrapped decider is a
+        # typed-decision provider (see TypesafeDecider.typed_decisions).
+        self.typed_decisions = bool(getattr(decider, "typed_decisions", False))
+
+    def decide_measured(self, question: str, candidates: list[CoverageProfile]) -> Decision:
+        decider: Decider | None = getattr(self, "_decider", None)
+        if decider is None:
+            # A subclass that overrides decide() without a provider (tests' gold
+            # deciders): its answer is a choice with nothing measured.
+            return Decision(chosen=self.decide(question, candidates), probs=None, provider="stub")
+        if not candidates:
+            return Decision(chosen=None, probs=None, provider="none-offered")
+        return decider.decide(
+            question=question, context=_CONTEXT, options=_options(candidates), allow_none=True
+        )
 
     def decide(self, question: str, candidates: list[CoverageProfile]) -> str | None:
-        if not candidates:
-            return None
-        user = (
-            f"Lenses:\n{_catalogue(candidates)}\n\n"
-            f"Question: {question}\nAnswer (lens name or none):"
-        )
-        out = self._provider.complete(
-            system=[CacheableBlock(text=_SYSTEM)],
-            messages=[Message(role="user", content=user)],
-            model=self._model,
-            temperature=0.0,
-            # deepseek reasons in output tokens; a tight cap truncates before the visible
-            # answer lands (and silently declines everything). Give the answer room.
-            max_tokens=512,
-        )
-        reply = out.text or ""
-        chosen = _parse(reply, {p.lens for p in candidates})
-        if chosen is not None:
-            return chosen
-        if "none" in reply.lower():
-            return None
-        raise DeciderStarved(
-            f"decider reply named no lens and no 'none' ({len(reply)} chars) — "
-            "starvation/garbage, not a decline"
-        )
+        return self.decide_measured(question, candidates).chosen
 
 
 def route_with_llm(
@@ -122,8 +127,15 @@ def route_with_llm(
     question: str,
     *,
     k: int | None = None,
+    all_lenses: bool | None = None,
 ) -> RouteDecision:
     """Cosine shortlist → LLM coverage decision, with ONE deterministic fast-path.
+
+    ``all_lenses``: no cosine at all — every published lens is an option and
+    the decider decides, the verbatim fast path included. The default for a
+    typed-decision provider (``decider.typed_decisions``), measured equal to
+    the shortlist on the held-out routing set (2026-09-17)
+    and simpler; the vote decider keeps the shortlist its prompt budget needs.
 
     A near-exact match (>= confident) routes without the LLM. Everything else goes
     to the decider over the top-k shortlist — the floor/margin arm is gone: in the
@@ -137,7 +149,11 @@ def route_with_llm(
     if not scored:
         return RouteDecision(False, None, 0.0, [], "no lenses to route to")
     best_lens, best_score = scored[0]
-    if best_score >= router.confident:
+    if all_lenses is None:
+        all_lenses = bool(getattr(decider, "typed_decisions", False))
+    if all_lenses:
+        k = len(scored)
+    elif best_score >= router.confident:
         return RouteDecision(
             True,
             best_lens,
@@ -151,7 +167,11 @@ def route_with_llm(
         k = shortlist_k(len(scored))
     shortlist = [profiles_by_lens[lens] for lens, _ in scored[:k] if lens in profiles_by_lens]
     try:
-        chosen = decider.decide(question, shortlist)
+        decision = (
+            decider.decide_measured(question, shortlist)
+            if hasattr(decider, "decide_measured")
+            else Decision(chosen=decider.decide(question, shortlist), probs=None, provider="stub")
+        )
     except Exception:
         log.exception("coverage decider unavailable — declining (degraded), never mid-band cosine")
         return RouteDecision(
@@ -163,8 +183,50 @@ def route_with_llm(
             "guessing from the ambiguous cosine band",
             degraded=DECIDER_DOWN,
         )
+    verdict = decision_policy.verdict(decision, "lens")
+    if verdict == "clarify":
+        # Measured, and not sure enough to act: an AMBIGUITY, which is a
+        # coverage signal (name the lens), never an outage — no degraded mark.
+        ranked = sorted((decision.probs or {}).items(), key=lambda kv: -kv[1])
+        lenses = [k for k, _v in ranked[:2] if k != "none"]
+        # Two lenses close together is an ambiguity between them; one lens
+        # against `none` is doubt that any lens covers it — say which.
+        reason = (
+            f"ambiguous between {lenses[0]} and {lenses[1]} — name the lens"
+            if len(lenses) == 2
+            else f"unsure whether {lenses[0] if lenses else 'any lens'} covers this — name the lens"
+        )
+        return RouteDecision(
+            False,
+            None,
+            best_score,
+            scored,
+            reason,
+            decided_by="decider",
+            decision=decision,
+            verdict=verdict,
+        )
+    chosen = decision.chosen
     if chosen is None:
-        return RouteDecision(False, None, best_score, scored, "no governed lens covers this (llm)")
+        return RouteDecision(
+            False,
+            None,
+            best_score,
+            scored,
+            "no governed lens covers this (llm)",
+            decided_by="decider",
+            decision=decision,
+            verdict=verdict,
+        )
     score = dict(scored).get(chosen, best_score)
     alternatives = [(lens, s) for lens, s in scored if lens != chosen]
-    return RouteDecision(True, chosen, score, alternatives, "routed (llm)", decided_by="decider")
+    return RouteDecision(
+        True,
+        chosen,
+        score,
+        alternatives,
+        "routed (llm)",
+        decided_by="decider",
+        decision=decision,
+        verdict=verdict,
+    )

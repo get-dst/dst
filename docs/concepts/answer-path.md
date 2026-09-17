@@ -23,8 +23,10 @@ The stages, in order:
    approved SQL is served verbatim and generation is skipped.
 3. **Check, then generate.** Before generation runs, deterministic code
    [clarifies or refuses](clarify-and-refusal.md) — an ambiguous governed term,
-   a metric this lens leaves out. Otherwise the model writes SQL against that
-   curated context.
+   a metric this lens leaves out. Then the SQL is produced: with a
+   [typed-decision provider](typed-decisions.md), every slot of the answer is
+   decided over the semantic model and the SQL is compiled from the decisions;
+   otherwise the model writes SQL against that curated context.
 4. **Guard.** The SQL is parsed and checked before it runs: single-statement
    and read-only, inside the lens's scope.
 5. **Execute** against the warehouse, row-capped at execution. The connection

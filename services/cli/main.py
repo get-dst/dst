@@ -24,7 +24,9 @@ if TYPE_CHECKING:  # httpx is imported per-verb (CLI startup cost) — types onl
 
     import httpx
 
+    from services.certify.store import CertifiedAnswer
     from services.db.schema_state import SchemaState
+    from services.evals.slot_lane import SlotLaneOutcome
 
 # How long `plan` will wait on the warehouse before it drops the staleness check
 # and says nothing. plan is the verb an engineer runs every day and the check is a
@@ -723,6 +725,7 @@ def _query(args: argparse.Namespace) -> int:
             style.accent("definition:") + f" {d['definition_used']}"
             if d.get("definition_used")
             else None,
+            _resolution_part(d),
             _freshness_part(d),
         )
         if part
@@ -731,6 +734,32 @@ def _query(args: argparse.Namespace) -> int:
         print(" · ".join(meta))
     _print_request_id(d)
     return code
+
+
+def _resolution_part(d: dict[str, object]) -> str | None:
+    """`resolution: declared` — whether the figure's MEANING was governed.
+    Beside `definition:` (the human sentence names the winner) this is the
+    typed verdict: declared/certified = the semantic model's metric computed
+    it; mixed/inferred = the model summed columns it chose, and the invented
+    slots are named so the reader sees what was guessed."""
+    res = d.get("resolution")
+    if not isinstance(res, dict) or not res.get("tag"):
+        return None
+    tag = str(res["tag"])
+    part = (
+        style.accent("resolution:")
+        + f" {style.good(tag) if tag in ('certified', 'declared') else tag}"
+    )
+    if tag in ("certified", "declared"):
+        return part
+    invented = [
+        str(s.get("name"))
+        for s in res.get("slots") or []
+        if isinstance(s, dict)
+        and s.get("source") == "inferred"
+        and s.get("kind") in ("metric", "definition")
+    ]
+    return part + (style.dim(f" (inferred: {', '.join(invented)})") if invented else "")
 
 
 def _define(args: argparse.Namespace) -> int:
@@ -2726,22 +2755,35 @@ def _apply(args: argparse.Namespace) -> int:
 
     body = {"files": _project_files(args, "apply")}
     url, headers = _client(args)
-    params: dict[str, str] = {}
+    params: dict[str, str | list[str]] = {}
     if getattr(args, "probe_certified", False):
         params["probe_certified"] = "true"
     if getattr(args, "require_gates", False):
         params["require_gates"] = "true"
-    if getattr(args, "allow_failing_cases", False):
+    allow_cases = [c for c in (getattr(args, "allow_case", None) or []) if c.strip()]
+    if getattr(args, "allow_failing_cases", False) or allow_cases:
         reason = (getattr(args, "reason", None) or "").strip()
         if not reason:
             print(
-                "error: --allow-failing-cases needs --reason '…' — the audited one-off "
-                "must say why (e.g. 'intended behaviour change: term now ambiguous')",
+                "error: --allow-case / --allow-failing-cases needs --reason '…' — the "
+                "audited one-off must say why (e.g. 'intended behaviour change: term "
+                "now ambiguous')",
                 file=sys.stderr,
             )
             return 2
-        params["allow_failing_cases"] = "true"
         params["override_reason"] = reason
+        if allow_cases:
+            params["allow_case"] = allow_cases
+        else:
+            # The blanket form: still accepted, reported as blanket. Name the
+            # cases instead — an override that names yesterday's red case cannot
+            # silently cover today's new one.
+            print(
+                "note: --allow-failing-cases is blanket; prefer --allow-case <id> "
+                "(repeatable) so the override names exactly the cases it covers",
+                file=sys.stderr,
+            )
+            params["allow_failing_cases"] = "true"
     try:
         r = httpx.post(
             f"{url}/mgmt/project/apply",
@@ -3377,6 +3419,130 @@ def _test_scope(args: argparse.Namespace) -> list[tuple[uuid.UUID, str]] | None:
         return [(r[0], r[1]) for r in every]
 
 
+def _slot_lane_for_lens(
+    bundle: object,
+    oid: object,
+    resolved: object,
+    answers: list[CertifiedAnswer],
+    repeat: int = 1,
+    explicit: bool = False,
+) -> SlotLaneOutcome | None:
+    """The slot lane for one lens: the typed resolver over every certified
+    question that carries gold, graded before any SQL (services/evals/
+    slot_lane.py). By default it runs on the decider typed serving runs on
+    (the switch: a typed-decision provider under `auto`, any decider under
+    `on`, nothing under `off`); `--slots` (``explicit``) runs it on any decider
+    that resolves, the vote included. None when none does — the caller says so
+    instead of printing a clean zero."""
+    from services.config import settings
+    from services.evals.slot_lane import run_slot_lane
+    from services.llm import registry
+    from services.runtime import assembly
+    from services.runtime.typed_resolver import TypedResolver
+
+    assemble_for, generators_for = assembly.eval_harness(bundle, oid, resolved)  # type: ignore[arg-type]
+    if explicit and settings.typed_serving == "off":
+        # The emission arm: --slots with typed serving off grades the one-shot
+        # JSON intent the way it grades a typed resolution — same table.
+        from services.evals.slot_lane import EmissionResolver
+
+        def emission_for(answer: object) -> EmissionResolver:
+            assembled = assemble_for(answer)  # type: ignore[arg-type]
+            generator, _escalate = generators_for(assembled)
+            return EmissionResolver(generator, assembled.prose, domains=assembled.value_domains)
+
+        return run_slot_lane(
+            answers,
+            bundle.semantic_model,  # type: ignore[attr-defined]
+            emission_for,
+            concurrency=settings.gate_concurrency,
+            repeat=repeat,
+        )
+    decider = registry.resolve_decider() if explicit else assembly.typed_decider()
+    if decider is None:
+        return None
+    today = assembly.business_today_date(bundle.semantic_model.timezone)  # type: ignore[attr-defined]
+
+    def resolver_for(answer: object) -> TypedResolver:
+        assembled = assemble_for(answer)  # type: ignore[arg-type]
+        return TypedResolver(
+            decider,
+            domains=assembled.value_domains,
+            entity_domains=assembled.entity_domains,
+            period_fields=assembled.period_fields,
+            today=today,
+        )
+
+    # The same ceiling the rows lane runs under: the lane is decisions only,
+    # so its wall time is the provider's round trips divided by the workers.
+    return run_slot_lane(
+        answers,
+        bundle.semantic_model,  # type: ignore[attr-defined]
+        resolver_for,
+        concurrency=settings.gate_concurrency,
+        repeat=repeat,
+    )
+
+
+def _calibrate_org(
+    bundles_by_lens: dict[str, object],
+    answers_by_lens: dict[str, list[object]],
+    labeled: list[tuple[str, str]],
+) -> list[object]:
+    """Grade the deciders over one org's corpus (services/evals/calibrate.py):
+    lens routing over every labelled question when the org publishes more than
+    one lens and an embedder + fast-tier model resolve; certified-equivalence
+    pairs per lens. Anything that cannot run yields no records — the report then
+    prints UNTESTED for it, never a number."""
+    from services.config import settings
+    from services.evals import calibrate
+    from services.llm import registry
+    from services.llm.vote_decider import DEFAULT_K
+    from services.router import Router
+    from services.router.decider import LlmDecider
+    from services.router.profiles import coverage_profile
+
+    fast = registry.resolve(registry.tier("fast"))
+    if fast is None:
+        return []
+    records: list[object] = []
+    if len(bundles_by_lens) > 1 and labeled:
+        try:
+            embedder = registry.resolve_embedder()
+        except Exception:  # noqa: BLE001 — no embedder: the lens lane is untested, said so
+            embedder = None
+        if embedder is not None:
+            profiles = [coverage_profile(b) for b in bundles_by_lens.values()]  # type: ignore[arg-type]
+            router = Router(profiles, embedder)
+            # The install's decider (a typed-decision provider when configured,
+            # else the vote): the calibration measures what serving would use.
+            seam = registry.resolve_decider()
+            decider = (
+                LlmDecider(None, "", decider=seam)
+                if seam is not None
+                else LlmDecider(fast.llm, fast.name, k=DEFAULT_K)
+            )
+            records += calibrate.lens_decisions(
+                router,
+                {p.lens: p for p in profiles},
+                decider,
+                labeled,
+                concurrency=settings.gate_concurrency,
+            )
+    for name, answers in answers_by_lens.items():
+        bundle = bundles_by_lens[name]
+        records += calibrate.equivalence_decisions(
+            fast.llm,
+            fast.name,
+            answers,  # type: ignore[arg-type]
+            bundle.semantic_model.dialect,  # type: ignore[attr-defined]
+            k=DEFAULT_K,
+            decider=registry.resolve_decider(),
+            concurrency=settings.gate_concurrency,
+        )
+    return records
+
+
 def _ledger_line(plain: str, *, ok: bool, elapsed: float | None) -> str:
     """One test-ledger row: the existing `VERDICT  label: question` bytes with
     the verdict painted and a dim latency column appended. The
@@ -3442,8 +3608,17 @@ def _test(args: argparse.Namespace) -> int:
     if orgs is None:
         return 1
     total = failed = 0
-    cert_n = beh_n = candidates_n = 0
+    cert_n = beh_n = candidates_n = ungoverned_n = untyped_n = 0
+    slot_elapsed_s = 0.0
+    slot_runs = slot_workers = slot_sql_identical = proven_n = 0
+    slot_latencies: list[float] = []
+    slot_cost: float | None = 0.0
     found_lens = False
+    # The calibration lane's inputs: every certified question and behavioral
+    # case carries its lens as a gold label; every lens's certified corpus
+    # yields equivalence pairs. Graded after each org's sweep.
+    cal_records: list[object] = []
+    run_ids: list[tuple[Any, str]] = []  # (org id, eval_run id) — stamped with calibration
     emit_json = bool(getattr(args, "as_json", False))
     rows: list[dict[str, object]] = []
 
@@ -3452,6 +3627,9 @@ def _test(args: argparse.Namespace) -> int:
             print(text)
 
     for oid, org_name in orgs:
+        labeled: list[tuple[str, str]] = []
+        bundles_by_lens: dict[str, object] = {}
+        answers_by_lens: dict[str, list[object]] = {}
         with org_session(oid) as session:
             for name, _dn, _desc, bundle in lens_store.list_published(session):
                 if args.lens and name != args.lens:
@@ -3480,6 +3658,13 @@ def _test(args: argparse.Namespace) -> int:
                     )
                     if case.expect is not None
                 ]
+                labeled += [(a.question, name) for a in answers if not a.slots]
+                # Only answer-shaped cases carry a lens gold: a refuse/clarify
+                # pin under a lens says that lens declines it, not that no
+                # lens covers it — routing them to none is correct, not a miss.
+                labeled += [(c.question, name) for c in behavioral if c.expect == "answer"]
+                bundles_by_lens[name] = bundle
+                answers_by_lens[name] = list(answers)
                 # Cases that exist but will NOT run this sweep. Without this line an
                 # unarmed suite and a fully-passing one print the same shape:
                 # `passed 11/11` while candidates silently sit out.
@@ -3539,22 +3724,147 @@ def _test(args: argparse.Namespace) -> int:
                 if lens_candidates:
                     progress_bits.append(f"{lens_candidates} candidate(s) not run")
                 say(style.dim(f"{label}: running {' + '.join(progress_bits)} …"))
-                if answers:
+                # The slot lane runs whenever a decider resolves (typed serving):
+                # every certified question graded in seconds, and a case whose
+                # typed SQL is identical to the certified text is PROVEN there.
+                # The rows lane below executes only what the slot lane could not
+                # prove — the warehouse pays for the disagreements (--rows
+                # executes everything, --slots executes nothing).
+                slots_only = bool(getattr(args, "slots", False))
+                rows_all = bool(getattr(args, "rows", False))
+                proven: set[str] = set()
+                lane = _slot_lane_for_lens(
+                    bundle,
+                    oid,
+                    resolved,
+                    answers,
+                    repeat=getattr(args, "repeat", 1),
+                    explicit=slots_only,
+                )
+                if lane is not None or slots_only:
+                    if lane is None:
+                        total += 1
+                        failed += 1
+                        say(
+                            style.warn("SKIP")
+                            + f"  {label}: NOT verified — no decider resolves for the slot "
+                            "lane (configure a typed-decision provider or a fast-tier model)"
+                        )
+                        rows.append(
+                            {
+                                "org": org_name,
+                                "lens": name,
+                                "verdict": "skip",
+                                "reason": "no decider for the slot lane",
+                            }
+                        )
+                        continue
+                    for slot_case in lane.cases:
+                        total += 1
+                        cert_n += 1
+                        ok = slot_case.verdict == "passed"
+                        if not ok:
+                            failed += 1
+                        rows.append(
+                            {
+                                "org": org_name,
+                                "lens": name,
+                                "lane": "slots",
+                                "question": slot_case.question,
+                                "verdict": "pass" if ok else "fail",
+                                "typed": slot_case.typed,
+                                "reason": slot_case.evidence or None,
+                                "decisions": [d.model_dump() for d in slot_case.decisions],
+                                "gold": slot_case.gold,
+                                "runs": slot_case.runs,
+                                "agreement": slot_case.agreement,
+                                "sql_match": slot_case.sql_match,
+                                "elapsed_s": slot_case.elapsed_s,
+                                "calls": slot_case.calls,
+                                "input_tokens": slot_case.input_tokens,
+                                "output_tokens": slot_case.output_tokens,
+                                "cost_usd": slot_case.cost_usd,
+                            }
+                        )
+                        if slot_case.sql_match:
+                            slot_sql_identical += 1
+                        why = f" ({slot_case.evidence})" if slot_case.evidence and not ok else ""
+                        sql_mark = {
+                            True: " [sql identical]",
+                            False: " [sql differs from the certified text]",
+                        }.get(slot_case.sql_match, "")  # type: ignore[arg-type]
+                        say(
+                            _ledger_line(
+                                f"{'PASS' if ok else 'FAIL'}  {label}: {slot_case.question}"
+                                f"{why}{sql_mark}",
+                                ok=ok,
+                                elapsed=slot_case.elapsed_s,
+                            )
+                        )
+                        cal_records += slot_case.graded
+                    slot_elapsed_s += lane.elapsed_s
+                    slot_runs += len(lane.cases) * lane.repeat
+                    slot_workers = max(slot_workers, lane.workers)
+                    slot_latencies += lane.latencies_s
+                    slot_cost = (
+                        None
+                        if slot_cost is None or lane.cost_usd is None
+                        else slot_cost + lane.cost_usd
+                    )
+                    if lane.cases:
+                        say(
+                            f"{label}: slot lane — {len(lane.cases)} case(s) × {lane.repeat} "
+                            f"run(s) in {lane.elapsed_s:.1f}s on {lane.workers} worker(s)"
+                            + (
+                                f"; {lane.attributed_gold} graded against gold attributed "
+                                "from the certified SQL (certified before the ledger)"
+                                if lane.attributed_gold
+                                else ""
+                            )
+                        )
+                    if lane.skipped_no_gold:
+                        say(
+                            style.warn(
+                                f"{label}: {lane.skipped_no_gold} certified answer(s) carry no "
+                                "typed gold and their SQL attributes to no governed measure "
+                                "— not graded"
+                            )
+                        )
+                    proven = {
+                        c.answer_id for c in lane.cases if c.verdict == "passed" and c.sql_match
+                    }
+                    proven_n += len(proven)
+                    if slots_only:
+                        continue
+                to_execute = answers if rows_all else [a for a in answers if a.id not in proven]
+                if proven and not rows_all:
+                    say(
+                        f"{label}: {len(proven)} certified answer(s) proven by the slot lane "
+                        "(typed SQL identical to the certified text) — not executed; "
+                        "--rows executes every case"
+                    )
+                if to_execute:
                     assemble_for, generators_for = assembly.eval_harness(bundle, oid, resolved)
                     outcome = run_certified_suite(
                         connector=connector,
                         lens=name,
-                        answers=answers,
+                        answers=to_execute,
                         assemble_for=assemble_for,
                         generators_for=generators_for,
                         composer=composer,
                         model_name=model_name,
                     )
                     by_id = {r.answer_id: r for r in outcome.results}
-                    for a in answers:
+                    gold_stored = 0
+                    for a in to_execute:
                         r = by_id[a.id]
                         total += 1
                         cert_n += 1
+                        if r.passed and r.resolution and not a.resolution:
+                            # A green typed run IS the typed gold: the slot lane
+                            # grades this answer in seconds from now on.
+                            certify_store.set_resolution(session, a.id, r.resolution)
+                            gold_stored += 1
                         rows.append(
                             {
                                 "org": org_name,
@@ -3565,24 +3875,50 @@ def _test(args: argparse.Namespace) -> int:
                                 "generated": format_result(r.generated_result),
                                 "reason": r.reason,
                                 "elapsed_s": r.elapsed_s,
+                                # Stage attribution: which stage broke (None when
+                                # rows matched) and what the resolution lane saw.
+                                "stages": r.stages,
+                                "wrong_at": r.wrong_at,
+                                "resolution": {
+                                    "expected": r.resolution_expected,
+                                    "got": r.resolution_got,
+                                    "evidence": r.stage_evidence or None,
+                                },
+                                "typed": r.typed,
                             }
                         )
+                        if r.typed is False:
+                            untyped_n += 1
                         if not r.passed:
                             failed += 1
                             why = f" ({r.reason})" if r.reason else ""
+                            at = f" [wrong at: {r.wrong_at}]" if r.wrong_at else ""
                             say(
                                 _ledger_line(
                                     f"FAIL  {label}: {r.question} — certified SQL → "
                                     f"{format_result(r.oracle_result)}, generated → "
-                                    f"{format_result(r.generated_result)}{why}",
+                                    f"{format_result(r.generated_result)}{why}{at}",
                                     ok=False,
                                     elapsed=r.elapsed_s,
                                 )
                             )
                             continue
+                        if r.ungoverned_pass:
+                            # Right number, ungoverned path: the rows matched but
+                            # generation did not resolve to the oracle's declared
+                            # names. Reported, never a failure — rows are the gate.
+                            ungoverned_n += 1
                         say(
                             _ledger_line(
-                                f"PASS  {label}: {r.question}", ok=True, elapsed=r.elapsed_s
+                                f"PASS  {label}: {r.question}"
+                                + (
+                                    f" [resolution: {r.stage_evidence}]"
+                                    if r.ungoverned_pass
+                                    else ""
+                                )
+                                + (" [untyped]" if r.typed is False else ""),
+                                ok=True,
+                                elapsed=r.elapsed_s,
                             )
                         )
                         # Evidence-based re-verify: a passing
@@ -3606,6 +3942,11 @@ def _test(args: argparse.Namespace) -> int:
                                 verified_value=a.verified_value,
                                 bindings=fresh,
                             )
+                    if gold_stored:
+                        say(
+                            f"{label}: stored typed gold for {gold_stored} certified answer(s) "
+                            "from this green run — the slot lane grades them from now on"
+                        )
                 if behavioral:
                     # The slim rest of evals/cases.yaml: expect: clarify|refuse
                     # pins run alongside the corpus, as the scaffold promises.
@@ -3671,9 +4012,12 @@ def _test(args: argparse.Namespace) -> int:
                                 grade="pass"
                                 if cr.passed
                                 else ("errored" if "error" in cr.oracle_result else "fail"),
+                                # The stage tag rides the eval history (SA.1):
+                                # a decomposition of the TREND is where it earns
+                                # its keep. Resolution rides even on a pass.
                                 checks=(
-                                    {"wrong_at": "rows"}
-                                    if not cr.passed and "error" not in cr.oracle_result
+                                    {"wrong_at": cr.wrong_at, "stages": cr.stages}
+                                    if cr.stages
                                     else {}
                                 ),
                                 reason=cr.reason,
@@ -3703,6 +4047,7 @@ def _test(args: argparse.Namespace) -> int:
                     for rec in recorded:
                         rec.run_id = run_id
                     eval_store.record_results(session, run_id, recorded)
+                    run_ids.append((oid, run_id))
                     if getattr(args, "compare_last", False):
                         score = r_passed / len(recorded)
                         if prev_score is None:
@@ -3717,11 +4062,29 @@ def _test(args: argparse.Namespace) -> int:
                                 f"compare {label}: {prev_score:.0%} → {score:.0%} "
                                 f"vs previous run ({word})"
                             )
+        cal_records += _calibrate_org(bundles_by_lens, answers_by_lens, labeled)
     scope = ", ".join(n for _, n in orgs)
     if args.lens and not found_lens:
         print(f"error: no published lens '{args.lens}' in org {scope}", file=sys.stderr)
         return 1
+    from services.evals.calibration import format_report
+    from services.evals.calibration import report as calibration_report
+
+    calibration = calibration_report(cal_records)  # type: ignore[arg-type]
+    if calibration and run_ids:
+        # The table rides the run so the accuracy tab shows it — the same rows
+        # the CLI prints, never a number derived from production traffic.
+        for run_oid, run_id in run_ids:
+            with org_session(run_oid) as session:
+                eval_store.set_calibration(session, run_id, calibration)
     if emit_json:
+        # Computed FROM the rows, never from a parallel counter: a tally that can
+        # disagree with its own results is the class the comparator ticket named.
+        wrong_by_stage: dict[str, int] = {}
+        for row in rows:
+            if row.get("verdict") == "fail" and row.get("wrong_at"):
+                key = str(row["wrong_at"])
+                wrong_by_stage[key] = wrong_by_stage.get(key, 0) + 1
         print(
             json.dumps(
                 {
@@ -3731,6 +4094,41 @@ def _test(args: argparse.Namespace) -> int:
                     "certified": cert_n,
                     "behavioral": beh_n,
                     "candidates_not_run": candidates_n,
+                    "wrong_by_stage": wrong_by_stage,
+                    # The deciders' calibration over this corpus (advisory —
+                    # never a gate until the defaults are stamped from it).
+                    "calibration": calibration,
+                    "untyped_answers": untyped_n,
+                    "proven_by_slots": proven_n,
+                    "slot_lane": (
+                        {
+                            "resolutions": slot_runs,
+                            "sql_identical": slot_sql_identical,
+                            "elapsed_s": round(slot_elapsed_s, 1),
+                            "cost_usd": None if slot_cost is None else round(slot_cost, 6),
+                            "latency_s": (
+                                {
+                                    "median": sorted(slot_latencies)[len(slot_latencies) // 2],
+                                    "p90": sorted(slot_latencies)[
+                                        min(len(slot_latencies) - 1, int(len(slot_latencies) * 0.9))
+                                    ],
+                                }
+                                if slot_latencies
+                                else None
+                            ),
+                            "workers": slot_workers,
+                            "repeat": getattr(args, "repeat", 1),
+                        }
+                        if slot_runs
+                        else None
+                    ),
+                    "ungoverned_passes": sum(
+                        1
+                        for row in rows
+                        if row.get("verdict") == "pass"
+                        and isinstance(stages := row.get("stages"), dict)
+                        and stages.get("resolution") == "failed"
+                    ),
                     "orgs": scope,
                 },
                 indent=2,
@@ -3746,6 +4144,25 @@ def _test(args: argparse.Namespace) -> int:
         # must not print the same shape).
         composition = f"{cert_n} certified + {beh_n} behavioral"
         print(style.bold(f"{total - failed}/{total} passed") + f" ({composition}) in org {scope}")
+        if ungoverned_n:
+            print(
+                style.warn(
+                    f"{ungoverned_n} passed with an ungoverned path — the rows matched, but "
+                    "generation did not resolve to the certified SQL's declared metric or "
+                    "definition (see the [resolution: …] notes)"
+                )
+            )
+        if untyped_n:
+            print(
+                style.warn(
+                    f"{untyped_n} certified case(s) answered UNTYPED — the question did not "
+                    "type and raw-SQL generation answered it (allowed in the suite so the "
+                    "rows still grade); the slot lane says which slot clarified"
+                )
+            )
+        # Advisory: the exit code never keys off calibration — the policy
+        # defaults are tuned on this very report, and gating would be circular.
+        print(style.dim(format_report(calibration)))
         if candidates_n:
             print(
                 style.warn(
@@ -3817,13 +4234,31 @@ def _observe(args: argparse.Namespace) -> int:
             print(json.dumps(trace, indent=2))
             return 0
         assert isinstance(trace, dict)
-        for key in ("request_id", "created_at", "caller", "lens", "status", "confidence"):
+        for key in (
+            "request_id",
+            "created_at",
+            "caller",
+            "lens",
+            "status",
+            "confidence",
+            "resolution_tag",
+        ):
             if trace.get(key) is not None:
                 print(f"{key + ':':<14}{trace[key]}")
         if q := trace.get("question"):
             print(f"\n{q}")
         if sql := trace.get("sql"):
             print(f"\n{sql}")
+        res = trace.get("resolution")
+        if isinstance(res, dict) and res.get("slots"):
+            # The ledger, one slot per line: what the answer resolved to and
+            # whether each choice was the model's (declared) or the generator's.
+            print(f"\n{style.accent('resolution:')} {res.get('tag')} ({res.get('method')})")
+            for s in res["slots"]:
+                if not isinstance(s, dict):
+                    continue
+                value = f" = {s['value']}" if s.get("value") else ""
+                print(f"  {str(s.get('kind')):<11}{s.get('name')}{value}  [{s.get('source')}]")
         return 0
 
     if action == "requests":
@@ -3873,6 +4308,14 @@ def _observe(args: argparse.Namespace) -> int:
             print(f"{head} · {split}" if split else head)
         else:  # pre-split server: 'errors' there means every non-ok outcome
             print(f"{head} · {kpis.get('errors', 0)} non-ok")
+        basis = kpis.get("resolution_histogram")
+        if isinstance(basis, dict) and basis:
+            # Governed basis: how many served figures rested on a certified or
+            # declared definition. `unknown` = recorded before the ledger, said
+            # as itself — a pre-ledger server prints no line at all.
+            order = ("certified", "declared", "mixed", "inferred", "unknown")
+            split = " · ".join(f"{basis.get(k, 0)} {k}" for k in order if basis.get(k))
+            print(f"{style.accent('basis:')} {split}")
         print()
     if not callers:
         # Distinguish "nobody has used it" from "the surface is broken" — the same
@@ -4435,12 +4878,19 @@ def _evals_from_traffic(args: argparse.Namespace) -> int:
         if isinstance(c, dict) and c.get("question")
     }
     drafted: list[dict[str, str]] = []
-    skipped_outcome = skipped_dupe = 0
+    skipped_outcome = skipped_dupe = skipped_ungoverned = 0
     for row in rows:
         expect = expect_of.get(str(row.get("status")))
         q = str(row.get("question") or "").strip()
         if expect is None or not q:
             skipped_outcome += 1
+            continue
+        if expect == "answer" and row.get("resolution_tag") in ("mixed", "inferred"):
+            # An answer whose figure the ledger attributes to an invented
+            # aggregate is not a known-good expectation — drafting it would
+            # pin the ungoverned path as the suite's idea of correct. Rows
+            # written before the ledger (no tag) keep the old contract.
+            skipped_ungoverned += 1
             continue
         if norm(q) in seen:
             skipped_dupe += 1
@@ -4452,7 +4902,8 @@ def _evals_from_traffic(args: argparse.Namespace) -> int:
     if not drafted:
         print(
             f"nothing new to draft: {len(rows)} traffic row(s), "
-            f"{skipped_dupe} already in the suite, {skipped_outcome} without a usable outcome"
+            f"{skipped_dupe} already in the suite, {skipped_outcome} without a usable outcome, "
+            f"{skipped_ungoverned} answered by an ungoverned path"
         )
         return 0
     stamp = (
@@ -4469,7 +4920,8 @@ def _evals_from_traffic(args: argparse.Namespace) -> int:
     shape = " · ".join(f"{k}: {v}" for k, v in sorted(by_expect.items()))
     print(
         f"{len(drafted)} candidate case(s) drafted into {path} ({shape}); "
-        f"{skipped_dupe} duplicate(s) and {skipped_outcome} non-outcome row(s) skipped"
+        f"{skipped_dupe} duplicate(s), {skipped_outcome} non-outcome row(s) and "
+        f"{skipped_ungoverned} ungoverned-path answer(s) skipped"
     )
     print("candidates are visible to `dst test` but not scored until promoted to approved")
     return 0
@@ -4650,6 +5102,7 @@ def _rule(args: argparse.Namespace) -> int:
     r = httpx.post(
         f"{url}/mgmt/lenses/{t['lens']}/certified/from-request/{t['request_id']}",
         headers=headers,
+        json={"allow_untyped": bool(getattr(args, "allow_untyped", False))},
         timeout=60,
     )
     if r.status_code >= 400:
@@ -5334,6 +5787,30 @@ def main() -> int:
         "(default: .) — point the sweep at a project from outside it",
     )
     p.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="slot lane only: resolve every certified question N times; a case passes "
+        "only when every run passes and every run produced the same typed intent "
+        "(determinism, measured) — the rows lane ignores it",
+    )
+    p.add_argument(
+        "--slots",
+        action="store_true",
+        help="the slot lane only: grade each certified question's TYPED resolution "
+        "against its typed gold (stored, or attributed from the certified SQL) and "
+        "compare the compiled SQL to the certified text — no warehouse, no composer, "
+        "seconds per corpus. Without the flag the slot lane still runs whenever a "
+        "decider resolves, and the rows lane executes only the cases it could not prove",
+    )
+    p.add_argument(
+        "--rows",
+        action="store_true",
+        help="execute EVERY certified case against the warehouse, including the ones "
+        "the slot lane proved (typed SQL identical to the certified text) — the "
+        "data-drift check; by default those are not executed",
+    )
+    p.add_argument(
         "--compare-last",
         dest="compare_last",
         action="store_true",
@@ -5421,6 +5898,14 @@ def main() -> int:
         "--certify",
         action="store_true",
         help="after an approve ruling, promote the request's question→SQL to certified",
+    )
+    p.add_argument(
+        "--allow-untyped",
+        dest="allow_untyped",
+        action="store_true",
+        help="with --certify: certify an answer that was served UNTYPED (the raw-SQL "
+        "escalation) — a different act from certifying a typed resolution; you have "
+        "read the SQL",
     )
     p.add_argument(
         "--url",
@@ -5763,8 +6248,16 @@ def main() -> int:
                 "block (re-certify in the same push instead)",
             )
             p.add_argument(
+                "--allow-case",
+                action="append",
+                metavar="CASE_ID",
+                help="publish once past a gate block for THIS failing case only "
+                "(repeatable; the override applies only when every failing case is "
+                "named) — audited: requires --reason; certified divergences still block",
+            )
+            p.add_argument(
                 "--reason",
-                help="why this red publish is intended (required with "
+                help="why this red publish is intended (required with --allow-case / "
                 "--allow-failing-cases), e.g. 'intended behaviour change: term now "
                 "ambiguous — cases reconciled next push'",
             )

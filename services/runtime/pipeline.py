@@ -22,7 +22,14 @@ from sqlglot import exp
 
 from services.benchmark.contamination import normalize as contamination_normalize
 from services.connectors.tagging import query_context
-from services.contracts.protocols import Connector, ContextChunk, LLMProvider, QueryGenerator
+from services.contracts.protocols import (
+    Connector,
+    ContextChunk,
+    GeneratedQuery,
+    LLMProvider,
+    QueryGenerator,
+)
+from services.contracts.resolution import DecisionRecord, Resolution
 from services.contracts.response import (
     CertifiedProvenance,
     ClarificationRequest,
@@ -34,15 +41,18 @@ from services.contracts.semantic_model import SemanticModel
 from services.contracts.trace import TraceLog
 from services.lenses.profile_enrich import EntityCoverage
 from services.observability import cost
-from services.reviews.judge import judge_trace
+from services.reviews.judge import judge_trace, judge_typed
 from services.reviews.store import Trace as ReviewTrace
 from services.runtime import (
     adversary,
     ambiguity,
     cte_guard,
+    decision_policy,
     faithfulness,
     filter_guard,
+    reading,
     receipt,
+    resolution,
     shape_guard,
     sql_guard,
     time_guard,
@@ -51,7 +61,7 @@ from services.runtime import (
 )
 from services.runtime.answer import AnswerComposer, AnswerResult, certified_frame, citations_for
 from services.runtime.answer import data_notes as answer_data_notes
-from services.runtime.assembly import ANSWER_CONTRACT_SOURCE
+from services.runtime.assembly import ANSWER_CONTRACT_SOURCE, typed_decider
 from services.runtime.bounded import ServingTimeout, call_bounded
 from services.runtime.compiler import CompileError, metric_sql
 
@@ -313,6 +323,30 @@ def _basis_line(definition_used: str | None, model: SemanticModel) -> str | None
     return f"Computed as `{definition_used}`."
 
 
+def _resolution(
+    gen: GeneratedQuery,
+    sql: str,
+    model: SemanticModel,
+    domains: dict[str, list[str]] | None,
+    certification: str,
+) -> Resolution:
+    """The ledger for this serve. By construction when the generator carried a
+    compiled intent (the names came from the model), attributed from the served
+    SQL otherwise — read per served SQL, not per tier, because the tier stays
+    "intent" on a serve the grounded escalation actually wrote. A certified
+    serve is overlaid: the approval vouches for every slot."""
+    res = (
+        resolution.from_intent(gen.intent, model, domains, supplied=gen.supplied)
+        if gen.intent is not None
+        else resolution.attribute(sql, model, domains)
+    )
+    res.decisions = list(gen.decisions)
+    # Certified SQL is typed by approval; anything else is typed only when the
+    # typed resolver produced it — a JSON intent emission or raw SQL is not.
+    res.typed = True if certification == "certified" else bool(gen.typed)
+    return resolution.certified_overlay(res) if certification == "certified" else res
+
+
 def _known_term(term: str | None, model: SemanticModel) -> str | None:
     """*term* when the model actually declares it (definition term or metric
     name — the two namespaces `_basis_line` prints from), else None. A
@@ -428,6 +462,9 @@ def run_query(
     generator_tier: str | None = None,
     log_samples: bool = False,
     value_domains: dict[str, list[str]] | None = None,
+    # Measured decisions assembly made for this question (AssembledInputs.decisions);
+    # they ride the resolution ledger so probabilities live in one record.
+    decisions: list[DecisionRecord] | None = None,
     entity_coverage: dict[str, EntityCoverage] | None = None,
     scan_text: str | None = None,
 ) -> PipelineResult:
@@ -569,7 +606,15 @@ def run_query(
             ),
         )
 
-    def _clarification_result(clar: ClarificationRequest) -> PipelineResult:
+    # Measured decisions made BEFORE any generator (the typed reading of an
+    # ambiguous term): they ride the ledger of whatever the request becomes —
+    # the served answer, or the clarification's trace, so a clarified request
+    # still shows which slot fell below the bar and at what probability.
+    pre_records: list[DecisionRecord] = []
+
+    def _clarification_result(
+        clar: ClarificationRequest, records: list[DecisionRecord] | None = None
+    ) -> PipelineResult:
         canonical = next((d for d in semantic_model.definitions if d.term == clar.term), None)
         if canonical is not None and canonical.possible_mappings:
             clar = clar.model_copy(update={"options": canonical.possible_mappings})
@@ -579,6 +624,10 @@ def run_query(
                 update={"question": f"'{clar.term}' is ambiguous here — do you mean {opts}?"}
             )
         _mark("total", started)
+        decided = [*pre_records, *(records or [])]
+        ledger = (
+            Resolution(method="construction", tag="unknown", decisions=decided) if decided else None
+        )
         return PipelineResult(
             response=QueryResponse(
                 lens=lens_name,
@@ -602,6 +651,8 @@ def run_query(
                 certification=certification,
                 generator_tier=generator_tier,
                 repairs=attempt,
+                clarification=clar,
+                resolution=ledger,
                 latency_ms=latency_ms,
                 ai_input_tokens=ai_in,
                 ai_output_tokens=ai_out,
@@ -685,6 +736,36 @@ def run_query(
     # answers are exempt by design (a human approved that exact question→SQL).
     if certification != "certified":
         det = deterministic_clarification(rails_text, semantic_model)
+        # Under typed serving the residue the lexical rail cannot settle is one
+        # measured decision over the term's declared readings (reading.py):
+        # act pins the reading like a question-named one — disclosed, on the
+        # ledger — and the rail is re-run for any further term; below the
+        # bar the clarification stands, its record on the trace.
+        reader = typed_decider() if det is not None else None
+        for _ in range(len(semantic_model.definitions)):
+            if det is None or reader is None:
+                break
+            canonical = next((d for d in semantic_model.definitions if d.term == det.term), None)
+            if canonical is None:
+                break
+            picked, record = reading.decide_reading(reader, rails_text, canonical)
+            pre_records.append(record)
+            if picked is None:
+                break
+            semantic_model = ambiguity.pin(semantic_model, [picked])
+            chunk = ContextChunk(
+                text=(
+                    f"GOVERNED RESOLUTION — the ambiguous term '{picked.term}' is "
+                    f"pinned for this question to: {picked.mapping} ({picked.via}). "
+                    "Compute that reading; do not ask for clarification."
+                ),
+                source=f"ambiguity-resolution: {picked.term} -> "
+                f"{ambiguity.mapping_label(picked.mapping)}",
+            )
+            prose.append(chunk)
+            context_refs.append(chunk.source)
+            resolution_disclosures.append(ambiguity.disclosure_line(picked))
+            det = deterministic_clarification(rails_text, semantic_model)
         if det is not None:
             return _clarification_result(det)
 
@@ -712,6 +793,8 @@ def run_query(
     # describes the SQL that actually serves; non-empty means the serve must
     # disclose, grade at most partial, and leave the miss on the trace.
     filter_waived: list[tuple[str, str]] = []
+    untyped_reason: str | None = None
+    untyped_decisions: list[DecisionRecord] = []
     while True:
         active = generator if attempt == 0 else (escalate_generator or generator)
         gen_started = time.perf_counter()
@@ -741,6 +824,23 @@ def run_query(
             ai_cost, cost.ai_cost_usd(gen_model, gen.input_tokens, gen.output_tokens)
         )
 
+        if (
+            attempt == 0
+            and getattr(active, "model", None) == "typed"
+            and escalate_generator is not None
+            and not gen.sql.strip()
+            and (gen.clarification is not None or gen.no_answer_reason)
+        ):
+            # The caller accepted an UNTYPED answer: the question did not type,
+            # so raw-SQL generation runs instead — disclosed below, and the
+            # decisions that did not type ride the ledger with it.
+            untyped_reason = (
+                gen.clarification.question if gen.clarification else str(gen.no_answer_reason)
+            )
+            untyped_decisions = list(gen.decisions)
+            attempt += 1
+            feedback = None
+            continue
         if gen.no_answer_reason and not gen.sql.strip():
             # The absence signal: a confident decline with the gap named is a
             # correct answer, not a failure — it does not consume repairs and
@@ -787,7 +887,7 @@ def run_query(
             # Options come from the model's canonical possible_mappings (the LLM's
             # tailored question wording is kept); never reaches the warehouse and
             # consumes no repair.
-            return _clarification_result(gen.clarification)
+            return _clarification_result(gen.clarification, list(gen.decisions))
 
         # Pre-approved SQL (a certified answer or a certified-definition page's authored query) is
         # trusted on table scope — a human chose those tables, not the model. The
@@ -1421,21 +1521,26 @@ def run_query(
         and composition is None
     ):
         judge_started = time.perf_counter()
-        verdict, reasoning = judge_trace(
-            inline_judge_llm,
-            ReviewTrace(
-                request_id=rid,
-                lens=lens_name,
-                caller=caller,
-                question=question,
-                sql=guard.sql,
-                answer=ans.text,
-                definition_used=definition_used,
-                confidence=report.grade,
-                row_count=total_rows,
-            ),
-            judge_model,
+        review_trace = ReviewTrace(
+            request_id=rid,
+            lens=lens_name,
+            caller=caller,
+            question=question,
+            sql=guard.sql,
+            answer=ans.text,
+            definition_used=definition_used,
+            confidence=report.grade,
+            row_count=total_rows,
+            columns=list(served.columns),
+            rows=[list(row) for row in served.rows],
         )
+        typed_judge = typed_decider()
+        try:
+            if typed_judge is None:
+                raise LookupError("no typed decider")
+            verdict, reasoning, _judge_decisions = judge_typed(review_trace, typed_judge)
+        except Exception:  # noqa: BLE001 — the rubric judge is the fallback, never a 500
+            verdict, reasoning = judge_trace(inline_judge_llm, review_trace, judge_model)
         _mark("judge", judge_started)
         report = verification.fold_judge(report, verdict, reasoning)
     # Opt-in adversarial reviewer — a second opinion that challenges the
@@ -1467,6 +1572,14 @@ def run_query(
     # confirm). Folded after judge/adversary so a regrade cannot lose it.
     if filter_waiver_note is not None:
         report = verification.fold_metric_filter_waived(report, filter_waiver_note)
+    # An acted decision below the bar its slot was measured at is DISCLOSED,
+    # never refused (the typed regime acts unless none wins): the check names
+    # the slot, the choice and the probability, and the grade caps at partial.
+    low_confidence = decision_policy.low_confidence(
+        [*(decisions or []), *pre_records, *untyped_decisions, *gen.decisions]
+    )
+    if low_confidence:
+        report = verification.fold_low_confidence(report, low_confidence)
     # Folded LAST so nothing upgrades past it: a serve that exists only because
     # serve_ungoverned_shapes bypassed the selection boundary grades unverified.
     if ungoverned_reason is not None:
@@ -1538,6 +1651,10 @@ def run_query(
     # gets the exact name to re-ask with, never a silently different number.
     if filter_waiver_note is not None:
         answer_text += f" Note: {filter_waiver_note}"
+    # A low-confidence decision, likewise in-band: the caller reading only the
+    # prose learns which slot was decided below its measured bar.
+    if low_confidence:
+        answer_text += f" Note: {decision_policy.describe_low(low_confidence)}."
 
     # The freshness contract's violation is said in-band, same deterministic-append
     # idiom: the caller reading only the prose must not hold month-old data as
@@ -1576,6 +1693,9 @@ def run_query(
         truncated=truncated,
     )
     trust_summary = _basis_line(definition_used, semantic_model)
+    ledger = _resolution(gen, guard.sql, semantic_model, value_domains, certification)
+    if decisions or pre_records:
+        ledger.decisions = [*(decisions or []), *pre_records, *ledger.decisions]
     # The scope travels with the number: an answer computed over
     # a scoped subset names the population in the field agents lead with —
     # whether or not the filter was enforced (the check grades that half).
@@ -1629,6 +1749,14 @@ def run_query(
     # checks. Certified serves are exempt: their
     # guarantee is the approval, and their checks skip structurally.
     degraded_notes: list[str] = []
+    if untyped_reason is not None:
+        # Rule 4: an escalated figure says so on its face. The line rides
+        # `degraded` so every surface (CLI, MCP rule, trace) relays it verbatim.
+        degraded_notes.append(
+            f"UNTYPED: served by raw-SQL generation — the question did not type: {untyped_reason}"
+        )
+        ledger.decisions = [*untyped_decisions, *ledger.decisions]
+        ledger.typed = False
     if certification != "certified" and report is not None:
         # The trigger is THE SAME line the grade draws
         # (`_semantic_abstained`): announce exactly when the badge was capped for
@@ -1673,7 +1801,9 @@ def run_query(
                 confidence=confidence,
                 sql=guard.sql,
                 data_as_of=data_as_of,
+                resolution_tag=ledger.tag,
             ),
+            resolution=ledger,
             composition=composition,
             # The stamped fact, on the envelope: `data` is dropped for
             # format=prose, and a caller must never have to parse English to
@@ -1714,6 +1844,8 @@ def run_query(
             certification=certification,
             generator_tier=generator_tier,
             repairs=attempt,
+            resolution=ledger,
+            resolution_tag=ledger.tag,
             latency_ms=latency_ms,
             status="ok",
             ai_input_tokens=ai_in,

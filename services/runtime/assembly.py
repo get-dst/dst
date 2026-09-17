@@ -19,6 +19,7 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -32,17 +33,22 @@ from services.contracts.profile import TableProfile
 from services.contracts.protocols import (
     CacheableBlock,
     ContextChunk,
+    Decider,
+    Decision,
     LLMProvider,
     Message,
+    Option,
     QueryGenerator,
 )
+from services.contracts.resolution import DecisionRecord
 from services.contracts.semantic_model import SampleQuery, SemanticModel
 from services.db.session import org_session
 from services.lenses import profile_enrich, profile_store
 from services.lenses.store import LensBundle
 from services.llm import registry
 from services.llm.assist import assist_llm
-from services.runtime import value_guard
+from services.llm.vote_decider import EQUIV_K, VoteDecider
+from services.runtime import decision_policy, value_guard
 from services.runtime.bounded import call_bounded
 from services.runtime.generator import FixedSQLGenerator, GroundedSQLGenerator
 from services.runtime.intent_generator import IntentSQLGenerator
@@ -146,18 +152,46 @@ class AssembledInputs:
     # column name -> its complete value dictionary (value_guard.value_domains):
     # the pipeline's deterministic check that a filter literal exists at all.
     value_domains: dict[str, list[str]] = field(default_factory=dict)
+    # entity name -> column -> dictionary (value_guard.entity_domains): the
+    # typed resolver's own view, one entity at a time, so a column name shared
+    # across entities with different values still has a dictionary.
+    entity_domains: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # entity name -> its month-period string field (value_guard.period_fields):
+    # the window compiles to a range on it; proven by the profile's sample.
+    period_fields: dict[str, str] = field(default_factory=dict)
     # entity name -> its measured date coverage (profile_enrich.entity_coverage):
     # the pipeline's deterministic check that the asked period was ever loaded.
     entity_coverage: dict[str, profile_enrich.EntityCoverage] = field(default_factory=dict)
+    # Every measured closed-set decision assembly made for this question (the
+    # certified-equivalence gate today). Rides the answer's ledger.
+    decisions: list[DecisionRecord] = field(default_factory=list)
+    # The caller's typed values for open slots (column -> value) and whether it
+    # accepts raw-SQL generation when the question does not type.
+    bindings: dict[str, str] = field(default_factory=dict)
+    allow_untyped: bool = False
 
 
-def certified_equivalent(llm: LLMProvider, model: str, question: str, approved: str) -> bool:
-    """Cheap-model gate: is ``question`` a paraphrase of the ``approved`` question?
+_EQUIV_OPTIONS = [
+    Option(
+        "equivalent", "the SAME SQL correctly answers both — same metric, grain, filters, entities"
+    ),
+    Option("different", "a different number, time window, entity or aggregation"),
+]
 
-    Fails closed (``False``) on any provider error — a missed promotion just means
-    generation runs, never that a wrong approved SQL is served.
-    """
-    try:
+
+def equivalence_decision(
+    llm: LLMProvider,
+    model: str,
+    question: str,
+    approved: str,
+    *,
+    k: int = EQUIV_K,
+    decider: Decider | None = None,
+) -> Decision:
+    """Is ``question`` a paraphrase of the ``approved`` question — as a measured,
+    closed-set decision (equivalent | different). ``k == 1`` with no injected
+    decider is the legacy yes/no call byte-for-byte, and measures nothing."""
+    if decider is None and k == 1:
         res = llm.complete(
             system=[CacheableBlock(_EQUIV_SYSTEM)],
             messages=[Message("user", f"A: {approved}\nB: {question}")],
@@ -165,10 +199,56 @@ def certified_equivalent(llm: LLMProvider, model: str, question: str, approved: 
             temperature=0.0,
             max_tokens=4,
         )
+        yes = res.text.strip().lower().startswith("y")
+        return Decision(
+            chosen="equivalent" if yes else "different", probs=None, provider=f"legacy:{model}"
+        )
+    d = decider or VoteDecider(llm, model, k=k)
+    return d.decide(
+        question=f"A (approved): {approved}\nB (asked): {question}",
+        context=_EQUIV_SYSTEM,
+        options=_EQUIV_OPTIONS,
+        allow_none=False,
+    )
+
+
+def certified_equivalent(
+    llm: LLMProvider,
+    model: str,
+    question: str,
+    approved: str,
+    *,
+    decider: Decider | None = None,
+    record_to: list[DecisionRecord] | None = None,
+) -> bool:
+    """Cheap-model gate: is ``question`` a paraphrase of the ``approved`` question?
+
+    Serves the approved SQL only on a measured ``act`` for ``equivalent``; a
+    decision the policy is not sure enough to act on falls through to
+    generation — today's fail-closed. Fails closed (``False``) on any provider
+    error too: a missed promotion just means generation runs, never that a
+    wrong approved SQL is served. ``record_to`` collects the decision so it
+    rides the answer's ledger.
+    """
+    try:
+        d = equivalence_decision(llm, model, question, approved, decider=decider)
     except Exception:
         log.exception("certified equivalence check failed")
         return False
-    return res.text.strip().lower().startswith("y")
+    verdict = decision_policy.verdict(d, "certified_equivalent")
+    if record_to is not None:
+        record_to.append(
+            DecisionRecord(
+                slot="certified_equivalent",
+                chosen=d.chosen,
+                p=d.p,
+                runner_up=d.runner_up,
+                margin=d.margin,
+                verdict=verdict,
+                provider=d.provider,
+            )
+        )
+    return verdict == "act" and d.chosen == "equivalent"
 
 
 def certified_bind(
@@ -275,6 +355,7 @@ def certified_lookup(
     *,
     serve: bool = True,
     exclude_id: str | None = None,
+    record_to: list[DecisionRecord] | None = None,
 ) -> tuple[
     certify_store.CertifiedAnswer | None,
     list[SampleQuery],
@@ -324,7 +405,9 @@ def certified_lookup(
         elif hits[0].score >= bands.exact:
             return top, [], "certified", "exact", None
         elif (pair := assist_llm()) is not None:
-            if certified_equivalent(pair.llm, pair.name, question, top.question):
+            if certified_equivalent(
+                pair.llm, pair.name, question, top.question, record_to=record_to
+            ):
                 return top, [], "certified", "equivalent", None
     exemplars = [
         SampleQuery(question=h.answer.question, sql=h.answer.sql)
@@ -415,6 +498,8 @@ def assemble(
     *,
     serve_certified: bool = True,
     exclude_certified_id: str | None = None,
+    bindings: dict[str, str] | None = None,
+    allow_untyped: bool = False,
 ) -> AssembledInputs:
     """The per-question input assembly production serves: retrieval, certified page,
     profile enrichment, exemplar folding, certified serve decisions.
@@ -429,16 +514,27 @@ def assemble(
     # descriptions, partition-pruning hints land in the (cached) system prompt.
     profiles, as_of = profile_facts(bundle, org_id)
     domains: dict[str, list[str]] = {}
+    per_entity: dict[str, dict[str, list[str]]] = {}
+    periods: dict[str, str] = {}
     coverage: dict[str, profile_enrich.EntityCoverage] = {}
     if profiles:
         model = profile_enrich.enrich_model(model, profiles)
         domains = value_guard.value_domains(model, profiles)
+        per_entity = value_guard.entity_domains(model, profiles)
+        periods = value_guard.period_fields(model, profiles)
         coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
 
     # Certified-answer repository: serve an approved SQL directly on an exact match,
     # or fold near-matches in as few-shot exemplars to guide generation.
+    decisions: list[DecisionRecord] = []
     certified, exemplars, certification, match, bound = certified_lookup(
-        name, qvec, org_id, question, serve=serve_certified, exclude_id=exclude_certified_id
+        name,
+        qvec,
+        org_id,
+        question,
+        serve=serve_certified,
+        exclude_id=exclude_certified_id,
+        record_to=decisions,
     )
     if exemplars:
         model = model.model_copy(update={"sample_queries": list(model.sample_queries) + exemplars})
@@ -457,7 +553,12 @@ def assemble(
         data_as_of=as_of,
         degraded=() if embed_failure is None else (MATCHING_DOWN.format(why=embed_failure),),
         value_domains=domains,
+        entity_domains=per_entity,
+        period_fields=periods,
         entity_coverage=coverage,
+        decisions=decisions,
+        bindings=dict(bindings or {}),
+        allow_untyped=allow_untyped,
         counts={
             "context_chunks": n_chunks,
             "certified_exemplars": len(exemplars),
@@ -510,12 +611,18 @@ def eval_harness(
                 )
                 if not errors:
                     question = certify_binding.render_question(answer.question, dict(canonical))
+        # The rows lane grades whether the question can be answered correctly;
+        # under typed serving a question that does not type is allowed to fall
+        # to raw-SQL generation HERE (disclosed, tagged, typed=false), so the
+        # oracle comparison still runs — typed-ness is reported as its own
+        # fact per case, never folded into pass/fail.
         return assemble(
             bundle,
             question,
             org_id,
             serve_certified=False,
             exclude_certified_id=answer.id,
+            allow_untyped=True,
         )
 
     return assemble_for, _eval_generators_for(bundle, model)
@@ -529,9 +636,32 @@ def question_harness(
     self-exclusion, serve bypass off."""
 
     def assemble_q(question: str) -> AssembledInputs:
-        return assemble(bundle, question, org_id, serve_certified=False)
+        return assemble(bundle, question, org_id, serve_certified=False, allow_untyped=True)
 
     return assemble_q, _eval_generators_for(bundle, model)
+
+
+def typed_decider() -> Decider | None:
+    """The decider typed serving runs on, per the switch: a typed-decision
+    provider under "auto", any resolvable decider under "on", nothing under "off"."""
+    from services.config import settings
+
+    if settings.typed_serving == "off":
+        return None
+    decider = registry.resolve_decider()
+    if decider is None:
+        return None
+    if settings.typed_serving == "on":
+        return decider
+    from services.llm.typesafe import TypesafeDecider
+
+    return decider if isinstance(decider, TypesafeDecider) else None
+
+
+def business_today_date(timezone: str | None) -> date:
+    from services.runtime.generator import business_today
+
+    return date.fromisoformat(business_today(timezone))
 
 
 def select_generators(
@@ -588,6 +718,28 @@ def select_generators(
             (assembled.certified_match),
         )
     if generator_tier(assembled) == "intent":
+        typed = typed_decider()
+        if typed is not None:
+            # Typed serving: every slot a measured decision over the option sets;
+            # raw SQL only when the caller opted into an untyped escalation.
+            from services.runtime.typed_resolver import TypedIntentGenerator, TypedResolver
+
+            resolver = TypedResolver(
+                typed,
+                domains=assembled.value_domains,
+                entity_domains=assembled.entity_domains,
+                period_fields=assembled.period_fields,
+                bindings=assembled.bindings,
+                today=business_today_date(assembled.model.timezone),
+            )
+            return (
+                TypedIntentGenerator(resolver),
+                GroundedSQLGenerator(llm, model=model_name, temperature=gen_temp)
+                if assembled.allow_untyped
+                else None,
+                assembled.certification,
+                None,
+            )
         # Metric layer exists → compile a structured intent; fall back to raw SQL on repair.
         return (
             IntentSQLGenerator(llm, model=primary_model, temperature=gen_temp),

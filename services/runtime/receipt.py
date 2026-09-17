@@ -34,7 +34,11 @@ SignatureState = Literal["valid", "invalid", "unsigned", "unkeyed"]
 
 
 def _canonical(receipt: Receipt) -> bytes:
-    payload = receipt.model_dump(exclude={"digest"})
+    # A field added after receipts were already in the wild is excluded while
+    # unset, so a receipt signed before it existed still recomputes to the same
+    # bytes; once set it is pinned like every other claim.
+    exclude = {"digest"} | ({"resolution_tag"} if receipt.resolution_tag is None else set())
+    payload = receipt.model_dump(exclude=exclude)
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -55,6 +59,7 @@ def build(
     confidence: str | None,
     sql: str | None,
     data_as_of: str | None,
+    resolution_tag: str | None = None,
 ) -> Receipt:
     receipt = Receipt(
         request_id=request_id,
@@ -65,6 +70,7 @@ def build(
         confidence=confidence,
         sql_sha256=sql_hash(sql),
         data_as_of=data_as_of,
+        resolution_tag=resolution_tag,
     )
     keys = signing_keys()
     if keys:

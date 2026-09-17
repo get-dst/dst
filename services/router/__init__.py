@@ -39,6 +39,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from services.contracts.protocols import Decision
 from services.contracts.protocols import Embedder as Embedder
 
 # A pre-scored recall signal: question -> (lens, score) ranked best first. Injected
@@ -104,6 +105,12 @@ class RouteDecision:
     # Set when the decline is an OUTAGE, not a coverage signal (DECIDER_DOWN /
     # ROUTER_DOWN) — rides the envelope and the routing_decision row.
     degraded: str | None = None
+    # The decider's measured decision (contracts.protocols.Decision) and the
+    # policy verdict it got — act | clarify | decline. None on the cosine paths
+    # and on outages. Rides the routing_decision row so calibration and the
+    # act/clarify split are queries, not archaeology.
+    decision: Decision | None = None
+    verdict: str | None = None
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:

@@ -52,3 +52,8 @@ class QueryIntent(BaseModel):
     filters: list[IntentFilter] = PField(default_factory=list)
     order_by: list[IntentOrder] = PField(default_factory=list)
     limit: int | None = None
+    fields: list[str] = PField(
+        default_factory=list,
+        description="a LISTING's projection: member names shown per row, no aggregation "
+        "and no GROUP BY — the typed resolver's shape for 'list / show / which records'",
+    )

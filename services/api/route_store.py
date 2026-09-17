@@ -10,13 +10,14 @@ list-window / latest-window.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-_COLS = "id, question, routed_lens, score, covered, created_at, degraded"
+_COLS = "id, question, routed_lens, score, covered, created_at, degraded, decision"
 
 
 class RoutingDecision(BaseModel):
@@ -31,6 +32,9 @@ class RoutingDecision(BaseModel):
     # Outage marker: DECIDER_DOWN / ROUTER_DOWN. A degraded decline is
     # an availability signal, never a coverage signal — surface counts it apart.
     degraded: str | None = None
+    # The decider's measured decision + policy verdict (0064): {provider, chosen,
+    # p, runner_up, margin, verdict}. None on cosine paths, outages, pre-0064 rows.
+    decision: dict[str, object] | None = None
 
 
 def _row_to_decision(r: object) -> RoutingDecision:
@@ -42,6 +46,7 @@ def _row_to_decision(r: object) -> RoutingDecision:
         covered=bool(r[4]),  # type: ignore[index]
         created_at=r[5],  # type: ignore[index]
         degraded=r[6],  # type: ignore[index]
+        decision=r[7],  # type: ignore[index]
     )
 
 
@@ -53,20 +58,29 @@ def record(
     covered: bool,
     *,
     degraded: str | None = None,
+    decision: dict[str, object] | None = None,
 ) -> RoutingDecision:
     """Persist one routing decision; returns the stored row (id + created_at)."""
     row = session.execute(
         text(
             f"""
-            INSERT INTO routing_decision (org_id, question, routed_lens, score, covered, degraded)
+            INSERT INTO routing_decision
+                (org_id, question, routed_lens, score, covered, degraded, decision)
             VALUES (
                 NULLIF(current_setting('app.current_org', true), '')::uuid,
-                :q, :l, :s, :c, :dg
+                :q, :l, :s, :c, :dg, CAST(:dc AS jsonb)
             )
             RETURNING {_COLS}
             """
         ),
-        {"q": question, "l": routed_lens, "s": score, "c": covered, "dg": degraded},
+        {
+            "q": question,
+            "l": routed_lens,
+            "s": score,
+            "c": covered,
+            "dg": degraded,
+            "dc": json.dumps(decision) if decision is not None else None,
+        },
     ).first()
     return _row_to_decision(row)
 

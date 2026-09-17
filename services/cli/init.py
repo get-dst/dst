@@ -248,6 +248,13 @@ def run_init(args: argparse.Namespace) -> int:
         "  #   production: an openai-compatible entry with embedding_model + base_url",
         "  #   none:       omit - generation/guards/evals still work; certified",
         "  #               matching degrades and routing falls back to lexical",
+        "  # a typed-decision provider: no model writes SQL - every slot of an answer",
+        "  # (lens, entity, metric, dimension, grain, filter, value) is a decision over",
+        "  # the semantic model and the column profiles, and the SQL is compiled from it.",
+        "  # With one configured (DST_TYPED_SERVING=auto) every lens serves typed:",
+        "  # jev:",
+        "  #   type: typesafe",
+        f"  #   api_key_env: {_key_env('jev')}",
     ]
     # Each reference block sits under the section it documents — appended to the
     # end of the file, the provider fields read as connection config.

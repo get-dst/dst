@@ -311,3 +311,30 @@ def test_define_exits_nonzero_when_nothing_is_governed(monkeypatch, capsys) -> N
     captured = capsys.readouterr()
     assert captured.out.strip() == ""
     assert "no governed definition mentions 'nope'" in captured.err
+
+
+def test_query_meta_names_the_resolution_and_what_was_inferred(monkeypatch, capsys) -> None:
+    """`resolution:` beside `definition:` — the typed verdict on whether the
+    figure's MEANING was governed; an inferred figure names the aggregate the
+    model invented so the reader sees what was guessed."""
+    payload = {
+        "lens": "sales",
+        "answer": "Bookings were 11.7M EUR.",
+        "sql": "SELECT SUM(x) FROM deals",
+        "confidence": "verified",
+        "certification": "none",
+        "resolution": {
+            "method": "attributed",
+            "tag": "inferred",
+            "slots": [{"kind": "metric", "name": "SUM(x)", "source": "inferred"}],
+        },
+    }
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _fake_response(payload))
+    assert _run_cli(monkeypatch, ["query", "sales", "bookings?", "--token", "dstadm_t"]) == 0
+    out = capsys.readouterr().out
+    assert "resolution: inferred" in out and "inferred: SUM(x)" in out
+
+    payload["resolution"] = {"method": "construction", "tag": "declared", "slots": []}
+    assert _run_cli(monkeypatch, ["query", "sales", "bookings?", "--token", "dstadm_t"]) == 0
+    out = capsys.readouterr().out
+    assert "resolution: declared" in out and "inferred:" not in out

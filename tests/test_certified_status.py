@@ -250,3 +250,17 @@ def test_deleting_an_entry_deletes_it_files_win(org) -> None:
     with org_session(oid) as s:
         stored = {a.question: a.status for a in certify_store.list_for_lens(s, "customer_value")}
     assert second not in stored and stored[_Q] == "active"
+
+
+@needs_db
+def test_typed_gold_is_stored_on_an_answer_that_had_none(org) -> None:
+    oid, headers = org
+    _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
+    gold = {"method": "construction", "tag": "declared", "slots": [], "typed": True}
+    with org_session(oid) as s:
+        a = certify_store.list_for_lens(s, "customer_value")[0]
+        assert a.resolution is None
+        assert certify_store.set_resolution(s, a.id, gold) == 1
+    with org_session(oid) as s:
+        stored = certify_store.list_for_lens(s, "customer_value")[0].resolution
+        assert stored is not None and stored["typed"] is True and stored["tag"] == "declared"

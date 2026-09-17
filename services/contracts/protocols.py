@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
 from services.contracts.profile import (
@@ -16,6 +16,8 @@ from services.contracts.profile import (
     TableProfile,
     TableSampleSpec,
 )
+from services.contracts.query_intent import QueryIntent
+from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.warehouse import DryRunResult, QueryResult, SchemaSnapshot
@@ -67,6 +69,18 @@ class GeneratedQuery:
     # Set when the question hinges on an AMBIGUOUS governed term: the caller must
     # pick a meaning before SQL exists. sql is empty when set.
     clarification: ClarificationRequest | None = None
+    # The compiled QueryIntent when the SQL was built BY CONSTRUCTION from names
+    # in the semantic model (intent tier, metrics door). None on raw-SQL paths —
+    # the ledger then attributes from the served SQL instead. Read this, not
+    # generator_tier: the tier is decided before generation and stays "intent"
+    # on a serve the grounded escalation actually wrote.
+    intent: QueryIntent | None = None
+    # The typed resolver's decisions (each slot's measured choice) and the filter
+    # columns whose value the caller supplied — they ride the answer's ledger.
+    decisions: list[DecisionRecord] = field(default_factory=list)
+    supplied: list[str] = field(default_factory=list)
+    # True iff the typed resolver produced this SQL (no escalation).
+    typed: bool | None = None
 
 
 # ── Protocols ────────────────────────────────────────────────────────────────
@@ -171,6 +185,101 @@ class LLMProvider(Protocol):
         temperature: float,
         max_tokens: int,
     ) -> LLMResult: ...
+
+
+# ── Typed decisions ──────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Option:
+    """One member of a closed option set a decision is made over."""
+
+    name: str
+    description: str = ""
+
+
+@dataclass
+class DecisionUsage:
+    """What one decision cost: provider calls (fractional when several
+    decisions rode one call), tokens as the provider reports them, and the
+    wall time of the call(s). Summed per resolution, priced per provider."""
+
+    calls: float = 0.0
+    input_tokens: float = 0.0
+    output_tokens: float = 0.0
+    latency_s: float = 0.0
+
+    def split(self, n: int) -> DecisionUsage:
+        n = max(1, n)
+        return DecisionUsage(
+            calls=self.calls / n,
+            input_tokens=self.input_tokens / n,
+            output_tokens=self.output_tokens / n,
+            latency_s=self.latency_s / n,
+        )
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "calls": round(self.calls, 4),
+            "input_tokens": round(self.input_tokens, 2),
+            "output_tokens": round(self.output_tokens, 2),
+            "latency_s": round(self.latency_s, 4),
+        }
+
+
+@dataclass
+class Decision:
+    """A closed-set choice with the probability the decider MEASURED for it.
+
+    ``probs`` is None when nothing was measured — a single sample, a provider
+    with no way to expose likelihoods. It is never a fabricated 1.0: a policy
+    reading None falls back to act-or-decline, and the calibration report
+    prints that decider as UNTESTED instead of a number. ``chosen`` is None for
+    the ``none`` option (no member fits), and then ``probs`` carries "none".
+    """
+
+    chosen: str | None
+    probs: dict[str, float] | None
+    provider: str
+    # What the decision cost — None when the decider did not measure it.
+    usage: DecisionUsage | None = None
+
+    @property
+    def p(self) -> float | None:
+        if self.probs is None:
+            return None
+        return self.probs.get(self.chosen if self.chosen is not None else "none", 0.0)
+
+    @property
+    def runner_up(self) -> float | None:
+        if self.probs is None:
+            return None
+        key = self.chosen if self.chosen is not None else "none"
+        rest = [v for k, v in self.probs.items() if k != key]
+        return max(rest) if rest else 0.0
+
+    @property
+    def margin(self) -> float | None:
+        p, r = self.p, self.runner_up
+        return None if p is None or r is None else p - r
+
+
+@runtime_checkable
+class Decider(Protocol):
+    """A closed-set decision maker: question + context + options -> Decision.
+
+    The seam a typed-decision model plugs into 1:1 (fast, cheap, calibrated
+    classification over options declared in advance). Today's implementation
+    votes a chat model; the option-set builder and the threshold policy are the
+    durable halves either way.
+    """
+
+    def decide(
+        self,
+        *,
+        question: str,
+        context: str,
+        options: list[Option],
+        allow_none: bool,
+    ) -> Decision: ...
 
 
 @runtime_checkable

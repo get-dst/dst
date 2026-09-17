@@ -17,8 +17,9 @@ from services.contracts.correction import CorrectionDelta
 from services.contracts.protocols import LLMProvider
 from services.llm import registry
 from services.reviews import store
-from services.reviews.judge import judge_trace
+from services.reviews.judge import NO_VERDICT, judge_trace, judge_typed
 from services.reviews.store import Ticket, Trace
+from services.runtime.assembly import typed_decider
 
 log = logging.getLogger("dst")
 
@@ -98,7 +99,21 @@ def open_review(
         return ticket
 
     reference_sql = _certified_reference(session, trace)
-    verdict, reasoning = judge_trace(llm, trace, model, reference_sql=reference_sql)
+    if correction is not None and (correction.corrected_sql or "").strip():
+        # The correction is the thing under review: grading the original
+        # answer auto-approved corrections on "the SQL matches the question".
+        trace = trace.model_copy(update={"correction_sql": correction.corrected_sql})
+    decider = typed_decider()
+    if decider is not None:
+        try:
+            verdict, reasoning, _decisions = judge_typed(
+                trace, decider, reference_sql=reference_sql
+            )
+        except Exception as exc:  # noqa: BLE001 — a starved decider is an outage, not a ruling
+            log.exception("typed judge unavailable for %s", trace.request_id)
+            verdict, reasoning = NO_VERDICT, f"typed judge unavailable ({exc}) — needs a human"
+    else:
+        verdict, reasoning = judge_trace(llm, trace, model, reference_sql=reference_sql)
     # A confident approve resolves; anything else awaits a human sign-off. An empty
     # judge reply arrives as NO_VERDICT ("") and lands here UNRULED — same shape as
     # the no-LLM branch above: the queue shows no ai_verdict, so nobody mistakes a

@@ -107,6 +107,12 @@ class CertifiedAnswer:
     # lens whose compiled dialect differs from a non-null pin: certified SQL is
     # dialect-bound text and must not outlive its warehouse silently.
     verified_dialect: str | None = None
+    # The typed gold (0065): the trace's resolution ledger copied at certify
+    # time — which metric / definition / dimensions / grain the figure resolved
+    # to. `dst test` grades a question's typed resolution against it before any
+    # SQL runs. None = certified before the ledger existed (graded against the
+    # attributed oracle SQL instead, never pretending to carry gold).
+    resolution: dict[str, Any] | None = None
 
 
 @dataclass
@@ -117,7 +123,7 @@ class CertifiedHit:
 
 _COLS = (
     "id, lens, question, sql, created_by, created_at, verified_value, source, verified_by, "
-    "bindings, status, slots, sample_bindings, verified_dialect, verified_prose"
+    "bindings, status, slots, sample_bindings, verified_dialect, verified_prose, resolution"
 )
 
 
@@ -138,6 +144,7 @@ def _row(r: object) -> CertifiedAnswer:
         sample_bindings=_jsonlist(r[12]),  # type: ignore[index]
         verified_dialect=r[13],  # type: ignore[index]
         verified_prose=r[14],  # type: ignore[index]
+        resolution=_verified(r[15]),  # type: ignore[index]
     )
 
 
@@ -158,6 +165,7 @@ def create(
     sample_bindings: list[dict[str, Any]] | None = None,
     verified_dialect: str | None = None,
     verified_prose: str | None = None,
+    resolution: dict[str, Any] | None = None,
 ) -> str:
     """``embedding=None`` stores the pair unembedded (no provider configured yet):
     it is listed but never matched until ``dst reindex`` backfills it — and
@@ -170,13 +178,13 @@ def create(
             INSERT INTO certified_answer (
                 org_id, lens, question, sql, embedding, created_by, verified_value,
                 source, verified_by, bindings, status, slots, sample_bindings,
-                verified_dialect, verified_prose
+                verified_dialect, verified_prose, resolution
             )
             VALUES (
                 NULLIF(current_setting('app.current_org', true), '')::uuid,
                 :lens, :q, :sql, CAST(:e AS vector), :by, CAST(:vv AS jsonb),
                 :src, :vb, CAST(:b AS jsonb), :st, CAST(:slots AS jsonb),
-                CAST(:samples AS jsonb), :vd, :vp
+                CAST(:samples AS jsonb), :vd, :vp, CAST(:res AS jsonb)
             )
             RETURNING id
             """
@@ -196,6 +204,7 @@ def create(
             "samples": json.dumps(sample_bindings) if sample_bindings is not None else None,
             "vd": verified_dialect,
             "vp": verified_prose,
+            "res": json.dumps(resolution) if resolution is not None else None,
         },
     ).first()
     return str(row[0])  # type: ignore[index]
@@ -347,6 +356,17 @@ def update(
             "clear_vp": clear_verified_prose,
             "i": answer_id,
         },
+    )
+    return int(res.rowcount)  # type: ignore[attr-defined]
+
+
+def set_resolution(session: Session, answer_id: str, resolution: dict[str, Any]) -> int:
+    """Typed gold for an answer certified before the ledger: written by
+    `dst test` from a green rows run (the typed resolution whose rows matched
+    the certified oracle), read by the slot lane from then on."""
+    res = session.execute(
+        text("UPDATE certified_answer SET resolution = CAST(:r AS jsonb) WHERE id = :i"),
+        {"r": json.dumps(resolution), "i": answer_id},
     )
     return int(res.rowcount)  # type: ignore[attr-defined]
 

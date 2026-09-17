@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from services.contracts.resolution import Resolution
 from services.contracts.verification import VerificationReport
 
 
@@ -72,7 +73,11 @@ class ClarificationRequest(BaseModel):
     term: str
     question: str
     options: list[str] = Field(default_factory=list)
-    kind: Literal["ambiguous_term", "unknown_value"] = "ambiguous_term"
+    # ``unresolved_slot``: the typed resolver could not type one slot — `term`
+    # names it (a column, 'window', 'metric'), `options` are the candidates or
+    # the value grammar; re-ask with `bindings` (the caller supplies the value)
+    # or with the candidate spelled out.
+    kind: Literal["ambiguous_term", "unknown_value", "unresolved_slot"] = "ambiguous_term"
 
 
 class Receipt(BaseModel):
@@ -96,6 +101,10 @@ class Receipt(BaseModel):
     # without carrying the query (receipts travel further than SQL should).
     sql_sha256: str | None = None
     data_as_of: str | None = None
+    # The ledger's answer tag (certified | declared | mixed | inferred | unknown)
+    # — whether the figure's MEANING was governed. Signed with the rest; absent
+    # on receipts issued before the ledger existed, and those still verify.
+    resolution_tag: str | None = None
     digest: str | None = None
 
 
@@ -173,4 +182,11 @@ class QueryResponse(BaseModel):
     # Signed record of this serve (see Receipt) — present on data answers; a
     # refusal or clarification makes no data claim to attest.
     receipt: Receipt | None = None
+    # Where each part of the figure's meaning came from (contracts/resolution.py):
+    # the metric / definition / grain / dimensions / filters / window it resolved
+    # to, each certified | declared | inferred, and the derived tag. Present on
+    # data answers only. Read `resolution.tag` before quoting a number as "the
+    # revenue": declared means the semantic model's revenue; inferred means the
+    # model summed a column it chose.
+    resolution: Resolution | None = None
     request_id: str

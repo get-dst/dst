@@ -158,7 +158,13 @@ def test_query_endpoint_does_not_block_the_event_loop(monkeypatch: pytest.Monkey
     worker: dict[str, int] = {}
 
     def slow_run(
-        name: str, q: str, caller: object, background: object, fmt: str = "both"
+        name: str,
+        q: str,
+        caller: object,
+        background: object,
+        fmt: str = "both",
+        bindings: dict[str, str] | None = None,
+        allow_untyped: bool = False,
     ) -> QueryResponse:
         worker["thread"] = threading.get_ident()
         started.set()
@@ -299,3 +305,20 @@ def test_definition_lookup_is_deterministic_and_lens_scoped() -> None:
             for table in ("lens_version", "lens"):
                 c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
         _cleanup(settings.database_admin_url, org)
+
+
+def test_query_body_accepts_bindings_and_allow_untyped() -> None:
+    """The typed regime's two caller levers ride the request body: open-slot
+    values the caller supplies, and the opt-in to an untyped escalation. Both
+    default to the honest side (no values, ask rather than guess)."""
+    from services.api.query import QueryBody
+    from services.api.route import JustAskBody
+
+    b = QueryBody.model_validate({"question": "revenue for one customer"})
+    assert b.bindings == {} and b.allow_untyped is False
+    b = QueryBody.model_validate(
+        {"q": "revenue?", "bindings": {"customer_name": "Acme Oy"}, "allow_untyped": True}
+    )
+    assert b.bindings == {"customer_name": "Acme Oy"} and b.allow_untyped is True
+    j = JustAskBody.model_validate({"q": "revenue?", "bindings": {"country": "FI"}})
+    assert j.bindings == {"country": "FI"} and j.allow_untyped is False

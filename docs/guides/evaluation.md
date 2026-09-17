@@ -70,6 +70,33 @@ The cadence is yours — run the sweep from CI, cron, or a deploy pipeline
 (see [Environments and CI](environments-and-ci.md)); there is no in-process
 scheduler to configure.
 
+## Three lanes under typed serving
+
+With a [typed-decision provider](../concepts/typed-decisions.md) configured,
+`dst test` grades three different things, each with one owner for its failures:
+
+| lane | compares | a failure belongs to |
+|---|---|---|
+| **resolution** | the provider's decisions for each certified question against the answer's typed gold — lens, entity, metric, dimension, grain, filter column and value | the layer (option sets, descriptions, readings) or the decider |
+| **compile** | the SQL compiled from those decisions against the certified SQL, canonicalised | dst — a layer that does not compile is a product defect, caught at `dst plan` |
+| **data** | the certified SQL executed against the warehouse and compared to its stored result | the data: a load, a backfill, a schema change |
+
+The first two need no warehouse and run in seconds per corpus. The third is
+the only one that pays warehouse time, and by default it runs only for the
+cases the first two could not prove — a case whose compiled SQL is identical
+to the certified text is proven without a query.
+
+```bash
+dst test                 # resolution + compile for every case; data only for the unproven
+dst test --slots         # resolution + compile only — nothing executes
+dst test --repeat 20     # each question resolved 20 times; a case passes only when every run agrees
+dst test --rows          # execute every case — the data-drift check
+```
+
+Answers certified before typed serving carry no typed gold; they grade against
+gold attributed from their certified SQL, and a green typed run stores the
+typed gold for next time.
+
 ## Behavioral cases: pinning shape
 
 `lenses/<name>/evals/cases.yaml` holds the behavioral cases: cases that pin the

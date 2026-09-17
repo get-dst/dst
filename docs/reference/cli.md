@@ -467,6 +467,14 @@ the table rather than the exit code alone.
 
 [![dst test with two certified answers and a behavioral case: three green PASS rows, 3/3 passed](../assets/term/test2.svg)](../assets/term/test2.svg)
 
+Under [typed serving](../concepts/typed-decisions.md) the run is three lanes:
+the resolution lane (every certified question decided by the provider, graded
+per slot, no warehouse), the compile lane (compiled SQL against the certified
+text), and the data lane, which executes only the cases the first two could
+not prove. `--slots` runs the first two only; `--rows` executes every case;
+`--repeat N` resolves each question N times and fails any that does not
+produce the same intent every time.
+
 Flags: `--all`, `--json`, `--dir` (default `.`), the project whose `.env` supplies
 `DATABASE_URL` and the provider keys, so CI and cron can point the sweep at a project
 from outside its directory. `--tag` (repeatable, any-match) runs only behavioral cases

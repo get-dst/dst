@@ -117,7 +117,10 @@ Operating loop:
    A non-empty `degraded` list means a governance capability did NOT run for that
    answer (e.g. certified matching, with no usable embedder): certification='none'
    then means "nothing was checked", not "no approved answer covers this". Relay the
-   line and treat the answer as ungoverned generation.
+   line and treat the answer as ungoverned generation. `resolution.tag` says whether the
+   figure's MEANING was governed: certified/declared = the semantic model's metric or
+   definition computed it; mixed/inferred = the model summed columns it chose. Say which
+   when the user is going to rely on the number.
 5. TRUST GATE — when an answer must be relied on, when the route was uncertain, or when you
    believe it is wrong, put it in the REVIEW QUEUE with send_for_review(request_id, note,
    corrected_sql); an AI judge audits it and may escalate to the data team. Filing a
@@ -472,6 +475,8 @@ async def query(
     question: str,
     ctx: Context,  # type: ignore[type-arg]
     format: AnswerFormat = "both",
+    bindings: dict[str, str] | None = None,
+    allow_untyped: bool = False,
 ) -> dict[str, Any]:
     """Ask a governed, natural-language question against a NAMED lens.
 
@@ -497,9 +502,24 @@ async def query(
             Ask for 'structured' whenever you will read the numbers and phrase the
             reply yourself (the usual case); ask for 'both' when you want dst's
             own wording. 'prose' is the answer without the row payload.
+        bindings: values for open slots — when a result carries `clarification` of
+            kind 'unresolved_slot', re-ask with {<its term>: <the value>} (a customer
+            name, a number, a YYYY-MM-DD date or YYYY-Qn period). You supply the
+            value; dst never guesses one from the wording.
+        allow_untyped: let dst fall to raw-SQL generation when the question does not
+            type. Disclosed with an UNTYPED line; only when the user accepts an
+            ungoverned figure.
     """
     payload, failure = await _request(
-        ctx, "POST", f"/v1/lenses/{name}/query", json_body={"q": question, "format": format}
+        ctx,
+        "POST",
+        f"/v1/lenses/{name}/query",
+        json_body={
+            "q": question,
+            "format": format,
+            "bindings": bindings or {},
+            "allow_untyped": allow_untyped,
+        },
     )
     if failure is not None:
         return failure
@@ -609,6 +629,8 @@ async def route_query(
     question: str,
     ctx: Context,  # type: ignore[type-arg]
     format: AnswerFormat = "both",
+    bindings: dict[str, str] | None = None,
+    allow_untyped: bool = False,
 ) -> dict[str, Any]:
     """Ask a governed question WITHOUT naming a lens — the DEFAULT way to ask.
 
@@ -630,9 +652,18 @@ async def route_query(
         format: as in `query` — 'structured' returns the routed lens's rows with no
             written answer and skips the model call that writes it; the routing
             provenance (routed_to) is unaffected.
+        bindings / allow_untyped: as in `query`.
     """
     payload, failure = await _request(
-        ctx, "POST", "/v1/query", json_body={"q": question, "format": format}
+        ctx,
+        "POST",
+        "/v1/query",
+        json_body={
+            "q": question,
+            "format": format,
+            "bindings": bindings or {},
+            "allow_untyped": allow_untyped,
+        },
     )
     if failure is not None:
         return failure

@@ -240,7 +240,11 @@ class IntentSQLGenerator:
         # The compiler resolved these names or raised — they ARE the provenance.
         # Discarding them makes basis fall back to substring attribution, which
         # ties on sibling metrics and cites the wrong one.
-        gq = GeneratedQuery(sql=sql, definition_used=intent_term(intent) if sql else None)
+        gq = GeneratedQuery(
+            sql=sql,
+            definition_used=intent_term(intent) if sql else None,
+            intent=intent if sql else None,
+        )
         gq.input_tokens = res.input_tokens
         gq.output_tokens = res.output_tokens
         return gq

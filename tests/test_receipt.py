@@ -161,3 +161,34 @@ def test_verify_door_cross_checks_the_trace(monkeypatch: pytest.MonkeyPatch) -> 
         assert gone["ok"] is False and gone["trace_found"] is False
     finally:
         _cleanup(org)
+
+
+@needs_db
+def test_verify_door_holds_a_receipt_to_the_tag_it_claims(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trace logged without a ledger tag (pre-ledger, or a non-answer) does
+    not fail a receipt that claims none; a receipt CLAIMING a tag the trace
+    does not carry is a mismatch, named."""
+    org, raw = _make_org_token()
+    rid = f"req_{uuid.uuid4().hex[:12]}"
+    _seed_trace(org, rid, "SELECT 1")
+    h = {"Authorization": f"Bearer {raw}"}
+    monkeypatch.setattr(settings, "secret_key", "k1")
+    try:
+        common = dict(
+            request_id=rid,
+            lens="customer_value",
+            certification="none",
+            cert_id=None,
+            confidence="verified",
+            sql="SELECT 1",
+            data_as_of=None,
+        )
+        untagged = receipt.build(**common)  # type: ignore[arg-type]
+        ok = client.post("/v1/verify-receipt", headers=h, json=untagged.model_dump()).json()
+        assert ok["ok"] is True and ok["mismatches"] == []
+        tagged = receipt.build(**common, resolution_tag="declared")  # type: ignore[arg-type]
+        bad = client.post("/v1/verify-receipt", headers=h, json=tagged.model_dump()).json()
+        assert bad["ok"] is False and bad["signature"] == "valid"
+        assert bad["mismatches"] == ["resolution_tag"]
+    finally:
+        _cleanup(org)

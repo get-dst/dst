@@ -428,3 +428,81 @@ def _wide_warehouse(tmp_path: Path) -> DuckDBConnector:
     )
     con.close()
     return DuckDBConnector(str(tmp_path / "wide.duckdb"))
+
+
+def test_entity_domains_keep_a_shared_column_name_per_entity() -> None:
+    """`month` on two tables with different values: value_domains must drop
+    it (which table's dictionary applies needs the SQL), entity_domains keeps
+    each entity's own."""
+    budget = Entity(
+        name="budget",
+        source=EntitySource(connection="warehouse", table="budget"),
+        fields=[Field(name="month", type="string")],
+    )
+    fx = Entity(
+        name="fx",
+        source=EntitySource(connection="warehouse", table="fx"),
+        fields=[Field(name="month", type="string")],
+    )
+    model = SemanticModel(lens="t", dialect="duckdb", entities=[budget, fx])
+    profiles = [
+        TableProfile(
+            connection="warehouse",
+            table="budget",
+            columns=[
+                ColumnProfile(
+                    name="month",
+                    type="VARCHAR",
+                    top_values=["2026-01", "2026-02"],
+                    values_complete=True,
+                )
+            ],
+        ),
+        TableProfile(
+            connection="warehouse",
+            table="fx",
+            columns=[
+                ColumnProfile(
+                    name="month",
+                    type="VARCHAR",
+                    top_values=["2025-12", "2026-01"],
+                    values_complete=True,
+                )
+            ],
+        ),
+    ]
+    assert value_guard.value_domains(model, profiles) == {}
+    assert value_guard.entity_domains(model, profiles) == {
+        "budget": {"month": ["2026-01", "2026-02"]},
+        "fx": {"month": ["2025-12", "2026-01"]},
+    }
+
+
+def test_a_period_field_is_read_off_any_profiled_sample() -> None:
+    """A month column's FORM is proven by a sample, complete or not; a value
+    dictionary needs completeness, a period field does not."""
+    rev = Entity(
+        name="monthly_revenue",
+        source=EntitySource(connection="warehouse", table="monthly_revenue"),
+        fields=[Field(name="month", type="string"), Field(name="basis", type="string")],
+    )
+    model = SemanticModel(lens="t", dialect="duckdb", entities=[rev])
+    profiles = [
+        TableProfile(
+            connection="warehouse",
+            table="monthly_revenue",
+            columns=[
+                ColumnProfile(
+                    name="month",
+                    type="VARCHAR",
+                    top_values=["2026-01", "2026-02"],
+                    values_complete=False,
+                ),
+                ColumnProfile(
+                    name="basis", type="VARCHAR", top_values=["cash"], values_complete=False
+                ),
+            ],
+        )
+    ]
+    assert value_guard.entity_domains(model, profiles) == {}
+    assert value_guard.period_fields(model, profiles) == {"monthly_revenue": "month"}

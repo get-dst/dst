@@ -73,6 +73,14 @@ carry:
   that writes the prose — 200 rows by default, raisable per lens with
   `max_rows_to_compose` and hard-bounded by the 5000-row fetch cap
   (`services/contracts/lens_config.py:68`, `services/runtime/pipeline.py:56`);
+- with a typed-decision provider configured (`type: typesafe`), each decision
+  sends that provider the question, one instruction sentence, and the option
+  set it decides over — lens names and descriptions, entity, metric, dimension
+  and field names with their declared descriptions, definition texts, the
+  stored values of a profiled column's dictionary, and for the review judge the
+  served SQL and the composed answer — never result rows
+  (`services/llm/typesafe.py`, `services/runtime/typed_resolver.py`,
+  `services/reviews/judge.py`); its responses carry a probability per option;
 - for certified-answer matching and routing, the question also goes to the
   configured embedding provider, and routing sends the question to the
   fast-tier model with a shortlist of candidate lenses described by name,

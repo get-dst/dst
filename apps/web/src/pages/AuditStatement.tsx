@@ -195,6 +195,71 @@ function ConfidenceBands({ histogram }: { histogram: Record<string, number> }) {
   )
 }
 
+/** The ledger's split of everything served: where the figure's meaning came
+ * from. Widths cover all five tags so the pre-ledger slice is visible; the
+ * legend percentages are over the GRADED four, so they add up with the
+ * headline. Nothing here is red — an inferred figure is not an error, and
+ * an unknown one is unmeasured, not wrong. */
+function ResolutionBands({ histogram }: { histogram: Record<string, number> }) {
+  const n = (k: string) => histogram[k] ?? 0
+  const certified = n('certified')
+  const declared = n('declared')
+  const mixed = n('mixed')
+  const inferred = n('inferred')
+  const unknown = n('unknown')
+  const total = certified + declared + mixed + inferred + unknown
+  const graded = total - unknown
+  if (total === 0) return null
+  const pctOf = (v: number) => (graded ? Math.round((100 * v) / graded) : 0)
+  const bands: [number, string][] = [
+    [certified, 'bg-green'],
+    [declared, 'bg-accent'],
+    [mixed, 'bg-muted-2'],
+    [inferred, 'bg-border-strong'],
+    [unknown, 'bg-surface-3'],
+  ]
+  return (
+    <div className="mt-3 max-w-[38ch]">
+      <div className="flex h-1.5 w-full gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
+        {bands.map(
+          ([v, cls]) =>
+            v > 0 && <span key={cls} className={cls} style={{ width: `${(100 * v) / total}%` }} />,
+        )}
+      </div>
+      <p className="mt-1.5 font-mono text-[11px] text-muted tabular-nums">
+        {pctOf(certified)}% certified · {pctOf(declared)}% declared · {pctOf(mixed)}% mixed ·{' '}
+        {pctOf(inferred)}% inferred
+        {unknown > 0 && <span className="text-muted-2"> · {unknown.toLocaleString()} unknown</span>}
+      </p>
+    </div>
+  )
+}
+
+/** The slots that keep clarifying for want of a value the question could not
+ * type. A clarification here is not a fault: the dictionary the resolver
+ * chooses from is incomplete, and profiling the column is the lever. */
+function DictionaryGaps({ slots }: { slots: AuditStatement['unresolved_slots'] }) {
+  if (!slots?.length) return null
+  return (
+    <div className="mt-4 border-t border-border pt-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <span className="panel-label">Dictionary gaps</span>
+        <span className="text-[11px] text-muted-2">
+          columns that clarified for want of a complete value dictionary — profile them
+        </span>
+      </div>
+      <ul className="mt-2 flex flex-wrap gap-x-5 gap-y-1 font-mono text-[12px] tabular-nums">
+        {slots.map((s) => (
+          <li key={s.slot} className="text-text">
+            {s.slot}
+            <span className="ml-1.5 text-muted">×{s.count.toLocaleString()}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function StateChip({ row }: { row: AuditLensRow }) {
   if (row.degraded) {
     return (
@@ -233,6 +298,8 @@ function LensLedger({ rows }: { rows: AuditLensRow[] }) {
           <th className="panel-label text-left pb-2 font-normal">Lens · owner</th>
           <th className="panel-label text-right pb-2 font-normal">Questions</th>
           <th className="panel-label text-right pb-2 font-normal">Verified</th>
+          <th className="panel-label text-right pb-2 font-normal">Declared</th>
+          <th className="panel-label text-right pb-2 font-normal">Typed</th>
           <th className="panel-label text-right pb-2 font-normal">Cost</th>
           <th className="panel-label text-right pb-2 font-normal">State</th>
         </tr>
@@ -252,6 +319,12 @@ function LensLedger({ rows }: { rows: AuditLensRow[] }) {
             <td className="py-2 text-right font-mono text-[12.5px]">{r.asked.toLocaleString()}</td>
             <td className="py-2 text-right font-mono text-[12.5px]">
               {r.verified_pct !== null ? `${r.verified_pct}%` : '—'}
+            </td>
+            <td className="py-2 text-right font-mono text-[12.5px]">
+              {r.declared_pct !== null ? `${r.declared_pct}%` : '—'}
+            </td>
+            <td className="py-2 text-right font-mono text-[12.5px]">
+              {r.typed_pct !== null ? `${r.typed_pct}%` : '—'}
             </td>
             <td className="py-2 text-right font-mono text-[12.5px]">{formatCost(r.cost_usd)}</td>
             <td className="py-2 text-right">
@@ -273,6 +346,8 @@ function LensLedger({ rows }: { rows: AuditLensRow[] }) {
               {restAsked.toLocaleString()}
             </td>
             <td className="py-2 text-right font-mono text-[12.5px] text-muted-2">—</td>
+            <td className="py-2 text-right font-mono text-[12.5px] text-muted-2">—</td>
+            <td className="py-2 text-right font-mono text-[12.5px] text-muted-2">—</td>
             <td className="py-2 text-right font-mono text-[12.5px] text-muted-2">
               {formatCost(restCost)}
             </td>
@@ -291,6 +366,7 @@ export function AuditStatementPanel() {
   const d = q.data
 
   const served = d ? d.confidence_histogram : {}
+  const basis = d ? (d.resolution_histogram ?? {}) : {}
 
   return (
     <div>
@@ -336,8 +412,9 @@ export function AuditStatementPanel() {
 
       {d && (
         <>
-          {/* ── The two headline figures + the trend ── */}
-          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1.35fr] border-b border-border-strong">
+          {/* ── The four headline figures + the trend. Two-up at sm (the
+              chart takes its own row), five across at xl. ── */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1fr_1.35fr] border-b border-border-strong">
             <div className="py-5 pr-6">
               <div className="panel-label flex items-center gap-1.5">
                 Answer yield
@@ -372,7 +449,62 @@ export function AuditStatementPanel() {
               <Delta pp={d.verified_delta_pp} />
               <ConfidenceBands histogram={served} />
             </div>
-            <div className="py-5 sm:pl-6 sm:border-l border-border">
+            <div className="py-5 pr-6 sm:border-t xl:border-t-0 xl:pl-6 xl:border-l border-border">
+              <div className="panel-label flex items-center gap-1.5">
+                Governed basis
+                <InfoHint>
+                  Declared means the figure&apos;s meaning is a metric or definition in the
+                  semantic model; inferred means the model computed over raw columns it chose;
+                  unknown means the answer was recorded before the ledger existed.
+                </InfoHint>
+              </div>
+              <div className="mt-2 font-mono text-[42px] font-semibold leading-none tracking-tight tabular-nums">
+                {d.declared_pct !== null ? d.declared_pct : '—'}
+                <span className="text-[20px] text-muted-2 font-medium">%</span>
+              </div>
+              <Delta pp={d.declared_delta_pp} />
+              <p className="mt-2 text-[12px] text-muted max-w-[34ch]">
+                {((basis['certified'] ?? 0) + (basis['declared'] ?? 0)).toLocaleString()} of{' '}
+                {(d.answered - d.resolution_unknown).toLocaleString()} graded answers computed
+                from a certified or declared definition.
+              </p>
+              {d.resolution_unknown > 0 && (
+                <p className="mt-1 text-[12px] text-muted-2 max-w-[34ch]">
+                  {d.resolution_unknown.toLocaleString()} answers predate the ledger — not graded.
+                </p>
+              )}
+              <ResolutionBands histogram={basis} />
+            </div>
+            <div className="py-5 pr-6 sm:pl-6 sm:border-l sm:border-t xl:border-t-0 border-border">
+              <div className="panel-label flex items-center gap-1.5">
+                Typed
+                <InfoHint>
+                  Typed means every slot of the answer — metric, grain, filters, window — was a
+                  closed-set decision the policy acted on, a deterministic parse, or a value the
+                  caller supplied; no raw-SQL generation ran. Predating rows are counted apart,
+                  never as untyped.
+                </InfoHint>
+              </div>
+              <div className="mt-2 font-mono text-[42px] font-semibold leading-none tracking-tight tabular-nums">
+                {d.typed_pct !== null ? d.typed_pct : '—'}
+                <span className="text-[20px] text-muted-2 font-medium">%</span>
+              </div>
+              <Delta pp={d.typed_delta_pp} />
+              {/* The payload carries the share, not the count — the share is
+                  printed over its denominator rather than a count rounded
+                  back out of it. */}
+              <p className="mt-2 text-[12px] text-muted max-w-[34ch]">
+                {d.typed_pct !== null
+                  ? `${d.typed_pct}% of ${(d.answered - d.typed_unknown).toLocaleString()} answers typed end to end.`
+                  : 'No answers served since typed serving existed.'}
+              </p>
+              {d.typed_unknown > 0 && (
+                <p className="mt-1 text-[12px] text-muted-2 max-w-[34ch]">
+                  {d.typed_unknown.toLocaleString()} answers predate typed serving.
+                </p>
+              )}
+            </div>
+            <div className="py-5 sm:col-span-2 sm:border-t xl:col-span-1 xl:border-t-0 xl:pl-6 xl:border-l border-border">
               <div className="panel-label">Questions per day</div>
               <div className="mt-2">
                 <VolumeChart series={d.series} />
@@ -437,6 +569,9 @@ export function AuditStatementPanel() {
           <div className="mt-4">
             <LensLedger rows={d.lenses} />
           </div>
+
+          {/* ── The profiling backlog: slots that clarified for want of a dictionary ── */}
+          <DictionaryGaps slots={d.unresolved_slots} />
 
           {/* ── The trail line ── */}
           <div className="mt-4 flex flex-wrap items-baseline justify-between gap-3 border-t border-border pt-3">

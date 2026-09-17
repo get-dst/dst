@@ -65,10 +65,12 @@ class ProviderConfig(Authored):
     codebase — the core knows wire shapes; your config knows vendors.
     """
 
-    type: Literal["anthropic", "openai-compatible", "local"] = Field(
+    type: Literal["anthropic", "openai-compatible", "local", "typesafe"] = Field(
         description="wire protocol: 'anthropic', 'openai-compatible' (covers OpenAI, "
         "DeepSeek, Ollama, vLLM, Groq, most gateways), "
-        "or 'local' (in-process embeddings, no key — `dst-core[local-embed]` extra)"
+        "'local' (in-process embeddings, no key — `dst-core[local-embed]` extra), "
+        "or 'typesafe' (a typed-decision provider: closed-set decisions with "
+        "calibrated probabilities — serves the decision seam, never text)"
     )
     api_key: str | None = Field(
         default=None, description="inline secret — only for env-var config, never in files"
@@ -210,6 +212,11 @@ class Settings(BaseSettings):
     # concurrent-query ceilings; DST_GATE_CONCURRENCY tunes it per install,
     # 1 restores strictly-serial.
     gate_concurrency: int = 16
+    # Typed serving: "auto" = the typed resolver serves the intent tier
+    # whenever a typed-decision provider is configured; "on" = also on the voting
+    # chat decider (slower: one vote round per slot); "off" = the JSON intent
+    # emission. dst-owned default, a deployment switch, never per lens.
+    typed_serving: Literal["auto", "on", "off"] = "auto"
 
     # LLM providers, JSON keyed by name (declaration order IS the tier/cost
     # preference — put the cheap provider first). BYOK: a provider is a name +

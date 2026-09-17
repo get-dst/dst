@@ -29,6 +29,81 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.4.0] — 2026-09-17
+
+Schema changes ship with this release: run `dst migrate` before serving (the
+upgrade contract above). Migrations 0063–0066 add the resolution ledger to the
+request log, the measured routing decision, typed gold on certified answers,
+and the typed-serving audit columns.
+
+### Added — typed serving
+
+A question either types or it doesn't. With a **typed-decision provider**
+configured (`type: typesafe`, one more entry under `providers`), no model writes
+SQL: every slot of an answer — lens, entity, the reading of an ambiguous term,
+metric, dimension, grain, filter column, stored value — is a decision over a
+closed set the layer already owns, with a probability per option, and the SQL
+is compiled from the decisions. Windows are parsed, never decided.
+
+- **The resolution ledger** on every answer, trace and receipt: which slots
+  the answer rests on and where each came from (`certified`, `declared`,
+  `inferred`, `supplied`), the headline tag from the measure slots, and every
+  decision with its probability. The audit statement gains **governed basis**
+  (the share of answers resting on declared meaning) and **typed share**.
+- **`bindings`** on the query doors (REST and MCP): an open value the asking
+  agent supplies when a clarification names the slot. **`allow_untyped`**: the
+  raw-SQL escalation is opt-in, tagged by what it earns, disclosed with an
+  `UNTYPED:` line, and counted apart. Certifying an untyped serve is a
+  different act: `dst reviews rule … --certify --allow-untyped`.
+- **The policy:** a typed-decision provider acts on its top choice unless
+  `none` wins. A measured bar is disclosure, not a gate: an answer that acted
+  below it fails a `decision_confidence` check, grades partial, and names the
+  slot and probability in the answer. The voting chat decider (five samples
+  per decision, `DST_TYPED_SERVING=on`) keeps its measured act bars.
+- **Routing on a typed decider** decides over every published lens; the
+  cosine shortlist is gone from that path. Embeddings remain for certified
+  matching and as the fallback router when no decider is configured.
+- **Rails that keep a typed answer honest:** a month period stored as a string
+  is read off the column profile and the window compiles to it; month spans
+  and abbreviations are one window; a stated month no term carries clarifies
+  instead of serving the months it could place; a filter value's two nones
+  ("no value stated" drops the column, "not one of these" clarifies); each
+  entity's own value dictionaries; the grain is asked only when the wording
+  asks for a breakdown over time; the metric is decided first over every
+  metric of the lens and names the entity.
+- **Typed judge:** deterministic numeric grounding plus one typed scope
+  decision replaces the free-text rubric under typed serving; the corrected
+  SQL is what gets graded when a ticket carries one; a structured serve is
+  never "no data".
+
+### Changed — `dst test` is three lanes
+
+- **Resolution lane** (`--slots`): every certified question resolved by the
+  provider and graded per slot against its typed gold — stored from a green
+  run, or attributed from the certified SQL for answers certified earlier.
+  No warehouse; `--repeat N` fails any case that does not produce the same
+  intent every time; per case: elapsed seconds, provider calls, tokens, USD.
+- **Compile lane:** the compiled SQL against the certified text, canonicalised.
+  Identical is proven without a query.
+- **Data lane:** the certified SQL executed against the warehouse — by default
+  only for the cases the first two could not prove; `--rows` runs it for all.
+- The lanes run on the gate's worker pool (`DST_GATE_CONCURRENCY`), the
+  calibration lane too; `dst test --json` carries the lane's cost and a
+  median / p90 latency; `eval_run` records the calibration report.
+- **Plan lints:** a `population_filter` that references the physical table
+  where compiled SQL aliases the entity is an error (`population_filter_unbound`);
+  every entity with a metric must compile at plan (`entity_does_not_compile`);
+  an ambiguous term's reading that names a metric warns (`reading_names_a_metric`).
+- `dst apply --allow-case <id> --reason …` replaces the blanket
+  `--allow-failing-cases` for one apply.
+
+### Docs
+
+Typed decisions (concepts), the configuration reference (`type: typesafe`,
+`DST_TYPED_SERVING`, `DST_GATE_CONCURRENCY`), the quickstart's optional step,
+the evaluation guide's three lanes, the CLI reference, the FAQ, the answer
+path, and the `dst init` scaffold's commented typed-provider entry.
+
 ## [0.3.0] — 2026-09-08
 
 No schema changes: upgrading from 0.2.0 is `pip install --upgrade dst-core`

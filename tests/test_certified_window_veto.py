@@ -112,3 +112,59 @@ def test_windowless_ask_still_serves(monkeypatch) -> None:
         "funnel", [0.1], "org-1", "How many leads, SQLs and SQOs did we generate?"
     )
     assert top is not None and mode == "certified" and match == "exact"
+
+
+def test_a_month_span_with_a_year_is_one_window() -> None:
+    from datetime import date
+
+    from services.runtime.timewindow import unplaced_months, window_ranges
+
+    terms = temporal_terms("Group revenue by entity for January through August 2026")
+    assert terms == frozenset({"span:january-august", "2026"})
+    assert window_ranges(terms, date(2026, 9, 17)) == [(date(2026, 1, 1), date(2026, 8, 31))]
+    assert unplaced_months("January through August 2026", terms) == []
+    for wording in ("March to June 2026", "March–June 2026", "March - June 2026"):
+        assert window_ranges(temporal_terms(wording), date(2026, 9, 17)) == [
+            (date(2026, 3, 1), date(2026, 6, 30))
+        ]
+    # A backwards span resolves to nothing rather than to a guess.
+    assert window_ranges(temporal_terms("August through January 2026"), date(2026, 9, 17)) == []
+
+
+def test_a_stated_month_no_term_carries_is_unplaced() -> None:
+    from services.runtime.timewindow import unplaced_months
+
+    q = "revenue for January and August 2026"
+    terms = temporal_terms(q)
+    assert "august" in terms and "january" not in terms
+    assert unplaced_months(q, terms) == ["january"]
+    assert unplaced_months("revenue in January", frozenset()) == ["january"]
+    assert unplaced_months("orders that may ship this month", temporal_terms("this month")) == []
+
+
+def test_month_abbreviations_count_beside_a_year_or_in_a_span_never_bare() -> None:
+    from datetime import date
+
+    from services.runtime.timewindow import unplaced_months, window_ranges
+
+    today = date(2026, 9, 17)
+    assert temporal_terms("revenue Aug 2026") == frozenset({"august", "2026"})
+    assert temporal_terms("revenue Sept. 2026") == frozenset({"september", "2026"})
+    assert window_ranges(temporal_terms("revenue Jan–Aug 2026"), today) == [
+        (date(2026, 1, 1), date(2026, 8, 31))
+    ]
+    assert window_ranges(temporal_terms("Jan-Mar 2026 bookings"), today) == [
+        (date(2026, 1, 1), date(2026, 3, 31))
+    ]
+    # Bare abbreviations are words: not a window, not an unplaced month.
+    assert temporal_terms("mar the dec figures") == frozenset()
+    assert unplaced_months("mar the dec figures", frozenset()) == []
+
+
+def test_a_fiscal_period_token_is_not_a_calendar_quarter() -> None:
+    """ "FY25-Q1" is a stored period value (a dictionary the filter round
+    offers), not Q1 of some year: the window parser leaves it alone, so a
+    question about it never clarifies on a window the entity does not have."""
+    assert temporal_terms("total spiff for period FY25-Q1") == frozenset()
+    assert temporal_terms("payout row count for FY26-Q3") == frozenset()
+    assert temporal_terms("revenue in Q1 2026") == frozenset({"q1", "2026"})

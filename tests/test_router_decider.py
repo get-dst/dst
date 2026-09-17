@@ -13,6 +13,7 @@ import pytest
 
 from services.contracts.fakes import HashEmbedder
 from services.contracts.protocols import CacheableBlock, LLMResult, Message
+from services.llm.vote_decider import DEFAULT_K
 from services.router import DECIDER_DOWN, CoverageProfile, Router
 from services.router.decider import DeciderStarved, LlmDecider, _parse, route_with_llm, shortlist_k
 
@@ -56,7 +57,7 @@ def test_llm_pick_routes_when_cosine_is_unsure() -> None:
     d = route_with_llm(_router(), BY_LENS, LlmDecider(provider, "m"), "how much have we billed")
     assert d.covered and d.lens == "finance"
     assert d.reason == "routed (llm)"
-    assert provider.calls == 1  # the LLM was consulted
+    assert provider.calls == DEFAULT_K  # the LLM was consulted (one vote per sample)
 
 
 def test_llm_none_is_an_honest_decline() -> None:
@@ -65,7 +66,7 @@ def test_llm_none_is_an_honest_decline() -> None:
     assert not d.covered and d.lens is None
     assert "no governed lens covers this" in d.reason
     assert d.degraded is None  # a genuine decline, not an outage
-    assert provider.calls == 1
+    assert provider.calls == DEFAULT_K
 
 
 def test_confident_cosine_match_fast_paths_without_the_llm() -> None:
@@ -126,7 +127,7 @@ def test_mid_band_with_wide_margin_still_consults_the_decider() -> None:
     )
     assert d.covered and d.lens == "board"
     assert d.reason == "routed (llm)"  # never "routed (cosine)" from the mid-band
-    assert provider.calls == 1
+    assert provider.calls == DEFAULT_K
 
 
 def test_tied_cosine_falls_to_the_llm() -> None:
@@ -140,7 +141,7 @@ def test_tied_cosine_falls_to_the_llm() -> None:
         "pull the latest numbers for the board meeting",
     )
     assert d.covered and d.lens == "board"
-    assert provider.calls == 1  # the tie-break needed the LLM
+    assert provider.calls == DEFAULT_K  # the tie-break needed the LLM
 
 
 def test_decider_error_declines_degraded_never_mid_band_routes() -> None:
@@ -224,3 +225,78 @@ def test_dynamic_shortlist_reaches_the_decider_prompt() -> None:
     assert d.covered and d.lens == "lens_03"
     catalogue_lines = [ln for ln in provider.last_user.splitlines() if ln.startswith("- ")]
     assert len(catalogue_lines) == shortlist_k(12)
+
+
+# ── the seam: measured decisions and the act / clarify / decline regime ──────
+
+
+def test_a_measured_ambiguity_clarifies_without_a_degraded_mark() -> None:
+    """Two lenses at p=0.5/0.45: not sure enough to act. The route declines
+    naming both — a coverage signal for the caller ('name the lens'), never
+    DECIDER_DOWN, which is reserved for outages."""
+    from services.contracts.fakes import ScriptedDecider
+    from services.contracts.protocols import Decision
+
+    measured = Decision(
+        chosen="board", probs={"board": 0.5, "sales": 0.45, "none": 0.05}, provider="vote:k=20"
+    )
+    decider = LlmDecider(_FakeProvider("unused"), "m", decider=ScriptedDecider([measured]))
+    d = route_with_llm(
+        _StubRouter([("board", 0.86), ("sales", 0.70)]),  # type: ignore[arg-type]
+        _STUB_BY_LENS,
+        decider,
+        "board numbers",
+    )
+    assert not d.covered and d.lens is None
+    assert d.degraded is None
+    assert d.reason == "ambiguous between board and sales — name the lens"
+    assert d.decision is measured and d.verdict == "clarify"
+
+
+def test_a_measured_clear_choice_routes_and_carries_the_measurement() -> None:
+    from services.contracts.fakes import ScriptedDecider
+    from services.contracts.protocols import Decision
+
+    measured = Decision(
+        chosen="board", probs={"board": 0.9, "sales": 0.1, "none": 0.0}, provider="v"
+    )
+    d = route_with_llm(
+        _StubRouter([("board", 0.86), ("sales", 0.70)]),  # type: ignore[arg-type]
+        _STUB_BY_LENS,
+        LlmDecider(_FakeProvider("unused"), "m", decider=ScriptedDecider([measured])),
+        "board numbers",
+    )
+    assert d.covered and d.lens == "board" and d.reason == "routed (llm)"
+    assert d.decision is measured and d.verdict == "act"
+
+
+def test_a_measured_confident_none_declines_and_an_unsure_none_clarifies() -> None:
+    from services.contracts.fakes import ScriptedDecider
+    from services.contracts.protocols import Decision
+
+    sure = Decision(chosen=None, probs={"board": 0.1, "sales": 0.0, "none": 0.9}, provider="v")
+    unsure = Decision(chosen=None, probs={"board": 0.45, "sales": 0.0, "none": 0.55}, provider="v")
+    for measured, want in (
+        (sure, "no governed lens covers this (llm)"),
+        (unsure, "unsure whether board covers this — name the lens"),
+    ):
+        d = route_with_llm(
+            _StubRouter([("board", 0.86), ("sales", 0.70)]),  # type: ignore[arg-type]
+            _STUB_BY_LENS,
+            LlmDecider(_FakeProvider("unused"), "m", decider=ScriptedDecider([measured])),
+            "how many open tickets",
+        )
+        assert not d.covered and d.degraded is None and want in d.reason
+
+
+def test_the_legacy_single_call_is_unmeasured_and_routes_as_before() -> None:
+    provider = _FakeProvider("board")
+    d = route_with_llm(
+        _StubRouter([("board", 0.86), ("sales", 0.70)]),  # type: ignore[arg-type]
+        _STUB_BY_LENS,
+        LlmDecider(provider, "m", k=1),
+        "board numbers",
+    )
+    assert d.covered and d.lens == "board"
+    assert d.decision is not None and d.decision.probs is None and d.verdict == "act"
+    assert provider.calls == 1

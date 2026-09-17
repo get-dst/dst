@@ -250,6 +250,15 @@ The whole model is three terms — you used all of them above:
   claim to attest — but it is not lost: like every call, it lands on the
   ledger with its question and reason, and is counted apart from errors.
 
+**Typed serving — no model writes the SQL.** With a typed-decision provider
+configured (one entry under `providers`), every slot of an answer — lens,
+metric, dimension, grain, filter, stored value — is a decision over the lists
+your lens already declares, with a probability per option, and the SQL is
+compiled from the decisions. What the question does not settle comes back as a
+clarification naming the slot; the asking agent answers with `bindings`. Every
+decision rides the receipt.
+[Typed decisions →](docs/concepts/typed-decisions.md)
+
 **Test — the engine.** Generation is nondeterministic at its core, so dst
 treats testing as the product, not an afterthought. `dst test` re-asks every
 certified question through the real pipeline and compares results against the

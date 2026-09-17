@@ -213,3 +213,30 @@ def test_degraded_declines_count_apart_never_as_coverage_loss() -> None:
         assert all("board" not in c.label for c in report.uncovered_clusters)
     finally:
         _cleanup(org)
+
+
+@needs_db
+def test_the_measured_decision_rides_the_routing_row() -> None:
+    """What the decider measured — provider, p, margin, verdict — is stored
+    beside the route (0064), and NULL where nothing was measured."""
+    from services.api import route_store
+
+    org, _ = _org_token()
+    try:
+        measured = {
+            "provider": "vote:m:k=5",
+            "chosen": "finance",
+            "p": 0.8,
+            "runner_up": 0.2,
+            "margin": 0.6,
+            "verdict": "act",
+        }
+        with org_session(org) as session:
+            route_store.record(session, "revenue?", "finance", 0.9, True, decision=measured)
+            route_store.record(session, "verbatim anchor", "finance", 0.99, True)
+        with org_session(org) as session:
+            rows = {r.question: r for r in route_store.latest(session)}
+        assert rows["revenue?"].decision == measured
+        assert rows["verbatim anchor"].decision is None
+    finally:
+        _cleanup(org)

@@ -136,12 +136,13 @@ def grade(kind: str, expected: object, columns: list[str], rows: list[list[objec
 # Pipeline order — a case is tagged with the FIRST stage that failed.
 # `determinism` is deliberately absent: it is a property of repeated runs, not
 # of one case, and is reported as per-stage agreement (runner.prose_agreement).
-STAGES = ("routing", "rows", "grounding")
+STAGES = ("routing", "resolution", "rows", "grounding")
 
 # Default owners per stage, for the summary (product | authoring | consumer).
 # A stage tag without an owner is a number nobody acts on.
 STAGE_OWNERS = {
     "routing": "product: thresholds | authoring: use_when",
+    "resolution": "product: generation | authoring: layer (missing metric/definition)",
     "rows": "product: generation | authoring: layer",
     "grounding": "product: composer",
     "unattributed": "triage by hand",
@@ -155,8 +156,13 @@ def stage_statuses(
     grounding: str | None,
     expected_lens: str | None = None,
     served_lens: str | None = None,
+    resolution: str | None = None,
 ) -> dict[str, str]:
     """Each stage's verdict for one case: ``passed | failed | skipped``.
+
+    ``resolution`` is the ledger lane's own verdict (runtime.resolution.grade):
+    did generation resolve to the governed names the oracle resolves to. Lanes
+    without an attributable oracle pass None and record ``skipped``.
 
     ``routing`` grades only when the eval case is labeled AND the lane reports
     the lens it routed to — a lens-pinned run records ``skipped``, never
@@ -172,7 +178,12 @@ def stage_statuses(
         routing = "skipped"
     rows = ("passed" if rows_correct else "failed") if delivered else "skipped"
     grounds = {"pass": "passed", "fail": "failed", "skip": "skipped"}.get(grounding or "")
-    return {"routing": routing, "rows": rows, "grounding": grounds or "skipped"}
+    return {
+        "routing": routing,
+        "resolution": resolution if resolution in ("passed", "failed") else "skipped",
+        "rows": rows,
+        "grounding": grounds or "skipped",
+    }
 
 
 def first_failed_stage(stages: dict[str, str], outcome: str) -> str | None:

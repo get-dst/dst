@@ -171,3 +171,50 @@ def test_json_is_parseable_for_agents(_routes, capsys) -> None:
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["kpis"]["queries"] == 2
     assert parsed["callers"][0]["caller"] == "a"
+
+
+def test_summary_prints_the_governed_basis_and_names_the_unmeasured(_routes, capsys) -> None:
+    """The ledger histogram as one `basis:` line; `unknown` = recorded before
+    the ledger, printed as itself. A pre-ledger server prints no line."""
+    _routes["/kpis"] = {
+        "queries": 10,
+        "ai_cost_usd": 0.1,
+        "errors": 0,
+        "declined": 0,
+        "outcomes": {"ok": 10},
+        "resolution_histogram": {"declared": 6, "inferred": 3, "unknown": 1},
+    }
+    _routes["/callers"] = [{"caller": "a", "queries": 10, "cost_usd": 0.1, "errors": 0}]
+    assert cli._observe(_args()) == 0
+    out = capsys.readouterr().out
+    assert "basis: 6 declared · 3 inferred · 1 unknown" in out
+
+    _routes["/kpis"].pop("resolution_histogram")
+    assert cli._observe(_args()) == 0
+    assert "basis:" not in capsys.readouterr().out
+
+
+def test_show_prints_the_ledger_slots(_routes, capsys) -> None:
+    _routes["/requests/req-1"] = {
+        "request_id": "req-1",
+        "lens": "sales",
+        "status": "ok",
+        "confidence": "verified",
+        "resolution_tag": "mixed",
+        "question": "revenue by country?",
+        "sql": "SELECT country, SUM(amount * 2) FROM orders GROUP BY 1",
+        "resolution": {
+            "method": "attributed",
+            "tag": "mixed",
+            "slots": [
+                {"kind": "metric", "name": "revenue", "source": "declared"},
+                {"kind": "metric", "name": "SUM(amount * 2)", "source": "inferred"},
+                {"kind": "dimension", "name": "country", "source": "declared"},
+            ],
+        },
+    }
+    assert cli._observe(_args(action="show", request_id="req-1")) == 0
+    out = capsys.readouterr().out
+    assert "resolution_tag:" in out and "mixed" in out
+    assert "revenue  [declared]" in out
+    assert "SUM(amount * 2)  [inferred]" in out

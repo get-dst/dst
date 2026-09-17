@@ -53,6 +53,27 @@ def _result(**kw) -> QuestionResult:
 # --- the classifier ---------------------------------------------------------
 
 
+def test_resolution_sits_between_routing_and_rows():
+    """The ledger lane grades MEANING before rows grade values: a case that
+    resolved to the wrong metric and produced wrong rows is a resolution
+    miss first — the rows are wrong because the meaning was."""
+    from services.benchmark.grading import STAGE_OWNERS, STAGES
+
+    assert STAGES == ("routing", "resolution", "rows", "grounding")
+    assert "resolution" in STAGE_OWNERS
+    both = {"resolution": "failed", "rows": "failed"}
+    assert first_failed_stage(both, "wrong") == "resolution"
+    assert (
+        stage_statuses(rows_correct=True, delivered=True, grounding=None)["resolution"] == "skipped"
+    )
+    assert (
+        stage_statuses(rows_correct=True, delivered=True, grounding=None, resolution="failed")[
+            "resolution"
+        ]
+        == "failed"
+    )
+
+
 def test_first_failed_stage_picks_pipeline_order_and_fails_loud():
     both = {"routing": "failed", "rows": "failed", "grounding": "skipped"}
     assert first_failed_stage(both, "wrong") == "routing"
@@ -110,7 +131,12 @@ def test_rows_correct_but_ungrounded_prose_is_wrong_at_grounding():
     (r,) = run_benchmark([lane], [Q_COUNT], ORACLE)
     assert r.outcome == "wrong" and not r.correct
     assert r.wrong_at == "grounding"
-    assert r.stages == {"routing": "skipped", "rows": "passed", "grounding": "failed"}
+    assert r.stages == {
+        "routing": "skipped",
+        "resolution": "skipped",  # the benchmark lane has no attributable oracle
+        "rows": "passed",
+        "grounding": "failed",
+    }
     assert "claim 3" in r.stage_evidence
     # and the report says which stage broke, with the fail-loud column present
     report = render_markdown([r])

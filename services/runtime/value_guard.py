@@ -39,6 +39,7 @@ from the table the SQL already named.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import sqlglot
@@ -59,6 +60,54 @@ class UnknownLiteral:
     column: str
     literal: str
     values: tuple[str, ...]  # the complete domain the literal missed
+
+
+_MONTH_PERIOD = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def period_fields(model: SemanticModel, profiles: list[TableProfile]) -> dict[str, str]:
+    """entity name -> the string field that IS a month period ("YYYY-MM"),
+    read off the column profile's sample: every profiled value matches the
+    form. Unlike a value dictionary the sample need not be complete — a
+    period column's FORM is proven by any sample of it, and the window
+    compiles to a range, never to a choice over the values."""
+    by_table = {p.table: {c.name: c for c in p.columns} for p in profiles}
+    out: dict[str, str] = {}
+    for entity in model.entities:
+        columns = by_table.get(entity.source.table, {})
+        for field in entity.fields:
+            if field.type != "string":
+                continue
+            cp = columns.get(field.name)
+            values = list(cp.top_values or []) if cp is not None else []
+            if values and all(_MONTH_PERIOD.match(str(v)) for v in values):
+                out[entity.name] = field.name
+                break
+    return out
+
+
+def entity_domains(
+    model: SemanticModel, profiles: list[TableProfile]
+) -> dict[str, dict[str, list[str]]]:
+    """entity name -> column name (lowercased) -> its COMPLETE value dictionary.
+
+    The typed resolver decides one entity at a time, so it reads the entity's
+    OWN dictionary: a `month` or `status` column that means different values
+    on different tables is a domain here, where ``value_domains`` (keyed by
+    bare column name, for SQL the resolver did not write) must drop it."""
+    by_table = {p.table: {c.name: c for c in p.columns} for p in profiles}
+    out: dict[str, dict[str, list[str]]] = {}
+    for entity in model.entities:
+        columns = by_table.get(entity.source.table, {})
+        own: dict[str, list[str]] = {}
+        for field in entity.fields:
+            cp = columns.get(field.name)
+            if cp is None or not cp.top_values or not cp.values_complete:
+                continue
+            own[field.name.lower()] = list(cp.top_values)
+        if own:
+            out[entity.name] = own
+    return out
 
 
 def value_domains(model: SemanticModel, profiles: list[TableProfile]) -> dict[str, list[str]]:
