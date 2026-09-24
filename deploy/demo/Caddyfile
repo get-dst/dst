@@ -1,0 +1,5 @@
+# TLS from Let's Encrypt on the demo domain; everything proxied to the app.
+{$DEMO_DOMAIN} {
+	encode gzip
+	reverse_proxy app:8000
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.get-dst/dst",
+  "description": "dst (data serve tool): a governed semantic layer and MCP server between AI agents and your data warehouse (Snowflake, BigQuery, Postgres, DuckDB). Answers carry their SQL, a confidence grade and a receipt.",
+  "title": "dst (data serve tool)",
+  "repository": {
+    "url": "https://github.com/get-dst/dst",
+    "source": "github"
+  },
+  "websiteUrl": "https://www.dataservetool.com/",
+  "version": "0.4.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "dst-core",
+      "version": "0.4.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "python",
+          "isRequired": true
+        },
+        {
+          "type": "positional",
+          "value": "-m",
+          "isRequired": true
+        },
+        {
+          "type": "positional",
+          "value": "services.mcp.server",
+          "isRequired": true
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "DST_URL",
+          "description": "Base URL of your dst API (default http://localhost:8000)",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "DST_API_KEY",
+          "description": "A caller key (dst_...) issued by your dst instance",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

@@ -574,17 +574,43 @@ def _runs(args: argparse.Namespace) -> int:
 
 
 def _demo(args: argparse.Namespace) -> int:
-    from services.config import settings
+    from services.config import resolve_env_ref, settings
+    from services.contracts.lens_config import AccessRule
     from services.db.session import org_session
     from services.lenses import connection_store, store
+    from services.lenses.connections import build_connector
     from services.lenses.demo import jaffle_customer_value_bundle, jaffle_shared_assets
     from services.semantic import store as semantic_store
 
+    # The warehouse the demo lens reads: the bundled file by default, or any
+    # DuckDB path — `md:<database>` is MotherDuck, token via --secret-env. A
+    # public deployment sets the timeout: the file is no longer only yours.
+    path = getattr(args, "path", None) or settings.duckdb_jaffle_path
+    config: dict[str, object] = {"path": path}
+    timeout = getattr(args, "statement_timeout_ms", None)
+    if timeout:
+        config["statement_timeout_ms"] = int(timeout)
+    secret: str | None = None
+    secret_env = getattr(args, "secret_env", None)
+    if secret_env:
+        secret = resolve_env_ref(secret_env)
+        if not secret:
+            print(f"error: {secret_env} is not set (the warehouse token)", file=sys.stderr)
+            return 2
+    # Probe before anything lands: a dead path or token is a refusal here, not a
+    # published lens that fails on its first question.
+    try:
+        build_connector("duckdb", config, secret).execute("SELECT 1")
+    except Exception as exc:
+        print(f"error: cannot read {path}: {exc}", file=sys.stderr)
+        return 2
+
     with org_session(args.org_id) as session:
-        if not connection_store.get_connection(session, "jaffle"):
-            connection_store.create_connection(
-                session, "jaffle", "duckdb", {"path": settings.duckdb_jaffle_path}, None
-            )
+        existing = connection_store.get_connection(session, "jaffle")
+        if existing is None:
+            connection_store.create_connection(session, "jaffle", "duckdb", config, secret)
+        elif dict(existing.config or {}) != config or secret is not None:
+            connection_store.update_connection(session, "jaffle", config, secret)
         # The demo dogfoods the shared layer: seed its assets so the published
         # bundle's compile provenance matches the store (never spuriously stale).
         entities, definitions, relationships = jaffle_shared_assets()
@@ -595,11 +621,63 @@ def _demo(args: argparse.Namespace) -> int:
         for r in relationships:
             semantic_store.upsert_asset(session, "relationship", r.name, r.model_dump(mode="json"))
         bundle = jaffle_customer_value_bundle()
-        if not store.lens_exists(session, bundle.config.name):
+        # Who may ask, and how much: the bundled lens grants nobody by default
+        # (admins only). A public demo grants `group: demo` and bounds a day.
+        groups = list(getattr(args, "allow_group", None) or [])
+        if groups:
+            bundle.config.access.allow = [AccessRule(group=g) for g in groups]
+        rpd = getattr(args, "per_caller_rpd", None)
+        if rpd:
+            bundle.config.rate_limit.per_caller_rpd = int(rpd)
+        if store.lens_exists(session, bundle.config.name):
+            store.update_draft(session, bundle.config.name, bundle)
+        else:
             store.create_lens(session, bundle)
         store.publish(session, bundle.config.name)
         session.commit()
-    print(f"demo lens '{jaffle_customer_value_bundle().config.name}' published (duckdb jaffle)")
+    grant = f", allow {'/'.join(groups)}" if groups else ""
+    quota = f", {rpd}/day per caller" if rpd else ""
+    print(f"demo lens '{bundle.config.name}' published (duckdb {path}{grant}{quota})")
+    return 0
+
+
+def _prune_log(args: argparse.Namespace) -> int:
+    """Delete request_log rows older than --keep-days, per org (the log is FORCE
+    RLS: the GUC is set per org so the sweep is honest on managed Postgres,
+    where the admin role is not a superuser). The rows carry the questions
+    people asked; a public deployment promises them a bounded life."""
+    from sqlalchemy import text
+
+    from services.db.session import admin_engine
+
+    if args.keep_days < 1:
+        print("error: --keep-days must be at least 1", file=sys.stderr)
+        return 2
+    with admin_engine.connect() as c:
+        if args.org_id:
+            rows = c.execute(
+                text("SELECT id, name FROM org WHERE id = :o"), {"o": args.org_id}
+            ).all()
+        else:
+            rows = c.execute(text("SELECT id, name FROM org ORDER BY created_at")).all()
+    if not rows:
+        print("no org matched", file=sys.stderr)
+        return 2
+    total = 0
+    for oid, name in rows:
+        with admin_engine.begin() as c:
+            c.execute(text(f"SET LOCAL app.current_org = '{uuid.UUID(str(oid))}'"))
+            res = c.execute(
+                text(
+                    "DELETE FROM request_log WHERE org_id = :o "
+                    "AND created_at < now() - make_interval(days => :d)"
+                ),
+                {"o": oid, "d": int(args.keep_days)},
+            )
+        n = int(res.rowcount)
+        total += n
+        print(f"{name}: {n} row(s) older than {args.keep_days} day(s) deleted")
+    print(f"pruned {total} row(s) across {len(rows)} org(s)")
     return 0
 
 
@@ -5468,7 +5546,43 @@ def main() -> int:
 
     p = sub.add_parser("demo", help="publish the bundled duckdb demo lens into an org")
     p.add_argument("--org-id", required=True, help="org UUID from `dst bootstrap`")
+    p.add_argument(
+        "--path",
+        help="the DuckDB the lens reads: a file, or md:<database> for MotherDuck "
+        "(default: the bundled jaffle fixture)",
+    )
+    p.add_argument(
+        "--secret-env",
+        help="env var holding the warehouse token (MotherDuck), read from the process "
+        "env or ./.env — the value itself is never a flag",
+    )
+    p.add_argument(
+        "--statement-timeout-ms",
+        type=int,
+        help="cancel a query after this long (unset = unbounded; set it on anything "
+        "reachable from outside)",
+    )
+    p.add_argument(
+        "--allow-group",
+        action="append",
+        metavar="GROUP",
+        help="grant the lens to a caller group (repeatable; e.g. demo, or everyone). "
+        "Default: admins only",
+    )
+    p.add_argument(
+        "--per-caller-rpd",
+        type=int,
+        help="daily answers per caller on the lens (0 = unlimited, the default)",
+    )
     p.set_defaults(fn=_demo)
+
+    p = sub.add_parser(
+        "prune-log",
+        help="delete request_log rows older than N days (every org, or --org-id)",
+    )
+    p.add_argument("--keep-days", type=int, required=True, help="rows younger than this stay")
+    p.add_argument("--org-id", help="one org (default: every org in the database)")
+    p.set_defaults(fn=_prune_log)
 
     p = sub.add_parser(
         "experiment",

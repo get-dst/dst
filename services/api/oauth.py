@@ -29,7 +29,7 @@ from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from mcp.shared.auth import OAuthClientMetadata, OAuthMetadata, ProtectedResourceMetadata
 
-from services.auth import clerk, oauth, scopes
+from services.auth import clerk, demo, oauth, scopes
 from services.auth.deps import resolve_admin_org
 from services.auth.tokens import ADMIN_PREFIX, CALLER_PREFIX, OAUTH_PREFIX, hash_token
 from services.config import settings
@@ -189,6 +189,9 @@ def _resolve_grant_identity(raw: str) -> tuple[uuid.UUID, uuid.UUID] | None:
                 session, "admin", "service", []
             )
         return org_id, cid
+    if demo.enabled():
+        visitor = demo.resolve(raw)
+        return (visitor.org_id, visitor.caller_id) if visitor and visitor.caller_id else None
     clerk_ident = clerk.resolve_identity(raw)
     if clerk_ident is None:
         return None

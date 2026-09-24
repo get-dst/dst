@@ -21,12 +21,13 @@ from services.api.llm import require_llm
 from services.auth.deps import get_caller
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
+from services.config import settings
 from services.contracts.correction import CorrectionDelta
 from services.contracts.protocols import Connector
 from services.contracts.query_intent import QueryIntent
 from services.contracts.response import CertifiedProvenance, QueryResponse
 from services.db.session import org_session
-from services.governance import audit, drift_watch, ratelimit
+from services.governance import audit, drift_watch, quota, ratelimit
 from services.governance.credentials import CallerIdentity
 from services.governance.policy import authorize
 from services.lenses import profile_enrich
@@ -388,6 +389,29 @@ def _authorized_bundle(
                 detail=f"rate limit exceeded for caller '{caller.name}' on lens '{name}'",
                 headers={"Retry-After": str(ratelimit.retry_after(rl_key))},
             )
+        # Daily quotas, same shape: the caller's own on this lens, then the org's
+        # kill switch. Both count served answers, so this deny costs no budget.
+        rpd = bundle.config.rate_limit.per_caller_rpd
+        if rpd > 0:
+            use = quota.usage(caller.org_id, caller=caller.name, lens=name)
+            if quota.exceeded(rpd, use):
+                _audit("deny", "daily quota exceeded")
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"daily quota of {rpd} answers reached for caller "
+                    f"'{caller.name}' on lens '{name}'",
+                    headers={"Retry-After": str(use.retry_after())},
+                )
+        cap = settings.daily_request_cap
+        if cap > 0:
+            use = quota.usage(caller.org_id)
+            if quota.exceeded(cap, use):
+                _audit("deny", "daily request cap exceeded")
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"this deployment's daily cap of {cap} answers is reached",
+                    headers={"Retry-After": str(use.retry_after())},
+                )
     return bundle
 
 

@@ -200,6 +200,15 @@ class LoggingConfig(Authored):
 
 class RateLimitConfig(Authored):
     per_caller_rpm: int = 60
+    # The per-minute budget bounds a burst; this bounds a day. Counted from the
+    # answers actually served (request_log, rolling 24 h), so declines cost
+    # nothing. 0 = no daily quota — the default, because a team's own callers
+    # are not strangers; a public or trial lens sets it.
+    per_caller_rpd: int = Field(
+        default=0,
+        description="governed answers one caller may draw from this lens per rolling "
+        "24 h; 0 = unlimited. The 429 carries Retry-After",
+    )
 
 
 class NotComputable(Authored):

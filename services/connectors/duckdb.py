@@ -1,4 +1,4 @@
-"""DuckDB connector — the local, file-backed warehouse.
+"""DuckDB connector — the local, file-backed warehouse, and MotherDuck.
 
 Read-only by construction: every QUERY connection is opened with ``read_only=True``,
 so writes/DDL raise regardless of the ``read_only`` argument. The SQL-level SELECT-only
@@ -6,6 +6,20 @@ guarantee is additionally enforced by sql_guard. The single exception is
 ``probe_write``, which exists to prove write access and reopens the file writable —
 it is reached only when a connection is registered asking for ``access: ["write"]``,
 never from serving or from ``dst apply``.
+
+A ``md:`` path is MotherDuck. The token rides the connection secret (``secret_env``),
+never the path — a path is copied into snapshots, profiles and logs. MotherDuck
+opens read-only only under a read-scaling token (a regular token must open
+read-write), so ``read_only`` is a per-connection choice there: the default keeps
+the by-construction guarantee and expects a read-scaling token; ``read_only: false``
+opts out and leaves the SQL guard as the only line. A MotherDuck session attaches
+every database in the account, which is why every catalog read here is pinned to
+``current_database()`` — a lens over one database must not see the others.
+
+``statement_timeout_ms`` bounds a query the way ``statement_timeout`` does on
+Postgres: a timer interrupts the connection, and the query fails naming the cap.
+Unset means unbounded — right for a developer's own file, wrong for anything a
+stranger can reach.
 
 Introspection covers EVERY user schema, not the current one: ``SHOW TABLES``
 (and a ``schema_name = 'main'`` filter in the catalog pass) makes a warehouse
@@ -17,6 +31,7 @@ worst failure shape there is. Names are qualified ``schema.table`` except in
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime
 
 import duckdb
@@ -46,16 +61,23 @@ DEFAULT_SCHEMA = "main"
 # Tables AND views (``SHOW TABLES`` listed both; jaffle's stg_* models are views),
 # every user schema, no system relations — ``internal`` is the catalog's own flag
 # for those, so nothing is matched by name.
+#
+# ``database_name = current_database()`` on every catalog read: an attached
+# database (every MotherDuck database in the account, or a local ATTACH) is not
+# this connection's warehouse.
+_THIS_DB = "database_name = current_database()"
 _RELATIONS = (
     "SELECT schema_name, table_name, comment, FALSE AS is_view FROM duckdb_tables() "
-    "WHERE NOT internal "
+    f"WHERE NOT internal AND {_THIS_DB} "
     "UNION ALL "
-    "SELECT schema_name, view_name, comment, TRUE FROM duckdb_views() WHERE NOT internal "
+    "SELECT schema_name, view_name, comment, TRUE FROM duckdb_views() "
+    f"WHERE NOT internal AND {_THIS_DB} "
     "ORDER BY 1, 2"
 )
 _COLUMNS = (
     "SELECT schema_name, table_name, column_name, data_type, is_nullable, comment "
-    "FROM duckdb_columns() WHERE NOT internal ORDER BY schema_name, table_name, column_index"
+    f"FROM duckdb_columns() WHERE NOT internal AND {_THIS_DB} "
+    "ORDER BY schema_name, table_name, column_index"
 )
 # The catalog pass sees exactly what introspect() lists — views included. Reading
 # duckdb_tables() alone made every relation a view unprofilable, and every dbt
@@ -64,18 +86,24 @@ _COLUMNS = (
 # what puts a row count next to them in the listing.
 _CATALOG_RELATIONS = (
     "SELECT schema_name, table_name, estimated_size, comment, FALSE AS is_view "
-    "FROM duckdb_tables() WHERE NOT internal "
+    f"FROM duckdb_tables() WHERE NOT internal AND {_THIS_DB} "
     "UNION ALL "
     "SELECT schema_name, view_name, NULL::BIGINT, comment, TRUE FROM duckdb_views() "
-    "WHERE NOT internal "
+    f"WHERE NOT internal AND {_THIS_DB} "
     "ORDER BY 1, 2"
 )
 # `main` is flagged internal in duckdb_schemas(), so the user's schemas are
-# "everything in an attached database, minus dst's own validation plane".
+# "everything in THIS database, minus dst's own validation plane".
 _SCHEMAS = (
     "SELECT DISTINCT schema_name FROM duckdb_schemas() "
-    "WHERE database_name NOT IN ('system', 'temp') AND schema_name != ? ORDER BY 1"
+    f"WHERE {_THIS_DB} AND schema_name != ? ORDER BY 1"
 )
+
+MOTHERDUCK_PREFIX = "md:"
+
+
+def is_motherduck(path: str) -> bool:
+    return path.startswith(MOTHERDUCK_PREFIX)
 
 
 def qualified(schema: str, table: str) -> str:
@@ -88,13 +116,58 @@ def qualified(schema: str, table: str) -> str:
 class DuckDBConnector:
     kind = "duckdb"
 
-    def __init__(self, path: str, *, profile: bool = True, schema: str | None = None) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        profile: bool = True,
+        schema: str | None = None,
+        token: str | None = None,
+        read_only: bool = True,
+        statement_timeout_ms: int | None = None,
+    ) -> None:
+        if "motherduck_token=" in path:
+            raise ValueError(
+                "the MotherDuck token belongs in the connection's secret_env, not in the "
+                "path — the path is copied into snapshots, profiles and logs"
+            )
         self._path = path
         self._profile = profile
         self._schema = schema  # None = every user schema
+        self._token = token
+        # Only MotherDuck can open read-write on the query path; a local file
+        # is read-only by construction whatever the flag says.
+        self._read_only = read_only or not is_motherduck(path)
+        self._timeout_ms = statement_timeout_ms if statement_timeout_ms else None
+
+    @property
+    def statement_timeout_ms(self) -> int | None:
+        return self._timeout_ms
+
+    def _md_config(self) -> dict[str, str | bool | int | float | list[str]]:
+        return {"motherduck_token": self._token} if self._token else {}
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
+        if is_motherduck(self._path):
+            return duckdb.connect(self._path, read_only=self._read_only, config=self._md_config())
         return duckdb.connect(self._path, read_only=True)
+
+    def _run(self, con: duckdb.DuckDBPyConnection, query: str) -> duckdb.DuckDBPyConnection:
+        """``con.execute`` under the statement timeout: a timer interrupts the
+        connection, and the failure names the cap instead of a bare interrupt."""
+        if self._timeout_ms is None:
+            return con.execute(query)
+        timer = threading.Timer(self._timeout_ms / 1000, con.interrupt)
+        timer.start()
+        try:
+            return con.execute(query)
+        except duckdb.InterruptException as exc:
+            raise duckdb.Error(
+                f"query cancelled after {self._timeout_ms} ms "
+                "(this connection's statement_timeout_ms)"
+            ) from exc
+        finally:
+            timer.cancel()
 
     def _searched_schemas(self, con: duckdb.DuckDBPyConnection) -> list[str]:
         if self._schema:
@@ -232,7 +305,7 @@ class DuckDBConnector:
     def dry_run(self, sql: str) -> DryRunResult:
         con = self._connect()
         try:
-            con.execute(f"EXPLAIN {sql}")
+            self._run(con, f"EXPLAIN {sql}")
             return DryRunResult(valid=True)
         except Exception as exc:
             return DryRunResult(valid=False, error=str(exc))
@@ -250,7 +323,7 @@ class DuckDBConnector:
                 else f"SELECT * FROM ({sql.rstrip().rstrip(';')}) AS _q LIMIT {int(row_limit)}"
             )
             query = tag_sql(query)  # the final statement identifies itself in query history
-            rel = con.execute(query)
+            rel = self._run(con, query)
             columns = [d[0] for d in rel.description] if rel.description else []
             rows = [list(r) for r in rel.fetchall()]
             return QueryResult(columns=columns, rows=rows)
@@ -262,7 +335,7 @@ class DuckDBConnector:
         import secrets
 
         table = f'"_dst_write_probe_{secrets.token_hex(4)}"'
-        con = duckdb.connect(self._path, read_only=False)
+        con = duckdb.connect(self._path, read_only=False, config=self._md_config())
         try:
             con.execute(f"CREATE TABLE {table} (probe INTEGER)")
             try:

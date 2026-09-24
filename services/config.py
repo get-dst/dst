@@ -267,6 +267,13 @@ class Settings(BaseSettings):
     token_default_expiry_days: int | None = None
     token_max_expiry_days: int | None = None
 
+    # Install-wide kill switch: governed answers an org may serve per rolling 24 h,
+    # summed over every caller and lens (DST_DAILY_REQUEST_CAP). The per-lens
+    # `rate_limit.per_caller_rpd` bounds one person; this bounds the bill when a
+    # thousand people each stay under theirs. 0 = no cap. Admin callers are
+    # exempt, like every other limit on the data plane.
+    daily_request_cap: int = 0
+
     # Generic OIDC dashboard auth — the free-tier, self-host path that lets any
     # standard IdP (Keycloak, Authentik, Zitadel, Okta, Entra, Google) in. Sits
     # BESIDE Clerk, not replacing it: a self-hoster who runs their own IdP has a way
@@ -300,6 +307,17 @@ class Settings(BaseSettings):
             "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
         ),
     )
+
+    # Public demo mode (DST_DEMO_ORG_ID): the org every signed-in person lands in.
+    # Clerk normally provisions a tenant per person and makes them its admin; a
+    # public deployment wants the opposite — one seeded org, and every visitor a
+    # non-admin caller in group `demo`, keyed by the sign-in email so quotas and
+    # the audit trail name a person. Admin stays with dstadm_ tokens only. Unset =
+    # ordinary Clerk behaviour (services/auth/demo.py).
+    demo_org_id: str | None = None
+    # How long a visitor's self-minted dst_ key lives. A lost key is a bounded
+    # liability, not a standing one.
+    demo_key_days: int = 7
 
     # Private-demo sandbox config does NOT live here: the sandbox module
     # (services/lenses/sandbox.py) is excluded from the public cut and reads its

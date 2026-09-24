@@ -1,0 +1,70 @@
+{#
+  Head additions the theme does not emit on its own: social-preview tags and
+  structured data, so a shared link unfurls and a search engine can tell this
+  "dst" from daylight saving time. Everything else is the stock theme.
+#}
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {% set site = config.site_url | default("https://www.dataservetool.com/") %}
+  {% if page and page.meta and page.meta.title %}
+    {% set og_title = page.meta.title ~ " · " ~ config.site_name %}
+  {% elif page and page.title and not page.is_homepage %}
+    {% set og_title = page.title ~ " · " ~ config.site_name %}
+  {% else %}
+    {% set og_title = config.site_name %}
+  {% endif %}
+  {% if page and page.meta and page.meta.description %}
+    {% set og_description = page.meta.description %}
+  {% else %}
+    {% set og_description = config.site_description %}
+  {% endif %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ og_title }}">
+  <meta property="og:description" content="{{ og_description }}">
+  {% if page and page.canonical_url %}
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  {% endif %}
+  <meta property="og:image" content="{{ site }}assets/dst-social.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ og_title }}">
+  <meta name="twitter:description" content="{{ og_description }}">
+  <meta name="twitter:image" content="{{ site }}assets/dst-social.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "@id": "{{ site }}#software",
+        "name": "dst (data serve tool)",
+        "alternateName": ["data serve tool", "dst"],
+        "description": "{{ config.site_description }}",
+        "url": "{{ site }}",
+        "applicationCategory": "DeveloperApplication",
+        "applicationSubCategory": "Semantic layer and MCP server for AI access to data warehouses",
+        "operatingSystem": "Linux, macOS",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "codeRepository": "https://github.com/get-dst/dst",
+        "downloadUrl": "https://pypi.org/project/dst-core/",
+        "programmingLanguage": "Python",
+        "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+        "sameAs": [
+          "https://github.com/get-dst/dst",
+          "https://pypi.org/project/dst-core/"
+        ]
+      },
+      {
+        "@type": "WebSite",
+        "@id": "{{ site }}#website",
+        "name": "{{ config.site_name }}",
+        "url": "{{ site }}",
+        "about": {"@id": "{{ site }}#software"}
+      }
+    ]
+  }
+  </script>
+{% endblock %}

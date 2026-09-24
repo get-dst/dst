@@ -29,6 +29,44 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.4.1] — 2026-09-24
+
+One schema change ships with this release: run `dst migrate` before serving.
+Migration 0067 adds an index the daily quota reads.
+
+### Added — a deployment other people can reach
+
+- **MotherDuck on the DuckDB connector.** A path of the form `md:<database>` is
+  MotherDuck. The token rides the connection's `secret_env`, never the path,
+  since a path is copied into snapshots and logs. Read-only stays the default
+  and expects a read-scaling token; `read_only: false` opens read-write and
+  leaves the SQL guard as the only line. Every catalog read is pinned to the
+  connection's own database, because a MotherDuck session attaches every
+  database in the account.
+- **`statement_timeout_ms` on DuckDB connections**, the cap the other
+  connectors already had: a runaway query is interrupted and the failure names
+  the cap. Unset stays unbounded for a developer's own file.
+- **Daily quotas.** `rate_limit.per_caller_rpd` on a lens bounds one caller's
+  day; `DST_DAILY_REQUEST_CAP` bounds the whole org when many callers each
+  stay under theirs. Both count the answers actually served over a rolling
+  24 hours, so a refusal never eats budget, and both refuse the way the
+  per-minute limit does: 429, a `Retry-After` measured from the oldest counted
+  answer, a deny row in the audit log. 0 means no quota.
+- **Public demo mode.** With `DST_DEMO_ORG_ID` set, every verified Clerk
+  sign-in is a non-admin caller in that one org, in group `demo`, named by the
+  sign-in email, on the data plane and the MCP grant alike, and sign-in never
+  reaches the control plane. `GET /demo` signs a visitor in and
+  `POST /auth/demo-key` trades the session for a `dst_` key, one live key per
+  person, expiring after `DST_DEMO_KEY_DAYS`. Neither route exists outside
+  demo mode.
+- **`dst demo`** takes `--path` (a file or `md:<database>`), `--secret-env`,
+  `--statement-timeout-ms`, `--allow-group` and `--per-caller-rpd`, probes the
+  warehouse before anything lands, and updates in place on a re-run.
+  **`dst prune-log --keep-days N`** deletes old request-log rows per org.
+- **`deploy/demo/`**: a compose file with TLS for a single VM, the env
+  contract, a script that loads a DuckDB file into MotherDuck, and the runbook,
+  including the Cloud Run variant.
+
 ## [0.4.0] — 2026-09-17
 
 Schema changes ship with this release: run `dst migrate` before serving (the

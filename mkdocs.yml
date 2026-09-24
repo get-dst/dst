@@ -1,6 +1,6 @@
 # The published documentation site. mkdocs-material, markdown only.
 site_name: data serve tool (dst)
-site_description: data serve tool (dst) — callers ask, a governed layer answers.
+site_description: dst (data serve tool) is an open-source semantic layer and MCP server between the AI your team uses and your data warehouse. Callers ask, a governed layer answers, with the SQL, a confidence grade and a receipt.
 site_url: https://www.dataservetool.com/
 # The repo link and edit actions are enabled by the site deployment once the
 # repository answers publicly; while it does not, they stay off so the header
@@ -10,6 +10,7 @@ site_url: https://www.dataservetool.com/
 
 theme:
   name: material
+  custom_dir: overrides # social-preview tags + structured data, see overrides/main.html
   palette:
     scheme: default
   font: false # identity faces ship via extra_css, never Google Fonts defaults
@@ -20,6 +21,15 @@ theme:
 
 extra:
   generator: false # no "Made with Material for MkDocs" footer
+
+plugins:
+  - search
+  - blog:
+      blog_dir: blog
+      post_url_format: "{slug}"
+      archive: false
+      categories: false
+      draft: false # a draft post never ships; flip its front matter, not this switch
 
 extra_css:
   - stylesheets/dst.css # paper + amber + Plex Mono, receipt-style admonitions
@@ -61,3 +71,4 @@ nav:
       - API: reference/api.md
       - Configuration: reference/configuration.md
   - FAQ: faq.md
+  - Blog: blog/index.md

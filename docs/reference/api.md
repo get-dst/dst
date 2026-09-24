@@ -191,6 +191,18 @@ PKCE S256 only, dynamic client registration, a server-rendered consent page.
 | `GET /oauth/authorize` → `POST /oauth/authorize/complete` | Consent flow |
 | `POST /oauth/token` | Code + PKCE → `dsto_` access token |
 
+## Public demo mode
+
+Only when `DST_DEMO_ORG_ID` is set (`services/api/demo.py`, `services/auth/demo.py`); 404
+otherwise. In demo mode every verified Clerk session is a non-admin caller in that org, in
+group `demo`, named by the sign-in email, on the data plane and the MCP grant alike, and
+sign-in never reaches `/mgmt` (403, admin is a `dstadm_` token).
+
+| Route | Description |
+|---|---|
+| `GET /demo` | Server-rendered sign-in page: boots Clerk, mints the visitor's key, shows the three ways in |
+| `POST /auth/demo-key` | Bearer = the Clerk session token → `{caller, key, expires_in_days, lenses, base_url}`; one live `dst_` key per person (a re-mint revokes the last), budgeted per source address |
+
 ## Control plane (`/mgmt`)
 
 Admin auth. One router per concern under `services/api/`; the surface is large

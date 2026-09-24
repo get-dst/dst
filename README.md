@@ -7,6 +7,11 @@ the whole lifecycle of doing it.** The AI asks in plain language; dst answers
 from definitions your team wrote down, with the SQL that produced the answer,
 a confidence grade, and a receipt attached.
 
+In one line: dst (data serve tool) is an open-source semantic layer and MCP
+server between the AI your team uses (Claude, ChatGPT, Copilot, your own
+agents) and your warehouse (Snowflake, BigQuery, Postgres, DuckDB). It is
+the serve stage of the stack: dlt loads, dbt transforms, dst serves.
+
 The shape of it: one governed interface between the AI your team uses and
 your warehouse — four questions answered on every call, and a receipt to
 prove it:

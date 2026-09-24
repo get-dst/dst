@@ -3,7 +3,7 @@
 One entry point: `dst` (`services/cli/main.py`). Two kinds of command:
 
 - **In-process**: `init`, `dev`, `serve`, `migrate`, `doctor`, `bootstrap`, `secret`,
-  `rotate-key`, `demo`, `test`, `revoke-key`, `revoke-token`, `reindex`, `probe`,
+  `rotate-key`, `demo`, `prune-log`, `test`, `revoke-key`, `revoke-token`, `reindex`, `probe`,
   `drift`, `import`, `export osi`, `evals migrate` run directly against the configured
   database or the local files; no server, URL, or token needed. `introspect` joins them
   whenever `dst.yaml` declares the connection, and falls back to the server when it
@@ -175,7 +175,18 @@ on whichever connector is touched first.
 ### `dst demo`
 
 Publish the bundled DuckDB demo lens into an org. Flag: `--org-id` (required; the UUID
-`dst bootstrap` prints).
+`dst bootstrap` prints). By default the lens reads the bundled file and grants nobody but
+admins. For a deployment other people reach: `--path md:<database>` points it at MotherDuck
+(`--secret-env NAME` names the env var holding the token), `--statement-timeout-ms` bounds a
+query, `--allow-group demo` grants a caller group, and `--per-caller-rpd N` bounds a caller's
+day. The path is probed before anything lands. Re-running updates the connection and the
+lens in place.
+
+### `dst prune-log`
+
+Delete `request_log` rows older than `--keep-days N`, for every org or one `--org-id`. The
+rows carry the questions people asked; run it from cron wherever you promised them a
+bounded life.
 
 ## Files → server
 

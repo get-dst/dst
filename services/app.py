@@ -28,6 +28,7 @@ from starlette.types import Receive, Scope, Send
 from services import __version__ as services_version
 from services.api.auth_local import router as auth_local_router
 from services.api.auth_local import users_router as mgmt_users_router
+from services.api.demo import router as demo_router
 from services.api.mgmt import router as mgmt_router
 from services.api.mgmt_activation import router as mgmt_activation_router
 from services.api.mgmt_audit import router as mgmt_audit_router
@@ -165,6 +166,10 @@ _openapi_tags = [
     {"name": "project", "description": "File-first deployment — export, plan, apply."},
     {"name": "openai", "description": "OpenAI-compatible chat completions over lenses."},
     {"name": "oauth", "description": "PKCE authorization-server facade for MCP clients."},
+    {
+        "name": "demo",
+        "description": "Public demo mode only (DST_DEMO_ORG_ID): sign in, mint a visitor key.",
+    },
 ]
 
 app = FastAPI(
@@ -226,6 +231,8 @@ app.add_middleware(
 app.include_router(mgmt_router)
 # Local (Clerk-free) dashboard login + user management — the self-host path.
 app.include_router(auth_local_router)
+# Public demo mode only (DST_DEMO_ORG_ID): /demo + /auth/demo-key, 404 otherwise.
+app.include_router(demo_router)
 app.include_router(mgmt_users_router)
 app.include_router(mgmt_lenses_router)
 app.include_router(mgmt_callers_router)

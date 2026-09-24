@@ -1,0 +1,47 @@
+# dst (data serve tool)
+
+> dst (data serve tool) is an open-source semantic layer and MCP server that sits between the AI your team uses (Claude, ChatGPT, Copilot, your own agents) and your data warehouse (Snowflake, BigQuery, Postgres, DuckDB). Callers ask in plain language; dst answers from definitions your team wrote, with the SQL that produced the answer, a confidence grade and a receipt. It is the serve stage after dlt loads and dbt transforms. Apache-2.0, `pip install dst-core`, source at https://github.com/get-dst/dst.
+
+## Start here
+
+- [What dst is](https://www.dataservetool.com/): the shape of the product and why AI gets your numbers wrong
+- [Quickstart](https://www.dataservetool.com/quickstart/): from an empty directory to a governed answer over the demo warehouse
+- [The product, on screen](https://www.dataservetool.com/on-screen/): what the terminal and the dashboard show
+
+## Concepts
+
+- [The answer path](https://www.dataservetool.com/concepts/answer-path/): what happens between a question and a number
+- [Lenses](https://www.dataservetool.com/concepts/lens/): one use case, packaged, over the shared semantic layer
+- [Curated context](https://www.dataservetool.com/concepts/curated-context/): the definitions the model is allowed to use
+- [Certified answers](https://www.dataservetool.com/concepts/certified/): approved question-to-SQL pairs served verbatim and re-tested
+- [Receipts](https://www.dataservetool.com/concepts/receipts/): the SQL, the grade and the cost attached to every answer
+- [What the model sees](https://www.dataservetool.com/concepts/what-the-model-sees/)
+- [Clarify and refusal](https://www.dataservetool.com/concepts/clarify-and-refusal/): a decline is an outcome, not an error
+
+## Guides
+
+- [Project files](https://www.dataservetool.com/guides/project-files/)
+- [Connect a warehouse](https://www.dataservetool.com/guides/connect-a-warehouse/): Snowflake, BigQuery, Postgres, DuckDB
+- [Answerable tables](https://www.dataservetool.com/guides/answerable-tables/)
+- [Bootstrap from history](https://www.dataservetool.com/guides/drift-audit/)
+- [Agents over MCP](https://www.dataservetool.com/guides/agents-mcp/): point Claude, Cursor or your agent at dst's MCP server
+- [Build your own UI](https://www.dataservetool.com/guides/build-your-own-ui/)
+- [The correction loop](https://www.dataservetool.com/guides/correction-loop/)
+- [Evaluation](https://www.dataservetool.com/guides/evaluation/): tests on your data
+- [Environments and CI](https://www.dataservetool.com/guides/environments-and-ci/): disposable environments, plan and apply
+
+## Operate
+
+- [Deploying](https://www.dataservetool.com/deployment/)
+- [Security and data flow](https://www.dataservetool.com/security/)
+- [Upgrading](https://www.dataservetool.com/upgrading/)
+- [CLI reference](https://www.dataservetool.com/reference/cli/)
+- [API reference](https://www.dataservetool.com/reference/api/)
+- [Configuration reference](https://www.dataservetool.com/reference/configuration/)
+- [FAQ](https://www.dataservetool.com/faq/)
+
+## Elsewhere
+
+- [Source on GitHub](https://github.com/get-dst/dst)
+- [dst-core on PyPI](https://pypi.org/project/dst-core/)
+- [Blog](https://www.dataservetool.com/blog/)

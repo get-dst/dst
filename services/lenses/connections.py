@@ -44,7 +44,7 @@ class ConnectionUnavailable(ValueError):
 # (`config` is a free dict), so a key like `schema: finance_marts` can sit in a
 # dst.yaml doing nothing across repeated profiling attempts.
 KNOWN_CONFIG_KEYS: dict[str, frozenset[str]] = {
-    "duckdb": frozenset({"path", "schema"}),
+    "duckdb": frozenset({"path", "schema", "read_only", "statement_timeout_ms"}),
     "bigquery": frozenset({"project", "dataset", "datasets", "schema", "max_bytes_billed"}),
     "postgres": frozenset(
         {"host", "port", "database", "user", "schema", "sslmode", "statement_timeout_ms"}
@@ -104,9 +104,16 @@ def build_connector(type_: str, config: dict[str, Any], secret: str | None) -> C
     cfg = config or {}
     if type_ == "duckdb":
         schema = cfg.get("schema")
+        # The secret is the MotherDuck token (md: paths); a local file has none.
+        # No timeout by default: a developer's own file stays unbounded, and a
+        # declared cap is the same key the other connectors read.
+        timeout = cfg.get("statement_timeout_ms")
         return DuckDBConnector(
             str(cfg.get("path") or settings.duckdb_jaffle_path),
             schema=str(schema) if schema else None,
+            token=secret or None,
+            read_only=bool(cfg.get("read_only", True)),
+            statement_timeout_ms=int(timeout) if timeout else None,
         )
     if type_ == "bigquery":
         if not secret:

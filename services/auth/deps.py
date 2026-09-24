@@ -15,7 +15,7 @@ from fastapi import Cookie, Depends, Header, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from services.auth import clerk, local, oidc
+from services.auth import clerk, demo, local, oidc
 from services.auth.tokens import (
     ADMIN_PREFIX,
     CALLER_PREFIX,
@@ -100,6 +100,14 @@ def get_admin_identity(
         if not local_ident.is_admin:
             raise HTTPException(status_code=403, detail="admin role required to manage this org")
         return AdminIdentity(org_id=local_ident.org_id, actor=f"human:{local_ident.user}")
+    if demo.enabled():
+        # A signed-in visitor is a demo caller, never an admin — and never gets a
+        # tenant of their own to administer. Admin is a dstadm_ token here.
+        raise HTTPException(
+            status_code=403,
+            detail="this deployment is a public demo: sign-in grants a demo "
+            "caller, not admin — use an admin token",
+        )
     ident = clerk.resolve_identity(raw)
     if ident is None:
         raise HTTPException(status_code=401, detail="invalid credentials")
@@ -152,15 +160,20 @@ def get_caller(
             groups=local_ident.groups,
             agent=agent,
         )
-    clerk_ident = clerk.resolve_identity(raw)
-    if clerk_ident is not None:
-        return CallerIdentity(
-            org_id=clerk_ident.org_id,
-            name=clerk_ident.user,
-            is_admin=clerk_ident.is_admin,
-            groups=clerk_ident.groups,
-            agent=agent,
-        )
+    if demo.enabled():
+        visitor = demo.resolve(raw)
+        if visitor is not None:
+            return replace(visitor, agent=agent)
+    else:
+        clerk_ident = clerk.resolve_identity(raw)
+        if clerk_ident is not None:
+            return CallerIdentity(
+                org_id=clerk_ident.org_id,
+                name=clerk_ident.user,
+                is_admin=clerk_ident.is_admin,
+                groups=clerk_ident.groups,
+                agent=agent,
+            )
     oidc_ident = oidc.resolve_identity(raw)
     if oidc_ident is not None:
         return CallerIdentity(
@@ -199,14 +212,19 @@ def resolve_mcp_caller(raw: str, *, resource: str | None = None) -> CallerIdenti
             is_admin=local_ident.is_admin,
             groups=local_ident.groups,
         )
-    clerk_ident = clerk.resolve_identity(raw)
-    if clerk_ident is not None:
-        return CallerIdentity(
-            org_id=clerk_ident.org_id,
-            name=clerk_ident.user,
-            is_admin=clerk_ident.is_admin,
-            groups=clerk_ident.groups,
-        )
+    if demo.enabled():
+        visitor = demo.resolve(raw)
+        if visitor is not None:
+            return visitor
+    else:
+        clerk_ident = clerk.resolve_identity(raw)
+        if clerk_ident is not None:
+            return CallerIdentity(
+                org_id=clerk_ident.org_id,
+                name=clerk_ident.user,
+                is_admin=clerk_ident.is_admin,
+                groups=clerk_ident.groups,
+            )
     oidc_ident = oidc.resolve_identity(raw)
     if oidc_ident is None:
         return None

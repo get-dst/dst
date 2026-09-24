@@ -112,7 +112,7 @@ connector actually reads (`services/lenses/connections.py`):
 | `snowflake` | `account`, `user`, `warehouse`, `database`, `schema`, `role`, `auth`, `private_key_passphrase` |
 | `postgres` | `host`, `port`, `database`, `user`, `schema`, `sslmode`, `statement_timeout_ms` |
 | `mysql` | `host`, `port`, `database`, `user`, `statement_timeout_ms` |
-| `duckdb` | `path`, `schema` |
+| `duckdb` | `path` (a file, or `md:<database>` for MotherDuck), `schema`, `read_only`, `statement_timeout_ms` |
 
 **The cost and time caps belong here**, not in a shell: `max_bytes_billed` (BigQuery,
 default 10 GB) and `statement_timeout_ms` are per-connection, so a wide-scanning lens

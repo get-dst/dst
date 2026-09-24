@@ -1,0 +1,80 @@
+# dst public demo: one VM, one Postgres, one app container behind Caddy (TLS),
+# the warehouse on MotherDuck, sign-in through Clerk. Standalone — not an
+# overlay on ../docker-compose.yml — because the shape differs: the app port is
+# never published (only the proxy reaches it) and the demo env contract is longer.
+#
+#   cp .env.example .env   # fill it in
+#   docker compose up -d
+#   see README.md for the seeding steps
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dst
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: dst
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dst"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    image: ${DST_IMAGE:?pin an image, e.g. ghcr.io/get-dst/dst:0.4.0}
+    restart: unless-stopped
+    # No `ports:` — Caddy is the only way in. uvicorn trusts X-Forwarded-* from
+    # the container network by default, which is exactly the proxy.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    environment:
+      # sslmode=disable: the DB is on the compose-private network, and production
+      # mode would otherwise append sslmode=require. TLS terminates at Caddy.
+      DATABASE_URL: postgresql+psycopg://dst_app:${DST_APP_DB_PASSWORD:?set DST_APP_DB_PASSWORD}@db:5432/dst?sslmode=disable
+      DATABASE_ADMIN_URL: postgresql+psycopg://dst:${POSTGRES_PASSWORD}@db:5432/dst?sslmode=disable
+      DST_SECRET_KEY: ${DST_SECRET_KEY:?generate one with `dst secret`}
+      DST_ENVIRONMENT: production
+      DST_PUBLIC_BASE_URL: https://${DEMO_DOMAIN:?set DEMO_DOMAIN}
+      # LLM + typed-decision providers, JSON (README shows the DeepSeek + Jev shape).
+      DST_PROVIDERS: ${DST_PROVIDERS:?set DST_PROVIDERS}
+      # Profiling never sends sample values to the model on a public deployment.
+      DST_LLM_DESCRIPTIONS: "false"
+      # Sign-in: every signed-in person becomes a demo caller in DST_DEMO_ORG_ID.
+      DST_CLERK_PUBLISHABLE_KEY: ${DST_CLERK_PUBLISHABLE_KEY:?set DST_CLERK_PUBLISHABLE_KEY}
+      DST_CLERK_SECRET_KEY: ${DST_CLERK_SECRET_KEY:?set DST_CLERK_SECRET_KEY}
+      # Empty on the first boot (bootstrap prints it), then filled and restarted.
+      DST_DEMO_ORG_ID: ${DST_DEMO_ORG_ID:-}
+      DST_DEMO_KEY_DAYS: ${DST_DEMO_KEY_DAYS:-7}
+      # The kill switch: governed answers per day for the whole demo. 0 = none.
+      DST_DAILY_REQUEST_CAP: ${DST_DAILY_REQUEST_CAP:-2000}
+      # The warehouse token, read by `dst demo --secret-env MOTHERDUCK_TOKEN`.
+      MOTHERDUCK_TOKEN: ${MOTHERDUCK_TOKEN:?set MOTHERDUCK_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DEMO_DOMAIN: ${DEMO_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
