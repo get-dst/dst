@@ -9,10 +9,14 @@ never from serving or from ``dst apply``.
 
 A ``md:`` path is MotherDuck. The token rides the connection secret (``secret_env``),
 never the path — a path is copied into snapshots, profiles and logs. MotherDuck
-opens read-only only under a read-scaling token (a regular token must open
-read-write), so ``read_only`` is a per-connection choice there: the default keeps
-the by-construction guarantee and expects a read-scaling token; ``read_only: false``
-opts out and leaves the SQL guard as the only line. A MotherDuck session attaches
+opens read-only under a regular token too (CREATE, INSERT, UPDATE and DELETE are
+refused on the attached database), so the by-construction guarantee stays the
+default there; a read-scaling token narrows the credential itself, and
+``read_only: false`` opts out for a connection that must write. DuckDB caches one
+configuration per ``md:`` database per process: a read-only open followed by a
+read-write open of the same database in one process is refused, so ``probe_write``
+on MotherDuck works only when nothing opened the database read-only first. A
+MotherDuck session attaches
 every database in the account, which is why every catalog read here is pinned to
 ``current_database()`` — a lens over one database must not see the others.
 

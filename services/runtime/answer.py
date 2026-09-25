@@ -58,8 +58,20 @@ _SYSTEM = (
     "Never attach a currency symbol, code or unit (such as $, €, USD or EUR) that "
     "the result and its notes do not state: if a monetary amount is given a "
     "currency below, write it in that currency; if none is stated, write the bare "
-    "number and name no currency at all."
+    "number and name no currency at all. "
+    "The SQL is part of the answer: its filters, ORDER BY and LIMIT carry meaning, "
+    "so names listed in order of a win rate answer 'which is best' even when the "
+    "rate itself is not a column. Only when neither the rows nor the SQL's shape "
+    "address what the question asks — it asks about something this query never "
+    "touches — reply with exactly one line, 'NO_ANSWER: <what the data is missing, "
+    "one sentence>', and nothing else. An empty result or a zero IS an answer: "
+    "report it, never NO_ANSWER."
 )
+
+# The composer's own decline, parsed like the generator's `no_answer`: the one
+# stage that sees the rows beside the question says they do not answer it, and
+# that verdict must reach the status, not just the prose.
+_NO_ANSWER = "NO_ANSWER:"
 
 _DEFS_HEADER = "Definitions governing the result columns (they decide what the values mean):"
 
@@ -74,6 +86,8 @@ class AnswerResult:
     text: str
     citations: list[Citation] = field(default_factory=list)
     confidence: Literal["high", "low"] | None = None
+    # Set when the composer declined: the rows do not answer the question.
+    no_answer_reason: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     # "length" means the model was CUT OFF mid-sentence by the token cap. The
@@ -429,8 +443,15 @@ class AnswerComposer:
         confidence: Literal["high", "low"] = (
             "low" if (truncated or not result.rows or not generated.definition_used) else "high"
         )
+        text = res.text.strip()
+        no_answer = (
+            text[len(_NO_ANSWER) :].strip() or "the result does not answer the question"
+            if text.upper().startswith(_NO_ANSWER)
+            else None
+        )
         return AnswerResult(
-            text=res.text.strip(),
+            text=text,
+            no_answer_reason=no_answer,
             citations=citations_for(generated, prose_context),
             confidence=confidence,
             input_tokens=res.input_tokens,

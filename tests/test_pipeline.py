@@ -1236,6 +1236,51 @@ def test_pipeline_refuses_unanswerable_with_named_gap() -> None:
     assert res.trace.ai_input_tokens == 1
 
 
+def test_pipeline_refuses_when_the_composer_declines() -> None:
+    """The composer is the one stage that sees the rows beside the question. When
+    it says they do not answer it (a list of names for 'what should I build'),
+    the response is refused with its gap named — never a non-answer served ok."""
+    llm = ScriptedLLM([_GOOD, "NO_ANSWER: the rows count customers and carry no order items"])
+
+    res = run_query(
+        question="Which products should a new customer buy first?",
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+
+    assert res.trace.status == "refused"
+    assert res.response.status == "refused"
+    assert res.response.data is None
+    assert res.response.answer == (
+        "I can't answer this from this lens's data: "
+        "the rows count customers and carry no order items"
+    )
+
+
+def test_composer_decline_marker_only_at_the_start() -> None:
+    """Only the reply's own leading marker is a decline; prose that mentions the
+    words mid-sentence is an answer."""
+    llm = ScriptedLLM([_GOOD, "There are 100 customers (NO_ANSWER: none needed)."])
+
+    res = run_query(
+        question="How many customers are there?",
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+
+    assert res.trace.status == "ok"
+
+
 # --- Dry-run gate: validate — and budget-check where the engine ------------
 # --- estimates cost — before any job runs.                                ---
 

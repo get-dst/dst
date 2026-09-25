@@ -4,7 +4,7 @@ dst ships five warehouse connectors (`services/lenses/connections.py:98`):
 
 | Type | Read-only mechanism | Runaway-query cap |
 |---|---|---|
-| `duckdb` | every query connection opened `read_only=True`; on MotherDuck (`path: md:<db>`) that needs a read-scaling token, or `read_only: false` to open read-write and rely on the SQL guard | `statement_timeout_ms`, unset by default (a local file); set it on anything reachable from outside |
+| `duckdb` | every query connection opened `read_only=True`, on a local file and on MotherDuck (`path: md:<db>`) alike; a read-scaling token narrows the credential itself, `read_only: false` opens read-write for a connection that must write | `statement_timeout_ms`, unset by default (a local file); set it on anything reachable from outside |
 | `postgres` | session forced `default_transaction_read_only=on` | `statement_timeout`, 30 s default |
 | `mysql` | query session set `SESSION TRANSACTION READ ONLY` | `MAX_EXECUTION_TIME`, 30 s default |
 | `bigquery` | read-scoped credential | `maximum_bytes_billed`, 10 GB default |

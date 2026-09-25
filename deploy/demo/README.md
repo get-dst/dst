@@ -26,8 +26,8 @@ What is in this directory:
    ```
 
    Then mint a **read-scaling token** for the same account. That is the token the demo
-   serves with: it can only `SELECT`, which is what makes the connector's read-only open
-   hold on MotherDuck. Read-scaling connections need the database to exist already, which
+   serves with: it can only `SELECT`, so the credential itself cannot write, beneath the
+   connector's read-only open. Read-scaling connections need the database to exist already, which
    the load above did.
 2. **Clerk.** Create an application; note the publishable and secret keys. Sign-in method
    is your call; every method ends in an email or a subject id, and that is the caller name.

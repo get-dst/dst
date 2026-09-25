@@ -1325,6 +1325,15 @@ def run_query(
     # value of each referral varies…') — a deterministic hook no phrase list
     # gives the question side. An answer whose prose names a measure this lens
     # declared it cannot compute is a substitution: refuse, never serve.
+    # The composer's decline: it saw the rows beside the question and they do
+    # not answer it (a list of hero names for "what should I build"). Served,
+    # that is a non-answer labelled ok; the verdict belongs in the status.
+    if certification != "certified" and ans.no_answer_reason:
+        return _trace_failure(
+            "refused",
+            guard.sql,
+            f"I can't answer this from this lens's data: {ans.no_answer_reason}",
+        )
     if certification != "certified":
         nc_echo = not_computable_echo(ans.text, semantic_model)
         if nc_echo is not None:
@@ -1415,6 +1424,12 @@ def run_query(
                 # turning a servable request into an error.
                 retry = None
             _mark("compose", retry_started)
+            if retry is not None and retry.no_answer_reason:
+                return _trace_failure(
+                    "refused",
+                    guard.sql,
+                    f"I can't answer this from this lens's data: {retry.no_answer_reason}",
+                )
             if retry is not None:
                 retry_model = getattr(composer, "model", model_name)
                 ai_in += retry.input_tokens

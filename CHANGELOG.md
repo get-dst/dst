@@ -29,6 +29,35 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.4.2] — 2026-09-25
+
+No schema change.
+
+### Fixed
+
+- **A result that does not answer the question is refused, not served.** The answer
+  composer is the one stage that sees the rows beside the question. When they do not
+  carry what was asked (a list of hero names for "what should I build on Juggernaut"),
+  it now declines in a fixed form and the response is `refused` with the gap named,
+  the same shape as the generator's own decline. Before, the prose said the data could
+  not answer while the status said `ok`. An empty result or a zero is still an answer.
+- **MotherDuck read-only, corrected.** The 0.4.1 notes said read-only needs a
+  read-scaling token. It does not: under a regular token the read-only open refuses
+  CREATE, INSERT, UPDATE and DELETE on the attached database, so the default holds
+  either way. A read-scaling token narrows the credential itself. DuckDB keeps one
+  configuration per `md:` database per process, so `probe_write` works on MotherDuck
+  only when nothing opened that database read-only first.
+
+### Changed
+
+- The release workflow publishes only from `get-dst/dst`. A fork or mirror that pushes
+  a `v*` tag builds nothing and pushes no image or package under its own name.
+- The dashboard's design spec lives beside the dashboard, in `apps/web/DESIGN.md`.
+
+### Removed
+
+- `scripts/ai_tells_lint.py`, a writing helper unrelated to the product.
+
 ## [0.4.1] — 2026-09-24
 
 One schema change ships with this release: run `dst migrate` before serving.

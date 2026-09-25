@@ -55,3 +55,6 @@ bq-results-*.csv
 services/web_dist/*
 !services/web_dist/.gitkeep
 
+
+# Per-maintainer agent instructions (Claude Code loads it; it never ships).
+CLAUDE.local.md

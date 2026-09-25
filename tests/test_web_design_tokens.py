@@ -29,7 +29,4 @@ def test_no_vibe_styling_in_web() -> None:
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             if BANNED.search(line):
                 hits.append(f"{path.relative_to(WEB_SRC)}:{lineno}: {line.strip()[:80]}")
-    assert not hits, (
-        "generic-LLM styling tells found (see docs/design/genuine-signature.md):\n"
-        + "\n".join(hits)
-    )
+    assert not hits, "generic-LLM styling tells found (see apps/web/DESIGN.md):\n" + "\n".join(hits)
