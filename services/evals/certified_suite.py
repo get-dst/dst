@@ -196,6 +196,17 @@ def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) 
     return not remaining
 
 
+def expected_resolution(
+    stored: dict[str, Any] | None, attribute: Callable[[], Resolution]
+) -> Resolution:
+    """The oracle's gold: a stored CONSTRUCTION (the typed reading approved at
+    certification) stands; anything else is attributed now, with today's attributor."""
+    kept = Resolution.model_validate(stored) if stored else None
+    if kept is not None and kept.method == "construction":
+        return kept
+    return attribute()
+
+
 def _same(want: Any, got: Any) -> bool:
     """One cell equal to the certified scalar: floats within the scalar tolerance,
     everything else exact (a bool is never a number here)."""
@@ -447,11 +458,13 @@ def _score_one(
     oracle_summary = _value_summary(oracle.columns, oracle_rows)
     # The oracle's own resolution, attributed at test time: no stored
     # expectation to go stale when a metric is renamed, one attributor for
-    # both sides.
-    expected = (
-        Resolution.model_validate(a.resolution)
-        if a.resolution
-        else resolution_mod.attribute(oracle_sql, assembled.model, assembled.value_domains)
+    # both sides. A stored resolution is kept only when it is a CONSTRUCTION —
+    # the typed reading a human approved at certification. A stored attribution
+    # is the attributor's output at that moment, a cache that goes stale as the
+    # attributor learns (an inline ratio once read back as its numerator).
+    expected = expected_resolution(
+        a.resolution,
+        lambda: resolution_mod.attribute(oracle_sql, assembled.model, assembled.value_domains),
     )
     generator, escalate_generator = generators_for(assembled)
     passed, reason = False, None

@@ -616,6 +616,29 @@ def test_invalid_template_fails_its_case_loudly() -> None:
     assert case.reason is not None and "re-certify" in case.reason
 
 
+def test_a_stored_attribution_is_recomputed_a_stored_construction_stands() -> None:
+    """A certified answer stores the resolution it had when certified. An
+    ATTRIBUTED one is the attributor's output then — stale once the attributor
+    reads the SQL better — so the suite attributes again; a CONSTRUCTION is the
+    typed reading a human approved and stands as gold."""
+    from services.contracts.resolution import Resolution, Slot
+    from services.evals.certified_suite import expected_resolution
+
+    def res(method: str, metric: str) -> Resolution:
+        return Resolution(
+            method=method,  # type: ignore[arg-type]
+            slots=[Slot(kind="metric", name=metric, source="declared")],
+            tag="declared",
+        )
+
+    fresh = res("attributed", "radiant_win_rate")
+    stale = res("attributed", "radiant_wins").model_dump()
+    approved = res("construction", "radiant_wins").model_dump()
+    assert expected_resolution(stale, lambda: fresh) == fresh
+    assert expected_resolution(approved, lambda: fresh).slots[0].name == "radiant_wins"
+    assert expected_resolution(None, lambda: fresh) == fresh
+
+
 def test_compare_accepts_the_certified_value_beside_label_columns_visibly() -> None:
     """'What is the current patch?' certified as 7.41, answered as ('7.41', True):
     the value is there, labelled. Exactly one matching cell passes, visibly."""

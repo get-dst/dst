@@ -130,6 +130,8 @@ def test_mint_issues_one_live_key_per_person(client: TestClient, demo_org: uuid.
     assert body["caller"] == VISITOR.lower()
     assert body["key"].startswith("dst_")
     assert body["lenses"] == [LENS_NAME]
+    # each lens comes with a question its own semantic layer declares, not a fixed one
+    assert set(body["examples"]) == {LENS_NAME}
     assert body["expires_in_days"] == settings.demo_key_days
     # The minted key is a real caller key on the data plane.
     assert client.get(f"/v1/lenses/{LENS_NAME}", headers=_auth(body["key"])).status_code == 200

@@ -31,8 +31,9 @@ What is in this directory:
    the load above did.
 2. **Clerk.** Create an application; note the publishable and secret keys. Sign-in method
    is your call; every method ends in an email or a subject id, and that is the caller name.
-3. **DeepSeek.** Set a monthly spending limit in their dashboard. dst's daily cap bounds
-   answers, not dollars, and a cap that lives only in our code is a single point of failure.
+3. **DeepSeek.** Use a key of its own on a prepaid balance you top up by hand, so the
+   spend cannot run past what you loaded. dst's daily cap bounds answers, not dollars,
+   and a cap that lives only in the code is a single point of failure.
 4. **DNS.** Point `DEMO_DOMAIN` at the VM. Caddy gets the certificate on first request.
 
 ## On the VM
@@ -66,9 +67,9 @@ The three doors a visitor gets, all governed by the same lens allow-list and bud
 
 ## The same thing on Cloud Run
 
-The VM is the recipe; the first public endpoint went up on Cloud Run instead, following
-[docs/deploy-gcp.md](../../docs/deploy-gcp.md) step for step. The demo-specific parts map
-onto that runbook like this:
+The VM is the recipe; the same service also runs on Cloud Run, following the Cloud Run
+section of [docs/deployment.md](../../docs/deployment.md#cloud-run-and-friends). The
+demo-specific parts map onto it like this:
 
 - The service gets the extra env: `DST_DAILY_REQUEST_CAP`, `DST_CLERK_PUBLISHABLE_KEY`,
   `DST_LLM_DESCRIPTIONS=false`, and `DST_DEMO_ORG_ID` once bootstrap has printed the org.

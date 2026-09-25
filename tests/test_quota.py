@@ -190,6 +190,23 @@ def test_probe_rows_are_not_governed_usage(seeded: tuple[uuid.UUID, str]) -> Non
     assert quota.usage(org, caller=CALLER).served == 0
 
 
+def test_only_served_answers_spend_the_day(seeded: tuple[uuid.UUID, str]) -> None:
+    """A refusal, a clarification or an error is logged too, but it served no
+    answer: the day's budget counts status 'ok' rows only."""
+    org, _ = seeded
+    before = quota.usage(org, caller=CALLER).served
+    with org_session(org) as session:
+        for i, status in enumerate(("refused", "clarification", "error", "ok")):
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, question, "
+                    "status) VALUES (:o, :r, :l, :c, 'q', :s)"
+                ),
+                {"o": org, "r": f"st{i}", "l": LENS_NAME, "c": CALLER, "s": status},
+            )
+    assert quota.usage(org, caller=CALLER).served == before + 1
+
+
 def test_zero_cap_means_no_quota() -> None:
     assert not quota.exceeded(0, quota.Usage(served=10**6, oldest=None))
     assert quota.exceeded(1, quota.Usage(served=1, oldest=None))

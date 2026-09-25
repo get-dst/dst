@@ -25,8 +25,10 @@ from services.db.session import org_session
 
 WINDOW_SECONDS = 24 * 3600
 
-# Admin passthrough rows are not governed answers (observe.py draws the same line).
-_GOVERNED = "COALESCE(generator_tier, '') <> 'probe'"
+# Admin passthrough rows are not governed answers (observe.py draws the same line),
+# and only a served answer counts: a refusal, a clarification or dst's own error
+# is logged too, and must never spend the caller's day.
+_GOVERNED = "COALESCE(generator_tier, '') <> 'probe' AND status = 'ok'"
 _WINDOW = "created_at >= NOW() - make_interval(secs => :w)"
 
 

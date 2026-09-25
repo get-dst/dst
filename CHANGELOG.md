@@ -29,6 +29,27 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.2] — 2026-09-25
+
+No schema change.
+
+### Fixed
+
+- **A certified answer's stored reading no longer goes stale.** The suite graded
+  typed answers against the resolution stored when the answer was certified. An
+  attributed one is recomputed with the current attributor, so improvements (such
+  as reading an inline ratio back as the ratio) reach answers certified earlier.
+  A construction, the typed reading approved at certification, still stands.
+- **Only served answers count against a daily quota.** Refusals, clarifications
+  and dst's own errors are logged too, and they no longer use up a caller's day.
+- **The demo page's example question comes from the lens.** The key mint returns
+  one example per lens, the first common question its semantic layer declares.
+- **`allow_untyped` help text:** an untyped answer carries `typed: false` and the
+  `UNTYPED:` line; its tag is what its SQL reads back as.
+- **Demo recipe:** the Cloud Run section links the public deployment guide, the
+  unused Clerk secret is no longer required, and DeepSeek spend is bounded by a
+  prepaid balance.
+
 ## [0.5.1] — 2026-09-25
 
 No schema change.

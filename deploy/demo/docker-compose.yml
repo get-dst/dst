@@ -47,7 +47,6 @@ services:
       DST_LLM_DESCRIPTIONS: "false"
       # Sign-in: every signed-in person becomes a demo caller in DST_DEMO_ORG_ID.
       DST_CLERK_PUBLISHABLE_KEY: ${DST_CLERK_PUBLISHABLE_KEY:?set DST_CLERK_PUBLISHABLE_KEY}
-      DST_CLERK_SECRET_KEY: ${DST_CLERK_SECRET_KEY:?set DST_CLERK_SECRET_KEY}
       # Empty on the first boot (bootstrap prints it), then filled and restarted.
       DST_DEMO_ORG_ID: ${DST_DEMO_ORG_ID:-}
       DST_DEMO_KEY_DAYS: ${DST_DEMO_KEY_DAYS:-7}

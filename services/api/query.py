@@ -122,8 +122,9 @@ BINDINGS_HELP = (
 )
 UNTYPED_HELP = (
     "when the question does not type (a slot clarifies), fall to raw-SQL "
-    "generation instead — always disclosed with an UNTYPED line and tagged by "
-    "what it earns, never `declared`. Unset: the lens's `untyped_fallback` "
+    "generation instead — always disclosed with an UNTYPED line and `typed: false` "
+    "on its ledger; its tag is what its SQL reads back as. Unset: the lens's "
+    "`untyped_fallback` "
     "(default false: ask, don't guess); false demands typed-only"
 )
 FORMAT_HELP = (

@@ -45,12 +45,18 @@ def _base(request: Request) -> str:
     return (settings.public_base_url or str(request.base_url)).rstrip("/")
 
 
-def _lenses_for(visitor: credentials.CallerIdentity) -> list[str]:
-    return [
-        name
-        for name, _, _, bundle in list_published_for_org(visitor.org_id)
-        if authorize(visitor, bundle.config)[0]
-    ]
+def _lenses_for(visitor: credentials.CallerIdentity) -> dict[str, str | None]:
+    """The lenses this visitor may ask, each with an example question: the first
+    common question its semantic layer declares, so the page shows a question the
+    lens was authored to answer rather than one from some other dataset."""
+    out: dict[str, str | None] = {}
+    for name, _, _, bundle in list_published_for_org(visitor.org_id):
+        if not authorize(visitor, bundle.config)[0]:
+            continue
+        out[name] = next(
+            (q for e in bundle.semantic_model.entities for q in e.common_questions), None
+        )
+    return out
 
 
 @router.post("/auth/demo-key", status_code=201)
@@ -79,11 +85,13 @@ def demo_key(
         minted = credentials.issue_key(
             session, visitor.caller_id, expires_in_days=settings.demo_key_days
         )
+    lenses = _lenses_for(visitor)
     return {
         "caller": visitor.name,
         "key": minted,
         "expires_in_days": settings.demo_key_days,
-        "lenses": _lenses_for(visitor),
+        "lenses": list(lenses),
+        "examples": lenses,
         "base_url": _base(request),
     }
 
@@ -156,17 +164,18 @@ async function mint() {
   }
   const b = await r.json();
   const lens = b.lenses[0] || '<lens>';
+  const ask = ((b.examples || {})[lens] || 'What can this lens answer?').replace(/["\\\\]/g, '');
   $('key').textContent = b.key;
   $('days').textContent = b.expires_in_days;
   $('curl').textContent =
     `curl -s ${b.base_url}/v1/lenses/${lens}/query \\\\\n` +
     `  -H 'Authorization: Bearer ${b.key}' -H 'Content-Type: application/json' \\\\\n` +
-    `  -d '{"q": "How many customers are repeat customers?"}'`;
+    `  -d '{"q": "${ask.replace(/'/g, '')}"}'`;
   $('openai').textContent =
     `from openai import OpenAI\n` +
     `client = OpenAI(base_url="${b.base_url}/v1", api_key="${b.key}")\n` +
     `client.chat.completions.create(model="${lens}",\n` +
-    `    messages=[{"role": "user", "content": "How many customers are repeat customers?"}])`;
+    `    messages=[{"role": "user", "content": "${ask}"}])`;
   $('mcp').textContent = `${b.base_url}/mcp   (sign in with the same account when the client asks)`;
   $('signin').hidden = true;
   $('issued').hidden = false;

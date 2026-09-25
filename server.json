@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://www.dataservetool.com/",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "dst-core",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
