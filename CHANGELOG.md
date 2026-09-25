@@ -29,6 +29,20 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.7] — 2026-09-25
+
+No schema change.
+
+### Fixed
+
+- **A filter that decides a ratio is refused.** A typed reading that filtered on a
+  column only the ratio's numerator reads (`win_rate` where `is_win`) made every row
+  1.0 and served that as a ranking. It now asks, and with `untyped_fallback` raw
+  generation answers. A simple metric filtered on its own column still types.
+- **A number stated once restricts one column.** "The winner's gold lead at 15
+  minutes" bound 15 to both the minute and the gold lead. Once a stated number is
+  bound, a second column reading it asks which field it restricts.
+
 ## [0.5.6] — 2026-09-25
 
 No schema change.

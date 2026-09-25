@@ -306,6 +306,60 @@ def test_a_numeric_column_is_a_filter_candidate_only_with_a_stated_number() -> N
     assert "order_id" in with_number and "status" in without
 
 
+def test_a_number_stated_once_restricts_one_column() -> None:
+    """'15 minutes' once in the question compiled as minute = 15 AND gold_lead = 15,
+    a filter on a value nobody gave. The second column reading the same literal
+    asks which field it restricts."""
+    steps = [
+        _sure("aggregate"), _sure("revenue"), _sure(None), _sure(None),
+        _sure("order_id"), _sure("="), _sure("amount"), _sure("="), _sure(None),
+    ]  # fmt: skip
+    res = _resolver(steps).resolve("revenue from order 7", _model())
+    assert res.intent is None and res.clarification is not None
+    assert set(res.clarification.options) == {"order_id", "amount"}
+    one = [_sure("aggregate"), _sure("revenue"), _sure(None), _sure(None), _sure("order_id")]
+    ok = _resolver([*one, _sure("="), _sure(None)]).resolve("revenue from order 7", _model())
+    assert ok.intent is not None
+    assert [(f.field, f.value) for f in ok.intent.filters] == [("order_id", 7)]
+
+
+def _win_rate_model() -> SemanticModel:
+    model = _model()
+    orders = model.entities[0]
+    orders.fields.append(Field(name="is_paid", type="boolean"))
+    orders.metrics += [
+        Metric(name="paid", agg="sum", expr="CASE WHEN orders.is_paid THEN 1 ELSE 0 END"),
+        Metric(name="orders_n", agg="count", expr="orders.order_id"),
+        Metric(name="paid_rate", type="ratio", numerator="paid", denominator="orders_n"),
+    ]
+    return model
+
+
+def test_a_filter_on_a_ratios_numerator_column_is_refused() -> None:
+    """`paid_rate WHERE is_paid` is 1.0 on every row: a filter on a column only the
+    numerator reads decides the ratio. It asks rather than serve identical values."""
+    resolver = TypedResolver(
+        ScriptedDecider(
+            [
+                _sure("ranking"),
+                _sure("paid_rate"),
+                _sure(None),
+                _sure("country"),
+                _sure(None),
+                _sure("is_paid"),
+                _sure("true"),
+                _sure(None),
+                _sure(None),
+            ]
+        ),  # type: ignore[arg-type]
+        domains={**DOMAINS, "is_paid": ["true", "false"]},
+        today=TODAY,
+    )
+    res = resolver.resolve("Which country has the highest paid rate?", _win_rate_model())
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "is_paid"
+
+
 def test_a_listing_without_ranking_words_still_types() -> None:
     decisions = [_sure("listing"), _sure("customer_name"), _sure(None), _sure(None)]
     res = _resolver(decisions).resolve("list the customers", _model())

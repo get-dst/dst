@@ -50,7 +50,7 @@ from services.contracts.query_intent import (
 )
 from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
-from services.contracts.semantic_model import Definition, Entity, SemanticModel
+from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.runtime import ambiguity, decision_policy, reading, timewindow
 from services.runtime.compiler import CompileError, compile_intent, is_predicate
 from services.runtime.intent_generator import intent_term
@@ -218,6 +218,48 @@ def period_field(entity: Entity, domains: dict[str, list[str]]) -> str | None:
         if values and all(_MONTH_PERIOD.match(v) for v in values):
             return f.name
     return None
+
+
+def _expr_columns(metric: Metric) -> set[str]:
+    cols: set[str] = set()
+    for sql in [metric.expr or "", *metric.filters]:
+        if not sql.strip():
+            continue
+        try:
+            cols |= {c.name.lower() for c in sqlglot.parse_one(sql).find_all(exp.Column)}
+        except sqlglot.errors.ParseError:
+            continue
+    return cols
+
+
+def _refuse_self_defining_filters(
+    entity: Entity, metrics: list[str], filters: list[IntentFilter]
+) -> None:
+    """A filter on a column only a ratio's NUMERATOR reads decides the ratio:
+    `win_rate WHERE is_win` is 1.0 for every row, `WHERE NOT is_win` is 0.0 — a
+    ranking of identical values served as an answer. Ask instead. A simple
+    metric filtered on its own column (SUM(amount) WHERE amount > 1000) is an
+    ordinary question and is untouched."""
+    by_name = {m.name: m for m in entity.metrics}
+    for name in metrics:
+        ratio = by_name.get(name)
+        if ratio is None or ratio.type != "ratio" or not ratio.numerator or not ratio.denominator:
+            continue
+        num, den = by_name.get(ratio.numerator), by_name.get(ratio.denominator)
+        if num is None or den is None:
+            continue
+        defining = _expr_columns(num) - _expr_columns(den)
+        for f in filters:
+            if f.field.lower() in defining:
+                raise _Clarify(
+                    ClarificationRequest(
+                        kind="unresolved_slot",
+                        term=f.field,
+                        question=f"Filtering on '{f.field}' would decide '{name}' itself "
+                        f"(its numerator counts '{f.field}'), so every row would read the "
+                        "same — what should the answer be restricted by instead?",
+                    )
+                )
 
 
 def _population_conflict(
@@ -855,6 +897,7 @@ class TypedResolver:
         filters, supplied = self._filters(question, entity, own_members, records)
         if conflict := _population_conflict(entity, filters, model.dialect):
             raise _Decline(conflict)
+        _refuse_self_defining_filters(entity, metrics, filters)
         filters += self._window(question, entity, metrics)
         order_by, limit = self._order(question, metrics, fields, self._better(entity, metrics))
         if shape == "ranking" and not order_by:
@@ -1223,6 +1266,22 @@ class TypedResolver:
             return
         literal = self._literal_in_question(question, ftype)
         if literal is not None:
+            # The question states this number once: it restricts one column. A
+            # second column reading it ('15 minutes' as minute = 15 AND
+            # gold_lead = 15) filters on a value nobody gave — ask which it is.
+            taken = next(
+                (f.field for f in filters if f.field != column and f.value == literal), None
+            )
+            if taken is not None:
+                raise _Clarify(
+                    ClarificationRequest(
+                        kind="unresolved_slot",
+                        term=column,
+                        question=f"The question states {literal} once, and both '{taken}' "
+                        f"and '{column}' would read it — which field does it restrict?",
+                        options=[taken, column],
+                    )
+                )
             op = self._op(question, column, records)
             filters.append(IntentFilter(field=column, op=op, value=literal))
             return
