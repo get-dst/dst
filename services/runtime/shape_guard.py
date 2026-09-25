@@ -378,6 +378,40 @@ def _operand(node: exp.Expression) -> exp.Expression:
             return node
 
 
+def _is_primary_key(node: object, entity: Entity) -> bool:
+    """A column that is the entity's single-column primary key: never null, so
+    counting it counts every row."""
+    return (
+        isinstance(node, exp.Column)
+        and len(entity.primary_key) == 1
+        and node.name.lower() == entity.primary_key[0].lower()
+    )
+
+
+def _counts_every_row(node: exp.Expression, inner: exp.Expression, entity: Entity) -> bool:
+    """COUNT(*), COUNT(1) and COUNT(<primary key>) are one count."""
+    if not isinstance(node, exp.Count) or isinstance(node.this, exp.Distinct):
+        return False
+    return (
+        isinstance(inner, exp.Star)
+        or (isinstance(inner, exp.Literal) and inner.this == "1")
+        or _is_primary_key(inner, entity)
+    )
+
+
+def _metric_counts_every_row(metric: Metric, entity: Entity) -> bool:
+    """A declared plain count of every row: no expression, or the primary key."""
+    if metric.agg != "count":
+        return False
+    if not (metric.expr or "").strip():
+        return True
+    try:
+        parsed = sqlglot.parse_one(metric.expr or "")
+    except sqlglot.errors.ParseError:
+        return False
+    return _is_primary_key(parsed, entity)
+
+
 def _operand_is(
     node: exp.Expression,
     metric: Metric,
@@ -400,7 +434,10 @@ def _operand_is(
     inner, guard_conds = parts
     if isinstance(node, exp.Count) and isinstance(inner, exp.Star):
         inner = exp.Literal.number(1)
-    if _canon(inner, entity, alias_map, sole, strict=False) != ident.key[2]:
+    if (
+        not (_counts_every_row(node, inner, entity) and _metric_counts_every_row(metric, entity))
+        and _canon(inner, entity, alias_map, sole, strict=False) != ident.key[2]
+    ):
         return False
     select = node.find_ancestor(exp.Select)
     where = select.args.get("where") if select is not None else None

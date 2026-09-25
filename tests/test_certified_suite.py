@@ -639,6 +639,30 @@ def test_a_stored_attribution_is_recomputed_a_stored_construction_stands() -> No
     assert expected_resolution(None, lambda: fresh) == fresh
 
 
+def test_only_an_exact_pass_stores_gold() -> None:
+    """A shape-lenient pass can carry an extra metric; stored as gold, that slot
+    would fail every later exact reading. Only an exact, typed construction is
+    gold-worthy."""
+    from services.contracts.resolution import Resolution, Slot
+    from services.evals.certified_suite import gold_worthy
+
+    typed = Resolution(
+        method="construction",
+        slots=[Slot(kind="metric", name="radiant_win_rate", source="declared")],
+        tag="declared",
+        typed=True,
+    )
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(["r"], [[0.55]], ["r"], [[0.55]])
+    assert ok and reason is None  # exact
+    ok, reason = _compare(["r"], [[0.55]], ["wins", "r"], [[3, 0.55]])
+    assert ok and reason is not None  # lenient: the value beside another metric
+    assert gold_worthy(True, typed)
+    assert not gold_worthy(False, typed)  # lenient or failed
+    assert not gold_worthy(True, typed.model_copy(update={"typed": False}))
+
+
 def test_compare_accepts_the_certified_value_beside_label_columns_visibly() -> None:
     """'What is the current patch?' certified as 7.41, answered as ('7.41', True):
     the value is there, labelled. Exactly one matching cell passes, visibly."""

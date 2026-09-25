@@ -196,6 +196,14 @@ def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) 
     return not remaining
 
 
+def gold_worthy(exact: bool, got: Resolution) -> bool:
+    """May this run's typed reading be stored as the certified answer's gold?
+    Only after an EXACT pass: a shape-lenient one (the certified value found
+    beside other columns) can carry an extra metric, and frozen as gold that
+    extra slot would fail every later exact reading."""
+    return exact and bool(got.typed) and got.method == "construction"
+
+
 def expected_resolution(
     stored: dict[str, Any] | None, attribute: Callable[[], Resolution]
 ) -> Resolution:
@@ -474,6 +482,7 @@ def _score_one(
     typed: bool | None = None
     grounding: str | None = None
     delivered = False
+    exact = False
     # Retry-before-fail: a case fails only after failing
     # every attempt; retries are paid only on failures. GATE_ATTEMPTS is
     # shared with the behavioral runner so the whole gate has one policy.
@@ -519,6 +528,9 @@ def _score_one(
         else:
             data = pr.response.data
             passed, reason = _compare(oracle.columns, oracle_rows, data.columns, data.rows)
+            # an exact match: no lenient bridge was needed (a later flaky-retry
+            # note must not hide that it was)
+            exact = passed and reason is None
             gen_summary = _value_summary(data.columns, data.rows)
         if passed:
             if _attempt > 0:
@@ -549,8 +561,6 @@ def _score_one(
         resolution_got=got.tag if got is not None else None,
         typed=typed,
         resolution=(
-            got.model_dump(mode="json")
-            if got is not None and got.typed and got.method == "construction"
-            else None
+            got.model_dump(mode="json") if got is not None and gold_worthy(exact, got) else None
         ),
     )

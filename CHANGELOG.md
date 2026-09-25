@@ -29,6 +29,21 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.3] — 2026-09-25
+
+No schema change.
+
+### Fixed
+
+- **A count of the primary key is a count of every row.** A ratio declared over
+  `COUNT(<primary key>)` now matches SQL dividing by `COUNT(*)` or `COUNT(1)`, so an
+  inline ratio reads back as the declared ratio whichever way its count is written.
+  The slot lane follows the certified suite's rule for stored gold: a stored
+  construction stands, a stored attribution is re-read.
+- **Only an exact pass becomes gold.** A shape-lenient pass (the certified value
+  found beside other columns) can carry an extra metric, so its typed reading is no
+  longer stored as the certified answer's gold.
+
 ## [0.5.2] — 2026-09-25
 
 No schema change.

@@ -208,7 +208,11 @@ def gold_for(a: CertifiedAnswer, model: SemanticModel, resolver: Any) -> Resolut
     else its approved SQL attributed into slots — None when neither carries a
     governed measure (nothing to grade; never a vacuous pass)."""
     if a.resolution:
-        return Resolution.model_validate(a.resolution)
+        stored = Resolution.model_validate(a.resolution)
+        # A stored CONSTRUCTION is the approved typed reading; a stored
+        # attribution is a cache of the attributor, re-read with today's.
+        if stored.method == "construction":
+            return stored
     attributed = ledger.attribute(a.sql, model, resolver._domains)
     if any(s.kind in MEASURE_KINDS and s.source in GOVERNED for s in attributed.slots):
         return attributed

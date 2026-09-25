@@ -285,6 +285,39 @@ def _metrics(sql: str) -> list[tuple[str, str]]:
     return _slots(attribute(sql, _ratio_model()), "metric")
 
 
+def _pk_count_model() -> SemanticModel:
+    """The ratio model with match_count declared the way real projects write it:
+    COUNT of the primary key column, not a bare COUNT(*)."""
+    model = _ratio_model()
+    matches = model.entities[0]
+    matches.primary_key = ["match_id"]
+    matches.fields.append(Field(name="match_id", type="number"))
+    matches.metrics[1] = Metric(name="match_count", agg="count", expr="pub_matches.match_id")
+    return model
+
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        f"{_WINS} * 1.0 / COUNT(*)",
+        f"{_WINS} * 1.0 / COUNT(pub_matches.match_id)",
+        f"{_WINS} * 1.0 / COUNT(1)",
+    ],
+)
+def test_a_count_of_the_primary_key_is_a_count_of_every_row(select: str) -> None:
+    """COUNT(*), COUNT(1) and COUNT(<primary key>) are one count: a key is never
+    null. A ratio whose denominator counts the key reads back as the ratio."""
+    got = _slots(attribute(f"SELECT {select}{_FROM}", _pk_count_model()), "metric")
+    assert got == [("radiant_win_rate", "declared")]
+
+
+def test_a_count_of_a_nullable_column_is_not_every_row() -> None:
+    got = _slots(
+        attribute(f"SELECT {_WINS} * 1.0 / COUNT(duration){_FROM}", _pk_count_model()), "metric"
+    )
+    assert ("radiant_win_rate", "declared") not in got
+
+
 @pytest.mark.parametrize(
     "select",
     [
