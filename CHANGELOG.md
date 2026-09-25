@@ -29,6 +29,18 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.6] — 2026-09-25
+
+No schema change.
+
+### Changed
+
+- **The demo page says what it is about.** Its heading is the instance name, and
+  before sign-in it lists what a visitor will be able to ask: each lens a demo
+  caller may use, by its display name and description, with an example question its
+  semantic layer declares. The MCP step says to name the connector after the
+  instance.
+
 ## [0.5.5] — 2026-09-25
 
 No schema change.

@@ -12,6 +12,7 @@ one click from dead.
 from __future__ import annotations
 
 import html
+import logging
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -23,8 +24,9 @@ from services.config import instance_name, settings
 from services.db.session import org_session
 from services.governance import credentials, ratelimit
 from services.governance.policy import authorize
-from services.lenses.store import list_published_for_org
+from services.lenses.store import LensBundle, list_published_for_org
 
+log = logging.getLogger("dst.demo")
 router = APIRouter(tags=["demo"])
 
 # Minting is cheap for us and free for the visitor; the budget exists so a script
@@ -45,18 +47,48 @@ def _base(request: Request) -> str:
     return (settings.public_base_url or str(request.base_url)).rstrip("/")
 
 
+def _example(bundle: LensBundle) -> str | None:
+    """The first common question the lens's semantic layer declares: a question it
+    was authored to answer, never one from some other dataset."""
+    return next((q for e in bundle.semantic_model.entities for q in e.common_questions), None)
+
+
 def _lenses_for(visitor: credentials.CallerIdentity) -> dict[str, str | None]:
-    """The lenses this visitor may ask, each with an example question: the first
-    common question its semantic layer declares, so the page shows a question the
-    lens was authored to answer rather than one from some other dataset."""
-    out: dict[str, str | None] = {}
-    for name, _, _, bundle in list_published_for_org(visitor.org_id):
+    """The lenses this visitor may ask, each with its example question."""
+    return {
+        name: _example(bundle)
+        for name, _, _, bundle in list_published_for_org(visitor.org_id)
+        if authorize(visitor, bundle.config)[0]
+    }
+
+
+def _lens_list_html() -> str:
+    """What a visitor will be able to ask, shown before sign-in: every published
+    lens a demo visitor is authorized for, by its display name and description,
+    with its example question. All of it comes from the lens files."""
+    visitor = credentials.CallerIdentity(
+        org_id=demo.org_id(), name="visitor", is_admin=False, groups=[demo.GROUP]
+    )
+    try:
+        published = list_published_for_org(visitor.org_id)
+    except Exception:  # noqa: BLE001 — the list informs; it must never take the page down
+        log.exception("demo page: listing the demo's lenses failed")
+        return ""
+    items = []
+    for _name, _, _, bundle in published:
         if not authorize(visitor, bundle.config)[0]:
             continue
-        out[name] = next(
-            (q for e in bundle.semantic_model.entities for q in e.common_questions), None
+        cfg = bundle.config
+        ask = _example(bundle)
+        items.append(
+            f"<li><b>{html.escape(cfg.display_name or cfg.name)}</b>"
+            + (f" — {html.escape(cfg.description)}" if cfg.description else "")
+            + (f'<br><span class="ex">“{html.escape(ask)}”</span>' if ask else "")
+            + "</li>"
         )
-    return out
+    if not items:
+        return ""
+    return '<h2>What you can ask</h2><ul class="lenses">' + "".join(items) + "</ul>"
 
 
 @router.post("/auth/demo-key", status_code=201)
@@ -110,7 +142,12 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     border:1px solid #e4ddcf; border-radius:8px; padding:1.6rem 1.8rem; }
   .tag { font-size:11px; font-weight:600; letter-spacing:.14em;
     text-transform:uppercase; color:#206b4e; }
-  h1 { font-size:17px; margin:.5rem 0 .4rem; }
+  h1 { font-size:20px; margin:.5rem 0 .1rem; }
+  .sub { color:#2b2824; margin:0 0 .8rem; }
+  ul.lenses { padding-left:1.1rem; margin:.3rem 0 .9rem; }
+  ul.lenses li { margin:.35rem 0; color:#6b6459; }
+  ul.lenses b { color:#2b2824; }
+  .ex { color:#206b4e; }
   h2 { font-size:13px; margin:1.2rem 0 .3rem; letter-spacing:.06em; text-transform:uppercase; }
   p { color:#6b6459; margin:.3rem 0 .8rem; }
   pre { background:#f5f1e8; border-left:2px solid #206b4e; padding:.6rem .8rem;
@@ -122,10 +159,11 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   [hidden] { display:none !important; }
 </style></head><body><div class="card">
   <div class="tag">__BYLINE__</div>
-  <h1>Ask a governed warehouse, from your own AI</h1>
+  <h1>__NAME__</h1>
+  <p class="sub">Ask a governed warehouse, from your own AI.</p>
+  __LENSES__
   <p>Sign in to get a key. The key works with curl, any OpenAI-compatible client, and any
-  MCP client. Answers come from governed lenses over a warehouse; every answer carries its
-  SQL and its verification.</p>
+  MCP client; every answer carries its SQL and its verification.</p>
   <div id="signin"><p id="status">Loading sign-in…</p></div>
   <div id="issued" hidden>
     <h2>Your key</h2>
@@ -138,6 +176,8 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <pre id="openai"></pre>
     <h2>MCP</h2>
     <pre id="mcp"></pre>
+    <p class="fine">Add it as a custom connector named <b>__NAME__</b>, then sign in with the
+    same account when the client asks. After that, just ask: "ask __NAME__ …".</p>
     <p class="fine">Limits: a per-minute and a per-day budget per account, and a daily cap
     for the whole demo. A refusal says which one, and when it frees. Questions you ask are
     logged with your sign-in email and reviewed to improve the product; ask nothing you
@@ -176,7 +216,7 @@ async function mint() {
     `client = OpenAI(base_url="${b.base_url}/v1", api_key="${b.key}")\n` +
     `client.chat.completions.create(model="${lens}",\n` +
     `    messages=[{"role": "user", "content": "${ask}"}])`;
-  $('mcp').textContent = `${b.base_url}/mcp   (sign in with the same account when the client asks)`;
+  $('mcp').textContent = `${b.base_url}/mcp`;
   $('signin').hidden = true;
   $('issued').hidden = false;
 }
@@ -210,5 +250,6 @@ def demo_page() -> HTMLResponse:
         .replace("__HOST__", html.escape(host, quote=True))
         .replace("__NAME__", html.escape(name))
         .replace("__BYLINE__", html.escape(byline))
+        .replace("__LENSES__", _lens_list_html())
     )
     return HTMLResponse(page, headers={"Content-Security-Policy": _CLERK_CONSENT_CSP})

@@ -227,3 +227,21 @@ def test_a_demo_oauth_token_lives_as_long_as_a_demo_key(monkeypatch: pytest.Monk
     assert _token_ttl() == timedelta(days=7)
     monkeypatch.setattr(settings, "demo_org_id", None)
     assert _token_ttl() == oauth.OAUTH_TOKEN_TTL
+
+
+@needs_db
+def test_the_page_says_what_the_demo_is_about_before_sign_in(
+    client: TestClient, demo_org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A visitor sees what they will be able to ask before signing in: each lens a
+    demo caller may use, by its display name and description, with an example
+    question its own semantic layer declares — and the name to give the connector."""
+    monkeypatch.setenv("DST_INSTANCE_NAME", "roshan")
+    monkeypatch.setattr(settings, "clerk_publishable_key", "pk_test_x")
+    monkeypatch.setattr(clerk, "issuer", lambda: "https://ex.clerk.accounts.dev")
+    cfg = jaffle_customer_value_bundle().config  # the lens the fixture published
+    page = client.get("/demo").text
+    assert "<h1>roshan</h1>" in page
+    assert "What you can ask" in page
+    assert f"<b>{cfg.display_name or cfg.name}</b>" in page
+    assert "custom connector named <b>roshan</b>" in page
