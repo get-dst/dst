@@ -393,6 +393,28 @@ def _join_plan(
     return plan
 
 
+_PREDICATES = (
+    exp.Predicate,  # comparisons, IN, IS, LIKE, BETWEEN, EXISTS
+    exp.Connector,  # AND / OR
+    exp.Not,
+    exp.Boolean,
+)
+
+
+def is_predicate(sql: str, dialect: str | None = None) -> bool:
+    """True when ``sql`` is a condition a WHERE clause can hold. A definition's
+    ``sql_expr`` may instead be a derivation — a column (`brackets.bracket_name`)
+    or a formula — which explains the term but, pasted into WHERE, either fails
+    on type or silently filters nothing (`AND (position)` is true for every row)."""
+    try:
+        node = sqlglot.parse_one(sql, read=dialect or None)
+    except sqlglot.errors.ParseError:
+        return False
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return isinstance(node, _PREDICATES)
+
+
 def _definition_sql(model: SemanticModel, term: str) -> str:
     """The governed predicate a named definition contributes, or a CompileError.
 
@@ -408,6 +430,11 @@ def _definition_sql(model: SemanticModel, term: str) -> str:
                     "glossary only"
                 )
             assert d.sql_expr is not None  # guarded above
+            if not is_predicate(d.sql_expr, model.dialect):
+                raise CompileError(
+                    f"definition '{term}' is a derivation ({d.sql_expr}), not a condition — "
+                    "it cannot apply as a filter"
+                )
             return d.sql_expr
     raise CompileError(f"unknown definition '{term}'")
 

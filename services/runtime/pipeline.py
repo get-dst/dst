@@ -22,6 +22,7 @@ from sqlglot import exp
 
 from services.benchmark.contamination import normalize as contamination_normalize
 from services.connectors.tagging import query_context
+from services.contracts.profile import LOW_CARDINALITY_MAX
 from services.contracts.protocols import (
     Connector,
     ContextChunk,
@@ -467,6 +468,7 @@ def run_query(
     decisions: list[DecisionRecord] | None = None,
     entity_coverage: dict[str, EntityCoverage] | None = None,
     scan_text: str | None = None,
+    untyped: tuple[str, list[DecisionRecord]] | None = None,
 ) -> PipelineResult:
     """Ground → generate → guard → execute → compose, with execution-guided self-repair.
 
@@ -503,6 +505,9 @@ def run_query(
     is the static certified state. A legacy fixed answer without stored prose
     composes exactly as before.
     """
+    # Every argument, for the one re-run a typed answer the composer rejected gets
+    # on a lens that accepts untyped answers (see the composer decline below).
+    call_args = dict(locals())
     rid = request_id or "req_" + uuid.uuid4().hex[:16]
     org = str(org_id)
     prose = list(prose_context or [])
@@ -793,8 +798,8 @@ def run_query(
     # describes the SQL that actually serves; non-empty means the serve must
     # disclose, grade at most partial, and leave the miss on the trace.
     filter_waived: list[tuple[str, str]] = []
-    untyped_reason: str | None = None
-    untyped_decisions: list[DecisionRecord] = []
+    untyped_reason: str | None = untyped[0] if untyped else None
+    untyped_decisions: list[DecisionRecord] = list(untyped[1]) if untyped else []
     while True:
         active = generator if attempt == 0 else (escalate_generator or generator)
         gen_started = time.perf_counter()
@@ -1063,8 +1068,15 @@ def run_query(
         # is a deterministic unknown_value clarification, never the accidental
         # zero: the domain is COMPLETE, so executing could only dress the mismatch
         # up as data (ask-don't-guess, extended from terms to values).
-        if certification != "certified" and value_domains:
-            misses = value_guard.unknown_literals(guard.sql, semantic_model.dialect, value_domains)
+        # Enum-sized dictionaries only: a long one (names, up to MATCH_DICTIONARY_MAX)
+        # grows between probes, so a value missing from it may simply be newer
+        # than the snapshot — refusing on it would be a false positive. Long
+        # dictionaries serve value matching, never this pre-query refusal.
+        enum_domains = {
+            k: v for k, v in (value_domains or {}).items() if len(v) <= LOW_CARDINALITY_MAX
+        }
+        if certification != "certified" and enum_domains:
+            misses = value_guard.unknown_literals(guard.sql, semantic_model.dialect, enum_domains)
             if misses:
                 if attempt < max_repairs:
                     feedback = value_guard.repair_feedback(misses, guard.sql)
@@ -1329,6 +1341,26 @@ def run_query(
     # not answer it (a list of hero names for "what should I build"). Served,
     # that is a non-answer labelled ok; the verdict belongs in the status.
     if certification != "certified" and ans.no_answer_reason:
+        if (
+            getattr(active, "model", None) == "typed"
+            and escalate_generator is not None
+            and untyped_reason is None
+        ):
+            # The typed reading compiled, ran, and its rows do not answer the
+            # question. On a lens that accepts untyped answers that is the same
+            # case as a question that did not type: one raw-SQL run, disclosed.
+            return run_query(
+                **{
+                    **call_args,
+                    "generator": escalate_generator,
+                    "escalate_generator": None,
+                    "untyped": (
+                        "its typed reading returned rows that do not answer it "
+                        f"({ans.no_answer_reason})",
+                        list(gen.decisions),
+                    ),
+                }
+            )
         return _trace_failure(
             "refused",
             guard.sql,

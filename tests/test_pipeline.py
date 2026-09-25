@@ -1262,6 +1262,56 @@ def test_pipeline_refuses_when_the_composer_declines() -> None:
     )
 
 
+class _TypedStub:
+    """A typed generator whose reading compiled to SQL that does not answer."""
+
+    model = "typed"
+
+    def generate(self, **_kw: object) -> object:
+        from services.contracts.protocols import GeneratedQuery
+
+        return GeneratedQuery(sql="SELECT customer_id FROM customers")
+
+
+def test_a_typed_answer_the_composer_rejects_falls_to_raw_sql_disclosed() -> None:
+    """On a lens that accepts untyped answers, a typed reading whose rows do not
+    answer the question gets one raw-SQL run, disclosed UNTYPED — the same as a
+    question that did not type — instead of a refusal."""
+    llm = ScriptedLLM(
+        ["NO_ANSWER: the rows list customer ids, no count", _GOOD, "There are 100 customers."]
+    )
+    res = run_query(
+        question="How many customers are there?",
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=_TypedStub(),  # type: ignore[arg-type]
+        escalate_generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+    assert res.trace.status == "ok" and res.response.data is not None
+    assert any("UNTYPED" in n for n in (res.response.degraded or []))
+    assert res.response.resolution is not None and res.response.resolution.typed is False
+    assert "count(*)" in (res.response.sql or "").lower()
+
+
+def test_without_a_fallback_the_composer_decline_still_refuses() -> None:
+    llm = ScriptedLLM(["NO_ANSWER: the rows list customer ids, no count"])
+    res = run_query(
+        question="How many customers are there?",
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=_TypedStub(),  # type: ignore[arg-type]
+        composer=AnswerComposer(llm),
+    )
+    assert res.trace.status == "refused"
+
+
 def test_composer_decline_marker_only_at_the_start() -> None:
     """Only the reply's own leading marker is a decline; prose that mentions the
     words mid-sentence is an answer."""

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.contracts.errors import ProviderError
 from services.contracts.eval import EvalCase
 from services.contracts.fakes import FakeConnector, ScriptedLLM
 from services.contracts.protocols import GeneratedQuery
@@ -112,3 +113,63 @@ def test_flaky_cases_ride_the_gate_decision() -> None:
     assert not d.blocked  # flaky never blocks
     dumped = gate_decision_dict(d)
     assert dumped is not None and dumped["flaky"] == ["c1"]
+
+
+class _DroppingGenerator:
+    """Raises a provider error (a dropped connection) for the first *drop_first*
+    calls, then emits good SQL."""
+
+    model = "dropping"
+
+    def __init__(self, drop_first: int) -> None:
+        self.calls = 0
+        self._drop_first = drop_first
+
+    def generate(self, **_kw: Any) -> GeneratedQuery:
+        self.calls += 1
+        if self.calls <= self._drop_first:
+            raise ProviderError("openai-compatible", "peer closed connection")
+        return GeneratedQuery(sql=_GOOD)
+
+
+def _run_dropping(drop_first: int):
+    assembled = AssembledInputs(
+        model=_model(),
+        prose=[],
+        certified=None,
+        certification="none",
+        certified_sql=None,
+        data_as_of=None,
+        counts={},
+    )
+    gen = _DroppingGenerator(drop_first)
+    cases = [
+        EvalCase(id=f"c{i}", lens="t", question="total orders?", source="authored", expect="answer")
+        for i in (1, 2)
+    ]
+    return run_behavioral(
+        connector=FakeConnector(result=QueryResult(columns=["total"], rows=[[7]])),
+        lens="t",
+        cases=cases,
+        assemble_for=lambda _q: assembled,
+        generators_for=lambda _a: (gen, None),
+        composer=AnswerComposer(ScriptedLLM(["Seven."] * 10)),
+        concurrency=1,
+    )
+
+
+def test_a_provider_error_is_an_errored_attempt_not_a_crashed_suite() -> None:
+    """One dropped provider call is retried like any failure; the suite runs on."""
+    outcome = _run_dropping(drop_first=1)
+    assert [r.passed for r in outcome.results] == [True, True]
+    assert outcome.results[0].reason and outcome.results[0].reason.startswith(FLAKY_PREFIX)
+
+
+def test_a_provider_that_never_answers_fails_that_case_only() -> None:
+    """Every attempt dropped: the case is errored, never passed, and the next
+    case still runs."""
+    outcome = _run_dropping(drop_first=GATE_ATTEMPTS)
+    first, second = outcome.results
+    assert not first.passed and first.grade == "errored"
+    assert "model provider failed" in (first.reason or "")
+    assert second.passed

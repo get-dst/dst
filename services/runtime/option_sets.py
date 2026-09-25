@@ -9,15 +9,17 @@ slot it was measured for. Pure: model + profiles in, options out.
 
 Filter values come ONLY from complete dictionaries (``values_complete``): an
 incomplete top-N is a sample, and a decision over a sample would refuse the
-values it never saw. Cardinality is bounded by the profiler's low-cardinality
-cap, which fits a typed-decision model's option budget by construction.
+values it never saw. Only enum-sized dictionaries (LOW_CARDINALITY_MAX) become
+option sets, which fits a typed-decision model's option budget by construction;
+a longer complete dictionary is matched against the question verbatim instead
+(services/runtime/typed_resolver.py), never offered as options.
 """
 
 from __future__ import annotations
 
 from typing import get_args
 
-from services.contracts.profile import TableProfile
+from services.contracts.profile import LOW_CARDINALITY_MAX, TableProfile
 from services.contracts.protocols import Option
 from services.contracts.query_intent import TimeGrain
 from services.contracts.semantic_model import Entity, Metric, SemanticModel
@@ -43,8 +45,8 @@ def option_sets(
 
     ``metric`` and ``dimension`` names are qualified ``entity.name`` when the same
     bare name appears on more than one entity — the compiler's own rule.
-    ``filter_value:<column>`` appears only for columns with a complete value
-    dictionary. ``definition`` lists enforceable definitions (those with an
+    ``filter_value:<column>`` appears only for columns with a complete,
+    enum-sized value dictionary. ``definition`` lists enforceable definitions (those with an
     ``sql_expr``); ``grain`` is the compiler's TimeGrain vocabulary.
     """
     metric_owners: dict[str, list[str]] = {}
@@ -82,5 +84,6 @@ def option_sets(
     }
     resolved = domains if domains is not None else value_guard.value_domains(model, profiles)
     for column, values in sorted(resolved.items()):
-        out[f"filter_value:{column}"] = [Option(v) for v in values]
+        if len(values) <= LOW_CARDINALITY_MAX:
+            out[f"filter_value:{column}"] = [Option(v) for v in values]
     return out

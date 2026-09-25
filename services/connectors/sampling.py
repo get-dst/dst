@@ -2,7 +2,8 @@
 
 Every `SamplingProfiler` connector delegates here: `sample_tables` runs, per
 table, a two-phase read — one aggregate query for null rates / cardinality /
-min-max, then one tiny top-k query per low-cardinality column — plus a
+min-max, then one top-k query per low-cardinality column (and per counted text
+column small enough to hold whole, `MATCH_DICTIONARY_MAX`) — plus a
 full-table ``MIN/MAX(time column)`` probe for logical freshness and date
 coverage, all through the
 connector's own read-only query path. Only the FROM clause differs per dialect
@@ -41,6 +42,7 @@ from typing import Literal
 
 from services.contracts.profile import (
     EXACT_PROFILE_MAX_ROWS,
+    MATCH_DICTIONARY_MAX,
     ColumnProfile,
     ColumnSampleSpec,
     TableProfile,
@@ -48,6 +50,7 @@ from services.contracts.profile import (
     TimeCoverage,
     is_numeric_type,
     is_temporal_type,
+    is_text_type,
 )
 from services.contracts.warehouse import QueryResult
 
@@ -469,7 +472,6 @@ def _literal(value: object) -> str:
     return str(value)
 
 
-_TEXT_TYPES = ("VARCHAR", "TEXT", "STRING", "CHAR")
 _POINT_RE = re.compile(r"^\(\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*\)$")
 _NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?)?$")
@@ -529,7 +531,7 @@ def _collect_value_shapes(
     already-collected top_values (no extra query); the rest get one 3-row probe
     each."""
     for col_spec, col in zip(specs, columns, strict=True):
-        if col_spec.shape_only or not col_spec.type.upper().startswith(_TEXT_TYPES):
+        if col_spec.shape_only or not is_text_type(col_spec.type):
             continue
         samples = list(col.top_values or [])
         if not samples:
@@ -594,9 +596,23 @@ def _collect_top_values(
     reconciled with the list so the two can never contradict each other: 19
     values alongside ``distinct_count: 18`` was an impossible pair printed as
     fact, because the approximate aggregate and the top-k query disagreed.
+
+    A counted TEXT column of up to MATCH_DICTIONARY_MAX values gets its whole
+    dictionary too, for value matching; it stays not low-cardinality, and the
+    list is ordered by frequency like any other. Only when counted: a sampled
+    list that long could never be complete, and nothing would read it.
     """
     for col_spec, col in zip(specs, columns, strict=True):
-        if col_spec.shape_only or not col.is_low_cardinality:
+        if col_spec.shape_only:
+            continue
+        matchable = (
+            col_spec.matchable
+            and exact
+            and is_text_type(col_spec.type)
+            and col.distinct_count is not None
+            and 0 < col.distinct_count <= MATCH_DICTIONARY_MAX
+        )
+        if not (col.is_low_cardinality or matchable):
             continue
         sql = top_values_sql(
             spec.table,
@@ -604,7 +620,7 @@ def _collect_top_values(
             dialect=dialect,
             max_rows=max_rows,
             row_count=spec.row_count,
-            limit=limit,
+            limit=max(limit, MATCH_DICTIONARY_MAX) if matchable else limit,
             exact=exact,
             is_view=bool(spec.is_view),
         )

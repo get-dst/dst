@@ -29,6 +29,62 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.0] — 2026-09-25
+
+No schema change. Re-run `dst probe` after upgrading: documented columns are now
+sampled, and declared dimensions get whole value lists.
+
+### Added: typed serving you can leave on
+
+- **A ranking shape.** "Which team has the highest win rate?" resolves to the
+  metric per team, ordered, instead of a list of names. "Top 5" carries its
+  limit. A ranking with no stated direction asks which end is meant.
+- **`better: higher | lower` on metrics.** The author declares which end of a
+  metric is the better one; "best" and "worst" rank by it on the typed path, and
+  raw-SQL generation sees it too. Unset, a best/worst question asks.
+- **Names in the question are matched, not decided.** A stored value the question
+  names word for word ("Crystal Maiden", "Lion") binds as a filter with no model
+  decision; the model only picks which column it restricts. Two named values on
+  two columns give two filters. A named value no filter uses is asked about,
+  never dropped.
+- **`untyped_fallback` in `lens.yaml`.** The lens owner can make "typed first, raw
+  SQL when the question does not type" the lens's default, for callers that
+  cannot be expected to pass `allow_untyped`. Every raw answer still carries the
+  `UNTYPED:` disclosure. `allow_untyped` on the API, the router and the MCP tools
+  is now true, false or unset: unset takes the lens default, false still demands
+  typed-only. A typed answer whose rows do not answer the question gets the same
+  single raw-SQL run.
+- **Whole value lists for declared dimensions.** `dst probe` collects the full
+  list of a text dimension up to 500 values (hero, team and item names), used
+  only to match names in questions. Prompts never carry more than 25 values, and
+  columns that are not declared dimensions (an email, a note) stay at the
+  25-value cap.
+
+### Fixed
+
+- **A result that does not answer the question is refused, not served.** Before,
+  a ranking read as a listing compiled to a bare list of names and served `ok`.
+- **A ranking word is never dropped silently.** "Highest" with no measure to rank
+  on asks (or falls to raw SQL) instead of serving an unordered list.
+- **A definition whose SQL is a column or a formula never lands in WHERE.** It
+  failed on type or filtered nothing; only true/false conditions apply as filters.
+- **Numbers are stated, never guessed.** A numeric filter value (an id, a year)
+  comes only from a number in the question, never from a list a model picks from.
+- **A filter outside the table's declared population is refused before the
+  query runs**, with the population named, instead of returning zero rows.
+- **`dst probe` sampled nothing on a documented warehouse.** A column with a
+  description was skipped, so describing every column removed every value list,
+  while the output still said every table was sampled. Described columns are
+  sampled, and the count is the real one.
+- **A long value list never refuses a query.** A name newer than the last probe
+  is not proof of absence, so the pre-query value check reads only lists of 25
+  or fewer.
+- **One dropped model-provider call no longer ends a `dst test` run.** It fails
+  that attempt, which is retried like any failure and never counts as a pass.
+- **`dst test` accepts a certified value returned beside label columns** (the
+  patch name next to its win rate), marked shape-lenient. Exactly one matching
+  cell passes.
+
 ## [0.4.2] — 2026-09-25
 
 No schema change.

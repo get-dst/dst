@@ -616,6 +616,25 @@ def test_invalid_template_fails_its_case_loudly() -> None:
     assert case.reason is not None and "re-certify" in case.reason
 
 
+def test_compare_accepts_the_certified_value_beside_label_columns_visibly() -> None:
+    """'What is the current patch?' certified as 7.41, answered as ('7.41', True):
+    the value is there, labelled. Exactly one matching cell passes, visibly."""
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(["patch"], [["7.41"]], ["patch_name", "is_current"], [["7.41", True]])
+    assert ok and reason is not None and "shape-lenient" in reason and "patch_name" in reason
+    ok, _ = _compare(["r"], [[0.5553]], ["patch", "rate"], [["7.41", 0.55530000001]])
+    assert ok
+    # the value absent, or present twice (a coincidence it cannot tell apart): fail
+    ok, _ = _compare(["patch"], [["7.41"]], ["patch_name", "x"], [["7.40", 1]])
+    assert not ok
+    ok, _ = _compare(["n"], [[3]], ["a", "b"], [[3, 3]])
+    assert not ok
+    # a bool never counts as the number 1
+    ok, _ = _compare(["n"], [[1]], ["a", "b"], [[True, "x"]])
+    assert not ok
+
+
 def test_compare_bridges_count_vs_row_cardinality_visibly() -> None:
     # Probe finding: haiku row-shapes "how many" questions; a 1×1 integer
     # oracle K >= 2 matched by generated row cardinality passes VISIBLY.

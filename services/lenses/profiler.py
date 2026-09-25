@@ -29,12 +29,14 @@ from sqlalchemy.orm import Session
 
 from services.contracts.profile import (
     LOW_CARDINALITY_MAX,
+    MATCH_DICTIONARY_MAX,
     SAMPLE_MAX_ROWS,
     ColumnProfile,
     ColumnSampleSpec,
     TableProfile,
     TableSampleSpec,
     is_temporal_type,
+    is_text_type,
 )
 from services.contracts.protocols import Connector, SamplingProfiler
 from services.lenses import profile_store
@@ -76,12 +78,16 @@ def sample_profiles(
     connector: Connector,
     profiles: list[TableProfile],
     excluded: frozenset[str] = frozenset(),
+    matchable: frozenset[str] = frozenset(),
 ) -> dict[str, TableProfile]:
     """The sampling pass without the store: sample each profile's gaps, return the
-    merged profiles keyed by table — only the tables the connector actually sampled."""
+    merged profiles keyed by table — only the tables the connector actually sampled.
+    ``matchable``: see build_sample_spec."""
     if not profiles or not isinstance(connector, SamplingProfiler):
         return {}
-    specs = [spec for p in profiles if (spec := build_sample_spec(p, excluded)) is not None]
+    specs = [
+        spec for p in profiles if (spec := build_sample_spec(p, excluded, matchable)) is not None
+    ]
     if not specs:
         return {}
     base_by_table = {p.table: p for p in profiles}
@@ -115,22 +121,31 @@ def profile_connection(
 
 
 def build_sample_spec(
-    profile: TableProfile, excluded: frozenset[str] | None = None
+    profile: TableProfile,
+    excluded: frozenset[str] | None = None,
+    matchable: frozenset[str] = frozenset(),
 ) -> TableSampleSpec | None:
     """The sampling worklist for one stored profile: gap columns + a freshness column.
 
-    A *gap* is a column the catalog pass left unexplained — no description and no
-    catalog-native stats (``null_rate``/``top_values``). Returns None when the
-    table needs nothing (fully documented and no time column to probe).
+    A *gap* is a column the catalog pass left unmeasured — no catalog-native stats
+    (``null_rate``/``top_values``), whether or not it is described. Returns None
+    when the table needs nothing (fully measured and no time column to probe).
+    ``matchable``: ``table.column`` names of declared dimensions, the only columns
+    that may get a whole (long) dictionary for value matching.
     """
     excluded = excluded if excluded is not None else frozenset()
-    columns = [
-        ColumnSampleSpec(
-            name=c.name, type=c.type, shape_only=_shape_only(profile.table, c.name, excluded)
-        )
-        for c in profile.columns
-        if _is_gap(c)
-    ]
+    columns = []
+    for c in profile.columns:
+        match = f"{profile.table}.{c.name}" in matchable
+        if _is_gap(c, match):
+            columns.append(
+                ColumnSampleSpec(
+                    name=c.name,
+                    type=c.type,
+                    matchable=match,
+                    shape_only=_shape_only(profile.table, c.name, excluded),
+                )
+            )
     freshness = _freshness_column(profile, excluded)
     if not columns and freshness is None:
         return None
@@ -199,9 +214,25 @@ def merge_sampled(
     )
 
 
-def _is_gap(column: ColumnProfile) -> bool:
-    """True when the catalog pass left this column unexplained."""
-    return column.description is None and column.null_rate is None and column.top_values is None
+def _is_gap(column: ColumnProfile, matchable: bool = False) -> bool:
+    """True when the catalog pass left this column's VALUES unmeasured. A
+    description says what a column means, never what it holds: exempting
+    documented columns meant a fully documented warehouse lost every value
+    dictionary and null rate. Only catalog-native stats cover a column.
+
+    A MATCHABLE text column (a declared dimension) the catalog estimates small
+    enough to hold whole (MATCH_DICTIONARY_MAX) is a gap until its dictionary is
+    complete: catalog statistics (Postgres' most-common-values list) are a sample,
+    and value matching reads only a complete dictionary."""
+    if column.null_rate is None and column.top_values is None:
+        return True
+    return (
+        matchable
+        and is_text_type(column.type)
+        and not column.values_complete
+        and column.distinct_count is not None
+        and 0 < column.distinct_count <= MATCH_DICTIONARY_MAX
+    )
 
 
 def _shape_only(table: str, column: str, excluded: frozenset[str]) -> bool:

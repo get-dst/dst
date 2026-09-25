@@ -39,6 +39,7 @@ from the table the SQL already named.
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 
@@ -187,11 +188,36 @@ def unknown_literals(sql: str, dialect: str, domains: dict[str, list[str]]) -> l
     return out
 
 
+def shown_values(values: tuple[str, ...], near: tuple[str, ...]) -> list[str]:
+    """The values quoted back at a model or a caller for a missed literal: the
+    whole dictionary while it is enum-sized, else the LOW_CARDINALITY_MAX
+    stored values closest to the literal(s) — a 500-name dictionary is a fact
+    to check against, never a list to paste into a prompt."""
+    if len(values) <= LOW_CARDINALITY_MAX:
+        return list(values)
+    by_lower = {v.lower(): v for v in values}
+    close: list[str] = []
+    for lit in near:
+        for hit in difflib.get_close_matches(lit.lower(), list(by_lower), n=LOW_CARDINALITY_MAX):
+            if by_lower[hit] not in close:
+                close.append(by_lower[hit])
+    return close[:LOW_CARDINALITY_MAX]
+
+
+def _describe_values(values: tuple[str, ...], near: tuple[str, ...]) -> str:
+    shown = ", ".join(f"'{v}'" for v in shown_values(values, near))
+    if len(values) <= LOW_CARDINALITY_MAX:
+        return f"its complete value set is {shown}"
+    if not shown:
+        return f"it holds {len(values)} values, none close to it"
+    return f"it holds {len(values)} values; the closest stored ones are {shown}"
+
+
 def repair_feedback(misses: list[UnknownLiteral], sql: str) -> str:
     """The repair-loop message: name the miss and the real values, verbatim."""
     lines = [
-        f"the filter value '{m.literal}' does not exist in `{m.column}` — its complete "
-        "value set is " + ", ".join(f"'{v}'" for v in m.values)
+        f"the filter value '{m.literal}' does not exist in `{m.column}` — "
+        + _describe_values(m.values, (m.literal,))
         for m in misses
     ]
     return (
@@ -358,14 +384,20 @@ def unknown_value_clarification(
     by an unexplained 0.
     """
     missed = ", ".join(f"'{m}'" for m in missing)
-    stored = ", ".join(f"'{v}'" for v in values)
+    shown = shown_values(values, missing)
+    stored = ", ".join(f"'{v}'" for v in shown)
+    held = (
+        f"its stored values are {stored}"
+        if len(values) <= LOW_CARDINALITY_MAX
+        else f"it holds {len(values)} values" + (f", the closest being {stored}" if shown else "")
+    )
     return ClarificationRequest(
         term=column,
         question=(
-            f"{missed} does not appear in `{column}` — its stored values are {stored}. "
+            f"{missed} does not appear in `{column}` — {held}. "
             "Re-ask with the value you mean, or read the absence as the answer."
         ),
-        options=list(values),
+        options=shown,
         kind="unknown_value",
     )
 

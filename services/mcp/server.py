@@ -476,7 +476,7 @@ async def query(
     ctx: Context,  # type: ignore[type-arg]
     format: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
-    allow_untyped: bool = False,
+    allow_untyped: bool | None = None,
 ) -> dict[str, Any]:
     """Ask a governed, natural-language question against a NAMED lens.
 
@@ -506,9 +506,10 @@ async def query(
             kind 'unresolved_slot', re-ask with {<its term>: <the value>} (a customer
             name, a number, a YYYY-MM-DD date or YYYY-Qn period). You supply the
             value; dst never guesses one from the wording.
-        allow_untyped: let dst fall to raw-SQL generation when the question does not
-            type. Disclosed with an UNTYPED line; only when the user accepts an
-            ungoverned figure.
+        allow_untyped: true lets dst fall to raw-SQL generation when the question
+            does not type (disclosed with an UNTYPED line) — only when the user
+            accepts an ungoverned figure; false demands typed-only; omitted, the
+            lens's own default applies.
     """
     payload, failure = await _request(
         ctx,
@@ -518,7 +519,7 @@ async def query(
             "q": question,
             "format": format,
             "bindings": bindings or {},
-            "allow_untyped": allow_untyped,
+            **({"allow_untyped": allow_untyped} if allow_untyped is not None else {}),
         },
     )
     if failure is not None:
@@ -630,7 +631,7 @@ async def route_query(
     ctx: Context,  # type: ignore[type-arg]
     format: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
-    allow_untyped: bool = False,
+    allow_untyped: bool | None = None,
 ) -> dict[str, Any]:
     """Ask a governed question WITHOUT naming a lens — the DEFAULT way to ask.
 
@@ -662,7 +663,7 @@ async def route_query(
             "q": question,
             "format": format,
             "bindings": bindings or {},
-            "allow_untyped": allow_untyped,
+            **({"allow_untyped": allow_untyped} if allow_untyped is not None else {}),
         },
     )
     if failure is not None:

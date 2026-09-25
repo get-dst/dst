@@ -199,7 +199,7 @@ class JustAskBody(BaseModel):
     q: str = Field(description="the natural-language question — the only required field")
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
     bindings: dict[str, str] = Field(default_factory=dict, description=BINDINGS_HELP)
-    allow_untyped: bool = Field(default=False, description=UNTYPED_HELP)
+    allow_untyped: bool | None = Field(default=None, description=UNTYPED_HELP)
 
 
 class RouteProvenance(BaseModel):

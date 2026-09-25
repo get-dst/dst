@@ -258,6 +258,26 @@ def test_a_known_domain_repairs_before_the_warehouse_is_touched(tmp_path: Path) 
     assert res.response.data is not None and len(res.response.data.rows) == 2
 
 
+def test_a_long_dictionary_never_refuses_before_the_warehouse(tmp_path: Path) -> None:
+    """A long dictionary (names, which grow between probes) may be older than the
+    data: a literal missing from it is not proof of absence. The query runs and the
+    row the snapshot did not know about is served — no pre-query refusal."""
+    stale = [f"old{i}@x" for i in range(200)]  # the probe's snapshot, before ada joined
+    res = run_query(
+        question="sales for ada@x",
+        lens_name="sales",
+        org_id="org",
+        caller="t",
+        semantic_model=_model(),
+        connector=_warehouse(tmp_path),
+        generator=_gen("SELECT email, amount FROM customers WHERE email = 'ada@x'"),
+        composer=None,
+        value_domains={"email": stale},
+    )
+    assert res.trace.status == "ok" and res.trace.repairs == 0
+    assert res.response.data is not None and len(res.response.data.rows) == 1
+
+
 def test_no_domain_probes_the_empty_result_then_repairs(tmp_path: Path) -> None:
     """Zero rows, no stored domain — one governed DISTINCT probe
     learns 'FI'/'DK', the feedback repairs the filter, the answer serves."""

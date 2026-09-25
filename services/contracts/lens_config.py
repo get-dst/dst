@@ -381,6 +381,17 @@ class LensConfig(Authored):
         "shape from raw columns (at confidence: unverified) instead of refusing "
         "with the path",
     )
+    # Typed serving answers from closed-set decisions over the semantic model;
+    # a question that does not type clarifies unless the caller accepts an
+    # untyped answer. A lens whose callers cannot be expected to know that flag
+    # (a public assistant) can make "typed first, raw SQL when it does not type"
+    # its default. Every raw answer still carries the UNTYPED disclosure, and a
+    # caller's explicit allow_untyped: false still demands typed-only.
+    untyped_fallback: bool = Field(
+        default=False,
+        description="when a question does not type, fall to raw-SQL generation "
+        "(disclosed UNTYPED) unless the caller passes allow_untyped: false",
+    )
 
     @model_validator(mode="after")
     def _default_display_name(self) -> LensConfig:

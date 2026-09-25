@@ -243,6 +243,13 @@ class Metric(Authored):
         description="field this metric aggregates over time by, when it differs "
         "from the entity's default_time_field",
     )
+    better: Literal["higher", "lower"] | None = PField(
+        default=None,
+        description="which end of this metric is the better one: 'higher' for a win "
+        "rate, 'lower' for deaths or churn. The author's judgment — the product never "
+        "guesses one. Set, 'best' and 'worst' rank by it; unset, a question asking "
+        "for the best or worst by this metric asks which end is meant.",
+    )
 
     @field_validator("type", mode="before")
     @classmethod

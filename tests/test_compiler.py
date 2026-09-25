@@ -19,7 +19,7 @@ from services.contracts.semantic_model import (
 )
 from services.lenses.demo import jaffle_customer_value
 from services.runtime.answer import AnswerComposer
-from services.runtime.compiler import CompileError, compile_intent, metric_sql
+from services.runtime.compiler import CompileError, compile_intent, is_predicate, metric_sql
 from services.runtime.generator import GroundedSQLGenerator
 from services.runtime.intent_generator import IntentSQLGenerator
 from services.runtime.pipeline import run_query
@@ -732,6 +732,36 @@ def test_an_unknown_or_glossary_definition_falls_the_compile_back() -> None:
         compile_intent(
             QueryIntent(metrics=["customer_count"], definitions=["active customer"]), glossary
         )
+
+
+def test_a_derivation_definition_never_becomes_a_filter() -> None:
+    """A definition whose sql_expr is a column or a formula explains a term; in
+    WHERE it fails on type (`AND (bracket_name)`) or filters nothing
+    (`AND (position)` is true for every nonzero row). It falls the compile back."""
+    derived = _crm_model("C")
+    derived.definitions[0].sql_expr = "customers.status_code"
+    with pytest.raises(CompileError, match="derivation"):
+        compile_intent(
+            QueryIntent(metrics=["customer_count"], definitions=["active customer"]), derived
+        )
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("patches.is_current = TRUE", True),
+        ("(a.x > 1 AND a.y IN (1, 2))", True),
+        ("NOT a.flag", True),
+        ("a.name LIKE 'x%'", True),
+        ("a.v IS NULL", True),
+        ("brackets.bracket_name", False),
+        ("player_performances.position", False),
+        ("SUM(CASE WHEN p.is_win THEN 1 ELSE 0 END) * 1.0 / COUNT(*)", False),
+        ("not valid sql (((", False),
+    ],
+)
+def test_is_predicate(sql: str, expected: bool) -> None:
+    assert is_predicate(sql, "duckdb") is expected
 
 
 def _seed_crm_warehouse(tmp_path: object) -> DuckDBConnector:

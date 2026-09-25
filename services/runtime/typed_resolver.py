@@ -9,6 +9,9 @@ measured probability and turned into act / clarify / decline by the policy
   values are DECISIONS (each a DecisionRecord on the answer's ledger);
 - the time window is a deterministic parse (services/runtime/timewindow.py);
   a stated window the parser cannot resolve clarifies, never guesses;
+- a stored value the question names verbatim (a complete dictionary's member,
+  word-bounded, longest first) is matched, not decided: it fixes the filter's
+  value, and a named value no filter uses clarifies rather than being dropped;
 - numbers and dates in the question resolve only when unambiguous (exactly one
   standalone literal); anything else — and every open string value — comes
   from the caller's ``bindings`` or clarifies with ``unresolved_slot``, naming
@@ -27,6 +30,10 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal, cast
 
+import sqlglot
+from sqlglot import exp
+
+from services.contracts.profile import LOW_CARDINALITY_MAX
 from services.contracts.protocols import (
     ContextChunk,
     Decider,
@@ -45,7 +52,7 @@ from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import Definition, Entity, SemanticModel
 from services.runtime import ambiguity, decision_policy, reading, timewindow
-from services.runtime.compiler import CompileError, compile_intent
+from services.runtime.compiler import CompileError, compile_intent, is_predicate
 from services.runtime.intent_generator import intent_term
 from services.runtime.option_sets import option_sets
 
@@ -57,8 +64,20 @@ _NONE = "none"
 _ANOTHER_NONE = Option(_NONE, "no further one is asked for")
 _SHAPES = [
     Option("aggregate", "a figure: a total, count, average, rate, or a breakdown of one"),
-    Option("listing", "rows: list / show / which records, with their fields"),
+    Option(
+        "ranking",
+        "which X has the highest / most / lowest / best / worst Y, or the top N X by Y: "
+        "one figure per X, ordered by it",
+    ),
+    Option(
+        "listing",
+        "rows or one stored value: list / show / which records, with their fields, or "
+        "what is the <thing> (the current patch, a team's region)",
+    ),
 ]
+# A ranking is an aggregate with a required breakdown and an order: it takes the
+# aggregate's path everywhere a figure is resolved.
+_FIGURES = ("aggregate", "ranking")
 _ENGAGED = [Option("engaged", "the term's filter applies"), Option("not_engaged", "it does not")]
 # Two different "none"s on a filter value: the question states NO value for
 # the field (the column was not a filter after all — dropped, acted on) versus
@@ -77,12 +96,62 @@ _OPS = [
     Option("<=", "at most / up to"),
 ]
 _TOP = re.compile(r"\b(?:top|first|largest|biggest|highest)\s+(\d{1,3})\b", re.I)
-_BOTTOM = re.compile(r"\b(?:bottom|lowest|smallest)\s+(\d{1,3})\b", re.I)
+_BOTTOM = re.compile(r"\b(?:bottom|lowest|smallest|fewest)\s+(\d{1,3})\b", re.I)
 _HIGHEST = re.compile(r"\b(?:highest|largest|biggest|most|top)\b", re.I)
-_LOWEST = re.compile(r"\b(?:lowest|smallest|least|bottom)\b", re.I)
+_LOWEST = re.compile(r"\b(?:lowest|smallest|least|fewest|bottom)\b", re.I)
+# A ranking whose direction depends on the measure (fewer deaths is the
+# better record): it cannot be typed as desc or asc, so it is never typed.
+_RANKED = re.compile(r"\b(?:best|worst)\b", re.I)
 _NUMBER = re.compile(r"(?<![\d.-])-?\d+(?:\.\d+)?(?![\d.])")
 _ISO_DATE = re.compile(r"\b((?:19|20)\d{2}-\d{2}-\d{2})\b")
 _YEARISH = re.compile(r"\b(?:19|20)\d{2}\b")
+
+# The ledger's provider for a value matched from the question's own text: a
+# deterministic read, so no probability was measured.
+QUESTION_TEXT = "question-text"
+_LETTER = re.compile(r"[^\W\d_]")
+_CODE = re.compile(r"^[A-Z0-9]{1,4}$")
+
+
+def named_values(question: str, domains: dict[str, list[str]]) -> list[dict[str, str]]:
+    """Stored values the question names verbatim, in the order it names them:
+    one entry per value, ``{column: the value as that column stores it}`` —
+    "Lion" held by two columns is one entry with both.
+
+    Case-insensitive and word-bounded (a possessive "Crystal Maiden's" names
+    "Crystal Maiden"; "Lions" does not name "Lion"), longest value first, so a
+    shorter value inside a longer one is not named twice. Two exceptions keep
+    a match a fact rather than a coincidence: a value with no letter never
+    matches (a number in a question is a limit or a threshold as often as a
+    stored value), and a short all-capitals code matches only as written —
+    the country code 'IN' is not the word "in", nor 'NO' the word "no"."""
+    groups: dict[str, dict[str, str]] = {}
+    for column, values in domains.items():
+        for value in values:
+            if not _LETTER.search(value):
+                continue
+            key = value if _CODE.match(value) else value.lower()
+            groups.setdefault(key, {}).setdefault(column, value)
+    lowered = question.lower()
+    taken: list[tuple[int, int]] = []
+    found: list[tuple[int, dict[str, str]]] = []
+    for key in sorted(groups, key=lambda k: (-len(k), k)):
+        text = question if _CODE.match(key) else lowered
+        spans = [
+            m.span()
+            for m in re.finditer(rf"(?<!\w){re.escape(key)}(?!\w)", text)
+            if not any(m.start() < end and start < m.end() for start, end in taken)
+        ]
+        if spans:
+            taken += spans
+            found.append((spans[0][0], groups[key]))
+    return [by_column for _pos, by_column in sorted(found, key=lambda f: f[0])]
+
+
+def _uses(named: dict[str, str], filters: list[IntentFilter]) -> bool:
+    """Does some filter restrict one of the named value's columns to it?"""
+    return any(f.op == "=" and f.field in named and f.value == named[f.field] for f in filters)
+
 
 GRAMMAR = {
     "date_range": "YYYY | YYYY-Qn | YYYY-MM | YYYY-MM-DD/YYYY-MM-DD",
@@ -100,6 +169,8 @@ class TypedResolution:
     decline: str | None = None
     # Filter columns whose value came from the caller's bindings.
     supplied: list[str] = field(default_factory=list)
+    # Filter columns whose value the question named verbatim (named_values).
+    matched: list[str] = field(default_factory=list)
 
     @property
     def typed(self) -> bool:
@@ -146,6 +217,41 @@ def period_field(entity: Entity, domains: dict[str, list[str]]) -> str | None:
         values = domains.get(f.name.lower())
         if values and all(_MONTH_PERIOD.match(v) for v in values):
             return f.name
+    return None
+
+
+def _population_conflict(
+    entity: Entity, filters: list[IntentFilter], dialect: str | None
+) -> str | None:
+    """A filter the entity's declared population rules out, or None.
+
+    `game_type = 'turbo'` on a table counted over ranked All Pick only compiles to
+    a WHERE no row satisfies — an empty answer to a question the table never
+    covered. Equality and IN constraints in ``population_filter`` are read
+    statically, so the contradiction declines before any query runs."""
+    if not (entity.population_filter or "").strip() or not filters:
+        return None
+    try:
+        tree = sqlglot.parse_one(entity.population_filter or "", read=dialect or None)
+    except sqlglot.errors.ParseError:
+        return None
+    allowed: dict[str, set[str]] = {}
+    for node in tree.find_all(exp.EQ, exp.In):
+        column = node.this if isinstance(node.this, exp.Column) else None
+        if column is None:
+            continue
+        values = [node.expression] if isinstance(node, exp.EQ) else list(node.expressions)
+        if not all(isinstance(v, exp.Literal) for v in values):
+            continue
+        allowed.setdefault(column.name.lower(), set()).update(v.this for v in values)
+    for f in filters:
+        permitted = allowed.get(f.field.lower())
+        if f.op == "=" and permitted is not None and str(f.value) not in permitted:
+            scope = entity.population or f"{entity.name}: {entity.population_filter}"
+            return (
+                f"'{f.value}' is outside what this table counts ({scope.strip()}) — "
+                f"{f.field} is always {', '.join(sorted(permitted))} here"
+            )
     return None
 
 
@@ -378,6 +484,7 @@ class TypedResolver:
         decisions' instructions, the way they ride the JSON generator's prompt."""
         records: list[DecisionRecord] = []
         self._prefetched: dict[str, tuple[Decision, str, int]] = {}
+        self._matched: list[str] = []
         self._notes = " ".join(notes or [])
         try:
             intent, supplied = self._resolve(question, model, records)
@@ -387,7 +494,12 @@ class TypedResolver:
             )
         except _Decline as d:
             return TypedResolution(intent=None, decisions=self._consumed(records), decline=d.reason)
-        return TypedResolution(intent=intent, decisions=self._consumed(records), supplied=supplied)
+        return TypedResolution(
+            intent=intent,
+            decisions=self._consumed(records),
+            supplied=supplied,
+            matched=list(self._matched),
+        )
 
     def _consumed(self, records: list[DecisionRecord]) -> list[DecisionRecord]:
         """The ledger carries the decisions the resolution USED. A fan-out asks
@@ -501,7 +613,7 @@ class TypedResolver:
             raise _Decline("not a question this lens's data answers")
 
         first_metric: str | None = None
-        if shape == "aggregate":
+        if shape in _FIGURES:
             if not sets["metric"]:
                 raise _Decline("no governed metric of this lens answers the question")
             first_metric = self._pick(
@@ -571,7 +683,7 @@ class TypedResolver:
         grain_opts = [*sets["grain"], Option(_NONE, "no time series is asked for")]
         filter_candidates = self._filter_candidates(question, entity, own_members)
         round_two: dict[str, tuple[str, str, list[Option], bool]] = {}
-        if shape == "aggregate":
+        if shape in _FIGURES:
             rest_metrics = [o for o in own_metrics if o.name != first_metric]
             if rest_metrics and MAX_METRICS > 1 and first_metric is not None:
                 round_two["metric:1"] = (
@@ -580,7 +692,11 @@ class TypedResolver:
                     [*rest_metrics, _ANOTHER_NONE],
                     True,
                 )
-            round_two["dimension:0"] = ("dimension", dim_ctx, [*dims, _ANOTHER_NONE], True)
+            round_two["dimension:0"] = (
+                ("dimension", dim_ctx, dims, False)
+                if shape == "ranking"
+                else ("dimension", dim_ctx, [*dims, _ANOTHER_NONE], True)
+            )
             if entity.default_time_field and over_time:
                 round_two["grain"] = ("grain", grain_ctx, grain_opts, True)
         else:
@@ -591,7 +707,7 @@ class TypedResolver:
         # term would apply a filter nobody asked for — a silent-wrong on every
         # question for every definition. Aliases are how authoring widens it.
         for d in model.definitions:
-            if ambiguity.triggered(question, d) and (d.sql_expr or "").strip():
+            if ambiguity.triggered(question, d) and is_predicate(d.sql_expr or "", model.dialect):
                 round_two[f"definition:{d.term}"] = (
                     "definition",
                     self._definition_ctx(d),
@@ -659,7 +775,7 @@ class TypedResolver:
 
         metrics: list[str] = []
         fields: list[str] = []
-        if shape == "aggregate":
+        if shape in _FIGURES:
             metrics = [
                 m.rsplit(".", 1)[-1]
                 for m in self._pick_many(
@@ -693,7 +809,7 @@ class TypedResolver:
                 raise _Decline("no field of this lens matches what the listing asks for")
 
         dimensions: list[str] = []
-        if shape == "aggregate":
+        if shape in _FIGURES:
             dimensions = self._pick_many(
                 "dimension",
                 question,
@@ -702,12 +818,25 @@ class TypedResolver:
                 cap=MAX_DIMENSIONS,
                 records=records,
                 clarify_term="dimension",
-                first_required=False,
+                # a ranking ranks SOMETHING: one figure per X needs its X
+                first_required=shape == "ranking",
                 key_prefix="dimension",
             )
 
+        if shape == "ranking" and not dimensions:
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="dimension",
+                    question="Ranked across what? "
+                    + ", ".join(o.name for o in dims[:6] if dims)
+                    + ("." if dims else "This entity declares no dimension to rank."),
+                    options=[o.name for o in dims],
+                )
+            )
+
         grain: TimeGrain | None = None
-        if shape == "aggregate" and entity.default_time_field and over_time:
+        if shape in _FIGURES and entity.default_time_field and over_time:
             g = self._pick(
                 "grain",
                 question,
@@ -724,8 +853,21 @@ class TypedResolver:
 
         definitions = self._definitions(question, model, records)
         filters, supplied = self._filters(question, entity, own_members, records)
+        if conflict := _population_conflict(entity, filters, model.dialect):
+            raise _Decline(conflict)
         filters += self._window(question, entity, metrics)
-        order_by, limit = self._order(question, metrics, fields)
+        order_by, limit = self._order(question, metrics, fields, self._better(entity, metrics))
+        if shape == "ranking" and not order_by:
+            # Read as a ranking with no direction the question states: which end
+            # is the answer is not the resolver's to guess.
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="order",
+                    question="Ranked by which end — highest or lowest first?",
+                    options=["highest first", "lowest first"],
+                )
+            )
 
         intent = QueryIntent(
             entity=entity.name,
@@ -765,6 +907,15 @@ class TypedResolver:
         for m in members:
             if m.name.lower() in (time_field, period) and m.name.lower():
                 continue
+            # A numeric column restricts only by a number the question states:
+            # offered otherwise, an id column (ally_hero_id beside ally_hero_name)
+            # wins the pick and the filter then asks for a number nobody gave.
+            ftype = _field_type(entity, m.name)
+            if (
+                ftype in ("integer", "number")
+                and self._literal_in_question(question, ftype) is None
+            ):
+                continue
             if windowed and _field_type(entity, m.name) in ("date", "timestamp"):
                 continue
             out.append(m)
@@ -796,7 +947,7 @@ class TypedResolver:
                         options=list(d.possible_mappings),
                     )
                 )
-            if not (d.sql_expr or "").strip():
+            if not is_predicate(d.sql_expr or "", model.dialect):
                 continue
             pick = self._pick(
                 "definition",
@@ -844,7 +995,90 @@ class TypedResolver:
             columns.append(column)
             candidates = [o for o in candidates if o.name != column]
             self._value(question, entity, column, filters, supplied, records)
+        # A value the question names is a restriction it asked for: serving
+        # without it answers a different question. The general "any restriction?"
+        # decision can miss it (the name read as a field to show), so each
+        # unused one gets a focused decision among the columns holding it; a
+        # "none" there is still never a silent drop — the caller is asked.
+        for named in self._named(question, entity):
+            if _uses(named, filters):
+                continue
+            value = next(iter(named.values()))
+            free = [c for c in sorted(named) if c not in columns]
+            column = (
+                self._pick(
+                    "filter",
+                    question,
+                    f"The question names '{value}', a stored value of "
+                    f"{', '.join(free)}. Which field does it restrict the answer by?",
+                    [
+                        *(Option(c) for c in free),
+                        Option(_NONE, "it restricts nothing; the name is incidental"),
+                    ],
+                    allow_none=True,
+                    records=records,
+                    clarify_term="filter",
+                    clarify_question=f"Which field should '{value}' restrict? " + ", ".join(free),
+                    key=f"named:{value}",
+                )
+                if free and len(columns) < MAX_FILTERS
+                else None
+            )
+            if column is not None:
+                columns.append(column)
+                filters.append(IntentFilter(field=column, op="=", value=named[column]))
+                continue
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term=value,
+                    question=f"The question names '{value}', a stored value of "
+                    f"{', '.join(sorted(named))}, but no filter of the answer uses it. "
+                    "Which field should it restrict? Supply it as a binding.",
+                    options=sorted(named),
+                )
+            )
         return filters, supplied
+
+    def _named(self, question: str, entity: Entity) -> list[dict[str, str]]:
+        """The stored values the question names among the entity's filter
+        candidates — text fields with a complete dictionary (named_values)."""
+        members = [
+            *(Option(d.name) for d in entity.dimensions),
+            *(Option(f.name) for f in entity.fields),
+        ]
+        domains = self._domains_for(entity)
+        text: dict[str, list[str]] = {}
+        for o in self._filter_candidates(question, entity, members):
+            values = domains.get(o.name.lower())
+            if values and _field_type(entity, o.name) in (None, "string"):
+                text[o.name] = values
+        return named_values(question, text)
+
+    def _named_for(
+        self, question: str, entity: Entity, column: str, filters: list[IntentFilter]
+    ) -> list[str]:
+        """The named values this column holds that no filter uses yet."""
+        return [
+            n[column]
+            for n in self._named(question, entity)
+            if column in n and not _uses(n, filters)
+        ]
+
+    def _decidable_domain(self, entity: Entity, column: str) -> list[str] | None:
+        """The dictionary a model may pick a filter value from: text and boolean only.
+        A number (a bracket id, a year, an amount) is a fact the question states
+        or it is not — picking '3' off a list of ids for 'Legend' is a guess, so
+        numeric values come only from a literal in the question or a binding."""
+        if _field_type(entity, column) not in (None, "string", "boolean"):
+            return None
+        return self._domains_for(entity).get(column.lower())
+
+    @staticmethod
+    def _named_ctx(column: str) -> str:
+        return (
+            f"The question names more than one stored value of '{column}'. Which is its '{column}'?"
+        )
 
     @staticmethod
     def _value_options(domain: list[str]) -> list[Option]:
@@ -861,11 +1095,19 @@ class TypedResolver:
         same question ``_value`` asks, so a round may ask it early. None when
         no decision is needed (a binding, a literal in the question)."""
         ftype = _field_type(entity, column)
-        domain = self._domains_for(entity).get(column.lower())
+        domain = self._decidable_domain(entity, column)
         bound = self._bindings.get(column.lower())
-        if domain:
-            if bound is not None and bound in domain:
-                return None
+        if domain and bound is not None and bound in domain:
+            return None
+        named = self._named_for(question, entity, column, [])
+        if len(named) > 1:
+            return (
+                f"filter_value:{column}",
+                ("filter_value", self._named_ctx(column), [Option(v) for v in named], False),
+            )
+        if named:
+            return None
+        if domain and len(domain) <= LOW_CARDINALITY_MAX:
             return (
                 f"filter_value:{column}",
                 (
@@ -897,14 +1139,53 @@ class TypedResolver:
         records: list[DecisionRecord],
     ) -> None:
         ftype = _field_type(entity, column)
-        domain = self._domains_for(entity).get(column.lower())
+        domain = self._decidable_domain(entity, column)
         bound = self._bindings.get(column.lower())
-        if domain:
-            if bound is not None and bound in domain:
-                # The caller bound it: the value is theirs, no decision to make.
-                filters.append(IntentFilter(field=column, op="=", value=bound))
-                supplied.append(column)
-                return
+        if domain and bound is not None and bound in domain:
+            # The caller bound it: the value is theirs, no decision to make.
+            filters.append(IntentFilter(field=column, op="=", value=bound))
+            supplied.append(column)
+            return
+        named = self._named_for(question, entity, column, filters)
+        if named:
+            # The question names the value: one named value is the value, read
+            # off the text and recorded as such; two named values of the same
+            # column ("Crystal Maiden's win rate with Lion") decide only which
+            # is this column's — the other is the next filter's.
+            if len(named) == 1:
+                value: str | None = named[0]
+                records.append(
+                    DecisionRecord(
+                        slot="filter_value", chosen=value, verdict="act", provider=QUESTION_TEXT
+                    )
+                )
+            else:
+                value = self._pick(
+                    "filter_value",
+                    question,
+                    self._named_ctx(column),
+                    [Option(v) for v in named],
+                    allow_none=False,
+                    records=records,
+                    clarify_term=column,
+                    clarify_question=f"Which of {', '.join(repr(v) for v in named)} "
+                    f"is the question's '{column}'?",
+                    key=f"filter_value:{column}",
+                )
+            if value is None:
+                raise _Clarify(
+                    ClarificationRequest(
+                        kind="unresolved_slot",
+                        term=column,
+                        question=f"Which of {', '.join(repr(v) for v in named)} "
+                        f"is the question's '{column}'?",
+                        options=named,
+                    )
+                )
+            filters.append(IntentFilter(field=column, op="=", value=value))
+            self._matched.append(column)
+            return
+        if domain and len(domain) <= LOW_CARDINALITY_MAX:
             value = self._pick(
                 "filter_value",
                 question,
@@ -945,8 +1226,9 @@ class TypedResolver:
             op = self._op(question, column, records)
             filters.append(IntentFilter(field=column, op=op, value=literal))
             return
-        # No dictionary, no binding, no literal: one more decision before asking
-        # the agent to bind — does the question state a value at all? A column
+        # No option set (no dictionary, or one too long to offer), no named
+        # value, no binding, no literal: one more decision before asking the
+        # agent to bind — does the question state a value at all? A column
         # picked at low p on a question that names no value is not a filter.
         stated = self._pick(
             "filter_value",
@@ -1092,8 +1374,15 @@ class TypedResolver:
         ]
 
     @staticmethod
+    def _better(entity: Entity, metrics: list[str]) -> str | None:
+        """The declared better end of the metric a ranking orders by, if any."""
+        if not metrics:
+            return None
+        return next((m.better for m in entity.metrics if m.name == metrics[0]), None)
+
+    @staticmethod
     def _order(
-        question: str, metrics: list[str], fields: list[str]
+        question: str, metrics: list[str], fields: list[str], better: str | None = None
     ) -> tuple[list[IntentOrder], int | None]:
         limit: int | None = None
         direction: Literal["asc", "desc"] | None = None
@@ -1105,8 +1394,34 @@ class TypedResolver:
             direction = "desc"
         elif _LOWEST.search(question):
             direction = "asc"
-        if direction is None or not metrics:
+        if direction is None and (ranked := _RANKED.search(question)) and metrics and better:
+            # 'best' is the declared better end; 'worst' the other one.
+            best = ranked.group(0).lower() == "best"
+            direction = "desc" if best == (better == "higher") else "asc"
+        if direction is None and _RANKED.search(question):
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="order",
+                    question="The question ranks by 'best' or 'worst' — by which figure, "
+                    "and is higher or lower better?",
+                )
+            )
+        if direction is None:
             return [], limit
+        if not metrics:
+            # The question ranks ('highest', 'most', 'top 5') but the reading
+            # carries no measure to rank by: dropping the order would serve an
+            # unordered listing as the answer. Ask instead — with escalation on,
+            # raw-SQL generation takes the question.
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="order",
+                    question="The question ranks by a measure, but this reading found "
+                    "none to rank on — which figure should the answer be ordered by?",
+                )
+            )
         return [IntentOrder(field=metrics[0], dir=direction)], limit
 
 

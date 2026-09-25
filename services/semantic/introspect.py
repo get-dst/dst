@@ -15,6 +15,7 @@ from services.contracts.profile import (
     ColumnProfile,
     TableProfile,
     profile_from_table_schema,
+    prompt_values,
 )
 from services.contracts.semantic_model import FIELD_TYPES, warehouse_field_type
 from services.contracts.warehouse import ColumnSchema, SchemaSnapshot, TableSchema
@@ -66,9 +67,9 @@ def _column_facts(profile: ColumnProfile | None, *, sampled: bool = False) -> st
     if profile is None:
         return ""
     stats: list[str] = []
-    if profile.top_values:
+    if shown := prompt_values(profile):
         label = "Values" if profile.values_complete else "Values (partial)"
-        stats.append(f"{label}: " + ", ".join(f"'{v}'" for v in profile.top_values))
+        stats.append(f"{label}: " + ", ".join(f"'{v}'" for v in shown))
     elif profile.distinct_count is not None:
         prefix = "" if profile.distinct_is_exact else ">="
         stats.append(f"distinct: {prefix}{profile.distinct_count}")

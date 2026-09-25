@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from services.contracts.profile import TableProfile, TimeCoverage
+from services.contracts.profile import TableProfile, TimeCoverage, prompt_values
 from services.contracts.semantic_model import SemanticModel
 
 # A null rate below this is noise, not signal — it renders nothing.
@@ -80,11 +80,13 @@ def enrich_model(model: SemanticModel, profiles: list[TableProfile]) -> Semantic
                     # The shape rule outranks value lists — a model that
                     # compares a raw JSON column to a plain string serves nothing.
                     stats.append(cp.access_hint)
-                if cp.top_values:
+                if shown := prompt_values(cp):
                     # A partial dictionary presented as complete is worse than none:
                     # the model writes `WHERE element IN (…)` and silently drops rows.
+                    # A dictionary longer than an enum is for value matching, not
+                    # for the prompt: the column reads as its distinct count.
                     label = "Values" if cp.values_complete else "Values (partial)"
-                    stats.append(f"{label}: " + ", ".join(f"'{v}'" for v in cp.top_values))
+                    stats.append(f"{label}: " + ", ".join(f"'{v}'" for v in shown))
                 elif cp.distinct_count is not None:  # high-cardinality signal
                     prefix = "" if cp.distinct_is_exact else ">="
                     stats.append(f"distinct: {prefix}{cp.distinct_count}")

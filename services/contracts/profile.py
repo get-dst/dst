@@ -17,8 +17,18 @@ from pydantic import BaseModel, Field
 from services.contracts.warehouse import SchemaSnapshot, TableSchema
 
 # A column with at most this many distinct values is "low cardinality" (enum-like) —
-# the threshold the sampling pass uses to collect literals into top_values.
+# the threshold the sampling pass uses to collect literals into top_values. It is
+# also the most values any dictionary contributes to text a model reads (field
+# descriptions, repair feedback, a decision's options): a longer one is a fact
+# the machinery matches against, never a list a prompt carries.
 LOW_CARDINALITY_MAX = 25
+
+# A TEXT column with at most this many distinct values, counted over every row,
+# gets its whole dictionary collected (``values_complete``) even though it is not
+# enum-like: 127 hero names, 300 customer names. The serving rail matches stored
+# values the question names verbatim against it, deterministically — a name the
+# question states is then a fact, not a value the caller must bind.
+MATCH_DICTIONARY_MAX = 500
 
 # Hard caps for the sampling pass: at most this many rows are ever pulled
 # into one sampling query, and on engines that bill scanned bytes (BigQuery) a query
@@ -135,6 +145,11 @@ class ColumnSampleSpec(BaseModel):
 
     name: str
     type: str = ""  # warehouse type from the catalog pass; decides min/max eligibility
+    # A declared DIMENSION of the semantic layer: the only kind of column whose
+    # whole dictionary (up to MATCH_DICTIONARY_MAX) is collected for value
+    # matching. Other text columns (an email, a free-text note) stay at the
+    # enum cap, so a probe never writes a table's names and addresses to disk.
+    matchable: bool = False
     shape_only: bool = False
 
 
@@ -274,6 +289,21 @@ _COMPOUND_TYPE_PREFIXES = ("STRUCT", "MAP", "ARRAY", "LIST", "ROW", "RECORD")
 
 def _type_tokens(type_name: str) -> list[str]:
     return [t for t in _TOKEN_SPLIT.split(type_name.lower()) if t]
+
+
+_TEXT_TYPE_PREFIXES = ("VARCHAR", "TEXT", "STRING", "CHAR")
+
+
+def is_text_type(type_name: str) -> bool:
+    """True for warehouse character types (VARCHAR(n), TEXT, STRING, character varying)."""
+    return type_name.strip().upper().startswith(_TEXT_TYPE_PREFIXES)
+
+
+def prompt_values(column: ColumnProfile) -> list[str] | None:
+    """The value list a model may be shown for this column: every value of an
+    enum-like dictionary, nothing for a longer one (see LOW_CARDINALITY_MAX)."""
+    values = column.top_values
+    return values if values and len(values) <= LOW_CARDINALITY_MAX else None
 
 
 def is_compound_type(type_name: str) -> bool:

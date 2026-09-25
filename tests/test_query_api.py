@@ -315,10 +315,24 @@ def test_query_body_accepts_bindings_and_allow_untyped() -> None:
     from services.api.route import JustAskBody
 
     b = QueryBody.model_validate({"question": "revenue for one customer"})
-    assert b.bindings == {} and b.allow_untyped is False
+    assert b.bindings == {} and b.allow_untyped is None  # unset: the lens decides
     b = QueryBody.model_validate(
         {"q": "revenue?", "bindings": {"customer_name": "Acme Oy"}, "allow_untyped": True}
     )
     assert b.bindings == {"customer_name": "Acme Oy"} and b.allow_untyped is True
     j = JustAskBody.model_validate({"q": "revenue?", "bindings": {"country": "FI"}})
-    assert j.bindings == {"country": "FI"} and j.allow_untyped is False
+    assert j.bindings == {"country": "FI"} and j.allow_untyped is None
+
+
+def test_untyped_fallback_is_the_lens_default_and_the_caller_can_refuse_it() -> None:
+    """Unset, the lens owner's untyped_fallback decides; the caller's explicit
+    choice always wins, so false still demands typed-only on a fallback lens."""
+    from services.api.query import effective_allow_untyped
+    from services.contracts.lens_config import LensConfig
+
+    strict = LensConfig(name="s", connections=["wh"])
+    lenient = LensConfig(name="l", connections=["wh"], untyped_fallback=True)
+    assert effective_allow_untyped(strict, None) is False
+    assert effective_allow_untyped(lenient, None) is True
+    assert effective_allow_untyped(lenient, False) is False
+    assert effective_allow_untyped(strict, True) is True

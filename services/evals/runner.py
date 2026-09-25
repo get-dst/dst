@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from services.contracts.errors import ProviderError
 from services.contracts.eval import EvalCase, EvalResult, EvalRun
 from services.contracts.protocols import Connector, LLMProvider
 from services.reviews.judge import judge_trace
@@ -137,22 +138,28 @@ def run_behavioral(
         for attempt in range(GATE_ATTEMPTS):
             assembled = assemble_for(c.question)
             generator, escalate = generators_for(assembled)
-            pr = run_query(
-                question=c.question,
-                lens_name=lens,
-                org_id="eval",
-                caller="eval",
-                semantic_model=assembled.model,
-                value_domains=assembled.value_domains,
-                connector=connector,
-                generator=generator,
-                escalate_generator=escalate,
-                composer=composer,
-                prose_context=assembled.prose,
-                model_name=model_name,
-                data_as_of=assembled.data_as_of,
-                entity_coverage=assembled.entity_coverage,
-            )
+            try:
+                pr = run_query(
+                    question=c.question,
+                    lens_name=lens,
+                    org_id="eval",
+                    caller="eval",
+                    semantic_model=assembled.model,
+                    value_domains=assembled.value_domains,
+                    connector=connector,
+                    generator=generator,
+                    escalate_generator=escalate,
+                    composer=composer,
+                    prose_context=assembled.prose,
+                    model_name=model_name,
+                    data_as_of=assembled.data_as_of,
+                    entity_coverage=assembled.entity_coverage,
+                )
+            except ProviderError as exc:
+                # One dropped provider call is this case's errored attempt, retried
+                # like any failure; it must not take the rest of the suite with it.
+                ok, reason, grade, sql = False, f"model provider failed: {exc}", "errored", None
+                continue
             t = pr.trace
             sql = t.sql
             if t.status == "error":
@@ -222,22 +229,35 @@ def run_health(
     for c in cases:
         assembled = assemble_for(c.question)
         generator, escalate = generators_for(assembled)
-        pr = run_query(
-            question=c.question,
-            lens_name=lens,
-            org_id="eval",
-            caller="eval",
-            semantic_model=assembled.model,
-            value_domains=assembled.value_domains,
-            connector=connector,
-            generator=generator,
-            escalate_generator=escalate,
-            composer=composer,
-            prose_context=assembled.prose,
-            model_name=model_name,
-            data_as_of=assembled.data_as_of,
-            entity_coverage=assembled.entity_coverage,
-        )
+        try:
+            pr = run_query(
+                question=c.question,
+                lens_name=lens,
+                org_id="eval",
+                caller="eval",
+                semantic_model=assembled.model,
+                value_domains=assembled.value_domains,
+                connector=connector,
+                generator=generator,
+                escalate_generator=escalate,
+                composer=composer,
+                prose_context=assembled.prose,
+                model_name=model_name,
+                data_as_of=assembled.data_as_of,
+                entity_coverage=assembled.entity_coverage,
+            )
+        except ProviderError as exc:
+            results.append(
+                EvalResult(
+                    run_id="",
+                    case_id=c.id,
+                    question=c.question,
+                    passed=False,
+                    grade="errored",
+                    reason=f"model provider failed: {exc}",
+                )
+            )
+            continue
         t = pr.trace
         if t.status != "ok":
             results.append(

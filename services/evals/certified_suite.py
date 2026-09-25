@@ -40,6 +40,7 @@ from services.certify import binding as certify_binding
 from services.certify.generate import _value_summary
 from services.certify.store import CertifiedAnswer, is_active
 from services.connectors.tagging import query_context
+from services.contracts.errors import ProviderError
 from services.contracts.protocols import Connector, QueryGenerator
 from services.contracts.resolution import Resolution
 from services.evals import runner
@@ -195,6 +196,16 @@ def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) 
     return not remaining
 
 
+def _same(want: Any, got: Any) -> bool:
+    """One cell equal to the certified scalar: floats within the scalar tolerance,
+    everything else exact (a bool is never a number here)."""
+    if isinstance(want, bool) or isinstance(got, bool):
+        return want is got
+    if isinstance(want, int | float) and isinstance(got, int | float):
+        return abs(got - want) <= _SCALAR_RTOL * max(abs(want), 1)
+    return str(want) == str(got)
+
+
 def _compare(
     oracle_cols: list[str],
     oracle_rows: list[list[Any]],
@@ -202,6 +213,18 @@ def _compare(
     gen_rows: list[list[Any]],
 ) -> tuple[bool, str | None]:
     """Executed-result equality: set diff, column-order-insensitive, scalar-tolerant."""
+    if len(oracle_cols) == 1 and len(oracle_rows) == 1 and len(gen_rows) == 1 and len(gen_cols) > 1:
+        # The certified answer is one value; the generated one is a single row
+        # carrying it beside label columns ('7.41', True for "the current patch").
+        # Exactly one cell must match — two would be a coincidence it cannot
+        # tell apart — and the pass says so, never a silent green.
+        want = oracle_rows[0][0]
+        hits = [c for c, got in zip(gen_cols, gen_rows[0], strict=False) if _same(want, got)]
+        if len(hits) == 1:
+            return True, (
+                f"shape-lenient: the certified value is column '{hits[0]}', with "
+                f"{len(gen_cols) - 1} label column(s) beside it"
+            )
     if len(oracle_cols) != len(gen_cols):
         story = _shape_story(oracle_cols, oracle_rows, gen_cols, gen_rows)
         return False, story or (
@@ -442,23 +465,30 @@ def _score_one(
     # every attempt; retries are paid only on failures. GATE_ATTEMPTS is
     # shared with the behavioral runner so the whole gate has one policy.
     for _attempt in range(runner.GATE_ATTEMPTS):
-        pr = run_query(
-            question=case_question,
-            lens_name=lens,
-            org_id="certified-suite",
-            caller="certified-suite",
-            semantic_model=assembled.model,
-            value_domains=assembled.value_domains,
-            connector=connector,
-            generator=generator,
-            composer=composer,
-            escalate_generator=escalate_generator,
-            prose_context=assembled.prose,
-            max_rows=_ROW_CAP,
-            model_name=model_name,
-            data_as_of=assembled.data_as_of,
-            entity_coverage=assembled.entity_coverage,
-        )
+        try:
+            pr = run_query(
+                question=case_question,
+                lens_name=lens,
+                org_id="certified-suite",
+                caller="certified-suite",
+                semantic_model=assembled.model,
+                value_domains=assembled.value_domains,
+                connector=connector,
+                generator=generator,
+                composer=composer,
+                escalate_generator=escalate_generator,
+                prose_context=assembled.prose,
+                max_rows=_ROW_CAP,
+                model_name=model_name,
+                data_as_of=assembled.data_as_of,
+                entity_coverage=assembled.entity_coverage,
+            )
+        except ProviderError as exc:
+            # A dropped provider call fails this attempt, retried like any
+            # failure; it must not take the rest of the suite with it.
+            reason = f"model provider failed: {exc}"
+            gen_summary, passed = {"error": reason}, False
+            continue
         t = pr.trace
         gen_sql = t.sql
         got = pr.response.resolution

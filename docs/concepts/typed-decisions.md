@@ -18,15 +18,19 @@ extracted from prose.
 | entity | the lens's entities | `semantic/entities/` |
 | reading | the declared readings of an ambiguous term | `definitions` with `possible_mappings` |
 | metric, dimension, grain | the entity's declared metrics, dimensions and time grains | the entity file |
-| filter column and value | the entity's fields; a value from the column's complete dictionary | the column profile (`dst introspect --profile`) |
+| ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
+| filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this) | the column profile (`dst introspect --profile`) |
 | window | none — a stated period is parsed, never decided | `timewindow` |
 
 A slot the question does not settle is asked back as a **clarification naming
 the slot**: which metric, which value of `status`. The asking agent answers by
 re-asking with `bindings` (an open value it supplies) — it never has to know
-the SQL. Raw-SQL generation survives only as a disclosed escalation the caller
-opts into with `allow_untyped: true`; such an answer carries `typed: false` on
-its ledger and an `UNTYPED:` line, and the audit counts it apart.
+the SQL. Raw-SQL generation survives only as a disclosed escalation: the caller
+opts into it with `allow_untyped: true`, or the lens owner makes it the lens's
+default with `untyped_fallback: true` in `lens.yaml`, for callers that cannot be
+expected to know the flag. A caller's `allow_untyped: false` still demands
+typed-only. Such an answer carries `typed: false` on its ledger and an
+`UNTYPED:` line, and the audit counts it apart.
 
 ## The policy: act unless none
 

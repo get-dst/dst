@@ -23,6 +23,7 @@ from services.certify import binding as certify_binding
 from services.certify import store as certify_store
 from services.config import settings
 from services.contracts.correction import CorrectionDelta
+from services.contracts.lens_config import LensConfig
 from services.contracts.protocols import Connector
 from services.contracts.query_intent import QueryIntent
 from services.contracts.response import CertifiedProvenance, QueryResponse
@@ -122,7 +123,8 @@ BINDINGS_HELP = (
 UNTYPED_HELP = (
     "when the question does not type (a slot clarifies), fall to raw-SQL "
     "generation instead — always disclosed with an UNTYPED line and tagged by "
-    "what it earns, never `declared`. Default false: ask, don't guess"
+    "what it earns, never `declared`. Unset: the lens's `untyped_fallback` "
+    "(default false: ask, don't guess); false demands typed-only"
 )
 FORMAT_HELP = (
     "answer shape: `both` (default), `structured` (rows only — skips the prose LLM "
@@ -141,10 +143,16 @@ class QueryBody(BaseModel):
     )
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
     bindings: dict[str, str] = Field(default_factory=dict, description=BINDINGS_HELP)
-    allow_untyped: bool = Field(default=False, description=UNTYPED_HELP)
+    allow_untyped: bool | None = Field(default=None, description=UNTYPED_HELP)
 
 
 router = APIRouter(prefix="/v1", tags=["query"])
+
+
+def effective_allow_untyped(config: LensConfig, requested: bool | None) -> bool:
+    """The caller's choice when it made one; otherwise the lens owner's default.
+    An explicit false always demands typed-only, whatever the lens allows."""
+    return config.untyped_fallback if requested is None else requested
 
 
 def _lens_unavailable(name: str) -> HTTPException:
@@ -577,7 +585,7 @@ def run_lens_query(
     background: BackgroundTasks,
     fmt: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
-    allow_untyped: bool = False,
+    allow_untyped: bool | None = None,
 ) -> QueryResponse:
     """Authorize + run the governed query pipeline for one lens question.
 
@@ -611,7 +619,11 @@ def run_lens_query(
         raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
 
     assembled = assembly.assemble(
-        bundle, q, caller.org_id, bindings=bindings or {}, allow_untyped=allow_untyped
+        bundle,
+        q,
+        caller.org_id,
+        bindings=bindings or {},
+        allow_untyped=effective_allow_untyped(bundle.config, allow_untyped),
     )
     generator, escalate, certification, certified_match = assembly.select_generators(
         assembled, resolved, config=bundle.config

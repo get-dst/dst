@@ -86,7 +86,6 @@ def test_every_slot_acts_and_the_intent_compiles() -> None:
         _sure("country"),
         _sure(None),
         _sure("status"),
-        _sure("shipped"),
         _sure(None),
     ]
     res = _resolver(decisions).resolve("revenue by country for shipped orders last month", _model())
@@ -109,6 +108,11 @@ def test_every_slot_acts_and_the_intent_compiles() -> None:
         "filter",
     ]
     assert all(d.verdict == "act" for d in res.decisions)
+    # "shipped" is a stored status value the question names: read off the
+    # text, recorded as such, never decided
+    value = res.decisions[6]
+    assert value.chosen == "shipped" and value.provider == "question-text" and value.p is None
+    assert res.matched == ["status"]
     sql = compile_intent(i, _model())
     assert "SUM(" in sql and "GROUP BY" in sql and "'shipped'" in sql and "2026-08-01" in sql
 
@@ -141,6 +145,171 @@ def test_listing_projects_fields_without_aggregation() -> None:
     assert res.intent is not None and res.intent.fields == ["customer_name", "amount"]
     sql = compile_intent(res.intent, _model())
     assert "GROUP BY" not in sql and "customer_name" in sql and "SUM(" not in sql
+
+
+def test_a_ranking_with_no_measure_to_rank_on_clarifies_never_serves_a_bare_listing() -> None:
+    """'Which customer has the highest revenue?' read as a listing carries no
+    metric, so its order had nothing to attach to and a bare list of names was
+    served. The ranking must fail loud (a clarify, which escalation hands to
+    raw-SQL generation), never drop silently."""
+    decisions = [_sure("listing"), _sure("customer_name"), _sure(None), _sure(None)]
+    res = _resolver(decisions).resolve("Which customer has the highest revenue?", _model())
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.kind == "unresolved_slot" and res.clarification.term == "order"
+
+
+def test_best_or_worst_never_types_its_direction_depends_on_the_measure() -> None:
+    """'Best' means highest for revenue and lowest for deaths: the resolver cannot
+    pick a direction, so it asks rather than serve an unordered figure."""
+    decisions = [_sure("aggregate"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    res = _resolver(decisions).resolve("Which country has the best revenue?", _model())
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "order"
+
+
+def test_a_ranking_is_one_figure_per_dimension_ordered_by_it() -> None:
+    """'Which country has the highest revenue?' is a ranking: revenue per country,
+    highest first — the shape the listing reading dropped to a bare list of names."""
+    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    res = _resolver(decisions).resolve("Which country has the highest revenue?", _model())
+    assert res.intent is not None, res.clarification
+    i = res.intent
+    assert i.metrics == ["revenue"] and i.dimensions == ["country"]
+    assert [(o.field, o.dir) for o in i.order_by] == [("revenue", "desc")]
+    sql = compile_intent(i, _model())
+    assert "GROUP BY" in sql and "ORDER BY" in sql and "DESC" in sql
+
+
+def test_a_top_n_ranking_carries_its_limit() -> None:
+    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    res = _resolver(decisions).resolve("top 3 countries by revenue", _model())
+    assert res.intent is not None and res.intent.limit == 3
+
+
+def test_a_ranking_with_no_stated_direction_clarifies() -> None:
+    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    res = _resolver(decisions).resolve("rank the countries by revenue", _model())
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "order"
+
+
+def test_a_ranking_needs_something_to_rank() -> None:
+    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure(None)]
+    res = _resolver(decisions).resolve("Which has the highest revenue?", _model())
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "dimension"
+
+
+def test_a_derivation_definition_is_never_engaged_as_a_filter() -> None:
+    """A definition the question names but whose sql_expr is a column, not a
+    condition, is not offered as a filter at all — no decision, no WHERE clause."""
+    model = _model()
+    model.definitions[0].sql_expr = "orders.amount"
+    decisions = [_sure("aggregate"), _sure("revenue"), *[_sure(None)] * 6]
+    res = _resolver(decisions).resolve("revenue from every large order", model)
+    assert res.intent is not None and res.intent.definitions == []
+    assert not any(d.slot == "definition" for d in res.decisions)
+
+
+def _ranked_model(better: str | None) -> SemanticModel:
+    model = _model()
+    model.entities[0].metrics[0].better = better  # type: ignore[assignment]
+    return model
+
+
+def test_best_and_worst_follow_the_declared_better_end() -> None:
+    """'Best' orders toward the metric's declared better end, 'worst' away from
+    it — the author's fact, never the resolver's guess."""
+    steps = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    best = _resolver(list(steps)).resolve(
+        "Which country has the best revenue?", _ranked_model("higher")
+    )
+    assert best.intent is not None and [(o.field, o.dir) for o in best.intent.order_by] == [
+        ("revenue", "desc")
+    ]
+    worst = _resolver(list(steps)).resolve(
+        "Which country has the worst revenue?", _ranked_model("higher")
+    )
+    assert worst.intent is not None and worst.intent.order_by[0].dir == "asc"
+    lower = _resolver(list(steps)).resolve(
+        "Which country has the best revenue?", _ranked_model("lower")
+    )
+    assert lower.intent is not None and lower.intent.order_by[0].dir == "asc"
+
+
+def test_a_named_value_the_filter_step_missed_gets_a_focused_decision() -> None:
+    """'shipped' is a stored status the question names. When the general "any
+    restriction?" step says none, a focused decision among the columns holding
+    the value places it — the filter is kept, not asked back to the caller."""
+    decisions = [
+        _sure("listing"),
+        _sure("customer_name"),
+        _sure(None),
+        _sure(None),
+        _sure("status"),
+    ]
+    res = _resolver(decisions).resolve("list the customers with shipped orders", _model())
+    assert res.intent is not None, res.clarification
+    assert [(f.field, f.value) for f in res.intent.filters] == [("status", "shipped")]
+
+
+def test_a_numeric_filter_value_is_never_picked_off_a_list() -> None:
+    """A number is stated or it is not: a model choosing '3' from a list of ids
+    for 'Legend' is a guess, so a numeric dictionary is never offered."""
+    resolver = TypedResolver(
+        ScriptedDecider(
+            [
+                _sure("aggregate"),
+                _sure("revenue"),
+                _sure(None),
+                _sure(None),
+                _sure("order_id"),
+                _sure("3"),
+                _sure(None),
+                _sure(None),
+            ]
+        ),  # type: ignore[arg-type]
+        domains={**DOMAINS, "order_id": ["1", "2", "3"]},
+        today=TODAY,
+    )
+    res = resolver.resolve("revenue for the premium order", _model())
+    assert not (res.intent and any(f.field == "order_id" for f in res.intent.filters))
+
+
+def test_a_filter_outside_the_declared_population_declines() -> None:
+    """A table counted over shipped orders only cannot answer about open ones:
+    `status = 'open' AND (status = 'shipped')` matches no row. The contradiction
+    is read off the declared population and declines before any query runs."""
+    model = _model()
+    model.entities[0].population_filter = "orders.status = 'shipped'"
+    # the fifth "none" is the general filter step; the named value then gets its
+    # focused decision, which places it on status
+    steps = [_sure("aggregate"), _sure("revenue"), *[_sure(None)] * 3, _sure("status"), _sure(None)]
+    res = _resolver(list(steps)).resolve("revenue from open orders", model)
+    assert res.intent is None and res.decline and "open" in res.decline
+    ok = _resolver(list(steps)).resolve("revenue from shipped orders", model)
+    assert ok.intent is not None
+
+
+def test_a_numeric_column_is_a_filter_candidate_only_with_a_stated_number() -> None:
+    from services.runtime.typed_resolver import Option
+
+    model = _model()
+    entity = model.entities[0]
+    members = [Option(f.name) for f in entity.fields]
+    r = _resolver([])
+    without = {
+        o.name for o in r._filter_candidates("revenue for the premium order", entity, members)
+    }
+    with_number = {o.name for o in r._filter_candidates("revenue for order 7", entity, members)}
+    assert "order_id" not in without and "amount" not in without
+    assert "order_id" in with_number and "status" in without
+
+
+def test_a_listing_without_ranking_words_still_types() -> None:
+    decisions = [_sure("listing"), _sure("customer_name"), _sure(None), _sure(None)]
+    res = _resolver(decisions).resolve("list the customers", _model())
+    assert res.intent is not None and res.intent.order_by == []
 
 
 def test_open_value_comes_from_bindings_or_clarifies() -> None:
@@ -274,7 +443,6 @@ def test_a_batching_decider_types_a_typical_question_in_three_calls() -> None:
             # first filter's value is picked — all in the same call
             "metric:1": None,
             "dimension:1": None,
-            "filter_value:status": "shipped",
             "filter:1": None,
         }
     )
@@ -287,7 +455,8 @@ def test_a_batching_decider_types_a_typical_question_in_three_calls() -> None:
     batched = [c for c in decider.calls if c != ["<single>"]]
     assert set(batched[0]) == {"shape", "metric:0"}  # one entity → no entity question
     assert set(batched[1]) == {"metric:1", "dimension:0", "filter:0"}  # no grain asked
-    assert set(batched[2]) == {"dimension:1", "filter_value:status", "filter:1"}
+    # the value is named in the question: matched, so round three never asks it
+    assert set(batched[2]) == {"dimension:1", "filter:1"}
     assert len(batched) == 3 and decider.calls.count(["<single>"]) == 0
     # Every decision is on the ledger, batched ones first in spec order.
     assert [d.slot for d in res.decisions][:4] == [
@@ -440,7 +609,8 @@ def test_the_entity_s_own_dictionary_serves_when_the_shared_one_dropped_the_colu
     assert res.intent is not None, res.clarification
     got = {(f.field, f.op, f.value) for f in res.intent.filters}
     assert ("month", "=", "2026-08") in got and ("status", "=", "final") in got
-    assert any(c["options"][:2] == ["draft", "final"] for c in decider.calls)
+    # "final" is matched against the entity's own dictionary (no shared one exists)
+    assert res.matched == ["status"]
 
 
 def test_a_month_span_compiles_and_an_unplaced_month_clarifies_never_drops() -> None:

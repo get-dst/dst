@@ -99,7 +99,7 @@ def _gold_names(expected: Resolution, kind: str) -> set[str]:
 def grade_decisions(records: list[DecisionRecord], expected: Resolution) -> list[GradedDecision]:
     """Each slot decision against the gold the stored slots imply.
 
-    ``shape``: aggregate iff the gold carries a measure slot. ``metric`` /
+    ``shape``: a figure (aggregate or ranking) iff the gold carries a measure slot. ``metric`` /
     ``dimension`` / ``grain``: a pick is right when the gold carries that name;
     a ``none`` is right when every gold name of that kind was already picked
     (tracked in order). Filters and definitions are not graded here — their
@@ -117,7 +117,10 @@ def grade_decisions(records: list[DecisionRecord], expected: Resolution) -> list
     for r in records:
         gold: str | None
         if r.slot == "shape":
-            gold = "aggregate" if has_measure else "listing"
+            # The stored slots carry no order, so a ranking and a plain aggregate
+            # grade as one family: a figure was asked for, or a listing was.
+            figure = "ranking" if r.chosen == "ranking" else "aggregate"
+            gold = figure if has_measure else "listing"
         elif r.slot in ("metric", "dimension"):
             pool = remaining[r.slot]
             if r.chosen is None:

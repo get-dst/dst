@@ -289,12 +289,12 @@ def test_answer_format_reaches_the_data_plane(monkeypatch: pytest.MonkeyPatch) -
             transport=httpx.MockTransport(handler), base_url="http://dst.test"
         ),
     )
+    # allow_untyped is sent only when the agent chose it: omitted, the lens decides
     asyncio.run(srv.query("churn", "how many?", ctx=None, format="structured"))
     assert sent["/v1/lenses/churn/query"] == {
         "q": "how many?",
         "format": "structured",
         "bindings": {},
-        "allow_untyped": False,
     }
     asyncio.run(srv.run_certified("churn", ctx=None, cert_id="c9", format="structured"))
     assert sent["/v1/lenses/churn/certified/c9/run"] == {"bindings": {}, "format": "structured"}
@@ -304,7 +304,6 @@ def test_answer_format_reaches_the_data_plane(monkeypatch: pytest.MonkeyPatch) -
         "q": "how many?",
         "format": "both",
         "bindings": {},
-        "allow_untyped": False,
     }
 
 

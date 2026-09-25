@@ -1490,16 +1490,35 @@ def _probe_connections(
                 f"sampling {len(scope)} table(s) now",
                 file=sys.stderr,
             )
-            merged = sample_profiles(connector, [p for p in profiles if p.table in scope])
+            # Whole dictionaries (for matching names the question states) only for
+            # the dimensions the semantic layer declares on this connection.
+            matchable = frozenset(
+                f"{e.source.table}.{d.name}"
+                for e in entities
+                if e.source.connection == name and e.source.table
+                for d in e.dimensions
+            )
+            merged = sample_profiles(
+                connector, [p for p in profiles if p.table in scope], matchable=matchable
+            )
             profiles = [merged.get(p.table, p) for p in profiles]
         except Exception as exc:  # noqa: BLE001 — one dead warehouse must not stop the rest
             first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
             print(f"error: connection '{name}' did not probe ({first})", file=sys.stderr)
             worst = 1
             continue
+        # Report what was SAMPLED, not what was scheduled: a pass that sampled
+        # nothing must not read as a pass that sampled everything.
+        sampled = sum(1 for p in profiles if p.source != "catalog")
+        if sampled < len(scope):
+            print(
+                f"warning: sampled {sampled} of the {len(scope)} table(s) in scope — "
+                f"the rest carry catalog metadata only",
+                file=sys.stderr,
+            )
         if len(scope) < len(profiles):
             print(
-                f"sampled {len(scope)} of {len(profiles)} table(s) — the semantic layer "
+                f"sampled {sampled} of {len(profiles)} table(s) — the semantic layer "
                 f"reads {len(scope)}; catalog metadata covers the rest (--sample-all "
                 "samples every table, --tables a,b exactly those)",
                 file=sys.stderr,

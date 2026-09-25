@@ -704,7 +704,7 @@ def _stored_profile() -> TableProfile:
         columns=[
             # pg_stats freebie → not a gap
             ColumnProfile(name="status", type="text", null_rate=0.01, top_values=["paid"]),
-            # described in the warehouse → not a gap
+            # described but unmeasured → still a gap: a description is not a value set
             ColumnProfile(
                 name="kind", type="text", description="order kind", description_source="warehouse"
             ),
@@ -720,7 +720,7 @@ def test_build_sample_spec_samples_only_gaps() -> None:
     assert spec is not None
     by_name = {c.name: c for c in spec.columns}
     # the catalog-profiled columns are skipped at SQL-build time, not post-hoc
-    assert set(by_name) == {"channel", "internal_code", "created_at"}
+    assert set(by_name) == {"kind", "channel", "internal_code", "created_at"}
     assert not any(c.shape_only for c in spec.columns)  # nothing excluded on this call
     assert spec.freshness_column == "created_at"  # the known partition column
     assert spec.row_count == 1000

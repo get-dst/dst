@@ -223,6 +223,8 @@ def serialize_model(m: SemanticModel) -> str:
                 line += f" = {sql}"
             if metric.format:
                 line += f" [format: {metric.format}]"
+            if metric.better:
+                line += f" [better: {metric.better}]"
             if metric.agg_time_field:
                 line += f" [time: {metric.agg_time_field}]"
             if metric.description:
