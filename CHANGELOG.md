@@ -29,6 +29,17 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.5] — 2026-09-25
+
+No schema change.
+
+### Changed
+
+- **In demo mode an OAuth token lives as long as a demo key** (`DST_DEMO_KEY_DAYS`,
+  7 days by default). There is no refresh token, so the token is the whole grant:
+  a stranger's client holds access for the week the demo promises, then reconnects.
+  Outside demo mode the long default stands.
+
 ## [0.5.4] — 2026-09-25
 
 No schema change.

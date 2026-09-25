@@ -63,7 +63,9 @@ The three doors a visitor gets, all governed by the same lens allow-list and bud
 
 - `POST /v1/lenses/customer_value/query` with the key as a bearer
 - `/v1` as an OpenAI-compatible base URL, the lens as the model name
-- `/mcp` from any MCP client; the OAuth consent page signs them in with the same account
+- `/mcp` from any MCP client; the OAuth consent page signs them in with the same account.
+  The client's token lives as long as a demo key (`DST_DEMO_KEY_DAYS`, 7 by default), then
+  the person reconnects
 
 ## The same thing on Cloud Run
 

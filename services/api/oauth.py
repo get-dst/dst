@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import html
 import uuid
+from datetime import timedelta
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
@@ -242,6 +243,16 @@ def _client_line(client_name: str, redirect_uri: str) -> str:
         f"scoped to your key.<br>Authorization code will be sent to: "
         f"<code>{dest}</code>{warn}</p>"
     )
+
+
+def _token_ttl() -> timedelta:
+    """An OAuth token's life. In demo mode it matches the demo's own keys
+    (demo_key_days): a stranger's client holds access for the week the demo
+    promises, then reconnects — there is no refresh token, so the week is the
+    whole grant. Elsewhere the long default stands (revocation is immediate)."""
+    if demo.enabled():
+        return timedelta(days=settings.demo_key_days)
+    return oauth.OAUTH_TOKEN_TTL
 
 
 def _consent_html(params: dict[str, str], error: str = "", *, client_name: str = "") -> str:
@@ -521,10 +532,11 @@ async def token(
 
     granted = [str(s) for s in (claims.get("scope") or [])]
     resource = claims.get("resource")
+    ttl = _token_ttl()
     raw = credentials.mint_oauth_token(
         uuid.UUID(str(claims["org"])),
         uuid.UUID(str(claims["cid"])),
-        oauth.OAUTH_TOKEN_TTL,
+        ttl,
         scopes=granted,
         resource=str(resource) if resource else None,
     )
@@ -532,7 +544,7 @@ async def token(
     body: dict[str, Any] = {
         "access_token": raw,
         "token_type": "Bearer",
-        "expires_in": int(oauth.OAUTH_TOKEN_TTL.total_seconds()),
+        "expires_in": int(ttl.total_seconds()),
     }
     # RFC 6749 §5.1: echo `scope` when it differs from the request. We always echo
     # what was actually granted — a client that assumes it got what it asked for

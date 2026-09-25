@@ -211,3 +211,19 @@ def test_every_page_a_person_sees_carries_the_instance_name(
     monkeypatch.delenv("DST_INSTANCE_NAME")
     page = client.get("/demo").text
     assert "<title>dst · demo</title>" in page and "answers by dst" not in page
+
+
+def test_a_demo_oauth_token_lives_as_long_as_a_demo_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is no refresh token, so a demo client's grant is the token's whole
+    life: the week the demo promises, then the person reconnects. Outside demo
+    mode the long default stands."""
+    from datetime import timedelta
+
+    from services.api.oauth import _token_ttl
+    from services.auth import oauth
+
+    monkeypatch.setattr(settings, "demo_org_id", str(uuid.uuid4()))
+    monkeypatch.setattr(settings, "demo_key_days", 7)
+    assert _token_ttl() == timedelta(days=7)
+    monkeypatch.setattr(settings, "demo_org_id", None)
+    assert _token_ttl() == oauth.OAUTH_TOKEN_TTL
