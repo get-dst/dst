@@ -172,12 +172,27 @@ def entity_coverage(
     return out
 
 
-def data_as_of(profiles: list[TableProfile], tables: set[str]) -> datetime | None:
+def data_as_of(
+    profiles: list[TableProfile],
+    tables: set[str],
+    time_fields: dict[str, str | None] | None = None,
+) -> datetime | None:
     """The scope's freshness floor: the *oldest* last-update across its tables —
-    the honest "data as of" (logical freshness preferred over physical)."""
-    stamps = [
-        p.last_updated_logical or p.last_updated_physical
-        for p in profiles
-        if p.table in tables and (p.last_updated_logical or p.last_updated_physical)
-    ]
-    return min(stamps) if stamps else None  # type: ignore[type-var]
+    the honest "data as of" (logical freshness preferred over physical).
+
+    Logical freshness is the newest value of a time column. It is freshness only
+    for a table the semantic layer declares as a time series (its entity names a
+    ``default_time_field``; ``time_fields``: table -> that field). A reference
+    table's dates are ATTRIBUTES — a patch's release date, a customer's signup
+    date: taken as a load time, every answer over a fresh warehouse was dated to
+    the last release and called stale. Such a table falls back to physical
+    freshness, or to no claim at all. Without ``time_fields`` every stamp counts."""
+
+    def stamp(p: TableProfile) -> datetime | None:
+        logical = p.last_updated_logical
+        if time_fields is not None and not time_fields.get(p.table):
+            logical = None
+        return logical or p.last_updated_physical
+
+    stamps = [s for p in profiles if p.table in tables and (s := stamp(p)) is not None]
+    return min(stamps) if stamps else None

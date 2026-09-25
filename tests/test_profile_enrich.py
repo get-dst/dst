@@ -278,6 +278,40 @@ def test_data_as_of_is_the_oldest_scope_table() -> None:
     assert profile_enrich.data_as_of(profiles, {"unknown"}) is None
 
 
+def test_a_date_attribute_is_not_freshness() -> None:
+    """A patches table's newest release date is an attribute, not a load time:
+    counted as freshness it dated every answer to the last release and called a
+    warehouse loaded an hour ago stale. Only the entity's declared event time
+    (default_time_field) is logical freshness."""
+    from services.contracts.profile import TimeCoverage
+
+    fresh = datetime(2026, 9, 25, tzinfo=UTC)
+    released = datetime(2026, 3, 24, tzinfo=UTC)
+    profiles = [
+        TableProfile(
+            connection="w",
+            table="matches",
+            last_updated_logical=fresh,
+            time_coverage=TimeCoverage(column="started_at", min=released, max=fresh),
+        ),
+        TableProfile(
+            connection="w",
+            table="patches",
+            last_updated_logical=released,
+            time_coverage=TimeCoverage(column="patch_started_at", min=released, max=released),
+        ),
+    ]
+    tables = {"matches", "patches"}
+    declared = {"matches": "started_at", "patches": None}
+    as_of = profile_enrich.data_as_of(profiles, tables, declared)
+    assert as_of == fresh  # the release date no longer drags the scope back
+    # declared a time series, the same table's newest date does count
+    as_series = profile_enrich.data_as_of(
+        profiles, tables, {"matches": "started_at", "patches": "patch_started_at"}
+    )
+    assert as_series == released
+
+
 def _reachable(url: str) -> bool:
     try:
         with create_engine(url).connect() as c:
@@ -320,6 +354,16 @@ def test_answer_carries_data_as_of(monkeypatch: pytest.MonkeyPatch) -> None:
             lens_store.publish(s, "customer_value")
             for p in _profiles():
                 profile_store.upsert_profile(s, p)
+            # orders is the lens's declared time series (default_time_field), so its
+            # newest date is the as-of; customers' dates are attributes
+            profile_store.upsert_profile(
+                s,
+                TableProfile(
+                    connection="jaffle",
+                    table="orders",
+                    last_updated_logical=datetime(2026, 6, 8, tzinfo=UTC),
+                ),
+            )
         r = client.post(
             "/v1/lenses/customer_value/query",
             json={"q": "how many customers?"},

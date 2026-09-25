@@ -466,7 +466,8 @@ def profile_facts(
             stored = profile_store.list_profiles(session, bundle.config.connections[0])
         profiles = [s.profile for s in stored]
         tables = {e.source.table for e in bundle.semantic_model.entities}
-        as_of = profile_enrich.data_as_of(profiles, tables)
+        time_fields = {e.source.table: e.default_time_field for e in bundle.semantic_model.entities}
+        as_of = profile_enrich.data_as_of(profiles, tables, time_fields)
         return profiles, as_of.date().isoformat() if as_of else None
     except Exception:
         log.exception("profile lookup failed for lens %s", bundle.config.name)

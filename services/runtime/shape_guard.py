@@ -130,6 +130,27 @@ def _identity(metric: Metric, entity: Entity, dialect: str) -> _Identity | None:
     return _Identity((agg_type, distinct, canon_inner), conjs, cols, checkable)
 
 
+def _agg_parts(
+    node: exp.Expression, distinct: bool
+) -> tuple[exp.Expression, list[exp.Expression]] | None:
+    """``(inner expression, guarding conditions)`` of an aggregation node — the
+    DISTINCT unwrapped, the CASE/IF guard and any ``FILTER (WHERE ...)`` split
+    off — or None when its DISTINCT-ness is not *distinct*."""
+    arg = node.this
+    if distinct != isinstance(arg, exp.Distinct):
+        return None
+    if isinstance(arg, exp.Distinct):
+        if len(arg.expressions) != 1:
+            return None
+        arg = arg.expressions[0]
+    inner, guard_conds = _unwrap_guard(arg)
+    if isinstance(node.parent, exp.Filter):  # AGG(x) FILTER (WHERE ...)
+        fw = node.parent.expression
+        if isinstance(fw, exp.Where):
+            guard_conds = [*guard_conds, *_conjuncts(fw.this)]
+    return inner, guard_conds
+
+
 def _grouped_cols(
     select: exp.Select | None,
     entity: Entity,
@@ -198,18 +219,10 @@ def _entity_composed(
     for key in {i.key for i in idents.values()}:
         agg_type, distinct, canon_inner = key
         for node in stmt.find_all(agg_type):
-            arg = node.this
-            if distinct != isinstance(arg, exp.Distinct):
+            parts = _agg_parts(node, distinct)
+            if parts is None:
                 continue
-            if isinstance(arg, exp.Distinct):
-                if len(arg.expressions) != 1:
-                    continue
-                arg = arg.expressions[0]
-            inner, guard_conds = _unwrap_guard(arg)
-            if isinstance(node.parent, exp.Filter):  # AGG(x) FILTER (WHERE ...)
-                fw = node.parent.expression
-                if isinstance(fw, exp.Where):
-                    guard_conds = [*guard_conds, *_conjuncts(fw.this)]
+            inner, guard_conds = parts
             cand = _canon(inner, entity, alias_map, sole, strict=True)
             if cand is None or cand != canon_inner:
                 continue  # not (provably) this shape — under-detect, never guess
@@ -339,3 +352,105 @@ def refusal_reason(
             part += f" (lens '{others[0]}' carries '{name}')"
         parts.append(part)
     return "ungoverned metric shape: " + "; ".join(parts)
+
+
+# ── reading a composed ratio back (attribution, not refusal) ─────────────────
+
+
+def _is_number(node: exp.Expression) -> bool:
+    return isinstance(node, exp.Literal) and not node.is_string
+
+
+def _operand(node: exp.Expression) -> exp.Expression:
+    """Strip what a ratio operand wears in the usual spellings — parens, casts,
+    ``NULLIF(x, 0)`` and a numeric-literal factor (``x * 1.0``, ``1.0 * x``)
+    — down to the aggregation itself."""
+    while True:
+        if isinstance(node, exp.Paren | exp.Cast):
+            node = node.this
+        elif isinstance(node, exp.Nullif) and _is_number(node.expression):
+            node = node.this
+        elif isinstance(node, exp.Mul) and _is_number(node.expression):
+            node = node.this
+        elif isinstance(node, exp.Mul) and _is_number(node.this):
+            node = node.expression
+        else:
+            return node
+
+
+def _operand_is(
+    node: exp.Expression,
+    metric: Metric,
+    ratio: Metric,
+    entity: Entity,
+    alias_map: dict[str, set[str]],
+    sole: bool,
+    dialect: str,
+) -> bool:
+    """Is *node* the ratio operand *metric* — same aggregation, every filter of
+    the operand and of the ratio held at the node? The ratio's own filters
+    ride on each operand: both are part of what the ratio means."""
+    merged = metric.model_copy(update={"filters": [*metric.filters, *ratio.filters]})
+    ident = _identity(merged, entity, dialect)
+    if ident is None or not ident.checkable or not isinstance(node, ident.key[0]):
+        return False
+    parts = _agg_parts(node, ident.key[1])
+    if parts is None:
+        return False
+    inner, guard_conds = parts
+    if isinstance(node, exp.Count) and isinstance(inner, exp.Star):
+        inner = exp.Literal.number(1)
+    if _canon(inner, entity, alias_map, sole, strict=False) != ident.key[2]:
+        return False
+    select = node.find_ancestor(exp.Select)
+    where = select.args.get("where") if select is not None else None
+    conds = [
+        *guard_conds,
+        *(_conjuncts(where.this) if isinstance(where, exp.Where) else []),
+    ]
+    held = {
+        c
+        for c in (_canon(x, entity, alias_map, sole, strict=False, condition=True) for x in conds)
+        if c is not None
+    }
+    return all(c in held for c in ident.conjs)
+
+
+def composed_ratios(
+    stmt: exp.Expression, entities: list[Entity], dialect: str
+) -> list[tuple[str, exp.Div]]:
+    """``(ratio metric name, division node)`` for every division in *stmt* whose
+    numerator is a declared ratio's numerator aggregation and whose denominator
+    is its denominator aggregation — the ratio written inline instead of by name.
+
+    The same canonical identities the refusal side uses, read the other way:
+    here a match NAMES the answer's metric, so conditions follow attribution's
+    leniency (unqualified columns are accepted; a qualifier must still denote the
+    entity) while every filter the ratio and its operand carry must hold at the
+    operand itself (its own guard, FILTER clause, or its SELECT's WHERE).
+    ``COUNT(*)`` is a plain count's other spelling (the compiler stores
+    ``COUNT(1)``). Ratio operands that are themselves ratios or derived are not
+    read — they stay separate aggregates, never a guess."""
+    alias_map = _alias_map(stmt)
+    all_refs = set().union(*alias_map.values()) if alias_map else set()
+    divs = list(stmt.find_all(exp.Div))
+    out: list[tuple[str, exp.Div]] = []
+    if not divs:
+        return out
+    for entity in entities:
+        sole = bool(all_refs) and all(_ref_matches(r, entity.source.table) for r in all_refs)
+        by_name = {m.name: m for m in entity.metrics}
+        for ratio in entity.metrics:
+            if ratio.type != "ratio" or not (ratio.numerator and ratio.denominator):
+                continue
+            num, den = by_name.get(ratio.numerator), by_name.get(ratio.denominator)
+            if num is None or den is None:
+                continue
+            for div in divs:
+                if _operand_is(
+                    _operand(div.this), num, ratio, entity, alias_map, sole, dialect
+                ) and _operand_is(
+                    _operand(div.expression), den, ratio, entity, alias_map, sole, dialect
+                ):
+                    out.append((ratio.name, div))
+    return out

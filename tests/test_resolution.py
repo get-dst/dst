@@ -25,7 +25,7 @@ from services.contracts.semantic_model import (
     SemanticModel,
 )
 from services.runtime.compiler import compile_intent
-from services.runtime.resolution import attribute, certified_overlay, from_intent
+from services.runtime.resolution import attribute, certified_overlay, from_intent, grade
 
 
 def _model() -> SemanticModel:
@@ -227,6 +227,94 @@ def test_grain_over_an_undeclared_time_column_is_inferred() -> None:
     res = attribute(sql, _model())
     grain = next(s for s in res.slots if s.kind == "grain")
     assert (grain.name, grain.source, grain.value) == ("shipped_at", "inferred", "week")
+
+
+# ── an inline ratio is the ratio ─────────────────────────────────────────────
+
+
+def _ratio_model() -> SemanticModel:
+    return SemanticModel(
+        lens="matches",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="pub_matches",
+                source=EntitySource(connection="wh", table="marts.fact_pub_match"),
+                fields=[
+                    Field(name="radiant_win", type="boolean"),
+                    Field(name="game_type", type="string"),
+                    Field(name="duration", type="number"),
+                    Field(name="patch_id", type="number"),
+                ],
+                metrics=[
+                    Metric(
+                        name="radiant_wins",
+                        agg="sum",
+                        expr="CASE WHEN pub_matches.radiant_win THEN 1 ELSE 0 END",
+                    ),
+                    Metric(name="match_count", agg="count"),
+                    Metric(
+                        name="radiant_win_rate",
+                        type="ratio",
+                        numerator="radiant_wins",
+                        denominator="match_count",
+                    ),
+                ],
+            ),
+            Entity(
+                name="patches",
+                source=EntitySource(connection="wh", table="marts.dim_patch"),
+                fields=[
+                    Field(name="patch_id", type="number"),
+                    Field(name="is_current", type="boolean"),
+                ],
+            ),
+        ],
+    )
+
+
+_FROM = (
+    " FROM marts.fact_pub_match AS pub_matches JOIN marts.dim_patch AS patches"
+    " ON patches.patch_id = pub_matches.patch_id"
+    " WHERE pub_matches.game_type = 'ranked_all_pick' AND patches.is_current = TRUE"
+)
+_WINS = "SUM(CASE WHEN radiant_win THEN 1 ELSE 0 END)"
+
+
+def _metrics(sql: str) -> list[tuple[str, str]]:
+    return _slots(attribute(sql, _ratio_model()), "metric")
+
+
+@pytest.mark.parametrize(
+    "select",
+    [
+        f"{_WINS} * 1.0 / COUNT(*) AS radiant_win_rate",
+        f"CAST({_WINS} AS DOUBLE) / NULLIF(COUNT(*), 0)",
+        f"{_WINS} / COUNT(*)",
+        f"1.0 * {_WINS} / COUNT(1)",
+    ],
+)
+def test_inline_ratio_attributes_the_ratio_not_its_operands(select: str) -> None:
+    assert _metrics(f"SELECT {select}{_FROM}") == [("radiant_win_rate", "declared")]
+
+
+def test_inline_ratio_grades_equal_to_the_typed_form() -> None:
+    model = _ratio_model()
+    intent = QueryIntent(entity="pub_matches", metrics=["radiant_win_rate"])
+    compiled = compile_intent(intent, model)
+    certified = attribute(f"SELECT {_WINS} * 1.0 / COUNT(*) AS radiant_win_rate{_FROM}", model)
+    assert _slots(attribute(compiled, model), "metric") == _slots(certified, "metric")
+    assert grade(certified, from_intent(intent, model, None))[0] == "passed"
+
+
+def test_bare_numerator_still_attributes_the_simple_metric() -> None:
+    assert _metrics(f"SELECT {_WINS} AS radiant_wins{_FROM}") == [("radiant_wins", "declared")]
+
+
+def test_division_of_unrelated_aggregations_is_no_ratio() -> None:
+    for select in (f"{_WINS} / SUM(duration)", "SUM(duration) / COUNT(*)"):
+        names = [n for n, _s in _metrics(f"SELECT {select}{_FROM}")]
+        assert "radiant_win_rate" not in names
 
 
 # ── overlay + tag table ──────────────────────────────────────────────────────

@@ -28,7 +28,7 @@ from sqlglot import exp
 from services.contracts.query_intent import QueryIntent
 from services.contracts.resolution import MEASURE_KINDS, Resolution, Slot, derive_tag
 from services.contracts.semantic_model import Entity, SemanticModel
-from services.runtime import verification
+from services.runtime import shape_guard, verification
 from services.runtime.compiler import CompileError, metric_sql
 
 Domains = dict[str, list[str]]
@@ -458,11 +458,37 @@ def attribute(
         return _unknown()
 
     sql_norm = verification._norm(sql)
-    metric_slots, matched_exprs = _matched_metrics(model, sql, sql_norm)
+    # A declared ratio written inline (SUM(...) * 1.0 / COUNT(*)) IS that ratio:
+    # it consumes its operands, so they are read back as the ratio and the rest
+    # of the SQL is matched without them — never as numerator and denominator
+    # standing in for it.
+    ratio_slots: list[Slot] = []
+    metric_sql_text, metric_outer = sql, outer
+    present = [e for e in model.entities if _entity_present(e, sql)]
+    work = stmt.copy()
+    composed = (
+        shape_guard.composed_ratios(work, present, read) if isinstance(work, exp.Expression) else []
+    )
+    if composed:
+        for name, div in composed:
+            if name not in {s.name for s in ratio_slots}:
+                ratio_slots.append(Slot(kind="metric", name=name, source="declared"))
+            div.replace(exp.Null())
+        metric_sql_text = work.sql(dialect=read)
+        rewritten = work.this if isinstance(work, exp.SetOperation) else work
+        if isinstance(rewritten, exp.Select):
+            metric_outer = rewritten
+    metric_slots, matched_exprs = _matched_metrics(
+        model, metric_sql_text, verification._norm(metric_sql_text)
+    )
+    metric_slots = [
+        *ratio_slots,
+        *(s for s in metric_slots if s.name not in {r.name for r in ratio_slots}),
+    ]
     definition_slots = _matched_definitions(model, sql, sql_norm)
     slots: list[Slot] = [
         *metric_slots,
-        *_inferred_aggregates(outer, matched_exprs),
+        *_inferred_aggregates(metric_outer, matched_exprs),
         *definition_slots,
     ]
     slots += _dimension_slots(outer, model, sql)

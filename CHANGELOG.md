@@ -29,6 +29,24 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.1] — 2026-09-25
+
+No schema change.
+
+### Fixed
+
+- **A date attribute is no longer read as data freshness.** A lens's "data as of"
+  took the newest date of every table, so a patches table's latest release date
+  dated every answer over a freshly loaded warehouse and called it months stale.
+  A table's newest date now counts as freshness only when its entity declares a
+  time axis (`default_time_field`); other tables fall back to physical freshness
+  or make no claim.
+- **An inline ratio reads back as the declared ratio.** SQL that divides a ratio
+  metric's numerator by its denominator (`SUM(CASE …) * 1.0 / COUNT(*)`, a cast,
+  a `NULLIF`) is attributed to the ratio metric, not to its two parts. A typed
+  answer that picked the ratio no longer grades as a mismatch against a
+  certified answer written that way.
+
 ## [0.5.0] — 2026-09-25
 
 No schema change. Re-run `dst probe` after upgrading: documented columns are now
