@@ -40,7 +40,7 @@ import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from services.config import resolve_env_ref, settings
+from services.config import instance_name, resolve_env_ref, settings
 from services.contracts.correction import CorrectionKind
 
 
@@ -56,12 +56,10 @@ DST_API_KEY = os.environ.get("DST_API_KEY", "")
 
 
 def _resolve_instance_name() -> str:
-    """The name this deployment answers to in the driver AI's context ("ask watson
-    what our ARR is"). Env-shaped like DST_URL — the deploy contract is image +
-    env with no project files, and stdio picks the project's .env up the same way.
-    The client-side half of the alias is the MCP registration name, which `dst
-    init` scaffolds from the same value."""
-    return (resolve_env_ref("DST_INSTANCE_NAME") or "").strip() or "dst"
+    """The name this deployment answers to (config.instance_name). The client-side
+    half of the alias is the MCP registration name, which `dst init` scaffolds
+    from the same value."""
+    return instance_name()
 
 
 INSTANCE_NAME = _resolve_instance_name()

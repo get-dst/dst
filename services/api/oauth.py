@@ -32,7 +32,7 @@ from mcp.shared.auth import OAuthClientMetadata, OAuthMetadata, ProtectedResourc
 from services.auth import clerk, demo, oauth, scopes
 from services.auth.deps import resolve_admin_org
 from services.auth.tokens import ADMIN_PREFIX, CALLER_PREFIX, OAUTH_PREFIX, hash_token
-from services.config import settings
+from services.config import instance_name, settings
 from services.db.session import org_session
 from services.governance import credentials, ratelimit
 
@@ -253,9 +253,10 @@ def _consent_html(params: dict[str, str], error: str = "", *, client_name: str =
     err = f'<p class="err">{html.escape(error)}</p>' if error else ""
     grant = _grant_summary(params.get("scope", ""))
     who = _client_line(client_name, params.get("redirect_uri", ""))
+    name = html.escape(instance_name())
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Connect to dst</title>
+<title>Connect to {name}</title>
 <style>
   :root {{ color-scheme: light; }}
   body {{ margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -279,7 +280,7 @@ def _consent_html(params: dict[str, str], error: str = "", *, client_name: str =
     padding:.5rem .7rem; }}
 </style></head><body><div class="card">
   <div class="tag">Connect MCP client</div>
-  <h1>Authorize dst access</h1>
+  <h1>Authorize {name} access</h1>
   {who}
   <p>Paste a dst caller key (<code>dst_…</code>) or admin token to authorize — the client
   receives its own token; your key is never stored in its config.</p>
@@ -299,7 +300,7 @@ def _consent_html(params: dict[str, str], error: str = "", *, client_name: str =
 # Clerk session token as the credential — the backend resolves it to the person + org.
 _CLERK_CONSENT = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in to dst</title>
+<title>Sign in to __NAME__</title>
 <style>
   :root { color-scheme: light; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -315,7 +316,7 @@ _CLERK_CONSENT = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 </style></head><body><div class="card">
   <div class="tag">Connect MCP client</div>
   <h1>Sign in to authorize</h1>
-  <p>Grant __CLIENT__ access to dst as you.</p>
+  <p>Grant __CLIENT__ access to __NAME__ as you.</p>
   <div id="signin"><p id="status">Loading sign-in…</p></div>
   <form id="grant" method="post" action="/oauth/authorize/complete">
     __HIDDEN__
@@ -370,6 +371,7 @@ def _clerk_consent_html(
         .replace("__PK__", html.escape(publishable_key, quote=True))
         .replace("__HOST__", html.escape(frontend_host, quote=True))
         .replace("__CLIENT__", html.escape(client_name or "an MCP client"))
+        .replace("__NAME__", html.escape(instance_name()))
     )
 
 

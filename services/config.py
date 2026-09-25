@@ -479,6 +479,14 @@ class EnvRefError(ValueError):
     (apply reports it per-connection) instead of matching on message text."""
 
 
+def instance_name() -> str:
+    """The name this deployment answers to — in the driver AI's context ("ask
+    watson what our ARR is") and on every page a person sees (sign-in, consent,
+    the demo). Env-shaped like DST_URL: the deploy contract is image + env with no
+    project files, and stdio picks the project's .env up the same way."""
+    return (resolve_env_ref("DST_INSTANCE_NAME") or "").strip() or "dst"
+
+
 def resolve_env_ref(
     env_name: str | None, *, dirs: Sequence[str | Path] | None = None
 ) -> str | None:

@@ -20,8 +20,9 @@ claude mcp add dst http://localhost:8000/mcp --transport http \
 The registration name is the alias your org's AI answers to — register it as `watson`
 and "check in watson what our ARR is" just works. Set `DST_INSTANCE_NAME=watson` on the
 deployment (or in `.env`) to match: the server then presents itself by that name too —
-MCP server name and operating manual — so the alias and the self-description agree
-(`dst init` asks for this name and wires both ends).
+MCP server name, operating manual, and the sign-in and consent pages a person sees
+when connecting — so the alias and the self-description agree (`dst init` asks for
+this name and wires both ends).
 
 The server is mounted at `/mcp` on the API itself (`services/mcp/server.py` builds it,
 `services/app.py` gates and serves it at that path); each request carries its own bearer

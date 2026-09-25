@@ -189,3 +189,25 @@ def test_page_boots_clerk_under_the_consent_policy(
     assert "ex.clerk.accounts.dev/npm/@clerk/clerk-js" in r.text
     assert "/auth/demo-key" in r.text
     assert r.headers["content-security-policy"].startswith("frame-ancestors 'none'")
+
+
+def test_every_page_a_person_sees_carries_the_instance_name(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DST_INSTANCE_NAME names the deployment on the demo page and both consent
+    pages, not only to the driver AI; a named deployment credits dst beneath it."""
+    from services.api.oauth import _clerk_consent_html, _consent_html
+
+    monkeypatch.setenv("DST_INSTANCE_NAME", "roshan")
+    monkeypatch.setattr(settings, "demo_org_id", str(uuid.uuid4()))
+    monkeypatch.setattr(settings, "clerk_publishable_key", "pk_test_x")
+    monkeypatch.setattr(clerk, "issuer", lambda: "https://ex.clerk.accounts.dev")
+    page = client.get("/demo").text
+    assert "<title>roshan · demo</title>" in page
+    assert "answers by dst (data serve tool)" in page
+    assert "Sign in to roshan" in _clerk_consent_html({}, "pk", "host", "Claude")
+    assert "Authorize roshan access" in _consent_html({})
+
+    monkeypatch.delenv("DST_INSTANCE_NAME")
+    page = client.get("/demo").text
+    assert "<title>dst · demo</title>" in page and "answers by dst" not in page

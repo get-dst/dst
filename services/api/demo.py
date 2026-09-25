@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 
 from services.api.oauth import _CLERK_CONSENT_CSP
 from services.auth import clerk, demo
-from services.config import settings
+from services.config import instance_name, settings
 from services.db.session import org_session
 from services.governance import credentials, ratelimit
 from services.governance.policy import authorize
@@ -100,7 +100,7 @@ def demo_key(
 # are substituted. Same shape and policy as the MCP consent page in oauth.py.
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>dst demo</title>
+<title>__NAME__ · demo</title>
 <style>
   :root { color-scheme: light; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -121,11 +121,11 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   #signin { display:flex; justify-content:center; }
   [hidden] { display:none !important; }
 </style></head><body><div class="card">
-  <div class="tag">data serve tool · public demo</div>
+  <div class="tag">__BYLINE__</div>
   <h1>Ask a governed warehouse, from your own AI</h1>
   <p>Sign in to get a key. The key works with curl, any OpenAI-compatible client, and any
-  MCP client. Answers come from a lens over a sample warehouse; every answer carries its SQL
-  and its verification.</p>
+  MCP client. Answers come from governed lenses over a warehouse; every answer carries its
+  SQL and its verification.</p>
   <div id="signin"><p id="status">Loading sign-in…</p></div>
   <div id="issued" hidden>
     <h2>Your key</h2>
@@ -202,7 +202,13 @@ def demo_page() -> HTMLResponse:
             status_code=503, detail="demo mode needs Clerk sign-in (DST_CLERK_PUBLISHABLE_KEY)"
         )
     host = issuer.split("://", 1)[-1]
-    page = _PAGE.replace("__PK__", html.escape(settings.clerk_publishable_key, quote=True)).replace(
-        "__HOST__", html.escape(host, quote=True)
+    name = instance_name()
+    # A deployment with its own name credits the tool that answers underneath.
+    byline = "public demo" if name == "dst" else "answers by dst (data serve tool) · public demo"
+    page = (
+        _PAGE.replace("__PK__", html.escape(settings.clerk_publishable_key, quote=True))
+        .replace("__HOST__", html.escape(host, quote=True))
+        .replace("__NAME__", html.escape(name))
+        .replace("__BYLINE__", html.escape(byline))
     )
     return HTMLResponse(page, headers={"Content-Security-Policy": _CLERK_CONSENT_CSP})

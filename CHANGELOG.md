@@ -29,6 +29,17 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.4] — 2026-09-25
+
+No schema change.
+
+### Changed
+
+- **`DST_INSTANCE_NAME` names the deployment everywhere a person looks.** It already
+  named the MCP server and the manual the driver AI reads; the demo sign-in page and
+  both consent pages now carry it too, and a deployment with its own name credits
+  dst (data serve tool) beneath it.
+
 ## [0.5.3] — 2026-09-25
 
 No schema change.
