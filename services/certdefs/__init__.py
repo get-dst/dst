@@ -119,6 +119,12 @@ class CertifiedDefinition(Authored):
         "to — a question naming the phrase serves that possible_mapping instead of "
         "clarifying, with the reading disclosed (Definition.audiences)",
     )
+    value_aliases: dict[str, str] = Field(
+        default_factory=dict,
+        description="word people use -> the stored value of the column this page is "
+        "`about` (e.g. {offlaner: offlane}); a question naming the word filters the "
+        "column to that value (Definition.value_aliases)",
+    )
     body: str = Field(
         default="",
         description="not a frontmatter key — the markdown prose below it: the governed "

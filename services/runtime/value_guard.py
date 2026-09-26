@@ -51,6 +51,7 @@ from services.contracts.protocols import Connector
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.warehouse import QueryResult
+from services.runtime.bounded import WarehouseTimeout
 
 # At most this many columns are probed for one empty result — the cost bound.
 EMPTY_PROBE_MAX_COLUMNS = 2
@@ -333,6 +334,8 @@ def empty_result_probe(sql: str, model: SemanticModel, connector: Connector) -> 
         probed += 1
         try:
             result = connector.execute(probe_sql, read_only=True, row_limit=LOW_CARDINALITY_MAX + 1)
+        except WarehouseTimeout:
+            raise  # a warehouse that is not answering ends the request, not this probe
         except Exception:  # noqa: BLE001 — a failed probe proves nothing
             unresolved += 1
             continue

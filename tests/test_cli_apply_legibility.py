@@ -144,6 +144,24 @@ def test_gateway_5xx_does_not_claim_nothing_landed(monkeypatch, project, capsys,
     assert "nothing was deployed" not in err
 
 
+def test_the_servers_own_504_is_reported_as_its_verdict(monkeypatch, project, capsys) -> None:
+    """A warehouse step past its deadline: the SERVER answers 504, rolled back,
+    and says so in its detail. That is dst's verdict, not a proxy's — the
+    operator reads what stalled and that nothing landed, never the in-flight
+    hedge that would send them polling for a deploy that was rolled back."""
+    detail = (
+        "apply aborted: the probe of connection 'wh' did not return within 60s "
+        "(DST_APPLY_STEP_TIMEOUT_S): the warehouse is not responding. Nothing was "
+        "deployed; prior state keeps serving"
+    )
+    _status_post(monkeypatch, 504, {"detail": detail})
+    assert _run_cli(monkeypatch, ["apply", "--dir", str(project), "--token", "dstadm_t"]) == 1
+    err = capsys.readouterr().err
+    assert "the probe of connection 'wh'" in err and "DST_APPLY_STEP_TIMEOUT_S" in err
+    assert "nothing was deployed" in err
+    assert "from a gateway" not in err and "still be applying" not in err
+
+
 # ── a plan that predicts a rejection must not exit 0 ─────────────────────────
 
 

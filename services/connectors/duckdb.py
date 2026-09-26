@@ -15,8 +15,12 @@ default there; a read-scaling token narrows the credential itself, and
 ``read_only: false`` opts out for a connection that must write. DuckDB caches one
 configuration per ``md:`` database per process: a read-only open followed by a
 read-write open of the same database in one process is refused, so ``probe_write``
-on MotherDuck works only when nothing opened the database read-only first. A
-MotherDuck session attaches
+on MotherDuck works only when nothing opened the database read-only first. Queries
+on MotherDuck run on cursors of one connection the process holds per database,
+opened under a deadline (``_motherduck_cursor``): an open that never returns fails
+its request and is never waited on again. A query the serving deadline gives up on
+is interrupted, and one that still has not let go of that connection a few seconds
+later retires it, so later queries never queue behind it. A MotherDuck session attaches
 every database in the account, which is why every catalog read here is pinned to
 ``current_database()`` — a lens over one database must not see the others.
 
@@ -34,9 +38,13 @@ worst failure shape there is. Names are qualified ``schema.table`` except in
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import partial
 
 import duckdb
 
@@ -59,6 +67,9 @@ from services.contracts.warehouse import (
     SchemaSnapshot,
     TableSchema,
 )
+from services.runtime.bounded import Stalled, WarehouseTimeout, on_abandon, run_bounded
+
+log = logging.getLogger("dst")
 
 DEFAULT_SCHEMA = "main"
 
@@ -105,9 +116,119 @@ _SCHEMAS = (
 
 MOTHERDUCK_PREFIX = "md:"
 
+# How long opening a MotherDuck connection, or a cursor on one, may take before it
+# counts as wedged rather than slow: a cold attach takes about a second. The same
+# bound as one BigQuery API round-trip.
+OPEN_TIMEOUT_S = 60.0
+
+# How long an interrupted statement may take to let go of its connection before
+# the connection counts as occupied for good.
+INTERRUPT_GRACE_S = 5.0
+
 
 def is_motherduck(path: str) -> bool:
     return path.startswith(MOTHERDUCK_PREFIX)
+
+
+class _Root:
+    """The process's one MotherDuck connection for a (path, access mode, token)."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.generation = 0
+        self.con: duckdb.DuckDBPyConnection | None = None
+        self.lock = threading.Lock()
+
+    @property
+    def key(self) -> str:
+        """The connection string DuckDB caches the instance under. A retired
+        instance's successor gets a new one: an extra ``user`` parameter is
+        MotherDuck's documented way to get a separate instance."""
+        if not self.generation:
+            return self.path
+        return f"{self.path}{'&' if '?' in self.path else '?'}user=dst-{self.generation}"
+
+    def retire(self) -> None:
+        """Never touch this instance again; the next call opens a fresh one."""
+        self.con = None
+        self.generation += 1
+
+
+_roots: dict[tuple[str, bool, str | None], _Root] = {}
+_roots_lock = threading.Lock()
+
+
+def _motherduck_cursor(
+    path: str, read_only: bool, token: str | None
+) -> tuple[duckdb.DuckDBPyConnection, Callable[[], None]]:
+    """A cursor on the process's MotherDuck connection for *path*, opened on first
+    use, and the call that retires that connection.
+
+    DuckDB's Python client caches one database instance per connection string,
+    process-wide, and an open of a string whose instance is being created or torn
+    down waits for it inside DuckDB. A MotherDuck handshake that never completed
+    left every later open of that database spinning in that wait for as long as
+    the process lived; opening per call (two or three opens per served question,
+    and a teardown after every idle spell) kept the window wide open. So: one
+    connection per (path, mode, token), held for the life of the process, and a
+    cursor per call — a cursor never touches the cache. The open and each cursor
+    run under ``OPEN_TIMEOUT_S``; one that stalls retires the instance, and the
+    next call opens a fresh one under a new connection string instead of waiting
+    on the wedged one. A call queued behind an open waits here, bounded, never
+    inside DuckDB. The stalled thread cannot be killed; it is a daemon."""
+    with _roots_lock:
+        root = _roots.setdefault((path, read_only, token), _Root(path))
+    step = f"opening MotherDuck database '{path}'"
+    if not root.lock.acquire(timeout=OPEN_TIMEOUT_S):
+        raise WarehouseTimeout(step, OPEN_TIMEOUT_S)
+    try:
+        con = root.con
+        if con is None:
+            config: dict[str, str | bool | int | float | list[str]] = (
+                {"motherduck_token": token} if token else {}
+            )
+            try:
+                con = run_bounded(
+                    "dst-motherduck-open",
+                    partial(duckdb.connect, root.key, read_only=read_only, config=config),
+                    OPEN_TIMEOUT_S,
+                )
+            except Stalled:
+                root.retire()
+                raise WarehouseTimeout(step, OPEN_TIMEOUT_S) from None
+            root.con = con
+    finally:
+        root.lock.release()
+
+    def retire() -> None:
+        with root.lock:
+            if root.con is con:
+                root.retire()
+
+    try:
+        return run_bounded("dst-motherduck-cursor", con.cursor, OPEN_TIMEOUT_S), retire
+    except Stalled:
+        retire()
+        raise WarehouseTimeout(step, OPEN_TIMEOUT_S) from None
+
+
+def _let_go(
+    con: duckdb.DuckDBPyConnection, freed: threading.Event, retire: Callable[[], None] | None
+) -> None:
+    """The deadline a call runs under gave up on it: interrupt its statement. On
+    MotherDuck, a statement that has not let go within ``INTERRUPT_GRACE_S`` still
+    occupies the one connection the process holds, and every later cursor could
+    queue behind it, so that connection is retired and the next call opens a fresh
+    instance."""
+    if freed.is_set():
+        return
+    con.interrupt()
+    if retire is not None and not freed.wait(INTERRUPT_GRACE_S):
+        log.warning(
+            "a MotherDuck statement past its deadline did not stop when interrupted; "
+            "retiring the connection it holds"
+        )
+        retire()
 
 
 def qualified(schema: str, table: str) -> str:
@@ -152,9 +273,28 @@ class DuckDBConnector:
         return {"motherduck_token": self._token} if self._token else {}
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        if is_motherduck(self._path):
-            return duckdb.connect(self._path, read_only=self._read_only, config=self._md_config())
+        """A connection to the local file for one call; the caller closes it."""
         return duckdb.connect(self._path, read_only=True)
+
+    @contextmanager
+    def _session(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """A connection for one call, closed after it. On MotherDuck it is a cursor
+        on the process's connection (see ``_motherduck_cursor``). If the deadline the
+        call runs under gives up on it, its statement is interrupted (``_let_go``)."""
+        retire: Callable[[], None] | None = None
+        if is_motherduck(self._path):
+            con, retire = _motherduck_cursor(self._path, self._read_only, self._token)
+        else:
+            con = self._connect()
+        freed = threading.Event()
+        on_abandon(partial(_let_go, con, freed, retire))
+        try:
+            yield con
+        finally:
+            try:
+                con.close()
+            finally:
+                freed.set()
 
     def _run(self, con: duckdb.DuckDBPyConnection, query: str) -> duckdb.DuckDBPyConnection:
         """``con.execute`` under the statement timeout: a timer interrupts the
@@ -182,8 +322,7 @@ class DuckDBConnector:
         return schema != VALIDATION_SCHEMA and (self._schema is None or schema == self._schema)
 
     def introspect(self) -> SchemaSnapshot:
-        con = self._connect()
-        try:
+        with self._session() as con:
             columns: dict[tuple[str, str], list[ColumnSchema]] = {}
             for sname, tname, cname, ctype, nullable, comment in con.execute(_COLUMNS).fetchall():
                 if not self._in_scope(str(sname)):
@@ -228,8 +367,6 @@ class DuckDBConnector:
                 tables=tables,
                 schemas_searched=self._searched_schemas(con),
             )
-        finally:
-            con.close()
 
     # ── CatalogProfiler ───────────────────────────────────────────────────────
 
@@ -241,12 +378,9 @@ class DuckDBConnector:
         file's mtime is the best-effort physical freshness.
         """
         modified = self._file_modified()
-        con = self._connect()
-        try:
+        with self._session() as con:
             table_rows = con.execute(_CATALOG_RELATIONS).fetchall()
             col_rows = con.execute(_COLUMNS).fetchall()
-        finally:
-            con.close()
         columns: dict[str, list[ColumnProfile]] = {}
         for sname, tname, cname, ctype, nullable, comment in col_rows:
             if not self._in_scope(str(sname)):
@@ -307,20 +441,17 @@ class DuckDBConnector:
         )
 
     def dry_run(self, sql: str) -> DryRunResult:
-        con = self._connect()
-        try:
-            self._run(con, f"EXPLAIN {sql}")
-            return DryRunResult(valid=True)
-        except Exception as exc:
-            return DryRunResult(valid=False, error=str(exc))
-        finally:
-            con.close()
+        with self._session() as con:
+            try:
+                self._run(con, f"EXPLAIN {sql}")
+                return DryRunResult(valid=True)
+            except Exception as exc:
+                return DryRunResult(valid=False, error=str(exc))
 
     def execute(
         self, sql: str, *, read_only: bool = True, row_limit: int | None = None
     ) -> QueryResult:
-        con = self._connect()  # always read-only
-        try:
+        with self._session() as con:  # always read-only
             query = (
                 sql
                 if row_limit is None
@@ -331,8 +462,6 @@ class DuckDBConnector:
             columns = [d[0] for d in rel.description] if rel.description else []
             rows = [list(r) for r in rel.fetchall()]
             return QueryResult(columns=columns, rows=rows)
-        finally:
-            con.close()
 
     def probe_write(self) -> None:
         """Prove write access: open the file writable, create a throwaway table, insert, drop."""

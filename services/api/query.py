@@ -569,6 +569,21 @@ def _trust_backstops(
     _standing_degraded(result, org_id=org_id, lens=lens)
 
 
+def _fail_on_warehouse_timeout(result: PipelineResult, caller: CallerIdentity) -> None:
+    """A warehouse step that never answered fails the request loud: a 504 naming
+    the step, never an `ok` and never a templated data problem (the drift check
+    would only ask the same silent warehouse). Logged here, synchronously: FastAPI
+    drops a request's BackgroundTasks when an exception replaces the response, and
+    the request log must still hold the error."""
+    if result.error_kind != "timeout":
+        return
+    result.trace.agent = caller.agent
+    log_trace(result.trace)
+    raise HTTPException(
+        status_code=504, detail=result.trace.error or "the warehouse did not answer"
+    )
+
+
 def _shaped(response: QueryResponse, fmt: AnswerFormat) -> QueryResponse:
     """Apply the response-side half of `format`.
 
@@ -694,14 +709,18 @@ def run_lens_query(
             # The per-lens switch the pipeline cannot see from the semantic model.
             log_samples=bundle.config.logging.log_samples,
         )
+    _fail_on_warehouse_timeout(result, caller)
     # Degradation rides on EVERY outcome, not just the ok ones — stamped here,
     # once, because run_query builds a response and a trace on each of its five
     # exits. A serve whose certified matching could not run says so on the wire
     # and in the log; silence there is what let a dead embedder pass for a
-    # corpus that simply had no answer.
+    # corpus that simply had no answer. The door's lines lead and the pipeline's
+    # own follow (an UNTYPED escalation, a grade on partial evidence): replacing
+    # them erased the line a raw-SQL answer owes on its face. The trace carries
+    # what the response carried.
     if assembled.degraded:
-        result.response.degraded = list(assembled.degraded)
-        result.trace.degraded = list(assembled.degraded)
+        result.response.degraded = [*assembled.degraded, *result.response.degraded]
+    result.trace.degraded = list(result.response.degraded)
     # A warehouse execution error runs the drift check NOW and becomes a
     # templated incident; a standing degraded mark rides this answer either way.
     _trust_backstops(
@@ -869,6 +888,7 @@ def run_lens_metrics(
             generator_tier="metrics",
             log_samples=bundle.config.logging.log_samples,
         )
+    _fail_on_warehouse_timeout(result, caller)
     _trust_backstops(
         result,
         org_id=caller.org_id,
@@ -1055,6 +1075,7 @@ def run_certified_for_caller(
             generator_tier="certified",
             log_samples=bundle.config.logging.log_samples,
         )
+    _fail_on_warehouse_timeout(result, caller)
     _trust_backstops(
         result,
         org_id=caller.org_id,

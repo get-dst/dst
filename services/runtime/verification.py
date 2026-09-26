@@ -28,7 +28,7 @@ from services.contracts.verification import (
 )
 from services.contracts.warehouse import QueryResult
 from services.lenses.profile_enrich import EntityCoverage
-from services.runtime import adversary, faithfulness, sql_guard
+from services.runtime import adversary, faithfulness, sql_canon
 from services.runtime.answer import data_notes as answer_data_notes
 from services.runtime.timewindow import sql_engages_time, temporal_terms, window_ranges
 
@@ -43,52 +43,19 @@ def _norm(sql_fragment: str) -> str:
     return re.sub(r"\s+", "", sql_fragment).lower()
 
 
-def _unqualify(sql_text: str) -> str | None:
-    """Normalised SQL with column qualifiers (catalog/db/table) stripped, so a
-    definition whose sql_expr names a column fully-qualified
-    (``DB.SCHEMA.TBL.COL * 0.10``) still matches the same column referenced bare
-    (``COL * 0.10``) in the executed SQL. None if the fragment doesn't parse.
-
-    Single-precision casts are widened on both sides for the same reason: the guard
-    now rewrites ``CAST(x AS REAL)`` to ``CAST(x AS DOUBLE)`` before serving, so a
-    definition authored with the narrow cast would otherwise read as *not applied* —
-    a precision fix silently costing the grade it was meant to protect.
-
-    Identifier QUOTING is stripped for the third time in the same story: a serve
-    that applied the definition exactly is graded as departing from it when the
-    only difference is that generation wrote ``c."status_code" = 'S0121'`` instead
-    of ``c.status_code = 'S0121'``. Nothing here executes — this string is
-    only ever an argument to ``in`` — and ``_norm`` already lowercases both sides,
-    so the case-sensitivity that quoting buys is gone before it could matter."""
-    try:
-        tree = sqlglot.parse_one(sql_text)
-    except Exception:
-        return None
-    if tree is None:
-        return None
-    for col in tree.find_all(exp.Column):
-        col.set("table", None)
-        col.set("db", None)
-        col.set("catalog", None)
-    for ident in tree.find_all(exp.Identifier):
-        ident.set("quoted", False)
-    sql_guard.widen_single_precision(tree)
-    return _norm(tree.sql())
-
-
-def _expr_in_sql(expr: str, sql: str, sql_norm: str) -> bool:
-    """Is the definition's expression applied in the SQL? Literal match first
-    (cheap, exact); then a qualifier-insensitive parse, so a table-qualified
-    sql_expr still matches the column used bare in the executed SQL — the bug that
-    made every commission answer fail definition_applied despite applying it."""
-    if _norm(expr) in sql_norm:
-        return True
-    unqualified_expr, unqualified_sql = _unqualify(expr), _unqualify(sql)
-    return (
-        unqualified_expr is not None
-        and unqualified_sql is not None
-        and unqualified_expr in unqualified_sql
-    )
+def _expr_in_sql(expr: str, sql: str, sql_norm: str, model: SemanticModel | None = None) -> bool:
+    """Is the definition's expression applied in the SQL? Compared as canonical
+    trees (``sql_canon.carries``): qualifiers, quoting, identifier case,
+    parentheses, the order of ANDed conditions and COUNT(*) against a count of a
+    declared key column are form, not meaning. Compared as text, the compiled
+    derived metric (every sibling wrapped in parentheses) read as departing from
+    the definition it implements, and ``name = 'x'`` read as applied inside
+    ``team_name = 'x'``. Only when a side does not parse is the text all there is.
+    *model* supplies the dialect and the declared keys."""
+    carried = sql_canon.carries(sql, expr, model)
+    if carried is not None:
+        return carried
+    return _norm(expr) in sql_norm
 
 
 def _touches(column: str, sql: str) -> bool:
@@ -223,7 +190,7 @@ def _departed_definitions(question: str, semantic_model: SemanticModel, sql: str
         touched = bool(columns) and all(_touches(c, sql) for c in columns)
         if not (named or touched):
             continue
-        if _expr_in_sql(expr, sql, sql_norm) or _about_referenced(d.about, sql):
+        if _expr_in_sql(expr, sql, sql_norm, semantic_model) or _about_referenced(d.about, sql):
             continue
         departed.append(d.term)
     return departed
@@ -264,7 +231,7 @@ def _definition_applied(
     sql_n = _norm(sql)
     if definition_used and definition_used in enforceable:
         expr = enforceable[definition_used]
-        if expr is not None and _expr_in_sql(expr, sql, sql_n):
+        if expr is not None and _expr_in_sql(expr, sql, sql_n, semantic_model):
             return VerificationCheck(name="definition_applied", status="pass")
         return VerificationCheck(
             name="definition_applied",
@@ -285,7 +252,8 @@ def _definition_applied(
     # question-text gate the masking branch was rarely the binding one.
     departed = _departed_definitions(question, semantic_model, sql)
     if not departed and any(
-        expr is not None and _expr_in_sql(expr, sql, sql_n) for expr in enforceable.values()
+        expr is not None and _expr_in_sql(expr, sql, sql_n, semantic_model)
+        for expr in enforceable.values()
     ):
         return VerificationCheck(name="definition_applied", status="pass")
     if departed:
@@ -566,7 +534,7 @@ def _zero_ratio_plausibility(sql: str, result: QueryResult) -> VerificationCheck
 
 def _strip_refs(node: exp.Expression) -> exp.Expression:
     """Qualifiers and identifier quoting off a parsed expression, in place —
-    the `_unqualify` treatment for predicate comparison."""
+    the canonical treatment for predicate comparison."""
     for col in node.find_all(exp.Column):
         col.set("table", None)
         col.set("db", None)
@@ -645,7 +613,7 @@ def _population_declared(sql: str, model: SemanticModel) -> VerificationCheck:
         e
         for e in scoped
         if e.population_filter
-        and not _expr_in_sql(e.population_filter, sql, sql_n)
+        and not _expr_in_sql(e.population_filter, sql, sql_n, model)
         and not _predicate_in_sql(e.population_filter, sql, model.dialect)
     ]
     if not missing:

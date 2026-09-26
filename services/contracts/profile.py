@@ -25,10 +25,12 @@ LOW_CARDINALITY_MAX = 25
 
 # A TEXT column with at most this many distinct values, counted over every row,
 # gets its whole dictionary collected (``values_complete``) even though it is not
-# enum-like: 127 hero names, 300 customer names. The serving rail matches stored
-# values the question names verbatim against it, deterministically — a name the
-# question states is then a fact, not a value the caller must bind.
-MATCH_DICTIONARY_MAX = 500
+# enum-like: 127 hero names, 1,662 team names, 3,000 customer names. The serving
+# rail matches stored values the question names verbatim against it,
+# deterministically — a name the question states is then a fact, not a value the
+# caller must bind. At 500, a team or player dimension never had one, and a question
+# naming a team could not type in any lane.
+MATCH_DICTIONARY_MAX = 5_000
 
 # Hard caps for the sampling pass: at most this many rows are ever pulled
 # into one sampling query, and on engines that bill scanned bytes (BigQuery) a query

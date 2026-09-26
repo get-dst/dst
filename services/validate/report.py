@@ -645,6 +645,22 @@ def _check_bundle(
                             subject=d.term,
                         )
                     )
+        if d.value_aliases:
+            # DEAD GOVERNANCE, same class: value aliases bind the column the
+            # definition is about, and `about: entity` (or none) names no column
+            # — the map reads as a rule and binds nothing.
+            head, dot, member = (d.about or "").rpartition(".")
+            if not (dot and head.strip() and member.strip()):
+                issues.append(
+                    Issue(
+                        severity="warning",
+                        code="value_aliases_unbound",
+                        message=f"definition '{d.term}' declares value_aliases but its "
+                        "`about` names no column — add `about: <entity>.<column>` naming "
+                        "the column that stores those values, or the aliases never bind",
+                        subject=d.term,
+                    )
+                )
 
     # Metric filters are compiled verbatim into WHERE clauses — they must at least
     # parse as boolean expressions in the lens dialect.

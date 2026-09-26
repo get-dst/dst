@@ -31,6 +31,7 @@ quotes the rows instead of restating them.
 from __future__ import annotations
 
 import decimal
+import math
 import re
 from collections.abc import Iterator
 
@@ -356,19 +357,32 @@ def _column_totals(result: QueryResult) -> list[float]:
     return totals
 
 
-def _rendered(cell: int | float | decimal.Decimal) -> str:
-    """The spelling a rewritten claim gets: the cell's value, readable as prose.
+def _significant(value: float, digits: int = 4) -> str:
+    """*digits* significant figures in fixed notation, trailing zeros dropped:
+    13.666441 → 13.67, 0.47085 → 0.4709, 0.000012 → 0.000012 — never the
+    exponential form a `g` format falls into below 1e-4."""
+    decimals = max(0, digits - 1 - math.floor(math.log10(abs(value))))
+    text = f"{value:.{decimals}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
-    `str(cell)` put binary-float residue into certified finance answers —
-    `$88759841.48000014` for a SUM over FLOAT64, at `verified · certified`.
-    Deterministic presentation instead: thousands
-    separators on integral values, and 2-decimal rounding once a non-integral
-    value reaches separator scale (sub-cent residue at ≥1000 is far inside
-    `_matches`' tolerance, so the reconcile invariant — a rewritten claim is
-    one the check tolerates — holds). Small non-integral values keep their
-    full precision: 0.10634 is data, not residue. Decimal cells (exact
-    numerics) render from their own digits, never through a float repr that
-    can go exponential."""
+
+def render_number(cell: int | float | decimal.Decimal, *, percent: bool = False) -> str:
+    """The ONE presentation of a numeric cell — what the composer reads in its
+    rows, what the deterministic frame prints, and what a rounded prose claim
+    is snapped to. The machine-readable rows never pass through here.
+
+    `str(cell)` put the machine's representation in front of the person: a win
+    rate of 0.47085201793721976, a median minute of 13.666441441441439, an ARR
+    of $88759841.48000014 — at `verified · certified`. Deterministic instead:
+    integral values with thousands separators; a fraction at separator scale
+    keeps two decimals (cents); a smaller fraction renders at four significant
+    figures; and a cell of a declared rate (``percent``) in [0, 1] is a
+    one-decimal percentage. Every rendering sits far inside `_matches`'
+    tolerance, so the reconcile invariant — a rewritten claim is one the check
+    tolerates — holds. Decimal cells (exact numerics) render from their own
+    digits, never through a float repr that can go exponential."""
+    if percent and 0 <= cell <= 1:
+        return f"{float(cell) * 100:.1f}%"
     if isinstance(cell, int):
         return f"{cell:,}"
     if isinstance(cell, decimal.Decimal):
@@ -376,12 +390,14 @@ def _rendered(cell: int | float | decimal.Decimal) -> str:
             return f"{int(cell):,}"
         if abs(cell) >= 1000:
             return f"{cell:,.2f}"
-        return format(cell, "f")
+        return _significant(float(cell))
+    if math.isnan(cell) or math.isinf(cell):
+        return str(cell)
     if cell == int(cell) and abs(cell) < 1e15:
         return f"{int(cell):,}"
     if abs(cell) >= 1000:
         return f"{cell:,.2f}"
-    return str(cell)
+    return _significant(cell)
 
 
 def _cells(result: QueryResult) -> list[tuple[float, str]]:
@@ -396,13 +412,13 @@ def _cells(result: QueryResult) -> list[tuple[float, str]]:
         for cell in row:
             if not isinstance(cell, int | float | decimal.Decimal) or isinstance(cell, bool):
                 continue
-            out.append((float(cell), _rendered(cell)))
+            out.append((float(cell), render_number(cell)))
             if cell < 0:
                 # The magnitude spelling of a negative cell:
                 # a rounded "614,447" for the cell -614446.91 reconciles to
                 # the magnitude's own presentation rendering.
                 magnitude = -cell
-                out.append((float(magnitude), _rendered(magnitude)))
+                out.append((float(magnitude), render_number(magnitude)))
     return out
 
 

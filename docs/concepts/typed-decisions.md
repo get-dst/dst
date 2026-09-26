@@ -19,7 +19,7 @@ extracted from prose.
 | reading | the declared readings of an ambiguous term | `definitions` with `possible_mappings` |
 | metric, dimension, grain | the entity's declared metrics, dimensions and time grains | the entity file |
 | ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
-| filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this) | the column profile (`dst introspect --profile`) |
+| filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
 | window | none — a stated period is parsed, never decided | `timewindow` |
 
 A slot the question does not settle is asked back as a **clarification naming

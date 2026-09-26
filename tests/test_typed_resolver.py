@@ -23,7 +23,7 @@ from services.contracts.semantic_model import (
     SemanticModel,
 )
 from services.runtime.compiler import compile_intent
-from services.runtime.typed_resolver import TypedIntentGenerator, TypedResolver
+from services.runtime.typed_resolver import TypedIntentGenerator, TypedResolver, named_values
 
 
 def _model() -> SemanticModel:
@@ -76,15 +76,16 @@ def _resolver(decisions: list[Decision], **kw: object) -> TypedResolver:
 
 
 def test_every_slot_acts_and_the_intent_compiles() -> None:
-    # shape, metric, another-metric(none), dimension, another(none),
-    # filter column, filter value, another filter(none) — no grain: the
-    # question asks for no breakdown over time, so none is posed
+    # shape, metric, another-metric(none), dimension, filter column, filter
+    # value, another filter(none) — no grain: the question asks for no
+    # breakdown over time, so none is posed; no second dimension: `status` is
+    # the column of the value the question names ("shipped"), a filter, so
+    # `country` is the only dimension on offer and "another?" has nothing to ask
     decisions = [
         _sure("aggregate"),
         _sure("revenue"),
         _sure(None),
         _sure("country"),
-        _sure(None),
         _sure("status"),
         _sure(None),
     ]
@@ -102,7 +103,6 @@ def test_every_slot_acts_and_the_intent_compiles() -> None:
         "metric",
         "metric",
         "dimension",
-        "dimension",
         "filter",
         "filter_value",
         "filter",
@@ -110,7 +110,7 @@ def test_every_slot_acts_and_the_intent_compiles() -> None:
     assert all(d.verdict == "act" for d in res.decisions)
     # "shipped" is a stored status value the question names: read off the
     # text, recorded as such, never decided
-    value = res.decisions[6]
+    value = res.decisions[5]
     assert value.chosen == "shipped" and value.provider == "question-text" and value.p is None
     assert res.matched == ["status"]
     sql = compile_intent(i, _model())
@@ -493,10 +493,10 @@ def test_a_batching_decider_types_a_typical_question_in_three_calls() -> None:
             "dimension:0": "country",
             "grain": None,
             "filter:0": "status",
-            # round three: the second metric / dimension / filter say none, the
-            # first filter's value is picked — all in the same call
+            # round three: the second metric / filter say none — all in the
+            # same call; no second dimension is asked, since `status` holds the
+            # value the question names and is a filter, never a grouping
             "metric:1": None,
-            "dimension:1": None,
             "filter:1": None,
         }
     )
@@ -510,7 +510,7 @@ def test_a_batching_decider_types_a_typical_question_in_three_calls() -> None:
     assert set(batched[0]) == {"shape", "metric:0"}  # one entity → no entity question
     assert set(batched[1]) == {"metric:1", "dimension:0", "filter:0"}  # no grain asked
     # the value is named in the question: matched, so round three never asks it
-    assert set(batched[2]) == {"dimension:1", "filter:1"}
+    assert set(batched[2]) == {"filter:1"}
     assert len(batched) == 3 and decider.calls.count(["<single>"]) == 0
     # Every decision is on the ledger, batched ones first in spec order.
     assert [d.slot for d in res.decisions][:4] == [
@@ -833,3 +833,357 @@ def test_the_metric_names_the_entity_across_a_lens() -> None:
     assert res.intent.entity == "quotes" and res.intent.metrics == ["won_count"]
     assert ["billed", "won_count"] in dec.calls  # every metric of the lens was on offer
     assert all(d.slot != "entity" for d in res.decisions)
+
+
+def _hero_model() -> SemanticModel:
+    """A playstyle table: heroes by position, with a dictionary on the position
+    word and a definition whose aliases carry the plural forms people type."""
+    entity = Entity(
+        name="hero_playstyle",
+        source=EntitySource(connection="wh", table="hero_playstyle"),
+        fields=[
+            Field(name="hero_name", type="string"),
+            Field(name="position_name", type="string"),
+            Field(name="observers_placed", type="integer"),
+            Field(name="lane_won", type="boolean"),
+        ],
+        dimensions=[Dimension(name="hero_name"), Dimension(name="position_name")],
+        metrics=[
+            Metric(
+                name="observers_per_game",
+                agg="avg",
+                expr="hero_playstyle.observers_placed",
+                better="higher",
+            ),
+            Metric(name="lane_games", agg="count"),
+            Metric(
+                name="lanes_won",
+                agg="sum",
+                expr="CASE WHEN hero_playstyle.lane_won THEN 1 ELSE 0 END",
+            ),
+            Metric(
+                name="lane_win_rate",
+                type="ratio",
+                numerator="lanes_won",
+                denominator="lane_games",
+                format="percent",
+                better="higher",
+            ),
+        ],
+    )
+    return SemanticModel(
+        lens="dota",
+        dialect="duckdb",
+        entities=[entity],
+        definitions=[
+            Definition(
+                term="position",
+                about="hero_playstyle.position_name",
+                body="carry, mid, offlane, soft support or hard support — a question about "
+                "carries or hard supports filters on it.",
+                aliases=["carries", "mids", "offlaners", "soft supports", "hard supports"],
+            )
+        ],
+    )
+
+
+POSITIONS = {"position_name": ["carry", "mid", "offlane", "soft support", "hard support"]}
+
+
+class _Prefers:
+    """Order-proof: the first preferred name on offer, else none. `unstated`
+    answers the value question for a filter column the question names no value
+    for — the drop a model makes when a stated value was never matched."""
+
+    def __init__(self, *prefer: str) -> None:
+        self._prefer = prefer
+
+    def decide(self, *, question, context, options, allow_none):  # type: ignore[no-untyped-def]
+        names = [o.name for o in options]
+        return _sure(next((p for p in self._prefer if p in names), None))
+
+
+def test_a_plural_names_the_stored_value() -> None:
+    """ "hard supports", "carries" and "mids" name the values 'hard support',
+    'carry' and 'mid' — one entry each, in question order."""
+    found = named_values("which hard supports, carries and mids", POSITIONS)
+    assert found == [
+        {"position_name": "hard support"},
+        {"position_name": "carry"},
+        {"position_name": "mid"},
+    ]
+    # a value that IS stored in the plural is still itself
+    assert named_values("sales", {"team": ["sales", "sale"]}) == [{"team": "sales"}]
+
+
+def test_a_dimension_whose_value_the_question_names_is_a_filter_never_a_grouping() -> None:
+    """ "Which hard supports place the most observer wards" ranks HEROES among the
+    hard supports: position_name = 'hard support' is a filter read off the text,
+    and position_name is not offered as the ranking's dimension at all — a
+    decider that would group by it cannot."""
+    decider = _Prefers("ranking", "observers_per_game", "position_name", "hero_name", "unstated")
+    res = TypedResolver(decider, domains=POSITIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+        "Which hard supports place the most observer wards per game?", _hero_model()
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.dimensions == ["hero_name"]
+    assert [(f.field, f.op, f.value) for f in res.intent.filters] == [
+        ("position_name", "=", "hard support")
+    ]
+    assert res.matched == ["position_name"]
+    sql = compile_intent(res.intent, _hero_model())
+    assert "'hard support'" in sql and "GROUP BY hero_playstyle.hero_name" in sql
+
+
+def test_a_stated_value_binds_the_filter_on_every_run() -> None:
+    """ "Which carry heroes win their lane most often": the same intent every
+    time — the value is matched, not decided, so nothing about it can wobble."""
+    seen = set()
+    for _ in range(5):
+        decider = _Prefers("ranking", "lane_win_rate", "position_name", "hero_name", "unstated")
+        res = TypedResolver(decider, domains=POSITIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+            "Which carry heroes win their lane most often?", _hero_model()
+        )
+        assert res.intent is not None, res.clarification
+        seen.add(
+            (
+                tuple(res.intent.dimensions),
+                tuple((f.field, f.op, str(f.value)) for f in res.intent.filters),
+                tuple(res.matched),
+            )
+        )
+    assert seen == {(("hero_name",), (("position_name", "=", "carry"),), ("position_name",))}
+
+
+def _core_items_model() -> SemanticModel:
+    entity = Entity(
+        name="hero_core_items",
+        source=EntitySource(connection="wh", table="hero_core_items"),
+        fields=[
+            Field(name="hero_name", type="string"),
+            Field(name="item_name", type="string"),
+            Field(name="item_order", type="string"),
+            Field(name="games", type="integer"),
+        ],
+        dimensions=[
+            Dimension(name="hero_name"),
+            Dimension(name="item_name"),
+            Dimension(name="item_order"),
+        ],
+        metrics=[Metric(name="core_item_games", agg="sum", expr="hero_core_items.games")],
+    )
+    return SemanticModel(lens="items", dialect="duckdb", entities=[entity])
+
+
+CORE_ITEMS = {
+    "hero_name": ["Juggernaut", "Pudge"],
+    "item_name": ["Battle Fury", "Blink Dagger"],
+    "item_order": ["first", "second", "third"],
+}
+
+
+class _GroupsByTheFilteredColumn:
+    """Reads "opening item" as item_order = 'first' — a value it decides, not one
+    the question names — and, when ``regroup`` is set, also answers "another
+    dimension?" with that same column: the run-to-run wobble of a real decider."""
+
+    def __init__(self, regroup: bool) -> None:
+        self._regroup = regroup
+
+    def decide(self, *, question, context, options, allow_none):  # type: ignore[no-untyped-def]
+        names = [o.name for o in options]
+        if "broken down by a dimension" in context:
+            pick = "item_name" if "Already chosen" not in context else None
+            if "Already chosen" in context and self._regroup:
+                pick = "item_order"
+        elif "restrict the rows" in context:
+            applied = context.split("Already applied:")[-1] if "Already applied" in context else ""
+            pick = next((c for c in ("hero_name", "item_order") if c not in applied), None)
+        elif "Which stored value of 'item_order'" in context:
+            pick = "first"
+        else:
+            pick = next((p for p in ("ranking", "core_item_games") if p in names), None)
+        return _sure(pick if pick in names else None)
+
+
+def test_a_column_a_filter_pins_to_one_value_is_never_a_grouping() -> None:
+    """ "What is the most common opening item on Juggernaut?" ranks items among
+    Juggernaut's FIRST items. item_order = 'first' is a constant: grouping by it
+    too changed the answer's shape from one run to the next and never its
+    values. The shape is the same on every run, whichever way the decider leans."""
+    question = "What is the most common opening item on Juggernaut?"
+    shapes = set()
+    for regroup in (False, True, False, True, True):
+        res = TypedResolver(  # type: ignore[arg-type]
+            _GroupsByTheFilteredColumn(regroup), domains=CORE_ITEMS, today=TODAY
+        ).resolve(question, _core_items_model())
+        assert res.intent is not None, res.clarification
+        shapes.add(
+            (
+                tuple(res.intent.dimensions),
+                tuple(sorted((f.field, f.op, str(f.value)) for f in res.intent.filters)),
+            )
+        )
+    assert shapes == {
+        (("item_name",), (("hero_name", "=", "Juggernaut"), ("item_order", "=", "first")))
+    }
+
+
+def test_a_ranking_whose_only_grouping_is_pinned_asks_what_it_ranks() -> None:
+    """Ranked by the one column the filter fixes, a ranking is one row wearing a
+    ranking's shape: it asks what to rank across instead of serving that."""
+
+    class _RanksTheFilteredColumn(_GroupsByTheFilteredColumn):
+        def decide(self, *, question, context, options, allow_none):  # type: ignore[no-untyped-def]
+            if "broken down by a dimension" in context and "Already chosen" not in context:
+                return _sure("item_order")
+            return super().decide(
+                question=question, context=context, options=options, allow_none=allow_none
+            )
+
+    res = TypedResolver(  # type: ignore[arg-type]
+        _RanksTheFilteredColumn(regroup=False), domains=CORE_ITEMS, today=TODAY
+    ).resolve("What is the most common opening item on Juggernaut?", _core_items_model())
+    assert res.intent is None
+    assert res.clarification is not None
+    assert res.clarification.term == "dimension"
+    assert "item_order" not in res.clarification.options
+
+
+def test_a_window_on_a_timestamp_ends_before_the_next_day_not_on_the_last_one() -> None:
+    """ "last month" on a TIMESTAMP compiled to `<= '2026-08-31'`, which is
+    midnight: every row of the month's last day after 00:00 fell out. On a
+    timestamp the upper bound is exclusive, the first day after the window; a
+    DATE column keeps the inclusive last day (the test above)."""
+    model = _model()
+    orders = model.entities[0]
+    orders.fields = [
+        f.model_copy(update={"type": "timestamp"}) if f.name == "order_date" else f
+        for f in orders.fields
+    ]
+    decisions = [
+        _sure("aggregate"),
+        _sure("revenue"),
+        _sure(None),
+        _sure("country"),
+        _sure("status"),
+        _sure(None),
+    ]
+    res = _resolver(decisions).resolve("revenue by country for shipped orders last month", model)
+    assert res.intent is not None, res.clarification
+    assert [(f.field, f.op, f.value) for f in res.intent.filters] == [
+        ("status", "=", "shipped"),
+        ("order_date", ">=", "2026-08-01"),
+        ("order_date", "<", "2026-09-01"),
+    ]
+    sql = compile_intent(res.intent, model)
+    assert "orders.order_date < '2026-09-01'" in sql
+    assert "2026-08-31" not in sql
+
+
+# ── a definition may map an alias to a stored value ──────────────────────────
+
+LANE_WORDS = {"offlaner": "offlane", "midlaner": "mid", "safelaner": "carry"}
+
+
+def _position_aliased_model() -> SemanticModel:
+    model = _hero_model()
+    (position,) = model.definitions
+    model.definitions = [
+        position.model_copy(update={"value_aliases": LANE_WORDS}),
+    ]
+    return model
+
+
+def test_an_alias_a_definition_maps_to_a_stored_value_binds_the_filter() -> None:
+    """ "offlaners" and "midlaners" are not plurals of 'offlane' and 'mid', so the
+    plural rule cannot reach them. A definition about position_name maps them
+    explicitly; the question naming one binds position_name to its value, off the
+    text, the same on every run."""
+    for question, value in (
+        ("Which offlaners win their lane most often?", "offlane"),
+        ("Which midlaner heroes win their lane most often?", "mid"),
+    ):
+        decider = _Prefers("ranking", "lane_win_rate", "position_name", "hero_name", "unstated")
+        res = TypedResolver(  # type: ignore[arg-type]
+            decider, domains=POSITIONS, today=TODAY
+        ).resolve(question, _position_aliased_model())
+        assert res.intent is not None, res.clarification
+        assert [(f.field, f.op, f.value) for f in res.intent.filters] == [
+            ("position_name", "=", value)
+        ]
+        assert res.intent.dimensions == ["hero_name"]
+        assert res.matched == ["position_name"]
+
+
+def test_an_alias_binds_only_a_value_the_column_holds() -> None:
+    """The map is the author's; the dictionary is the warehouse's. An alias whose
+    value the column does not hold names nothing."""
+    assert named_values(
+        "which offlaners", POSITIONS, aliases={"position_name": {"offlaner": "offlane"}}
+    ) == [{"position_name": "offlane"}]
+    assert (
+        named_values("which rovers", POSITIONS, aliases={"position_name": {"rover": "roamer"}})
+        == []
+    )
+
+
+def test_value_aliases_round_trip_the_definition_page_and_need_a_column() -> None:
+    from services.contracts.lens_config import LensConfig
+    from services.lenses.store import LensBundle
+    from services.semantic.files import definition_to_page, page_to_definition
+    from services.validate.report import validate_bundle
+
+    (position,) = _position_aliased_model().definitions
+    page = definition_to_page(position)
+    assert "value_aliases:" in page and "offlaner: offlane" in page
+    assert page_to_definition(page, path="semantic/definitions/position.md").value_aliases == (
+        LANE_WORDS
+    )
+
+    def _unbound(defn: Definition) -> list[str]:
+        bundle = LensBundle(
+            config=LensConfig(name="t", display_name="T", connections=["wh"]),
+            semantic_model=_hero_model().model_copy(update={"definitions": [defn]}),
+        )
+        report = validate_bundle(bundle, [], [])
+        return [i.message for i in report.issues if i.code == "value_aliases_unbound"]
+
+    assert not _unbound(position)
+    # `about` names a table, not a column: the aliases have no column to bind.
+    (warning,) = _unbound(position.model_copy(update={"about": "hero_playstyle"}))
+    assert "value_aliases" in warning and "position" in warning
+
+
+def test_a_month_the_window_fixes_is_not_also_a_grouping() -> None:
+    """The window pins a month-period column with an equality too ("in August
+    2026" is month = '2026-08'): a decider that also groups by `month` gets the
+    same shape as one that does not."""
+    entity = Entity(
+        name="budget",
+        source=EntitySource(connection="wh", table="budget"),
+        fields=[
+            Field(name="month", type="string"),
+            Field(name="entity", type="string"),
+            Field(name="amount_eur", type="number"),
+        ],
+        dimensions=[Dimension(name="entity"), Dimension(name="month")],
+        metrics=[Metric(name="budget", agg="sum", expr="budget.amount_eur")],
+    )
+    model = SemanticModel(lens="fin", dialect="duckdb", entities=[entity])
+    domains = {"month": [f"2026-{m:02d}" for m in range(1, 13)], "entity": ["FI", "SE"]}
+    shapes = set()
+    for grouping in ("month", None):
+        res = TypedResolver(  # type: ignore[arg-type]
+            _Prefers("aggregate", "budget", *([grouping] if grouping else [])),
+            domains=domains,
+            today=TODAY,
+        ).resolve("total budget in August 2026", model)
+        assert res.intent is not None, res.clarification
+        shapes.add(
+            (
+                tuple(res.intent.dimensions),
+                tuple((f.field, f.op, f.value) for f in res.intent.filters),
+            )
+        )
+    assert shapes == {((), (("month", "=", "2026-08"),))}

@@ -48,6 +48,7 @@ from services.evals.runner import _SCALAR_RTOL
 from services.runtime import resolution as resolution_mod
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
+from services.runtime.bounded import ApplyStepTimeout
 from services.runtime.pipeline import _jsonable, run_query
 
 # The comparison window: certified answers are small verified results; anything
@@ -453,6 +454,8 @@ def _score_one(
     try:
         with query_context(purpose="eval", lens=lens):
             oracle = connector.execute(oracle_sql, read_only=True, row_limit=_ROW_CAP)
+    except ApplyStepTimeout:
+        raise  # the warehouse stopped answering: the apply's verdict, not this case's
     except Exception as exc:  # noqa: BLE001 — a broken oracle fails its case, not the run
         return CertifiedCaseResult(
             answer_id=a.id,

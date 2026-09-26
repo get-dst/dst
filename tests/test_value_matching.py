@@ -18,6 +18,7 @@ from services.connectors.duckdb import DuckDBConnector
 from services.contracts.fakes import ScriptedDecider
 from services.contracts.profile import (
     LOW_CARDINALITY_MAX,
+    MATCH_DICTIONARY_MAX,
     ColumnProfile,
     ColumnSampleSpec,
     TableProfile,
@@ -188,16 +189,18 @@ def test_a_counted_text_column_up_to_the_match_cap_gets_its_whole_dictionary(
     tmp_path: Any,
 ) -> None:
     db_path = str(tmp_path / "heroes.duckdb")
+    past_cap = MATCH_DICTIONARY_MAX + 100  # one dimension too long to hold whole
+    rows = past_cap + 100
     scratch = duckdb.connect(db_path)
     scratch.execute(
         "CREATE TABLE duos AS SELECT 'hero ' || (i % 127) AS hero_name, "
-        "'player ' || (i % 600) AS player_name, "
-        "'user' || (i % 127) || '@example.com' AS contact_email FROM range(1200) AS t(i)"
+        f"'player ' || (i % {past_cap}) AS player_name, "
+        f"'user' || (i % 127) || '@example.com' AS contact_email FROM range({rows}) AS t(i)"
     )
     scratch.close()
     spec = TableSampleSpec(
         table="duos",
-        row_count=1200,
+        row_count=rows,
         columns=[
             ColumnSampleSpec(name="hero_name", type="VARCHAR", matchable=True),
             ColumnSampleSpec(name="player_name", type="VARCHAR", matchable=True),
@@ -211,7 +214,7 @@ def test_a_counted_text_column_up_to_the_match_cap_gets_its_whole_dictionary(
     assert heroes.top_values is not None
     assert sorted(heroes.top_values) == sorted(f"hero {i}" for i in range(127))
     players = next(c for c in profile.columns if c.name == "player_name")
-    assert players.distinct_count == 600
+    assert players.distinct_count == past_cap
     assert not players.values_complete and players.top_values is None
     emails = next(c for c in profile.columns if c.name == "contact_email")
     assert emails.distinct_count == 127

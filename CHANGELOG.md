@@ -29,6 +29,111 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.8] — 2026-09-26
+
+No schema change.
+
+### Fixed
+
+- **Numbers reach the reader as figures, not as the machine holds them.** A win rate
+  composed as 0.47085201793721976 and a median minute as 13.666441441441439 came from
+  two places: the rows the composer reads carried the raw values, and the pass that
+  snaps a rounded figure back to the data snapped it to the raw value too. Both now use
+  one presentation: a declared rate in [0, 1] reads 47.1%, other fractions at four
+  significant figures (13.67), integers with thousands separators; identifiers, years
+  and text stay as stored. The rows in the response are unchanged.
+- **A stated value filters; it never groups.** "Which hard supports place the most
+  observer wards" grouped by position instead of ranking heroes among the hard supports,
+  and a plural ("carries", "mids") did not match the stored word at all, so the filter
+  was left to a decision that could drop it. A lowercase stored value now matches its
+  regular plural, and a column whose value the question names is never offered as a
+  grouping: the filter binds off the text, on every run.
+- **An apply whose warehouse step never answers fails within a deadline and frees the
+  lock.** A connection probe that the warehouse accepted and never answered held the
+  org's apply lock and its transaction open for as long as the process lived, and every
+  later apply got a 409. Every warehouse-touching step of an apply (opening a connection,
+  probing it, running a certified answer's or an eval case's SQL) now runs under
+  `DST_APPLY_STEP_TIMEOUT_S` (default 60 s); past it the apply returns a 504 naming the
+  step, rolls back, and the next apply proceeds.
+- **A definition that moved to a longer column name no longer aborts the apply.**
+  The check for sample queries still carrying a definition's retired SQL matched by
+  substring, so `position` flagged every sample reading `position_name`. It now
+  matches whole tokens; a sample that really embeds the old expression still aborts.
+- **A warehouse connection that never answers fails one request, not the server.** A
+  MotherDuck open that never completed left every later open of the same database
+  waiting on it inside DuckDB's process-wide instance cache for as long as the process
+  lived; the connection's `statement_timeout_ms` never fired, because it starts once a
+  connection exists, and serving had no deadline of its own on the warehouse. Each
+  warehouse step of a served request (the dry run, the query, a value probe) now runs
+  under `DST_SERVING_TIMEOUT_S`; past it the request answers 504 naming the step and
+  logs an error, and the repair loop does not ask again. MotherDuck queries run on
+  cursors of one connection the process holds per database instead of opening one per
+  query; an open that does not return within 60 s fails its request, and the next
+  request opens a fresh instance rather than waiting on the stuck one.
+- **A name the question states binds in a dimension of thousands of values.** A
+  question naming one team out of 1,662 could not type: the typed resolver matches a
+  stated name against the dimension's whole value list, and `dst probe` kept that list
+  only up to 500 values. Declared text dimensions now keep it up to 5,000, and
+  matching stays near a millisecond. `dst query` now prints what an answer discloses
+  about itself, including the `UNTYPED:` line of a raw-SQL escalation, which it used
+  to drop, so such an answer no longer reads like a typed one. Run `dst probe` to
+  collect the longer lists.
+- **A column the question fixes to one value is never a grouping.** "The most common
+  first item" of one hero ranks items among that hero's first items; the typed reading
+  sometimes grouped by the item order as well, a column its own filter fixed to
+  `'first'`, so one question came back in two shapes. A column an equality filter pins
+  is now dropped from the grouping however its value was reached (named in the
+  question, decided, bound, or fixed by a one-month window), and a ranking left with
+  nothing to rank asks what to rank across.
+- **A definition applied in another form is recognised as applied.** Whether an answer
+  used the lens's definition was decided by comparing SQL as text: the compiled metric
+  that implements a definition wraps each part in parentheses, a definition written
+  over `COUNT(*)` never matched a count of the key, and correct answers were graded
+  partial as computed without their own definition. Text also erred the other way: a
+  condition on `name` was found inside one on `team_name`. Definitions and SQL are now
+  compared as parsed trees, where qualifiers, quoting, case, parentheses and the order
+  of ANDed conditions do not count, and `COUNT(*)` equals a count of a declared
+  primary-key column and of nothing else. The same comparison decides which
+  definitions a certified answer implements, whether a sample query still carries a
+  retired definition (in `dst plan` and `dst apply` alike), and that a generated
+  `COUNT(*)` computes a declared count of the key.
+- **A month on a timestamp column includes its last day.** A window the question
+  states ("this month", "last month") compiled on a timestamp time field to
+  `started_at <= '2026-09-30'`, which is midnight, so every row after 00:00 on the
+  window's last day fell out. On a timestamp the upper bound is now the first day after
+  the window (`< '2026-10-01'`); a date column keeps its inclusive last day.
+- **A word people use for a stored value can name it.** "Offlaners" and "midlaners"
+  are not plurals of the stored `offlane` and `mid`, so a question using them left the
+  filter to a decision that could drop it. A definition `about` a column can now map
+  such words to stored values (`value_aliases: {offlaner: offlane, midlaner: mid}`);
+  a question naming one, or its plural, filters the column to the value, read off the
+  text, wherever the column's value list holds it. A map on a definition whose `about`
+  names no column is a warning at plan and apply.
+- **An answer that mentions a measure the lens cannot compute is not refused for
+  saying so.** The backstop behind `not_computable` refused any answer whose prose named
+  such a measure or one of its aliases, so an answer whose population sentence said what
+  is not counted was refused, though neither the question nor its SQL touched the
+  measure. The backstop now reads the result's columns, never the prose: a column named
+  after a declared measure (`amount AS lifetime_value`) refuses before any prose is
+  composed, and a rows-only answer, which had no prose to read, is now held to it too.
+  A question naming the measure or an alias refuses before generation, as before.
+- **A MotherDuck query that never returns no longer holds up the queries after it.** A
+  query past `DST_SERVING_TIMEOUT_S` failed its request but kept running on the one
+  connection the process holds per database, so later queries could queue behind it
+  and fail at the deadline in turn. A DuckDB or MotherDuck statement the deadline gives
+  up on is now interrupted; on MotherDuck, one still running 5 s after the interrupt
+  retires the held connection, and the next request opens a fresh one. An apply step
+  past `DST_APPLY_STEP_TIMEOUT_S` is interrupted the same way.
+- **A raw-SQL answer says so on every door.** The `UNTYPED:` line could go missing two
+  ways. When certified matching could not run, the query door replaced the answer's
+  `degraded` lines with its own, dropping the `UNTYPED:` line and any
+  graded-on-partial-evidence line; it now adds its line in front of them, and the
+  request log keeps the same list. A typed reading that failed a check before serving
+  was repaired by raw-SQL generation with no `UNTYPED:` line at all, so the response
+  said `typed: false` while `dst query` printed nothing about it; that repair is now
+  disclosed like any other. The OpenAI-compatible endpoint's `dst` block now carries
+  `degraded` and `resolution` as well.
+
 ## [0.5.7] — 2026-09-25
 
 No schema change.

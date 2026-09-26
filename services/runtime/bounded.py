@@ -14,13 +14,20 @@ bound (``DST_SERVING_TIMEOUT_S``, default 600s — twice the slowest legitimate
 generation measured, 250-330s). A wedged upstream surfaces as an error naming
 what stalled and for how long, instead of a request that never returns.
 
+The same bound covers each warehouse step of a served request (``warehouse_bounded``):
+a connection the warehouse accepted and never answered held the request, and every
+request queued behind it, for as long as the process lived.
+
 The worker thread cannot be interrupted (Python has no thread kill): the point
 is that the REQUEST stops waiting and says why. The orphan is a daemon, so it
-finishes into nothing and never holds up process exit.
+finishes into nothing and never holds up process exit. What it holds can still be
+let go: a step registers how (``on_abandon`` — a connector interrupts its
+statement), and the bound runs that before it gives up.
 """
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 from collections.abc import Callable
@@ -34,6 +41,100 @@ class ServingTimeout(RuntimeError):
     """A per-request model/embedding call exceeded the serving timeout."""
 
 
+# The prefix of the apply endpoint's own 5xx detail for a step past its
+# deadline. The CLI reads it to tell dst's verdict ("rolled back, nothing
+# deployed") from a proxy's 502/503/504, which means upstream never answered
+# and the apply may still be running.
+APPLY_ABORTED_PREFIX = "apply aborted: "
+
+
+class ApplyStepTimeout(RuntimeError):
+    """A warehouse-touching step of an apply exceeded ``DST_APPLY_STEP_TIMEOUT_S``.
+
+    Carries the step and the bound so the endpoint can name both. The engine's
+    per-step ``except Exception`` handlers — a failed probe is that connection's
+    error, a failed certified re-probe is a warning — must let this one through:
+    the deadline is the apply's verdict, not the step's."""
+
+    def __init__(self, step: str, seconds: float) -> None:
+        self.step = step
+        self.seconds = seconds
+        super().__init__(
+            f"{step} did not return within {seconds:.0f}s (DST_APPLY_STEP_TIMEOUT_S): the "
+            "warehouse is not responding. Nothing was deployed; prior state keeps serving"
+        )
+
+
+class WarehouseTimeout(RuntimeError):
+    """A warehouse step did not return within its deadline.
+
+    Carries the step and the bound so every surface can name both. A timeout is
+    the request's verdict, never a repairable failure: asking a warehouse that is
+    not answering again only waits again, so the serving pipeline ends the request
+    on it and the door answers 504. ``bound`` names the setting behind the
+    deadline, when one does."""
+
+    def __init__(self, step: str, seconds: float, bound: str | None = None) -> None:
+        self.step = step
+        self.seconds = seconds
+        setting = f" ({bound})" if bound else ""
+        super().__init__(
+            f"{step} did not return within {seconds:g}s{setting}: the warehouse is not "
+            "responding. This request was abandoned; later requests are unaffected"
+        )
+
+
+class Stalled(Exception):
+    """The worker outlived its bound (never a driver's own TimeoutError)."""
+
+
+_abandon_hooks: contextvars.ContextVar[list[Callable[[], None]] | None] = contextvars.ContextVar(
+    "dst_abandon_hooks", default=None
+)
+
+
+def on_abandon(hook: Callable[[], None]) -> None:
+    """Have *hook* run if the bound this code runs under gives up on it, before the
+    bound raises. The stalled thread cannot be killed, but what it holds can be let
+    go: a statement interrupted, a shared connection retired. Outside a bound, a
+    no-op."""
+    hooks = _abandon_hooks.get()
+    if hooks is not None:
+        hooks.append(hook)
+
+
+def run_bounded[T](name: str, fn: Callable[[], T], seconds: float) -> T:
+    """Run *fn* on a daemon thread named *name*; raise ``Stalled`` if it has not
+    returned within *seconds*, after running what it registered with
+    ``on_abandon``. It runs in a copy of the caller's context, so the ambient
+    request state (query tag, attribution) travels with it."""
+    out: list[T] = []
+    failure: list[BaseException] = []
+    hooks: list[Callable[[], None]] = []
+    context = contextvars.copy_context()
+    context.run(_abandon_hooks.set, hooks)
+
+    def _run() -> None:
+        try:
+            out.append(context.run(fn))
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's thread
+            failure.append(exc)
+
+    worker = threading.Thread(target=_run, name=name, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        for hook in hooks:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 — the stall is the verdict; a failed release is logged
+                log.exception("%s: releasing what the stalled call held failed", name)
+        raise Stalled
+    if failure:
+        raise failure[0]
+    return out[0]
+
+
 def call_bounded[T](what: str, fn: Callable[[], T]) -> T:
     """Run *fn* under the serving timeout; raise ``ServingTimeout`` if it stalls.
 
@@ -44,25 +145,50 @@ def call_bounded[T](what: str, fn: Callable[[], T]) -> T:
     seconds = settings.serving_timeout_s
     if seconds <= 0:
         return fn()
-    out: list[T] = []
-    failure: list[BaseException] = []
-
-    def _run() -> None:
-        try:
-            out.append(fn())
-        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's thread
-            failure.append(exc)
-
-    worker = threading.Thread(target=_run, name=f"dst-serving-{what}", daemon=True)
-    worker.start()
-    worker.join(seconds)
-    if worker.is_alive():
+    try:
+        return run_bounded(f"dst-serving-{what}", fn, seconds)
+    except Stalled:
         log.error("%s exceeded the %.0fs serving timeout — abandoning the call", what, seconds)
         raise ServingTimeout(
             f"{what} did not return within the {seconds:.0f}s serving timeout "
             "(DST_SERVING_TIMEOUT_S) — the model or embedding provider is not responding; "
             "retry, or raise the timeout if this lens's answers legitimately take longer"
-        )
-    if failure:
-        raise failure[0]
-    return out[0]
+        ) from None
+
+
+def apply_bounded[T](step: str, fn: Callable[[], T]) -> T:
+    """Run one warehouse-touching step of an apply under ``DST_APPLY_STEP_TIMEOUT_S``;
+    raise ``ApplyStepTimeout`` naming *step* if it stalls.
+
+    The apply holds the org's apply lock and its transaction while *fn* runs, so
+    the orphaned worker is a daemon and the REQUEST is what stops waiting: the
+    endpoint rolls back, the lock goes with the transaction, and the next apply
+    proceeds. ``0`` disables the bound.
+    """
+    seconds = settings.apply_step_timeout_s
+    if seconds <= 0:
+        return fn()
+    try:
+        return run_bounded(f"dst-apply-{step}", fn, seconds)
+    except Stalled:
+        log.error("apply: %s exceeded the %.0fs step deadline — abandoning it", step, seconds)
+        raise ApplyStepTimeout(step, seconds) from None
+
+
+def warehouse_bounded[T](step: str, fn: Callable[[], T]) -> T:
+    """Run one warehouse step of a served request (the dry run, the query, a value
+    probe) under ``DST_SERVING_TIMEOUT_S``; raise ``WarehouseTimeout`` naming *step*
+    if it stalls.
+
+    A connection that never answers used to hold the request for as long as the
+    process lived, and a connector's own statement timeout cannot help while it is
+    still connecting. The orphaned worker is a daemon; the REQUEST stops waiting
+    and says which step it gave up on. ``0`` disables the bound."""
+    seconds = settings.serving_timeout_s
+    if seconds <= 0:
+        return fn()
+    try:
+        return run_bounded(f"dst-warehouse-{step}", fn, seconds)
+    except Stalled:
+        log.error("%s exceeded the %.0fs serving timeout — abandoning it", step, seconds)
+        raise WarehouseTimeout(step, seconds, "DST_SERVING_TIMEOUT_S") from None

@@ -49,9 +49,9 @@ def test_a_wrong_claim_over_a_decimal_cell_still_fails() -> None:
 
 
 def test_the_rendering_of_a_decimal_is_never_exponential() -> None:
-    assert f._rendered(Decimal("20620095.35")) == "20,620,095.35"
-    assert f._rendered(Decimal("522656131")) == "522,656,131"
-    assert f._rendered(Decimal("0.000012")) == "0.000012"
+    assert f.render_number(Decimal("20620095.35")) == "20,620,095.35"
+    assert f.render_number(Decimal("522656131")) == "522,656,131"
+    assert f.render_number(Decimal("0.000012")) == "0.000012"
 
 
 def test_decimal_column_totals_ground() -> None:

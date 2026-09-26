@@ -63,7 +63,12 @@ from services.runtime import (
 from services.runtime.answer import AnswerComposer, AnswerResult, certified_frame, citations_for
 from services.runtime.answer import data_notes as answer_data_notes
 from services.runtime.assembly import ANSWER_CONTRACT_SOURCE, typed_decider
-from services.runtime.bounded import ServingTimeout, call_bounded
+from services.runtime.bounded import (
+    ServingTimeout,
+    WarehouseTimeout,
+    call_bounded,
+    warehouse_bounded,
+)
 from services.runtime.compiler import CompileError, metric_sql
 
 FETCH_CAP = 5000
@@ -90,8 +95,11 @@ class PipelineResult:
     # "warehouse" = the failure happened warehouse-side on governed SQL (dry-run
     # invalid or execution error) — the class the serve-time drift backstop acts
     # on: run the schema diff, file the ticket, template the caller-facing
-    # message. None = no failure, or one that is not the warehouse's (provider
-    # outage, compose timeout), where a drift check would be noise.
+    # message. "timeout" = a warehouse step never answered within its deadline:
+    # the door answers 504 naming the step, and no drift check runs (it would ask
+    # the same silent warehouse). None = no failure, or one that is not the
+    # warehouse's (provider outage, compose timeout), where a drift check would be
+    # noise.
     error_kind: str | None = None
 
 
@@ -138,8 +146,8 @@ def deterministic_refusal_not_computable(question: str, model: SemanticModel) ->
     naming a declared not-computable measure (or an alias) refuses with the
     reason and the route, deterministically. Word-boundary matches, underscores
     read as spaces — the exclusion rail's idiom. The paraphrase tail this
-    cannot see is caught by the ANSWER-echo backstop below: the model narrates
-    the canonical measure name even when the question paraphrased it."""
+    cannot see is caught by the result-column backstop below: SQL written for
+    a paraphrase names its column after the measure it computed."""
     q = question.lower()
     for entry in model.not_computable:
         for surface in _nc_surfaces(entry):
@@ -148,18 +156,25 @@ def deterministic_refusal_not_computable(question: str, model: SemanticModel) ->
     return None
 
 
-def not_computable_echo(answer_text: str, model: SemanticModel) -> str | None:
-    """The backstop for paraphrases (the audit, the test that matters): 'how
-    much is a referral worth over its life' names no declared surface — but
-    the model's ANSWER does ('The lifetime value of each referral varies…'),
-    because narration translates back to the canonical term. An answer whose
-    prose names a not-computable measure on a lens that declared it cannot
-    compute it is a substitution, and it refuses instead of serving."""
-    a = answer_text.lower()
+def _as_words(text: str) -> str:
+    return " ".join(re.sub(r"[_\-]+", " ", text.lower()).split())
+
+
+def not_computable_columns(columns: list[str], model: SemanticModel) -> str | None:
+    """The backstop for paraphrases: 'how much is a referral worth over its
+    life' names no declared surface, but the SQL written for it names its
+    result column after what it computed (`amount AS lifetime_value`). A result
+    column carrying a not-computable measure's name, on a lens that declared it
+    cannot compute it, is a substitution, and it refuses instead of serving.
+    Only the measure's own name counts: aliases are the words people ASK with
+    ('rank' for MMR), and a column named `rank` is a ranking, not the measure.
+    The answer's prose is never read: a population sentence saying what is NOT
+    counted names the measure without computing it."""
+    names = [_as_words(c) for c in columns]
     for entry in model.not_computable:
-        for surface in _nc_surfaces(entry):
-            if re.search(rf"\b{re.escape(surface)}\b", a):
-                return _nc_refusal(entry)
+        measure = _as_words(str(entry.get("measure") or ""))
+        if measure and any(re.search(rf"\b{re.escape(measure)}\b", n) for n in names):
+            return _nc_refusal(entry)
     return None
 
 
@@ -382,7 +397,7 @@ def attributed_definition(sql: str, model: SemanticModel) -> str | None:
     matches = [
         (term, expr)
         for term, expr in _governed_expressions(model)
-        if verification._expr_in_sql(expr, sql, sql_norm)
+        if verification._expr_in_sql(expr, sql, sql_norm, model)
         and _tables_are_present(expr, sql)  # see below
     ]
     if not matches:
@@ -802,6 +817,15 @@ def run_query(
     untyped_decisions: list[DecisionRecord] = list(untyped[1]) if untyped else []
     while True:
         active = generator if attempt == 0 else (escalate_generator or generator)
+        if (
+            active is escalate_generator
+            and untyped_reason is None
+            and getattr(generator, "model", None) == "typed"
+        ):
+            # A typed reading that failed a check before serving is repaired by
+            # raw-SQL generation on a lens that accepts untyped answers: that
+            # answer is untyped too, and says so like any other.
+            untyped_reason = "its typed reading failed a check before serving"
         gen_started = time.perf_counter()
         try:
             # Bounded: a wedged provider must surface as an error,
@@ -1115,7 +1139,12 @@ def run_query(
         pre = None
         if (dry := getattr(connector, "dry_run", None)) is not None:
             try:
-                pre = dry(guard.sql)
+                pre = warehouse_bounded("the dry run", functools.partial(dry, guard.sql))
+            except WarehouseTimeout as exc:
+                # A warehouse that is not answering ends the request: the repair
+                # loop would only wait on it again.
+                _mark("dryrun", dryrun_started)
+                return _trace_failure("error", guard.sql, str(exc), error_kind="timeout")
             except Exception:
                 pre = None
         _mark("dryrun", dryrun_started)
@@ -1146,7 +1175,15 @@ def run_query(
             # query returned 21,056 and we cut it" the same observation, and the
             # pipeline then reports the cap as if it were the true count.
             with query_context(purpose="serve", lens=lens_name):
-                result = connector.execute(guard.sql, read_only=True, row_limit=FETCH_CAP + 1)
+                result = warehouse_bounded(
+                    "the query",
+                    functools.partial(
+                        connector.execute, guard.sql, read_only=True, row_limit=FETCH_CAP + 1
+                    ),
+                )
+        except WarehouseTimeout as exc:
+            _mark("execute", exec_started)
+            return _trace_failure("error", guard.sql, str(exc), error_kind="timeout")
         except Exception as exc:  # noqa: BLE001 — surface as a graceful error + repair attempt
             _mark("execute", exec_started)
             if attempt < max_repairs:
@@ -1173,7 +1210,16 @@ def run_query(
             outcome = probed_empty.get(guard.sql)
             if outcome is None:
                 probe_started = time.perf_counter()
-                outcome = value_guard.empty_result_probe(guard.sql, semantic_model, connector)
+                try:
+                    outcome = warehouse_bounded(
+                        "the empty-result probe",
+                        functools.partial(
+                            value_guard.empty_result_probe, guard.sql, semantic_model, connector
+                        ),
+                    )
+                except WarehouseTimeout as exc:
+                    _mark("probe", probe_started)
+                    return _trace_failure("error", guard.sql, str(exc), error_kind="timeout")
                 _mark("probe", probe_started)
                 probed_empty[guard.sql] = outcome
             if outcome.findings:
@@ -1219,6 +1265,15 @@ def run_query(
     # the fetch cap counts even when max_rows would have returned everything we
     # HELD: rows the query matched and the caller never received are truncation.
     truncated = fetch_capped or total_rows > max_rows
+
+    # The not-computable backstop for paraphrases the question rail cannot
+    # enumerate: a result column named after a measure this lens declared it
+    # cannot compute is a substitution. It reads the result's columns, the same
+    # on every format, before any prose exists; certified SQL was approved.
+    if certification != "certified":
+        nc_column = not_computable_columns(served.columns, semantic_model)
+        if nc_column is not None:
+            return _trace_failure("refused", guard.sql, nc_column)
 
     # On a certified serve, no model writes the answer. ``static_prose``
     # names why numeric_grounding SKIPS (there is no free prose to catch
@@ -1331,12 +1386,6 @@ def run_query(
             ai_cost, cost.ai_cost_usd(compose_model, ans.input_tokens, ans.output_tokens)
         )
 
-    # The answer-echo backstop for not-computable measures: the
-    # question-side rail cannot enumerate paraphrases, but the model's OWN
-    # NARRATION translates them back to the canonical term ('The lifetime
-    # value of each referral varies…') — a deterministic hook no phrase list
-    # gives the question side. An answer whose prose names a measure this lens
-    # declared it cannot compute is a substitution: refuse, never serve.
     # The composer's decline: it saw the rows beside the question and they do
     # not answer it (a list of hero names for "what should I build"). Served,
     # that is a non-answer labelled ok; the verdict belongs in the status.
@@ -1366,11 +1415,6 @@ def run_query(
             guard.sql,
             f"I can't answer this from this lens's data: {ans.no_answer_reason}",
         )
-    if certification != "certified":
-        nc_echo = not_computable_echo(ans.text, semantic_model)
-        if nc_echo is not None:
-            return _trace_failure("refused", guard.sql, nc_echo)
-
     # The ambiguity-disclosure floor: when the clarification
     # rail missed (aliases cannot enumerate language) and the SQL identifiably
     # used ONE declared reading, the answer says which — every miss becomes a
@@ -1512,10 +1556,12 @@ def run_query(
                 # caller reads a row-count shrug as failure. Withholding stays
                 # about the PROSE — the deterministic table is a rendering of the
                 # data, exactly what a withheld composition degrades to.
-                from services.runtime.answer import _format_rows
+                from services.runtime.answer import _format_rows, column_styles
 
                 preview_rows = served.rows[:10]
-                preview = _format_rows(served.columns, preview_rows)
+                preview = _format_rows(
+                    served.columns, preview_rows, column_styles(semantic_model, served.columns)
+                )
                 more = (
                     f"\n… and {total_rows - len(preview_rows)} more row(s) in `data`."
                     if total_rows > len(preview_rows)

@@ -794,17 +794,31 @@ _COUNT_ORACLE = "SELECT count(orders.order_id) AS order_count FROM orders"
 
 
 def test_right_rows_by_an_ungoverned_path_passes_and_says_so() -> None:
-    """The rows match the oracle, but generation counted rows instead of
-    computing the declared `order_count` metric. Rows are the gate — the case
-    PASSES — and the resolution stage records the miss so the ledger can say
-    'right number, ungoverned path' instead of a clean green."""
-    out = _suite([_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)], ["SELECT count(*) FROM orders"])
+    """The rows match the oracle, but generation counted a column that can be
+    null instead of computing the declared `order_count` metric: the same number
+    here, a different count. Rows are the gate — the case PASSES — and the
+    resolution stage records the miss so the ledger can say 'right number,
+    ungoverned path' instead of a clean green."""
+    out = _suite(
+        [_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)],
+        ["SELECT count(orders.status) FROM orders"],
+    )
     r = out.results[0]
     assert r.passed and r.wrong_at is None
     assert r.stages["rows"] == "passed" and r.stages["resolution"] == "failed"
     assert r.ungoverned_pass
     assert r.resolution_expected == "declared" and r.resolution_got == "inferred"
-    assert "order_count" in r.stage_evidence and "COUNT(*)" in r.stage_evidence
+    assert "order_count" in r.stage_evidence and "COUNT(orders.status)" in r.stage_evidence
+
+
+def test_counting_every_row_computes_the_count_of_the_declared_key() -> None:
+    """`order_id` is the declared key, so it is never null: COUNT(*) and
+    COUNT(orders.order_id) are one count, and a generation writing COUNT(*)
+    computed the declared `order_count` (the rule a ratio's operands follow)."""
+    out = _suite([_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)], ["SELECT count(*) FROM orders"])
+    r = out.results[0]
+    assert r.passed and r.stages["resolution"] == "passed", r.stage_evidence
+    assert not r.ungoverned_pass
 
 
 def test_wrong_rows_from_the_wrong_metric_attribute_to_resolution_first() -> None:
@@ -821,17 +835,18 @@ def test_wrong_rows_from_the_wrong_metric_attribute_to_resolution_first() -> Non
 
 
 def test_generation_more_governed_than_the_oracle_passes_and_says_so() -> None:
-    """The certified SQL sums a raw column; generation used the declared
+    """The certified SQL counts a raw column; generation used the declared
     metric. Not a miss — a note for the certifier, and the case passes the
     resolution stage."""
-    raw_oracle = "SELECT status, count(*) AS n FROM orders GROUP BY 1"
+    raw_oracle = "SELECT status, count(status) AS n FROM orders GROUP BY 1"
     out = _suite(
         [_answer(sql=raw_oracle, question=_COUNT_Q)],
         ["SELECT status, count(o.order_id) AS order_count FROM orders AS o GROUP BY 1"],
     )
     r = out.results[0]
     assert r.passed and r.stages["resolution"] == "passed" and not r.ungoverned_pass
-    assert "computes COUNT(*) raw" in r.stage_evidence and "order_count" in r.stage_evidence
+    assert "computes COUNT(status) raw" in r.stage_evidence, r.stage_evidence
+    assert "order_count" in r.stage_evidence
 
 
 def test_governed_generation_passes_the_resolution_stage() -> None:

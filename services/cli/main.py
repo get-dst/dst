@@ -791,6 +791,11 @@ def _query(args: argparse.Namespace) -> int:
         # actually collected, minus anything refunded" tells a commercial director
         # why his figure differs from his colleague's.
         print(f"{style.accent('basis:')} {d['trust_summary']}")
+    # What the answer discloses about itself (an UNTYPED escalation, a degraded
+    # lens, a grade resting on partial evidence) is printed verbatim: dropped
+    # here, a raw-SQL answer read exactly like a typed one.
+    for note in d.get("degraded") or []:
+        print(style.warn(str(note)))
     meta = [
         part
         for part in (
@@ -2728,6 +2733,16 @@ _APPLY_IN_FLIGHT = (
 )
 
 
+def _error_detail(r: httpx.Response) -> str | None:
+    """The server's own `detail` on an error response, or None for a body that
+    is not dst's (a proxy's HTML or text page)."""
+    try:
+        detail = r.json().get("detail")
+    except Exception:  # noqa: BLE001 — non-JSON error body
+        return None
+    return detail if isinstance(detail, str) else None
+
+
 def _summarize_apply(out: list[dict[str, Any]], quiet: bool = False) -> None:
     """The terraform-shaped apply report: grouped sections, warnings and errors
     painted, one counts line — the raw row array (agents' shape) is --json.
@@ -2905,10 +2920,15 @@ def _apply(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if r.status_code in (502, 503, 504):
+    from services.runtime.bounded import APPLY_ABORTED_PREFIX
+
+    detail = _error_detail(r)
+    if r.status_code in (502, 503, 504) and not (detail or "").startswith(APPLY_ABORTED_PREFIX):
         # A proxy's verdict, not the server's: upstream never answered, so the
         # apply may be running still. The one 5xx family that must NOT claim
         # "nothing was deployed" (the incident that taught this arrived as a 502).
+        # dst's own 504 — a warehouse step past its deadline, rolled back — says
+        # so in its detail and is reported below with what it says.
         print(
             f"error: apply got HTTP {r.status_code} from a gateway, not from dst — "
             f"{_APPLY_IN_FLIGHT}",
@@ -2930,10 +2950,6 @@ def _apply(args: argparse.Namespace) -> int:
         # actual cause is only in the server's log, so say where to look. It
         # said "check serve.log", which nothing ever writes: the
         # server logs to the TERMINAL running it, so name that instead.
-        try:
-            detail = r.json().get("detail")
-        except Exception:  # noqa: BLE001 — non-JSON error body
-            detail = None
         where = "the server's log (locally: the terminal running `dst dev`/`serve`)"
         # Apply has been read as non-atomic ("half of it is live"). Measured: it is
         # not — semantic assets, lens publishes, eval cases and certified

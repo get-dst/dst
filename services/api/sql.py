@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -56,6 +57,7 @@ from services.lenses.connections import ConnectionUnavailable, resolve_connector
 from services.observability import cost
 from services.observability.logger import log_trace
 from services.runtime import sql_guard
+from services.runtime.bounded import WarehouseTimeout, warehouse_bounded
 
 log = logging.getLogger("dst")
 
@@ -162,7 +164,14 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
     try:
         # +1 row is the "did we hit the cap" probe bit, the same idiom the serving
         # pipeline uses; it is trimmed before the rows leave here.
-        result: QueryResult = connector.execute(guard.sql, read_only=True, row_limit=body.limit + 1)
+        result: QueryResult = warehouse_bounded(
+            "the query",
+            partial(connector.execute, guard.sql, read_only=True, row_limit=body.limit + 1),
+        )
+    except WarehouseTimeout as exc:
+        trace.status, trace.valid, trace.error = "error", True, str(exc)
+        log_trace(trace)
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — a warehouse error is the answer, not a 500
         trace.status, trace.valid, trace.error = "error", True, str(exc)[:500]
         log_trace(trace)

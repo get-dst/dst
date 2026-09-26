@@ -2309,6 +2309,75 @@ def test_sample_embedding_stale_definition_aborts_the_apply(org) -> None:
 
 
 @needs_db
+def test_stale_definition_check_matches_whole_tokens_not_substrings(org) -> None:
+    """A definition's sql moved from `customers.region` to `customers.region_name`
+    and every sample that read `region_name` was flagged as embedding the RETIRED
+    expression: `region` is a substring of `region_name`. The old expression
+    counts as embedded only when it appears as a complete token sequence — bare
+    or table-qualified, the retired identifier being a prefix of a longer one is
+    not a match. A sample that really carries the old expression still aborts."""
+    _oid, headers = org
+    files = _project_files()
+    files["semantic/entities/customers.yaml"] = files["semantic/entities/customers.yaml"].replace(
+        "- name: customer_name\n  type: string\n",
+        "- name: customer_name\n  type: string\n"
+        "- name: region\n  type: string\n"
+        "- name: region_name\n  type: string\n",
+    )
+    files["semantic/definitions/home-region.md"] = (
+        "---\nmetric: home_region\nsql: customers.region\n---\n\nWhere the customer lives.\n"
+    )
+    files["lenses/customer_value/lens.yaml"] = files["lenses/customer_value/lens.yaml"].replace(
+        "  - repeat_customer\n", "  - repeat_customer\n  - home_region\n"
+    )
+
+    def _queries(*sqls: str) -> str:
+        return yaml.safe_dump(
+            {
+                "use_when": [],
+                "sample_queries": [
+                    {"question": f"Sample {i}?", "sql": sql} for i, sql in enumerate(sqls)
+                ],
+            },
+            sort_keys=False,
+        )
+
+    files["lenses/customer_value/queries.yaml"] = _queries("SELECT count(*) AS n FROM customers")
+    client.post("/mgmt/project/apply", headers=headers, json={"files": files})
+
+    files["semantic/definitions/home-region.md"] = files[
+        "semantic/definitions/home-region.md"
+    ].replace("customers.region", "customers.region_name")
+    # Bare and qualified prefix-of-identifier do not embed `customers.region`;
+    # only the sample carrying the whole retired expression does, and it aborts.
+    files["lenses/customer_value/queries.yaml"] = _queries(
+        "SELECT region_name, count(*) AS n FROM customers GROUP BY region_name",
+        "SELECT customers.region_name FROM customers",
+        "SELECT customers.region FROM customers",
+    )
+    # `dst plan` rejects exactly what apply rejects: the same one sample.
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    planned = next(e for e in plan if e.get("lens") == "customer_value")
+    stale_in_plan = [e for e in planned["errors"] if "PREVIOUS logic" in e]
+    assert len(stale_in_plan) == 1 and "'Sample 2?'" in stale_in_plan[0]
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    errors = [e for e in row["errors"] if "PREVIOUS logic of definition 'home_region'" in e]
+    assert len(errors) == 1 and "'Sample 2?'" in errors[0]
+    assert errors == stale_in_plan
+    assert any(e.get("action") == "aborted" for e in out)
+
+    # Dropping the stale sample lands the push; the prefix samples are untouched.
+    files["lenses/customer_value/queries.yaml"] = _queries(
+        "SELECT region_name, count(*) AS n FROM customers GROUP BY region_name",
+        "SELECT customers.region_name FROM customers",
+    )
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert not row["errors"] and not any(e.get("action") == "aborted" for e in out)
+
+
+@needs_db
 def test_apply_names_entities_whose_names_are_sql_keywords(org) -> None:
     """`order` is one of the commonest table names there is. Apply created
     `entity/order` without a word, and every answer through it then died on a
@@ -2338,3 +2407,64 @@ def test_only_keyword_names_are_flagged() -> None:
 
     assert _reserved_name_warnings(["customers", "orders", "order_items"]) == []
     assert len(_reserved_name_warnings(["order", "select", "customers"])) == 2
+
+
+@needs_db
+def test_a_wedged_warehouse_probe_fails_the_apply_loud_and_frees_the_lock(
+    org, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The apply that never returned: /ready answered, the request sat in the
+    warehouse probe, and the apply's backend stayed idle in transaction — the
+    org's apply lock is transaction-scoped, so it was held for as long as the
+    process lived and every later apply got a 409. Every warehouse-touching step
+    of an apply runs under a deadline now: past it the apply fails with a 504
+    naming the step, the transaction rolls back (the lock goes with it), and the
+    next apply proceeds."""
+    import threading
+    import time
+
+    from services.contracts.warehouse import DryRunResult, QueryResult, SchemaSnapshot
+    from services.lenses import connections as connections_mod
+
+    oid, headers = org
+    wedge = threading.Event()
+
+    class _Wedged:
+        """A warehouse that accepts the connection and never answers the probe.
+        The wait is bounded so a regression fails this test instead of hanging it."""
+
+        kind = "duckdb"
+
+        def introspect(self) -> SchemaSnapshot:
+            wedge.wait(8)
+            return SchemaSnapshot(connection="wh", dialect="duckdb")
+
+        def dry_run(self, sql: str) -> DryRunResult:
+            return DryRunResult()
+
+        def execute(self, sql: str, *, read_only: bool = True, row_limit=None) -> QueryResult:  # type: ignore[no-untyped-def]
+            return QueryResult()
+
+    monkeypatch.setattr(connections_mod, "build_connector", lambda *_a, **_k: _Wedged())
+    monkeypatch.setattr(settings, "apply_step_timeout_s", 0.5)
+    files = {"dst.yaml": "connections:\n  wh:\n    type: duckdb\n    config: {path: ':memory:'}\n"}
+    try:
+        started = time.perf_counter()
+        r = client.post("/mgmt/project/apply", headers=headers, json={"files": files})
+        elapsed = time.perf_counter() - started
+        assert r.status_code == 504, r.text
+        assert elapsed < 5  # the request stops waiting; it does not ride the stall out
+        detail = r.json()["detail"]
+        assert "the probe of connection 'wh'" in detail
+        assert "DST_APPLY_STEP_TIMEOUT_S" in detail and "Nothing was deployed" in detail
+        # The lock went with the rolled-back transaction: the next apply runs, no 409.
+        second = client.post(
+            "/mgmt/project/apply", headers=headers, json={"files": _project_files()}
+        )
+        assert second.status_code == 200, second.text
+        assert all(row.get("action") != "aborted" for row in second.json())
+        # …and the wedged connection never landed.
+        with org_session(oid) as s:
+            assert connection_store.get_connection(s, "wh") is None
+    finally:
+        wedge.set()

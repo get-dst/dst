@@ -235,7 +235,7 @@ def compile_lens_model(
         excluded_metrics=excluded_names,
         # The not-computable declarations ride the compiled model (a fact that
         # reaches one tier doesn't exist) — the runtime's refusal rail and
-        # answer-echo backstop both read them from here.
+        # result-column backstop both read them from here.
         not_computable=[nc.model_dump(mode="json") for nc in config.not_computable],
         excluded_metric_shapes=excluded_shapes,
         shared_provenance=SharedProvenance(

@@ -188,7 +188,7 @@ def _matched_metrics(model: SemanticModel, sql: str, sql_norm: str) -> tuple[lis
 
     by_expr: dict[str, list[str]] = {}
     for term, expr in _governed_metrics(model):
-        if verification._expr_in_sql(expr, sql, sql_norm) and _tables_are_present(expr, sql):
+        if verification._expr_in_sql(expr, sql, sql_norm, model) and _tables_are_present(expr, sql):
             names = by_expr.setdefault(expr, [])
             if term not in names:
                 names.append(term)
@@ -217,7 +217,7 @@ def _matched_definitions(model: SemanticModel, sql: str, sql_norm: str) -> list[
         for d in model.definitions
         if d.sql_expr
         and d.sql_expr.strip()
-        and verification._expr_in_sql(d.sql_expr, sql, sql_norm)
+        and verification._expr_in_sql(d.sql_expr, sql, sql_norm, model)
         and _tables_are_present(d.sql_expr, sql)
     ]
 

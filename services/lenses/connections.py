@@ -159,16 +159,18 @@ def _builtin(connection: str) -> Connector:
     )
 
 
-def _from_session(
-    session: Session, connection: str, caller: CallerIdentity | None
-) -> Connector | None:
-    rec = connection_store.get_connection(session, connection)
-    if rec is None:
-        return None
-    # The credential seam. The org secret is the default; a resolver installed by
-    # an operator (per-user warehouse identity via their own IdP automation) can
-    # return something else keyed on `caller`. See services/lenses/credential_resolver.
-    org_secret = connection_store.get_secret(session, connection)
+def connector_for_record(
+    rec: connection_store.ConnectionRecord,
+    org_secret: str | None,
+    caller: CallerIdentity | None = None,
+) -> Connector:
+    """A stored connection's live connector, with no database read of its own —
+    so a caller can hold its reads on one transaction and run this half (the
+    credential seam, then the warehouse open) under a deadline.
+
+    The credential seam: the org secret is the default; a resolver installed by
+    an operator (per-user warehouse identity via their own IdP automation) can
+    return something else keyed on `caller`. See services/lenses/credential_resolver."""
     secret = credential_resolver.resolve(
         credential_resolver.CredentialRequest(
             caller=caller,
@@ -179,6 +181,15 @@ def _from_session(
         )
     )
     return _build_from_record(rec, secret)
+
+
+def _from_session(
+    session: Session, connection: str, caller: CallerIdentity | None
+) -> Connector | None:
+    rec = connection_store.get_connection(session, connection)
+    if rec is None:
+        return None
+    return connector_for_record(rec, connection_store.get_secret(session, connection), caller)
 
 
 def resolve_connector(

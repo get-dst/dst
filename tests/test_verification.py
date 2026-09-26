@@ -1103,14 +1103,13 @@ def _prose_claims(answer: str) -> list[float]:
 def test_reconcile_rewrites_a_rounded_restatement_to_the_row_value() -> None:
     # The bug: the response carried a rounded prose sentence AND a full-precision
     # row, so two consumers reading one response legitimately disagreed
-    # (38.81 vs 38.813651137594796).
+    # (38.81 vs 38.813651137594796). The rewrite lands on the cell's ONE
+    # presentation (four significant figures), never on the raw double.
     result = QueryResult(columns=["pct"], rows=[[38.813651137594796]])
-    prose = "The percentage of atoms in carcinogenic molecules that are carbon is 38.81%."
+    prose = "The percentage of atoms in carcinogenic molecules that are carbon is 38.8%."
     fixed = reconcile(prose, result)
-    assert fixed == (
-        "The percentage of atoms in carcinogenic molecules that are carbon is 38.813651137594796%."
-    )
-    assert _prose_claims(fixed) == [38.813651137594796]
+    assert fixed == ("The percentage of atoms in carcinogenic molecules that are carbon is 38.81%.")
+    assert _prose_claims(fixed) == [38.81]
 
 
 def test_reconcile_leaves_a_value_already_stated_exactly() -> None:
@@ -1148,7 +1147,7 @@ def test_reconcile_never_corrects_a_column_total_into_a_dominant_cell() -> None:
     # …and a rounded restatement of a plain CELL still gets rewritten on a
     # multi-row result (the totals guard is a skip for totals, not a blanket).
     multi = QueryResult(columns=["rate"], rows=[[38.813651137594796], [12.0]])
-    assert reconcile("The rate is 38.81.", multi) == "The rate is 38.813651137594796."
+    assert reconcile("The rate is 38.8.", multi) == "The rate is 38.81."
 
 
 def test_reconcile_leaves_derived_comparisons_alone() -> None:
@@ -1163,10 +1162,11 @@ def test_reconcile_closes_exactly_what_numeric_check_tolerates() -> None:
     # would call grounded but that differs from the value it was grounded against
     # cannot survive — that gap IS the two-representations bug.
     result = QueryResult(columns=["ratio"], rows=[[0.8113590263691683]])
-    for rounded in ("0.81", "0.811", "0.8114", "0.81136"):
+    for rounded in ("0.81", "0.811", "0.8114", "0.81136", "0.8113590263691683"):
         prose = f"The ratio is {rounded}."
         assert numeric_check(prose, result)[0] == "pass"  # the check tolerates it today
-        assert _prose_claims(reconcile(prose, result)) == [0.8113590263691683]
+        # …and every spelling collapses to the cell's one presentation
+        assert _prose_claims(reconcile(prose, result)) == [0.8114]
 
 
 def test_pipeline_response_publishes_one_value_per_question() -> None:
@@ -1194,10 +1194,10 @@ def test_pipeline_response_publishes_one_value_per_question() -> None:
     # Every number the prose publishes is a payload value in its ONE deterministic
     # presentation rendering (separators + 2 decimals at scale) —
     # still a single spelling per value, never a second computation.
-    from services.runtime.faithfulness import _rendered
+    from services.runtime.faithfulness import render_number
 
     renderings = {
-        float(_rendered(c).replace(",", ""))
+        float(render_number(c).replace(",", ""))
         for row in res.response.data.rows
         for c in row
         if isinstance(c, int | float)

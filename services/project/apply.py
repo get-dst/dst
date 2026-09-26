@@ -32,8 +32,9 @@ import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
@@ -51,7 +52,7 @@ from services.contracts.shared_semantic import (
     SharedRelationship,
     asset_content_hash,
 )
-from services.contracts.warehouse import QueryResult
+from services.contracts.warehouse import DryRunResult, QueryResult, SchemaSnapshot
 from services.db import embedding_meta
 from services.definitions import standards as std_store
 from services.evals import service as eval_service
@@ -70,11 +71,15 @@ from services.project.plan import stale_asset_keys
 from services.project.schema import ConnectionDecl, ProjectConfig
 from services.router import anchor_store
 from services.runtime import sql_guard
+from services.runtime.bounded import ApplyStepTimeout, apply_bounded
 from services.runtime.identifiers import reserved_in
 from services.security.crypto import CryptoNotConfigured
 from services.semantic import store as semantic_store
 from services.semantic.files import parse_semantic_files
 from services.validate.report import ValidationReport, collapse_warnings, validate_bundle
+
+if TYPE_CHECKING:
+    from services.lenses.connection_eval import EvalResult
 
 log = logging.getLogger("dst")
 
@@ -187,8 +192,7 @@ def apply_connections(
     visible degradation at deploy time, not a silent nightly skip; unchanged
     connections skip the probe and report nothing — absence of the line, never
     a false ✓."""
-    from services.lenses.connection_eval import capability_report, evaluate_connection
-    from services.lenses.connections import build_connector, config_warnings
+    from services.lenses.connections import config_warnings
 
     applied: list[str] = []
     warnings: list[str] = []
@@ -230,8 +234,16 @@ def apply_connections(
                 probe_secret = connection_store.get_secret(session, name)
             hint = f" — check {decl.secret_env} in .env" if decl.secret_env else ""
             try:
-                connector = build_connector(decl.type, decl.config, probe_secret)
-                result = evaluate_connection(connector, ["read"])
+                # The whole warehouse round-trip (build, read probe, capability
+                # report) runs under the apply deadline: a warehouse that accepts
+                # the connection and never answers must not hold the org's apply
+                # lock for as long as the process lives.
+                result, report = apply_bounded(
+                    f"the probe of connection '{name}'",
+                    partial(_probe_declaration, decl.type, decl.config, probe_secret),
+                )
+            except ApplyStepTimeout:
+                raise  # the deadline is the apply's verdict, not this connection's error
             except Exception as exc:  # noqa: BLE001 — bad params must not land either
                 path_hint = _bare_path_hint(probe_secret, decl.secret_env)
                 errors.append(
@@ -243,10 +255,8 @@ def apply_connections(
                 detail = failed.error if failed else "probe failed"
                 errors.append(f"connection '{name}' NOT applied: {detail}{hint}; prior state kept")
                 continue
-            try:
-                capabilities.append(f"{name}: read ✓ · {capability_report(connector)}")
-            except Exception:  # noqa: BLE001 — the report must never fail an apply
-                pass
+            if report is not None:
+                capabilities.append(f"{name}: read ✓ · {report}")
         try:
             if not exists:
                 connection_store.create_connection(session, name, decl.type, decl.config, secret)
@@ -260,6 +270,53 @@ def apply_connections(
                 "(run `dst secret`, add it to .env)"
             )
     return applied, warnings, errors, capabilities
+
+
+def _probe_declaration(
+    type_: str, config: dict[str, Any], secret: str | None
+) -> tuple[EvalResult, str | None]:
+    """Build a declared connection and probe it for read — the same evaluation
+    the create endpoint runs — plus its capability report when the read passed
+    (None when the report itself failed: it must never fail an apply). No
+    database access: this is the half of `apply_connections` that runs under
+    the apply deadline, on its own thread."""
+    from services.lenses.connection_eval import capability_report, evaluate_connection
+    from services.lenses.connections import build_connector
+
+    connector = build_connector(type_, config, secret)
+    result = evaluate_connection(connector, ["read"])
+    if not result.ok:
+        return result, None
+    try:
+        return result, capability_report(connector)
+    except Exception:  # noqa: BLE001 — the report must never fail an apply
+        return result, None
+
+
+class _BoundedConnector:
+    """The probe connector with every warehouse call under the apply deadline
+    (`apply_bounded`): a certified answer's probe or an eval case's oracle that
+    the warehouse accepts and never answers ends the apply loudly instead of
+    holding the org's apply lock for as long as the process lives."""
+
+    def __init__(self, inner: Connector, step: str) -> None:
+        self._inner = inner
+        self._step = step
+        self.kind = inner.kind
+
+    def introspect(self) -> SchemaSnapshot:
+        return apply_bounded(self._step, self._inner.introspect)
+
+    def dry_run(self, sql: str) -> DryRunResult:
+        return apply_bounded(self._step, partial(self._inner.dry_run, sql))
+
+    def execute(
+        self, sql: str, *, read_only: bool = True, row_limit: int | None = None
+    ) -> QueryResult:
+        return apply_bounded(
+            self._step,
+            partial(self._inner.execute, sql, read_only=read_only, row_limit=row_limit),
+        )
 
 
 def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], list[str]]:
@@ -398,8 +455,12 @@ def _samples_embedding_stale_definitions(
     passing and serve stale answers. When a definition's sql_expr CHANGES,
     any sample still carrying the previous expression is an ERROR naming both
     sides; update the sample in the same push. Exact historical containment —
-    no false positives (the embed was verbatim when the sample was written)."""
-    import sqlglot
+    no false positives (the embed was verbatim when the sample was written).
+    Containment is over canonical TREES (``sql_canon.carries``), not characters:
+    `position` is a substring of `position_name`, and a definition that moved to
+    the longer column must not flag every sample that reads it; a sample writing
+    the retired expression with other parentheses or qualifiers still carries it."""
+    from services.runtime import sql_canon
 
     row = store.get_lens(session, name)
     raw = (row or {}).get("published")
@@ -407,19 +468,6 @@ def _samples_embedding_stale_definitions(
         return []
     prev = store.LensBundle.model_validate(raw).semantic_model
     new_by_term = {d.term: d for d in bundle.semantic_model.definitions}
-    dialect = bundle.semantic_model.dialect
-
-    def _canon(fragment: str) -> str | None:
-        # Qualifier-stripped canonical form: the resolver qualifies definition
-        # exprs (customers.number_of_orders) while authored samples are often
-        # bare — containment must match across that difference.
-        try:
-            node = sqlglot.parse_one(fragment, read=dialect)
-            for col in node.find_all(sqlglot.exp.Column):
-                col.set("table", None)
-            return node.sql(dialect=dialect).lower()
-        except Exception:  # noqa: BLE001 — unparseable fragments can't be compared
-            return None
 
     out: list[str] = []
     for prev_def in prev.definitions:
@@ -427,12 +475,8 @@ def _samples_embedding_stale_definitions(
         current = new_by_term.get(prev_def.term)
         if not old_expr or current is None or (current.sql_expr or "").strip() == old_expr:
             continue
-        old_canon = _canon(old_expr)
-        if old_canon is None:
-            continue
         for sample in bundle.semantic_model.sample_queries:
-            sample_canon = _canon(sample.sql)
-            if sample_canon is not None and old_canon in sample_canon:
+            if sql_canon.carries(sample.sql, old_expr, bundle.semantic_model):
                 out.append(
                     f"sample query '{sample.question}' embeds the PREVIOUS logic of "
                     f"definition '{prev_def.term}' ({old_expr!r}) — the definition "
@@ -1137,6 +1181,8 @@ def _apply_eval_cases(
             return None
         try:
             connector.execute(probe_sql, read_only=True, row_limit=_MAX_ROWS)
+        except ApplyStepTimeout:
+            raise  # the deadline is the apply's verdict, not this case's
         except Exception as exc:  # noqa: BLE001 — a broken oracle must not land
             return f"expected_sql failed against the warehouse: {exc}"
         return None
@@ -1304,8 +1350,9 @@ def _probe_connector(
     dialect — _lens_dialect's rule; compile already guaranteed one). Shared by
     --probe-certified and the eval-case oracle gate (*label* names the caller
     in the warning). Failure to build one is a warning, never a gate: probing
-    is advisory."""
-    from services.lenses.connections import resolve_connector
+    is advisory. Every call on the connector, and the open itself, runs under
+    the apply deadline (`apply_bounded`) — that one is a gate."""
+    from services.lenses.connections import connector_for_record
 
     for cname in config.connections:
         record = connection_store.get_connection(session, cname)
@@ -1316,13 +1363,21 @@ def _probe_connector(
         except CompileError:
             continue
         try:
-            # session=: the connection may be staged by THIS apply and not yet committed
-            return resolve_connector(cname, org_id, session=session)
+            # The reads stay on THIS session and transaction (the connection may
+            # be staged by this apply and not yet committed); only the warehouse
+            # open runs under the deadline, on its own thread.
+            secret = connection_store.get_secret(session, cname)
+            connector = apply_bounded(
+                f"opening connection '{cname}'", partial(connector_for_record, record, secret)
+            )
+        except ApplyStepTimeout:
+            raise  # the deadline is the apply's verdict, never an advisory warning
         except Exception as exc:  # noqa: BLE001 — a dead credential must not sink the apply
             result.warnings.append(
                 _degraded(f"{label}: connector '{cname}' unavailable ({exc}) — stored unprobed")
             )
             return None
+        return _BoundedConnector(connector, f"a query on connection '{cname}'")
     result.warnings.append(
         _degraded(f"{label}: no warehouse connection to probe through — stored unprobed")
     )
@@ -1539,6 +1594,8 @@ def _certify_self_test(
             model_name=pair.name,
             deadline=time.monotonic() + budget if budget > 0 else None,
         )
+    except ApplyStepTimeout:
+        raise  # the warehouse stopped answering: the apply's verdict, not the self-test's
     except Exception as exc:  # noqa: BLE001 — the self-test must never sink an apply
         result.warnings.append(_degraded(f"certify self-test failed to run: {exc}"))
         return len(to_test)
@@ -1716,6 +1773,8 @@ def _gate_dialect_pins(
                 if gated is None:
                     raise ValueError("; ".join(gate_errors) or "template did not render")
                 probed = connector.execute(gated, read_only=True, row_limit=_MAX_ROWS)
+            except ApplyStepTimeout:
+                raise  # the deadline is the apply's verdict, not this answer's
             except Exception as exc:  # noqa: BLE001 — a failed re-verify must gate
                 result.errors.append(
                     f"certified answer '{stored.question}' was verified on "
@@ -2018,6 +2077,8 @@ def _apply_certified_answers(
                         probed_ok = True
                         if prose is None and not answer.get("slots"):
                             prose = _certify_prose(source.config, model, question, sql, probed)
+                    except ApplyStepTimeout:
+                        raise  # the deadline is the apply's verdict, not this answer's
                     except Exception as exc:  # noqa: BLE001 — advisory: warn, store anyway
                         result.warnings.append(
                             _degraded(

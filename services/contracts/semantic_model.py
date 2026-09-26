@@ -443,6 +443,17 @@ class Definition(Authored):
         "(e.g. 'basket size' for order_value) — for ambiguous terms, these are "
         "what makes the clarification reachable for questions users actually type",
     )
+    # The words people use for a stored VALUE that are not the value: "offlaner"
+    # for 'offlane', "midlaner" for 'mid'. The typed rail binds a value the
+    # question names word for word (and a lowercase value's regular plural);
+    # these reach no rule, so the author maps them. Literal word-boundary
+    # matches, bound only where the column's complete dictionary holds the value.
+    value_aliases: dict[str, str] = PField(
+        default_factory=dict,
+        description="word people use -> the stored value of the column this "
+        "definition is `about` (e.g. {offlaner: offlane}) — a question naming the "
+        "word filters that column to the value; needs `about: entity.column`",
+    )
     # The three certified-page keys that DO work: `render_context` puts summary,
     # grain and sources into the generation prompt for a page under
     # model.certified_dir. The identical page under semantic/definitions/ used to
@@ -550,9 +561,9 @@ class SemanticModel(BaseModel):
     excluded_metrics: StrList = PField(default_factory=list)
     # Measures the lens declares it CANNOT compute: each entry is
     # {measure, aliases, route_to, reason}. The runtime refuses a question that
-    # names one (and converts an answer whose PROSE names one — the model
-    # translates paraphrases back to the canonical term when narrating, which
-    # is the deterministic hook no phrase list can give the question side).
+    # names one, and an answer whose result column is named after one — SQL
+    # written for a paraphrase names its column after the measure it computed,
+    # the deterministic hook no phrase list can give the question side.
     not_computable: list[dict[str, Any]] = PField(default_factory=list)
     # The dropped metrics' full definitions, keyed by selected entity name —
     # the name list refuses a question that ASKS for a dropped metric; these

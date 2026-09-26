@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal, cast
 
 import sqlglot
@@ -113,30 +113,74 @@ _LETTER = re.compile(r"[^\W\d_]")
 _CODE = re.compile(r"^[A-Z0-9]{1,4}$")
 
 
-def named_values(question: str, domains: dict[str, list[str]]) -> list[dict[str, str]]:
+def _plural(value: str) -> str:
+    """The regular English plural of a lowercased value: carry → carries,
+    hard support → hard supports, mid → mids, match → matches."""
+    if value.endswith("y") and len(value) > 1 and value[-2] not in "aeiou":
+        return value[:-1] + "ies"
+    if value.endswith(("s", "x", "z", "ch", "sh")):
+        return value + "es"
+    return value + "s"
+
+
+def named_values(
+    question: str,
+    domains: dict[str, list[str]],
+    aliases: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
     """Stored values the question names verbatim, in the order it names them:
     one entry per value, ``{column: the value as that column stores it}`` —
     "Lion" held by two columns is one entry with both.
 
     Case-insensitive and word-bounded (a possessive "Crystal Maiden's" names
     "Crystal Maiden"; "Lions" does not name "Lion"), longest value first, so a
-    shorter value inside a longer one is not named twice. Two exceptions keep
-    a match a fact rather than a coincidence: a value with no letter never
-    matches (a number in a question is a limit or a threshold as often as a
-    stored value), and a short all-capitals code matches only as written —
-    the country code 'IN' is not the word "in", nor 'NO' the word "no"."""
+    shorter value inside a longer one is not named twice. A value stored in
+    lowercase is a category word, and its regular plural names it too —
+    "which hard supports", "carries", "mids" — because a question about the
+    members of a category says the stored word in the plural; a capitalised
+    value is a name and has none; a value another column stores in the plural
+    form wins the spelling. Two exceptions keep a match a fact rather than a
+    coincidence: a value with no letter never matches (a number in a question
+    is a limit or a threshold as often as a stored value), and a short
+    all-capitals code matches only as written — the country code 'IN' is not
+    the word "in", nor 'NO' the word "no".
+
+    ``aliases`` (column -> {word: stored value}, from a definition's
+    ``value_aliases``) adds the words people use for a value that are neither
+    it nor its plural — "offlaner" for 'offlane' — and their plurals. A word
+    names its value only where the column's dictionary holds that value, and a
+    stored spelling always wins over an alias."""
     groups: dict[str, dict[str, str]] = {}
+    plurals: list[tuple[str, str, str]] = []
     for column, values in domains.items():
         for value in values:
             if not _LETTER.search(value):
                 continue
-            key = value if _CODE.match(value) else value.lower()
-            groups.setdefault(key, {}).setdefault(column, value)
+            if _CODE.match(value):
+                groups.setdefault(value, {}).setdefault(column, value)
+                continue
+            groups.setdefault(value.lower(), {}).setdefault(column, value)
+            if value == value.lower():
+                plurals.append((_plural(value), column, value))
+    # Stored spellings first, so a value stored in the plural is itself, not
+    # another value's plural.
+    for key, column, value in plurals:
+        groups.setdefault(key, {}).setdefault(column, value)
+    for column, words in (aliases or {}).items():
+        held = set(domains.get(column, ()))
+        for word, value in words.items():
+            if value in held and _LETTER.search(word):
+                for key in (word.lower(), _plural(word.lower())):
+                    groups.setdefault(key, {}).setdefault(column, value)
     lowered = question.lower()
     taken: list[tuple[int, int]] = []
     found: list[tuple[int, dict[str, str]]] = []
     for key in sorted(groups, key=lambda k: (-len(k), k)):
         text = question if _CODE.match(key) else lowered
+        if key not in text:
+            # The regex below can only match where the key occurs; a dictionary
+            # of thousands would otherwise compile a pattern per value per call.
+            continue
         spans = [
             m.span()
             for m in re.finditer(rf"(?<!\w){re.escape(key)}(?!\w)", text)
@@ -146,6 +190,19 @@ def named_values(question: str, domains: dict[str, list[str]]) -> list[dict[str,
             taken += spans
             found.append((spans[0][0], groups[key]))
     return [by_column for _pos, by_column in sorted(found, key=lambda f: f[0])]
+
+
+def _value_aliases(model: SemanticModel) -> dict[str, dict[str, str]]:
+    """column (lowercased) -> {word: stored value}: each definition's
+    ``value_aliases``, bound to the column its ``about: entity.column`` names
+    (a definition about a table names no column and binds nothing — validate
+    warns at plan/apply)."""
+    out: dict[str, dict[str, str]] = {}
+    for d in model.definitions:
+        head, dot, member = (d.about or "").rpartition(".")
+        if d.value_aliases and dot and head.strip() and member.strip():
+            out.setdefault(member.strip().lower(), {}).update(d.value_aliases)
+    return out
 
 
 def _uses(named: dict[str, str], filters: list[IntentFilter]) -> bool:
@@ -334,6 +391,7 @@ class TypedResolver:
         self._bindings = {k.rsplit(".", 1)[-1].lower(): str(v) for k, v in (bindings or {}).items()}
         self._today = today or date.today()
         self._policies = policies
+        self._value_aliases: dict[str, dict[str, str]] = {}
 
     def _period_field(self, entity: Entity) -> str | None:
         """The entity's month-period field: from the profile's sample when
@@ -528,6 +586,7 @@ class TypedResolver:
         self._prefetched: dict[str, tuple[Decision, str, int]] = {}
         self._matched: list[str] = []
         self._notes = " ".join(notes or [])
+        self._value_aliases = _value_aliases(model)
         try:
             intent, supplied = self._resolve(question, model, records)
         except _Clarify as c:
@@ -714,7 +773,17 @@ class TypedResolver:
         # each definition, the first filter column — one call; round three and
         # the sequential steps follow.
         fields_ctx = "Which fields should each listed row show?"
-        dims = [o for o in own_members if o.name in {d.name for d in entity.dimensions}]
+        # A dimension the question names a stored value of is a FILTER, never a
+        # grouping: "which hard supports place the most wards" ranks heroes among
+        # the hard supports, and a breakdown by position_name would be one group
+        # wearing a ranking's shape. Such a column is not offered as a dimension
+        # at all — the named value binds it below (`_filters`), deterministically.
+        named_columns = {c for named in self._named(question, entity) for c in named}
+        dims = [
+            o
+            for o in own_members
+            if o.name in {d.name for d in entity.dimensions} and o.name not in named_columns
+        ]
         dim_ctx = "Is the figure broken down by a dimension (per X / by Y)?"
         grain_ctx = (
             "The question asks for the figure broken down over time. Which period is "
@@ -899,6 +968,24 @@ class TypedResolver:
             raise _Decline(conflict)
         _refuse_self_defining_filters(entity, metrics, filters)
         filters += self._window(question, entity, metrics)
+        # A column an equality filter pins to one value is a constant: grouping
+        # by it adds a column and no information, and whether a decider added it
+        # was the only thing that varied between runs of one question. A named
+        # value is kept out of the dimensions up front; a decided or bound one
+        # is known only now, so it is dropped here — the same shape every run.
+        pinned = {f.field for f in filters if f.op == "="}
+        if pinned and set(dimensions) & pinned:
+            dimensions = [d for d in dimensions if d not in pinned]
+            if shape == "ranking" and not dimensions:
+                raise _Clarify(
+                    ClarificationRequest(
+                        kind="unresolved_slot",
+                        term="dimension",
+                        question="Ranked across what? The field it would rank is fixed to "
+                        "one value by the question.",
+                        options=[o.name for o in dims if o.name not in pinned],
+                    )
+                )
         order_by, limit = self._order(question, metrics, fields, self._better(entity, metrics))
         if shape == "ranking" and not order_by:
             # Read as a ranking with no direction the question states: which end
@@ -1096,7 +1183,8 @@ class TypedResolver:
             values = domains.get(o.name.lower())
             if values and _field_type(entity, o.name) in (None, "string"):
                 text[o.name] = values
-        return named_values(question, text)
+        aliases = {c: self._value_aliases.get(c.lower(), {}) for c in text}
+        return named_values(question, text, aliases)
 
     def _named_for(
         self, question: str, entity: Entity, column: str, filters: list[IntentFilter]
@@ -1426,6 +1514,13 @@ class TypedResolver:
             return [
                 IntentFilter(field=field_name, op=">=", value=first),
                 IntentFilter(field=field_name, op="<=", value=last),
+            ]
+        if _field_type(entity, field_name) == "timestamp":
+            # `<= '2026-09-30'` on a timestamp is midnight: the last day's rows
+            # after 00:00 fall out. The bound is the first day after the window.
+            return [
+                IntentFilter(field=field_name, op=">=", value=start.isoformat()),
+                IntentFilter(field=field_name, op="<", value=(end + timedelta(days=1)).isoformat()),
             ]
         return [
             IntentFilter(field=field_name, op=">=", value=start.isoformat()),

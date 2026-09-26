@@ -52,6 +52,7 @@ from services.project.compile import (
 )
 from services.project.loader import load_lens_source, split_by_lens, split_semantic
 from services.project.schema import ConnectionDecl, parse_project_yaml
+from services.runtime.bounded import APPLY_ABORTED_PREFIX, ApplyStepTimeout
 from services.semantic import store as semantic_store
 from services.semantic.files import (
     parse_semantic_files,
@@ -556,6 +557,40 @@ def apply_project(
         )
     gate_override = override_reason.strip() if (allow_failing_cases or allow_case) else None
     allow_cases = frozenset(c.strip() for c in allow_case if c.strip()) if allow_case else None
+    try:
+        return _apply(
+            session,
+            body,
+            org_id,
+            identity,
+            probe_certified=probe_certified,
+            require_gates=require_gates,
+            gate_override=gate_override,
+            allow_cases=allow_cases,
+        )
+    except ApplyStepTimeout as exc:
+        # The wedge that held the org's apply lock for as long as the process
+        # lived: a warehouse step that never returned, with the transaction —
+        # and the lock, which is transaction-scoped — open behind it. Roll the
+        # staged work back so the lock goes with it, and say which step stalled.
+        # A 5xx, not an aborted-apply row: the request never got a reading of
+        # its own to report.
+        session.rollback()
+        raise HTTPException(status_code=504, detail=f"{APPLY_ABORTED_PREFIX}{exc}") from exc
+
+
+def _apply(
+    session: Session,
+    body: ProjectFiles,
+    org_id: uuid.UUID,
+    identity: AdminIdentity,
+    *,
+    probe_certified: bool,
+    require_gates: bool,
+    gate_override: str | None,
+    allow_cases: frozenset[str] | None,
+) -> list[dict[str, object]]:
+    """The apply itself, under the org's lock: one transaction, blue/green."""
     # One apply per org at a time: a transaction-scoped advisory lock, released
     # with this request's commit/rollback. A concurrent apply would interleave
     # asset upserts and recompiles halfway through another's — refuse it cleanly.

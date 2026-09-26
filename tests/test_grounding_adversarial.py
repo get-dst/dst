@@ -163,10 +163,13 @@ def test_reconcile_cleans_verbatim_float_residue() -> None:
     assert out == "Current ARR is $88,759,841.48."
 
 
-def test_reconcile_keeps_small_precise_values_verbatim() -> None:
-    # Sub-1000 precision is data, not residue — no churn.
+def test_reconcile_renders_small_values_at_four_significant_figures() -> None:
+    # Sub-1000 fractions take the one presentation (four significant figures):
+    # a verbatim quote of the cell and a rounding of it land on the same spelling.
     result = QueryResult(columns=["rate"], rows=[[0.10634]])
-    assert reconcile("The rate is 0.10634.", result) == "The rate is 0.10634."
+    assert reconcile("The rate is 0.10634.", result) == "The rate is 0.1063."
+    assert reconcile("The rate is 0.106.", result) == "The rate is 0.1063."
+    assert reconcile("The rate is 0.1063.", result) == "The rate is 0.1063."
 
 
 def test_reconcile_never_touches_a_question_echo_with_residue() -> None:

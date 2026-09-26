@@ -165,11 +165,13 @@ class Settings(BaseSettings):
     # (RDS Proxy, Cloud SQL) idle-kill silently; pre_ping alone just eats the RTT.
     db_pool_recycle: int = 1800
 
-    # Bound on each per-request model/embedding call on the serving path
-    # (services/runtime/bounded.py). An embedder cold start or a wedged provider
-    # socket can hang for as long as the process lives, with nothing logged; the
-    # default is deliberately generous — several times a slow multi-step
-    # generation — so a real answer is never cut off. 0 disables the bound.
+    # Bound on each per-request model/embedding call and each warehouse step on the
+    # serving path (services/runtime/bounded.py). An embedder cold start, a wedged
+    # provider socket or a warehouse connection that never answers can hang for as
+    # long as the process lives, with nothing logged; the default is deliberately
+    # generous — several times a slow multi-step generation — so a real answer is
+    # never cut off. A warehouse step past it answers 504 naming the step. 0
+    # disables the bound.
     serving_timeout_s: float = 600
 
     # Wall-clock budget for the certify self-test inside `dst apply`
@@ -188,6 +190,16 @@ class Settings(BaseSettings):
     # their push gets covered. Size it as (answers you want covered) x (this
     # lens's generation latency).
     certify_selftest_budget_s: float = 120
+
+    # Deadline on each warehouse-touching step of `dst apply`: opening a declared
+    # connection, probing it, running a certified answer's or an eval case's SQL
+    # against it. Apply holds the org's apply lock and its Postgres transaction
+    # for the whole request, so a warehouse that accepted the connection and
+    # never answered held both for as long as the process lived: /ready kept
+    # answering, the request never returned, and every later apply got a 409.
+    # Past the deadline the apply fails with a 504 naming the step, rolls back,
+    # and the lock is free. 0 disables the bound.
+    apply_step_timeout_s: float = 60
 
     # Local test warehouse (jaffle).
     duckdb_jaffle_path: str = "fixtures/jaffle_shop.duckdb"

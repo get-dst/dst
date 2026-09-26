@@ -86,20 +86,6 @@ def foreign_tables(sql: str, model: SemanticModel) -> list[str]:
     )
 
 
-def _canon(fragment: str, dialect: str) -> str | None:
-    """Qualifier-stripped canonical SQL text (the stale-sample idiom): definition
-    exprs are qualified (``customers.number_of_orders``) while certified SQL is
-    often bare — containment must match across that difference. None when the
-    fragment can't be parsed (nothing to compare)."""
-    try:
-        node = sqlglot.parse_one(fragment, read=dialect)
-        for col in node.find_all(exp.Column):
-            col.set("table", None)
-        return node.sql(dialect=dialect).lower()
-    except Exception:  # noqa: BLE001 — unparseable fragments can't be compared
-        return None
-
-
 def certified_bindings(sql: str, model: SemanticModel) -> dict[str, str]:
     """``{asset_key: content_hash}`` for the shared assets the SQL touches:
     entities whose source table it reads, plus shared definitions whose sql_expr
@@ -127,16 +113,14 @@ def certified_bindings(sql: str, model: SemanticModel) -> dict[str, str]:
         key = f"relationship/{relationship_name(j.left, j.right)}"
         if key in provenance and {f"entity/{j.left}", f"entity/{j.right}"} <= out.keys():
             out[key] = provenance[key]
-    canon_sql = _canon(sql, model.dialect)
-    if canon_sql:
-        for d in model.definitions:
-            key = f"definition/{d.term}"
-            expr = (d.sql_expr or "").strip()
-            if key not in provenance or not expr:
-                continue
-            frag = _canon(expr, model.dialect)
-            if frag and frag in canon_sql:
-                out[key] = provenance[key]
+    # The one comparison serving uses (imported here: sql_canon reads this module).
+    from services.runtime import sql_canon
+
+    for d in model.definitions:
+        key = f"definition/{d.term}"
+        expr = (d.sql_expr or "").strip()
+        if key in provenance and expr and sql_canon.carries(sql, expr, model):
+            out[key] = provenance[key]
     return out
 
 

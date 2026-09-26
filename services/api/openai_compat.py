@@ -113,6 +113,11 @@ def _dst_extras(resp: QueryResponse) -> dict[str, Any]:
         "citations": [c.model_dump() for c in resp.citations],
         "confidence": resp.confidence,
         "certification": resp.certification,
+        # What the answer discloses about itself (an UNTYPED escalation, a
+        # capability that did not run) and where its meaning came from, as on
+        # every other door.
+        "degraded": list(resp.degraded),
+        "resolution": resp.resolution.model_dump(mode="json") if resp.resolution else None,
         "request_id": resp.request_id,
     }
 

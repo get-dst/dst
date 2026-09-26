@@ -23,6 +23,7 @@ from the call that wrote the sentence it forbade.
 from __future__ import annotations
 
 import decimal
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -38,6 +39,7 @@ from services.contracts.response import Citation
 from services.contracts.semantic_model import Definition, SemanticModel
 from services.contracts.warehouse import QueryResult
 from services.runtime.assembly import ANSWER_CONTRACT_SOURCE
+from services.runtime.faithfulness import render_number
 
 _SYSTEM = (
     "You write concise, grounded analytics answers (1-3 sentences). "
@@ -97,9 +99,21 @@ class AnswerResult:
     finish_reason: str | None = None
 
 
-def _format_rows(columns: list[str], rows: list[list[object]]) -> str:
+def _format_rows(
+    columns: list[str], rows: list[list[object]], styles: Sequence[Style] | None = None
+) -> str:
+    """The rows as the composer reads them: one presentation per number
+    (`render_cell`), never the machine's `str(float)`. *styles* is
+    `column_styles` for the result; without a model every column is a plain
+    number. The rows themselves are untouched — `data` stays exact."""
+    styles = styles or ["number"] * len(columns)
     head = " | ".join(columns)
-    body = "\n".join(" | ".join(str(v) for v in r) for r in rows)
+    body = "\n".join(
+        " | ".join(
+            render_cell(v, styles[i] if i < len(styles) else "number") for i, v in enumerate(r)
+        )
+        for r in rows
+    )
     return f"{head}\n{body}" if body else head
 
 
@@ -191,29 +205,63 @@ def data_notes(semantic_model: SemanticModel, columns: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
-def money_positions(semantic_model: SemanticModel, columns: Sequence[str]) -> set[int]:
-    """Indices of result columns the semantic model DECLARES monetary — a metric
-    of the same name with ``format: currency`` or a ``currency`` code (metrics
-    come back aliased to their name, the `governing_definitions` invariant).
-    Declared only, never inferred: an undeclared column renders as stored."""
-    money = {
-        m.name.strip().lower()
+Style = Literal["money", "percent", "stored", "number"]
+
+_IDENTIFIER = re.compile(r"^(?:id|.*_id|year|.*_year)$")
+
+
+def column_styles(semantic_model: SemanticModel, columns: Sequence[str]) -> list[Style]:
+    """How each result column's numbers render, read off the model's own
+    declarations (metrics come back aliased to their name, the
+    `governing_definitions` invariant): a metric with ``format: currency`` or a
+    ``currency`` code is ``money`` (two decimals); a ``ratio`` or
+    ``format: percent`` metric is ``percent`` (a value in [0, 1] renders as a
+    percentage); a declared integer field or dimension, or an identifier-shaped
+    name (`id`, `*_id`, `year`), is ``stored`` — an id or a year never gains
+    separators; everything else is a ``number``. Declared only, never
+    inferred from the values."""
+    metrics = {m.name.strip().lower(): m for e in semantic_model.entities for m in e.metrics}
+    integers = {
+        f.name.strip().lower()
         for e in semantic_model.entities
-        for m in e.metrics
-        if m.format == "currency" or m.currency
+        for f in e.fields
+        if f.type == "integer"
+    } | {
+        d.name.strip().lower()
+        for e in semantic_model.entities
+        for d in e.dimensions
+        if d.type == "integer"
     }
-    return {i for i, c in enumerate(columns) if str(c).strip().lower().rpartition(".")[2] in money}
+    out: list[Style] = []
+    for c in columns:
+        bare = str(c).strip().lower().rpartition(".")[2]
+        metric = metrics.get(bare)
+        if metric is not None and (metric.format == "currency" or metric.currency):
+            out.append("money")
+        elif metric is not None and (metric.format == "percent" or metric.type == "ratio"):
+            out.append("percent")
+        elif metric is None and (bare in integers or _IDENTIFIER.match(bare)):
+            out.append("stored")
+        else:
+            out.append("number")
+    return out
 
 
-def _frame_cell(value: object, money: bool) -> str:
-    """One cell of the deterministic frame. Money renders at 2dp — the
-    float-noise fix falls out here: 1234.5600000000001 is the
-    machine's representation, 1234.56 is the answer."""
+def render_cell(value: object, style: Style) -> str:
+    """One cell as the person (or the composer) reads it. Text, booleans and
+    ``stored`` numbers pass through as they are; NULL says so; money renders at
+    two decimals; every other number takes `render_number`'s presentation —
+    1234.5600000000001 is the machine's representation, 1234.56 is the
+    answer."""
     if value is None:
         return "NULL"
-    if money and isinstance(value, int | float | decimal.Decimal) and not isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int | float | decimal.Decimal):
+        return str(value)
+    if style == "stored":
+        return str(value)
+    if style == "money":
         return f"{value:.2f}"
-    return str(value)
+    return render_number(value, percent=style == "percent")
 
 
 def certified_frame(
@@ -229,17 +277,13 @@ def certified_frame(
     restated over the result as a compact table line set, written entirely by
     code. No model, no numeric_grounding pass to fail, byte-identical on every
     serve of the same result. Formatting comes from the semantic model's own
-    declarations: monetary columns render at 2dp, everything else as stored."""
+    declarations (`column_styles`): money at 2dp, rates as percentages,
+    identifiers as stored."""
     n = len(result.rows)
     count = f"more than {n}" if not row_count_exact else str(n)
     noun = "row" if n == 1 and row_count_exact else "rows"
-    money = money_positions(semantic_model, result.columns)
-    shown = result.rows[:max_rows]
-    body = "\n".join(
-        " | ".join(_frame_cell(v, i in money) for i, v in enumerate(row)) for row in shown
-    )
-    head = " | ".join(result.columns)
-    table = f"{head}\n{body}" if body else head
+    styles = column_styles(semantic_model, result.columns)
+    table = _format_rows(result.columns, result.rows[:max_rows], styles)
     tail = f"\n(showing the first {max_rows} of {count} rows)" if n > max_rows else ""
     return f"{question} — {count} result {noun}:\n{table}{tail}"
 
@@ -304,7 +348,12 @@ def compose_prompt(
     # much of the result these rows are, so a summary written from a slice
     # never reads as a summary of everything.
     truncated = len(result.rows) > max_rows
-    rows_text = _format_rows(result.columns, result.rows[:max_rows])
+    # The rows ride in their presentation (a rate as 47.1%, a fraction at four
+    # significant figures, an id as stored): the model is told to copy digits
+    # exactly, so the digits it copies must be the ones a person should read.
+    rows_text = _format_rows(
+        result.columns, result.rows[:max_rows], column_styles(semantic_model, result.columns)
+    )
     seen = f"showing the first {max_rows}" if truncated else "all shown"
     # Past the fetch cap the count is a floor, so the prompt must not hand the
     # model an exact total to write into prose ("all 5000 customers" when the
@@ -344,16 +393,14 @@ def compose_prompt(
     # The scope rides the composer too: a scoped-subset number
     # presented as the whole population is exactly the quiet-wrong shape, and
     # the prose is where a reader meets it first.
-    import re as _re
-
     scoped = [
         e.population
         for e in semantic_model.entities
         if e.population
-        and _re.search(
-            rf"\b{_re.escape(e.name)}\b|\b{_re.escape(e.source.table.split('.')[-1])}\b",
+        and re.search(
+            rf"\b{re.escape(e.name)}\b|\b{re.escape(e.source.table.split('.')[-1])}\b",
             generated.sql,
-            _re.IGNORECASE,
+            re.IGNORECASE,
         )
     ]
     population = (
