@@ -21,6 +21,7 @@ entry exactly as it is behind a stalled MotherDuck handshake.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -122,6 +123,8 @@ def test_a_wedged_motherduck_open_fails_within_the_deadline_and_the_next_open_do
 ) -> None:
     path, asked, release = _wedged_motherduck(tmp_path, monkeypatch)
     monkeypatch.setattr(duckdb_connector, "OPEN_TIMEOUT_S", 0.5)
+    # The wedged open is the database's first in the process: its own bound.
+    monkeypatch.setattr(settings, "warehouse_first_open_timeout_s", 0.5)
     conn = DuckDBConnector(path, token="t")
     try:
         # A call arriving while the first open is wedged waits behind it, bounded
@@ -153,6 +156,51 @@ def test_a_wedged_motherduck_open_fails_within_the_deadline_and_the_next_open_do
         assert len(asked) == 2
     finally:
         release()
+
+
+def test_a_cold_first_motherduck_open_runs_under_its_own_longer_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A machine that never loaded the MotherDuck extension downloads it on its
+    first open; a warm one opens in well under a second. The first open of a
+    database in the process is held to DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S, not to
+    the bound on a routine open, and the log says how long it took."""
+    healthy = tmp_path / "healthy.duckdb"
+    with duckdb.connect(str(healthy)) as con:
+        con.execute("CREATE TABLE customers AS SELECT * FROM range(3) AS t(customer_id)")
+    path = f"md:cold_{uuid.uuid4().hex[:8]}"
+    real_connect = duckdb.connect
+    opened: list[str] = []
+
+    def connect(database: str, read_only: bool = False, config: Any = None) -> Any:
+        opened.append(database)
+        if len(opened) == 1:
+            time.sleep(0.6)
+        return real_connect(str(healthy), read_only=True)
+
+    monkeypatch.setattr(duckdb, "connect", connect)
+    monkeypatch.setattr(duckdb_connector, "OPEN_TIMEOUT_S", 0.3)
+    conn = DuckDBConnector(path, token="t")
+    with caplog.at_level(logging.INFO, logger="dst"):
+        _seconds, first = _within(5, lambda: conn.execute(SQL))
+    assert isinstance(first, QueryResult), first
+    assert first.rows == [[3]]
+    assert opened == [path]
+    assert any(
+        f"opened MotherDuck database '{path}' in 0.6" in r.getMessage() for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_every_served_warehouse_step_logs_its_connection_and_seconds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A slow served request is measurable from the server log alone: each
+    warehouse step names itself, the connection and how long it took."""
+    with caplog.at_level(logging.INFO, logger="dst"):
+        _serve(FakeConnector())
+    logged = [r.getMessage() for r in caplog.records]
+    for step in ("the dry run", "the query"):
+        assert any(f"{step} on connection 'jaffle' took" in m for m in logged), logged
 
 
 # ── the pipeline: a stalled step ends the request, never the repair loop ─────
@@ -348,6 +396,7 @@ def test_the_query_door_answers_504_naming_the_step_and_serves_the_next_request(
 ) -> None:
     path, _asked, release = _wedged_motherduck(tmp_path, monkeypatch)
     monkeypatch.setattr(duckdb_connector, "OPEN_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(settings, "warehouse_first_open_timeout_s", 0.5)  # a first open
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
     monkeypatch.setattr(
         query_api, "resolve_connector", lambda *a, **k: DuckDBConnector(path, token="t")

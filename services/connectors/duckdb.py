@@ -18,7 +18,10 @@ read-write open of the same database in one process is refused, so ``probe_write
 on MotherDuck works only when nothing opened the database read-only first. Queries
 on MotherDuck run on cursors of one connection the process holds per database,
 opened under a deadline (``_motherduck_cursor``): an open that never returns fails
-its request and is never waited on again. A query the serving deadline gives up on
+its request and is never waited on again. The first open in a process also loads
+the MotherDuck extension, a download on a machine that never loaded it, so it has
+its own longer bound (``DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S``), and ``warm`` lets an
+apply pay it before a step deadline starts. A query the serving deadline gives up on
 is interrupted, and one that still has not let go of that connection a few seconds
 later retires it, so later queries never queue behind it. A MotherDuck session attaches
 every database in the account, which is why every catalog read here is pinned to
@@ -41,6 +44,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -48,6 +52,7 @@ from functools import partial
 
 import duckdb
 
+from services.config import settings
 from services.connectors.sampling import sample_tables
 from services.connectors.tagging import tag_sql
 from services.contracts.profile import (
@@ -118,7 +123,8 @@ MOTHERDUCK_PREFIX = "md:"
 
 # How long opening a MotherDuck connection, or a cursor on one, may take before it
 # counts as wedged rather than slow: a cold attach takes about a second. The same
-# bound as one BigQuery API round-trip.
+# bound as one BigQuery API round-trip. The first open in a process is bounded by
+# DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S instead (``_Root.open_timeout``).
 OPEN_TIMEOUT_S = 60.0
 
 # How long an interrupted statement may take to let go of its connection before
@@ -138,6 +144,17 @@ class _Root:
         self.generation = 0
         self.con: duckdb.DuckDBPyConnection | None = None
         self.lock = threading.Lock()
+        self.opened = False  # an open of this database has succeeded in this process
+
+    def open_timeout(self) -> float | None:
+        """The bound on opening: the first open in the process also loads the
+        MotherDuck extension (downloading it on a machine that never loaded it)
+        and attaches for the first time, so it gets its own longer bound
+        (``DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S``; None when 0 disables it)."""
+        if self.opened:
+            return OPEN_TIMEOUT_S
+        first = settings.warehouse_first_open_timeout_s
+        return first if first > 0 else None
 
     @property
     def key(self) -> str:
@@ -158,6 +175,48 @@ _roots: dict[tuple[str, bool, str | None], _Root] = {}
 _roots_lock = threading.Lock()
 
 
+def _motherduck_open(
+    path: str, read_only: bool, token: str | None
+) -> tuple[_Root, duckdb.DuckDBPyConnection]:
+    """The process's MotherDuck connection for *path* (see ``_motherduck_cursor``),
+    opened here on first use under the root's open bound; the open's seconds go to
+    the log, so a slow one is measurable from the server log alone."""
+    with _roots_lock:
+        root = _roots.setdefault((path, read_only, token), _Root(path))
+    step = f"opening MotherDuck database '{path}'"
+    first = not root.opened
+    bound = root.open_timeout()
+    setting = "DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S" if first else None
+    if not root.lock.acquire(timeout=-1 if bound is None else bound):
+        raise WarehouseTimeout(step, bound or 0, setting)
+    try:
+        con = root.con
+        if con is None:
+            config: dict[str, str | bool | int | float | list[str]] = (
+                {"motherduck_token": token} if token else {}
+            )
+            opener = partial(duckdb.connect, root.key, read_only=read_only, config=config)
+            started = time.perf_counter()
+            try:
+                con = (
+                    opener() if bound is None else run_bounded("dst-motherduck-open", opener, bound)
+                )
+            except Stalled:
+                log.error("%s did not return within %gs; retiring that instance", step, bound)
+                root.retire()
+                raise WarehouseTimeout(step, bound or 0, setting) from None
+            root.con, root.opened = con, True
+            log.info(
+                "opened MotherDuck database '%s' in %.2fs%s",
+                path,
+                time.perf_counter() - started,
+                " (its first open in this process)" if first else "",
+            )
+    finally:
+        root.lock.release()
+    return root, con
+
+
 def _motherduck_cursor(
     path: str, read_only: bool, token: str | None
 ) -> tuple[duckdb.DuckDBPyConnection, Callable[[], None]]:
@@ -171,34 +230,15 @@ def _motherduck_cursor(
     the process lived; opening per call (two or three opens per served question,
     and a teardown after every idle spell) kept the window wide open. So: one
     connection per (path, mode, token), held for the life of the process, and a
-    cursor per call — a cursor never touches the cache. The open and each cursor
-    run under ``OPEN_TIMEOUT_S``; one that stalls retires the instance, and the
-    next call opens a fresh one under a new connection string instead of waiting
-    on the wedged one. A call queued behind an open waits here, bounded, never
-    inside DuckDB. The stalled thread cannot be killed; it is a daemon."""
-    with _roots_lock:
-        root = _roots.setdefault((path, read_only, token), _Root(path))
+    cursor per call — a cursor never touches the cache. Each cursor, and every
+    open after the first, runs under ``OPEN_TIMEOUT_S``; the first open in the
+    process runs under its own longer bound (``_Root.open_timeout``). An open that
+    stalls retires the instance, and the next call opens a fresh one under a new
+    connection string instead of waiting on the wedged one. A call queued behind
+    an open waits here, bounded, never inside DuckDB. The stalled thread cannot be
+    killed; it is a daemon."""
+    root, con = _motherduck_open(path, read_only, token)
     step = f"opening MotherDuck database '{path}'"
-    if not root.lock.acquire(timeout=OPEN_TIMEOUT_S):
-        raise WarehouseTimeout(step, OPEN_TIMEOUT_S)
-    try:
-        con = root.con
-        if con is None:
-            config: dict[str, str | bool | int | float | list[str]] = (
-                {"motherduck_token": token} if token else {}
-            )
-            try:
-                con = run_bounded(
-                    "dst-motherduck-open",
-                    partial(duckdb.connect, root.key, read_only=read_only, config=config),
-                    OPEN_TIMEOUT_S,
-                )
-            except Stalled:
-                root.retire()
-                raise WarehouseTimeout(step, OPEN_TIMEOUT_S) from None
-            root.con = con
-    finally:
-        root.lock.release()
 
     def retire() -> None:
         with root.lock:
@@ -271,6 +311,14 @@ class DuckDBConnector:
 
     def _md_config(self) -> dict[str, str | bool | int | float | list[str]]:
         return {"motherduck_token": self._token} if self._token else {}
+
+    def warm(self) -> None:
+        """Pay this warehouse's one-time cost in this process, so a deadline on
+        a later step measures the warehouse: on MotherDuck, the first open, which
+        loads the extension (downloading it on a machine that never loaded it)
+        and attaches. A no-op for a local file and once the database is open."""
+        if is_motherduck(self._path):
+            _motherduck_open(self._path, self._read_only, self._token)
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         """A connection to the local file for one call; the caller closes it."""

@@ -540,6 +540,8 @@ def run_query(
     # Real per-stage latency. Generate accumulates across repair attempts.
     started = time.perf_counter()
     latency_ms: dict[str, float] = {}
+    # The connection the warehouse steps run on, as the server log names it.
+    wh = ", ".join(sorted({e.source.connection for e in semantic_model.entities})) or "?"
 
     def _mark(stage: str, since: float) -> None:
         latency_ms[stage] = round(
@@ -1139,7 +1141,9 @@ def run_query(
         pre = None
         if (dry := getattr(connector, "dry_run", None)) is not None:
             try:
-                pre = warehouse_bounded("the dry run", functools.partial(dry, guard.sql))
+                pre = warehouse_bounded(
+                    "the dry run", functools.partial(dry, guard.sql), connection=wh
+                )
             except WarehouseTimeout as exc:
                 # A warehouse that is not answering ends the request: the repair
                 # loop would only wait on it again.
@@ -1180,6 +1184,7 @@ def run_query(
                     functools.partial(
                         connector.execute, guard.sql, read_only=True, row_limit=FETCH_CAP + 1
                     ),
+                    connection=wh,
                 )
         except WarehouseTimeout as exc:
             _mark("execute", exec_started)
@@ -1216,6 +1221,7 @@ def run_query(
                         functools.partial(
                             value_guard.empty_result_probe, guard.sql, semantic_model, connector
                         ),
+                        connection=wh,
                     )
                 except WarehouseTimeout as exc:
                     _mark("probe", probe_started)

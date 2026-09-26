@@ -342,16 +342,32 @@ def _dimension_slots(select: exp.Select, model: SemanticModel, sql: str) -> list
     return slots
 
 
-def _inferred_aggregates(select: exp.Select, matched_exprs: list[str]) -> list[Slot]:
+def _reading(select: exp.Select, node: exp.Expr, dialect: str) -> str:
+    """*node* as the one projection of a SELECT over the tables *select* reads
+    (FROM first, then each joined table), nothing else: a count in it resolves
+    to the entity whose rows it counts, and no other clause can carry a match."""
+    reading = exp.select(node.copy())
+    frm = select.args.get("from_") or select.args.get("from")
+    if frm is not None and isinstance(frm.this, exp.Table):
+        reading = reading.from_(frm.this.copy())
+        for join in select.args.get("joins") or []:
+            if isinstance(join.this, exp.Table):
+                reading = reading.join(join.this.copy())
+    return reading.sql(dialect=dialect)
+
+
+def _inferred_aggregates(
+    select: exp.Select, matched_exprs: list[str], model: SemanticModel
+) -> list[Slot]:
     """Aggregates in the outer SELECT no governed expression accounts for."""
     slots: list[Slot] = []
     for node in _projection_nodes(select):
         aggs = list(node.find_all(exp.AggFunc))
         if not aggs:
             continue
-        text = node.sql()
+        text = _reading(select, node, model.dialect)
         norm = verification._norm(text)
-        if any(verification._expr_in_sql(expr, text, norm) for expr in matched_exprs):
+        if any(verification._expr_in_sql(expr, text, norm, model) for expr in matched_exprs):
             continue
         for agg in aggs:
             slots.append(Slot(kind="metric", name=agg.sql(), source="inferred"))
@@ -488,7 +504,7 @@ def attribute(
     definition_slots = _matched_definitions(model, sql, sql_norm)
     slots: list[Slot] = [
         *metric_slots,
-        *_inferred_aggregates(metric_outer, matched_exprs),
+        *_inferred_aggregates(metric_outer, matched_exprs, model),
         *definition_slots,
     ]
     slots += _dimension_slots(outer, model, sql)

@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from services.config import settings
@@ -56,11 +57,11 @@ class ApplyStepTimeout(RuntimeError):
     error, a failed certified re-probe is a warning — must let this one through:
     the deadline is the apply's verdict, not the step's."""
 
-    def __init__(self, step: str, seconds: float) -> None:
+    def __init__(self, step: str, seconds: float, bound: str = "DST_APPLY_STEP_TIMEOUT_S") -> None:
         self.step = step
         self.seconds = seconds
         super().__init__(
-            f"{step} did not return within {seconds:.0f}s (DST_APPLY_STEP_TIMEOUT_S): the "
+            f"{step} did not return within {seconds:g}s ({bound}): the "
             "warehouse is not responding. Nothing was deployed; prior state keeps serving"
         )
 
@@ -166,29 +167,64 @@ def apply_bounded[T](step: str, fn: Callable[[], T]) -> T:
     proceeds. ``0`` disables the bound.
     """
     seconds = settings.apply_step_timeout_s
-    if seconds <= 0:
-        return fn()
+    started = time.perf_counter()
     try:
-        return run_bounded(f"dst-apply-{step}", fn, seconds)
+        return fn() if seconds <= 0 else run_bounded(f"dst-apply-{step}", fn, seconds)
     except Stalled:
-        log.error("apply: %s exceeded the %.0fs step deadline — abandoning it", step, seconds)
+        log.error("apply: %s exceeded the %gs step deadline — abandoning it", step, seconds)
         raise ApplyStepTimeout(step, seconds) from None
+    finally:
+        log.info("apply: %s took %.2fs", step, time.perf_counter() - started)
 
 
-def warehouse_bounded[T](step: str, fn: Callable[[], T]) -> T:
+def apply_first_open(connection: str, connector: object) -> None:
+    """Pay *connector*'s one-time cost in this process (its ``warm``: on
+    MotherDuck, loading the extension, a download on a machine that never loaded
+    it, and the first attach) before a step deadline starts, under
+    ``DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S``. A cold machine's first apply aborted
+    at the probe's deadline while a warm one opens in well under a second: the
+    step deadline measures the warehouse, not the download. Past this bound the
+    apply aborts the same way, naming the open and the setting. A connector with
+    nothing to warm, or one already open, costs nothing here."""
+    warm = getattr(connector, "warm", None)
+    if warm is None:
+        return
+    step = f"the first open of connection '{connection}'"
+    seconds = settings.warehouse_first_open_timeout_s
+    started = time.perf_counter()
+    try:
+        if seconds <= 0:
+            warm()
+        else:
+            run_bounded("dst-apply-first-open", warm, seconds)
+    except (Stalled, WarehouseTimeout):
+        log.error("apply: %s exceeded the %gs bound — abandoning it", step, seconds)
+        raise ApplyStepTimeout(step, seconds, "DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S") from None
+    finally:
+        log.info("apply: %s took %.2fs", step, time.perf_counter() - started)
+
+
+def warehouse_bounded[T](step: str, fn: Callable[[], T], *, connection: str) -> T:
     """Run one warehouse step of a served request (the dry run, the query, a value
     probe) under ``DST_SERVING_TIMEOUT_S``; raise ``WarehouseTimeout`` naming *step*
-    if it stalls.
+    if it stalls. Each step logs its name, *connection* and seconds at INFO, so a
+    slow request is measurable from the server log.
 
     A connection that never answers used to hold the request for as long as the
     process lived, and a connector's own statement timeout cannot help while it is
     still connecting. The orphaned worker is a daemon; the REQUEST stops waiting
     and says which step it gave up on. ``0`` disables the bound."""
     seconds = settings.serving_timeout_s
-    if seconds <= 0:
-        return fn()
+    started = time.perf_counter()
     try:
-        return run_bounded(f"dst-warehouse-{step}", fn, seconds)
+        return fn() if seconds <= 0 else run_bounded(f"dst-warehouse-{step}", fn, seconds)
     except Stalled:
-        log.error("%s exceeded the %.0fs serving timeout — abandoning it", step, seconds)
+        log.error("%s exceeded the %gs serving timeout — abandoning it", step, seconds)
         raise WarehouseTimeout(step, seconds, "DST_SERVING_TIMEOUT_S") from None
+    finally:
+        log.info(
+            "serving: %s on connection '%s' took %.2fs",
+            step,
+            connection,
+            time.perf_counter() - started,
+        )

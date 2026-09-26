@@ -2468,3 +2468,95 @@ def test_a_wedged_warehouse_probe_fails_the_apply_loud_and_frees_the_lock(
             assert connection_store.get_connection(s, "wh") is None
     finally:
         wedge.set()
+
+
+def _motherduck_opens(monkeypatch: pytest.MonkeyPatch, *, first_open_s: float, hang: bool):
+    """An ``md:`` database whose opens the test controls: the first one takes
+    *first_open_s* (a cold machine's first open also downloads and loads the
+    MotherDuck extension), later ones are instant; with *hang*, every open waits
+    until released, then fails. Each open is real in-memory DuckDB. Returns the
+    path, the opens seen, and the release (the wait is bounded, so a regression
+    fails the test instead of hanging it)."""
+    import threading
+    import time
+    import uuid
+
+    import duckdb
+
+    from services.connectors import duckdb as duckdb_connector
+
+    path = f"md:cold_{uuid.uuid4().hex[:8]}"
+    real_connect = duckdb.connect
+    opens: list[str] = []
+    release = threading.Event()
+
+    def connect(database: str, read_only: bool = False, config=None):  # type: ignore[no-untyped-def]
+        if not str(database).startswith(path):
+            return real_connect(database, read_only=read_only, config=config or {})
+        opens.append(database)
+        if hang:
+            release.wait(8)
+            # The orphaned open ends here, never reaching a later test's warehouse.
+            raise duckdb.IOException("released by the test")
+        if len(opens) == 1:
+            time.sleep(first_open_s)
+        return real_connect(":memory:")
+
+    monkeypatch.setattr(duckdb, "connect", connect)
+    monkeypatch.setattr(duckdb_connector, "_roots", {})  # no instance from another test
+    return path, opens, release
+
+
+@needs_db
+def test_a_cold_first_warehouse_open_is_not_held_to_the_step_deadline(
+    org, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fresh machine's first apply aborted at the probe's deadline, while a warm
+    one opens the same MotherDuck database in well under a second: the probe's
+    first open also downloads and loads the extension. That one-time cost runs
+    before the step deadline starts, under its own longer bound, and the server
+    log says how long it and every warehouse step of the apply took."""
+    import logging
+
+    oid, headers = org
+    path, opens, _release = _motherduck_opens(monkeypatch, first_open_s=1.0, hang=False)
+    monkeypatch.setattr(settings, "apply_step_timeout_s", 0.5)
+    files = {"dst.yaml": f"connections:\n  wh:\n    type: duckdb\n    config: {{path: '{path}'}}\n"}
+    with caplog.at_level(logging.INFO, logger="dst"):
+        r = client.post("/mgmt/project/apply", headers=headers, json={"files": files})
+    assert r.status_code == 200, r.text
+    assert all(row.get("action") != "aborted" for row in r.json())
+    assert len(opens) == 1  # opened once; the probe reused it
+    with org_session(oid) as s:
+        assert connection_store.get_connection(s, "wh") is not None
+    logged = [rec.getMessage() for rec in caplog.records]
+    assert any("the first open of connection 'wh'" in m and "took 1." in m for m in logged), logged
+    assert any("the probe of connection 'wh'" in m and "took 0." in m for m in logged), logged
+
+
+@needs_db
+def test_a_warehouse_whose_every_open_hangs_still_fails_the_apply_at_its_deadline(
+    org, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The longer bound on the first open is still a bound: an open that never
+    returns ends the apply with a 504 naming the step and the setting, and
+    nothing lands."""
+    import time
+
+    oid, headers = org
+    path, _opens, release = _motherduck_opens(monkeypatch, first_open_s=0, hang=True)
+    monkeypatch.setattr(settings, "apply_step_timeout_s", 0.5)
+    monkeypatch.setattr(settings, "warehouse_first_open_timeout_s", 0.8)
+    files = {"dst.yaml": f"connections:\n  wh:\n    type: duckdb\n    config: {{path: '{path}'}}\n"}
+    try:
+        started = time.perf_counter()
+        r = client.post("/mgmt/project/apply", headers=headers, json={"files": files})
+        assert r.status_code == 504, r.text
+        assert time.perf_counter() - started < 5
+        detail = r.json()["detail"]
+        assert "the first open of connection 'wh'" in detail
+        assert "DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S" in detail and "Nothing was deployed" in detail
+        with org_session(oid) as s:
+            assert connection_store.get_connection(s, "wh") is None
+    finally:
+        release.set()

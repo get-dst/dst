@@ -11,12 +11,19 @@ Pinned in both directions: the forms that mean the same (parentheses,
 qualifiers, case, ANDed conditions in another order, COUNT(*) against a count of
 a declared key column) apply the definition; the forms that do not (a count of a
 column that can be null, a longer column holding the shorter one's name) do not.
-The certified-answer bindings read the same comparison.
+The certified-answer bindings read the same comparison. A count of every row
+belongs to one entity: over a fact joined to a dimension, COUNT(*) is the fact's
+declared count and never also the dimension's.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from services.certify.bindings import certified_bindings
+from services.certify.store import CertifiedAnswer
 from services.contracts.query_intent import QueryIntent
 from services.contracts.semantic_model import (
     Definition,
@@ -28,7 +35,10 @@ from services.contracts.semantic_model import (
     SemanticModel,
     SharedProvenance,
 )
+from services.evals.slot_lane import gold_for
 from services.runtime.compiler import compile_intent
+from services.runtime.resolution import attribute, from_intent, grade
+from services.runtime.sql_canon import carries
 from services.runtime.verification import _definition_applied
 
 WIN_RATE_SQL = (
@@ -166,3 +176,111 @@ def test_a_certified_answer_is_bound_to_the_definition_its_sql_implements() -> N
         model,
     )
     assert certified_bindings(sql, model).get("definition/hero_win_rate") == "d1"
+
+
+# ── a count of every row belongs to the entity whose rows the query reads ────
+#
+# COUNT(*) counts rows of the query's grain, the FROM entity's. Over a join to a
+# dimension it is that entity's declared key count, never also the joined
+# dimension's, and a declared count that matched leaves no inferred count.
+
+_MATCH_SQL = {
+    "pro_matches": (
+        "SELECT COUNT(*) AS match_count FROM marts.fact_match AS pro_matches "
+        "JOIN marts.dim_patch AS patches ON patches.patch_id = pro_matches.patch_id "
+        "WHERE patches.is_current = TRUE"
+    ),
+    "pub_matches": (
+        "SELECT COUNT(*) AS match_count FROM marts.fact_pub_match AS pub_matches "
+        "JOIN marts.dim_patch AS patches ON patches.patch_id = pub_matches.patch_id "
+        "WHERE pub_matches.game_type = 'ranked_all_pick' AND patches.is_current = TRUE"
+    ),
+}
+_FACT_TABLE = {"pro_matches": "marts.fact_match", "pub_matches": "marts.fact_pub_match"}
+
+
+def _match_model(fact: str) -> SemanticModel:
+    return SemanticModel(
+        lens="meta",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name=fact,
+                source=EntitySource(connection="wh", table=_FACT_TABLE[fact]),
+                primary_key=["match_id"],
+                fields=[
+                    Field(name="match_id", type="integer"),
+                    Field(name="patch_id", type="integer"),
+                    Field(name="game_type", type="string"),
+                ],
+                metrics=[Metric(name="match_count", agg="count", expr=f"{fact}.match_id")],
+            ),
+            Entity(
+                name="patches",
+                source=EntitySource(connection="wh", table="marts.dim_patch"),
+                primary_key=["patch_id"],
+                fields=[
+                    Field(name="patch_id", type="integer"),
+                    Field(name="is_current", type="boolean"),
+                ],
+                metrics=[Metric(name="patch_count", agg="count", expr="patches.patch_id")],
+            ),
+        ],
+        definitions=[
+            Definition(
+                term="current_patch", body="the patch in play", sql_expr="patches.is_current = TRUE"
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("fact", "count"),
+    [
+        ("pro_matches", "COUNT(*)"),
+        ("pub_matches", "COUNT(*)"),
+        ("pro_matches", "COUNT(pro_matches.match_id)"),
+    ],
+)
+def test_a_count_over_a_join_is_the_driving_entitys_count_only(fact: str, count: str) -> None:
+    """The slots lane on a server with no stored gold: the certified SQL is
+    attributed into slots, and the typed reading must resolve to the same names."""
+    model = _match_model(fact)
+    sql = _MATCH_SQL[fact].replace("COUNT(*)", count)
+    answer = CertifiedAnswer("c1", "meta", "How many matches on the current patch?", sql, "t")
+    gold = gold_for(answer, model, SimpleNamespace(_domains=None))
+    assert gold is not None and gold.method == "attributed"
+    measures = [(s.name, s.source) for s in gold.slots if s.kind == "metric"]
+    assert measures == [("match_count", "declared")]
+    assert [s.name for s in gold.slots if s.kind == "definition"] == ["current_patch"]
+
+    typed = from_intent(
+        QueryIntent(entity=fact, metrics=["match_count"], definitions=["current_patch"]),
+        model,
+        None,
+    )
+    assert grade(gold, typed) == ("passed", "")
+
+
+def test_a_joined_dimensions_key_count_is_not_a_count_of_the_querys_rows() -> None:
+    model = _match_model("pro_matches")
+    sql = _MATCH_SQL["pro_matches"]
+    assert carries(sql, "COUNT(pro_matches.match_id)", model) is True
+    assert carries(sql, "COUNT(patches.patch_id)", model) is False
+    # Read from the dimension, COUNT(*) is the dimension's key count.
+    by_patch = "SELECT COUNT(*) FROM marts.dim_patch AS p WHERE p.is_current = TRUE"
+    assert carries(by_patch, "COUNT(patches.patch_id)", model) is True
+    assert carries(by_patch, "COUNT(pro_matches.match_id)", model) is False
+
+
+def test_the_join_key_of_the_fact_is_not_the_dimensions_key() -> None:
+    """`pro_matches.patch_id` and `patches.patch_id` share a name, and the join
+    makes them equal row by row; counting the fact's column still is not the
+    dimension's declared count."""
+    model = _match_model("pro_matches")
+    sql = _MATCH_SQL["pro_matches"].replace("COUNT(*)", "COUNT(pro_matches.patch_id)")
+    assert carries(sql, "COUNT(patches.patch_id)", model) is False
+    gold = attribute(sql, model)
+    assert [(s.name, s.source) for s in gold.slots if s.kind == "metric"] == [
+        ("COUNT(pro_matches.patch_id)", "inferred")
+    ]

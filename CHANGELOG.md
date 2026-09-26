@@ -29,6 +29,33 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.9] — 2026-09-26
+
+No schema change.
+
+### Fixed
+
+- **A count over a join is the count of the table the query reads from.** A certified
+  answer counting the rows of a fact table joined to a dimension (`COUNT(*)`, or a count
+  of the fact's key) was read as the fact's declared count, the dimension's declared
+  count and an inferred count at once, so `dst test --slots` failed it against the
+  typed reading of the same question. A count of every row now belongs to the entity
+  its SELECT reads FROM, or to the entity whose declared key it counts, never also to a
+  joined entity; a projection a declared metric accounts for is no longer also reported
+  as inferred; and a column of one entity no longer matches a same-named column of
+  another entity the query also reads (the fact's join key is not the dimension's key).
+- **A warehouse's first open in a process is not held to the apply's step deadline.**
+  A fresh machine's first apply aborted at the probe of a MotherDuck connection, past
+  `DST_APPLY_STEP_TIMEOUT_S`, while a warm machine opens the same database in well under
+  a second. The first open of a MotherDuck database in a process also loads the
+  MotherDuck extension, downloading it on a machine that never loaded it, and attaches.
+  `dst apply` now pays that one-time cost before the step deadline starts, under its
+  own bound, `DST_WAREHOUSE_FIRST_OPEN_TIMEOUT_S` (default 300 s), and serving holds a
+  first open to the same bound instead of the 60 s one on a routine open. A first open
+  that never returns still aborts the apply with a 504 naming the open. Every warehouse
+  step of an apply or a served request now logs its name, its connection and its seconds
+  at INFO, so a slow step shows in the server log.
+
 ## [0.5.8] — 2026-09-26
 
 No schema change.

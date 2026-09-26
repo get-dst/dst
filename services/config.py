@@ -201,6 +201,16 @@ class Settings(BaseSettings):
     # and the lock is free. 0 disables the bound.
     apply_step_timeout_s: float = 60
 
+    # Bound on a warehouse's one-time cost in a process: the first open of a
+    # MotherDuck database, which on a machine that never loaded the MotherDuck
+    # extension also downloads and loads it, then attaches. A warm machine opens
+    # in well under a second; a cold one can take far longer, and none of that is
+    # the warehouse being slow to answer. It runs before an apply step's deadline
+    # starts, and in place of the bound on a routine open while serving, so
+    # DST_APPLY_STEP_TIMEOUT_S measures the warehouse and not the download. Past
+    # it the apply returns a 504 naming the open. 0 disables the bound.
+    warehouse_first_open_timeout_s: float = 300
+
     # Local test warehouse (jaffle).
     duckdb_jaffle_path: str = "fixtures/jaffle_shop.duckdb"
 

@@ -71,7 +71,7 @@ from services.project.plan import stale_asset_keys
 from services.project.schema import ConnectionDecl, ProjectConfig
 from services.router import anchor_store
 from services.runtime import sql_guard
-from services.runtime.bounded import ApplyStepTimeout, apply_bounded
+from services.runtime.bounded import ApplyStepTimeout, apply_bounded, apply_first_open
 from services.runtime.identifiers import reserved_in
 from services.security.crypto import CryptoNotConfigured
 from services.semantic import store as semantic_store
@@ -192,7 +192,7 @@ def apply_connections(
     visible degradation at deploy time, not a silent nightly skip; unchanged
     connections skip the probe and report nothing — absence of the line, never
     a false ✓."""
-    from services.lenses.connections import config_warnings
+    from services.lenses.connections import build_connector, config_warnings
 
     applied: list[str] = []
     warnings: list[str] = []
@@ -234,13 +234,16 @@ def apply_connections(
                 probe_secret = connection_store.get_secret(session, name)
             hint = f" — check {decl.secret_env} in .env" if decl.secret_env else ""
             try:
-                # The whole warehouse round-trip (build, read probe, capability
-                # report) runs under the apply deadline: a warehouse that accepts
-                # the connection and never answers must not hold the org's apply
-                # lock for as long as the process lives.
+                # The warehouse round-trip (read probe, capability report) runs
+                # under the apply deadline: a warehouse that accepts the
+                # connection and never answers must not hold the org's apply lock
+                # for as long as the process lives. The warehouse's one-time cost
+                # in this process (a cold machine's extension download) is paid
+                # first, under its own bound, so the deadline measures the probe.
+                connector = build_connector(decl.type, decl.config, probe_secret)
+                apply_first_open(name, connector)
                 result, report = apply_bounded(
-                    f"the probe of connection '{name}'",
-                    partial(_probe_declaration, decl.type, decl.config, probe_secret),
+                    f"the probe of connection '{name}'", partial(_probe_declaration, connector)
                 )
             except ApplyStepTimeout:
                 raise  # the deadline is the apply's verdict, not this connection's error
@@ -272,18 +275,14 @@ def apply_connections(
     return applied, warnings, errors, capabilities
 
 
-def _probe_declaration(
-    type_: str, config: dict[str, Any], secret: str | None
-) -> tuple[EvalResult, str | None]:
-    """Build a declared connection and probe it for read — the same evaluation
-    the create endpoint runs — plus its capability report when the read passed
-    (None when the report itself failed: it must never fail an apply). No
-    database access: this is the half of `apply_connections` that runs under
-    the apply deadline, on its own thread."""
+def _probe_declaration(connector: Connector) -> tuple[EvalResult, str | None]:
+    """Probe a declared connection for read — the same evaluation the create
+    endpoint runs — plus its capability report when the read passed (None when
+    the report itself failed: it must never fail an apply). No database access:
+    this is the half of `apply_connections` that runs under the apply deadline,
+    on its own thread."""
     from services.lenses.connection_eval import capability_report, evaluate_connection
-    from services.lenses.connections import build_connector
 
-    connector = build_connector(type_, config, secret)
     result = evaluate_connection(connector, ["read"])
     if not result.ok:
         return result, None
@@ -1370,6 +1369,9 @@ def _probe_connector(
             connector = apply_bounded(
                 f"opening connection '{cname}'", partial(connector_for_record, record, secret)
             )
+            # The one-time cost of a warehouse this process has not opened yet
+            # (an unchanged connection skipped its probe) is not a step's.
+            apply_first_open(cname, connector)
         except ApplyStepTimeout:
             raise  # the deadline is the apply's verdict, never an advisory warning
         except Exception as exc:  # noqa: BLE001 — a dead credential must not sink the apply

@@ -127,6 +127,7 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
             )
         connector = _connection_connector(body.connection, caller)
         scope = f"sql:{body.connection}"
+        wh = body.connection
         guard = sql_guard.check(
             body.sql, _probe_model(connector.kind), trust_tables=True, allow_star=True
         )
@@ -138,6 +139,7 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         except ConnectionUnavailable as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         scope = body.lens
+        wh = ", ".join(sorted({e.source.connection for e in bundle.semantic_model.entities}))
         guard = sql_guard.check(body.sql, bundle.semantic_model)
 
     trace = TraceLog(
@@ -167,6 +169,7 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         result: QueryResult = warehouse_bounded(
             "the query",
             partial(connector.execute, guard.sql, read_only=True, row_limit=body.limit + 1),
+            connection=wh or "?",
         )
     except WarehouseTimeout as exc:
         trace.status, trace.valid, trace.error = "error", True, str(exc)
