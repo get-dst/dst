@@ -388,7 +388,7 @@ wheels = [
 
 [[package]]
 name = "dst-core"
-version = "0.5.12"
+version = "0.5.13"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

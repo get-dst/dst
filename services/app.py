@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -59,6 +59,7 @@ from services.api.route import router as route_router
 from services.api.security_headers import SecurityHeaders
 from services.api.sql import router as sql_router
 from services.api.surface import router as surface_router
+from services.auth import demo
 from services.auth.deps import resolve_mcp_caller
 from services.auth.tokens import ADMIN_PREFIX
 from services.build_info import GIT_DIRTY, GIT_SHA
@@ -662,8 +663,10 @@ def _mount_spa() -> None:
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa(full_path: str) -> FileResponse:
+    # HEAD too: a static server answers HEAD for whatever it serves on GET, and an
+    # uptime check on the root gets the same redirect a browser does.
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def spa(full_path: str, request: Request) -> Response:
         # An UNREGISTERED api path must 404, not fall through to index.html.
         # A client pointed at a build without its endpoint would otherwise get
         # `200 text/html` and die in r.json() with "Expecting value: line 1
@@ -672,6 +675,13 @@ def _mount_spa() -> None:
         # is invisible in dev.
         if full_path.partition("/")[0] in _API_PREFIXES:
             raise HTTPException(status_code=404, detail=f"no such endpoint: /{full_path}")
+        # A public demo's front door is the demo page: a stranger typing the
+        # domain must meet it, not the operator's login screen. Only the bare
+        # root redirects; the dashboard's own routes keep serving it, so the
+        # operator still reaches it at those URLs.
+        if not full_path and demo.enabled():
+            query = request.url.query
+            return RedirectResponse(f"/demo?{query}" if query else "/demo", status_code=302)
         # `dist / full_path` follows `..` segments out of the build root — a
         # percent-encoded `/%2e%2e/…` reaches here undecoded by the router and
         # would hand back any file the process can read (env, keys). Serve a real

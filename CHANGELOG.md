@@ -29,6 +29,18 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.13] — 2026-09-27
+
+No schema change.
+
+### Fixed
+
+- **A public demo's front door is the demo page.** On a deployment in demo mode, the
+  root URL served the operator dashboard's login screen, so a visitor typing the
+  domain met an admin sign-in instead of the demo. The root now redirects to `/demo`,
+  query string preserved, on GET and HEAD alike; the dashboard's own routes are
+  unchanged, and so is every deployment without demo mode.
+
 ## [0.5.12] — 2026-09-27
 
 No schema change.

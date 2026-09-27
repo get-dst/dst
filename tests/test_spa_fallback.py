@@ -9,6 +9,7 @@ deploys mount the catch-all, so dev never sees this class — hence a test.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -43,6 +44,47 @@ def test_spa_serves_client_routes(bundled_client: TestClient) -> None:
     r = bundled_client.get("/lenses/churn")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
+
+
+def test_the_root_is_the_dashboard_outside_demo_mode(
+    bundled_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "demo_org_id", None)
+    r = bundled_client.get("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    r = bundled_client.head("/", follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+
+
+def test_in_demo_mode_the_root_redirects_to_the_demo_page(
+    bundled_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stranger typing the demo's domain must land on the demo page, not on the
+    operator dashboard's login screen; the query string travels with them."""
+    monkeypatch.setattr(settings, "demo_org_id", str(uuid.uuid4()))
+    r = bundled_client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/demo"
+    r = bundled_client.get("/?x=1", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/demo?x=1"
+    r = bundled_client.head("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/demo"
+
+
+def test_in_demo_mode_the_dashboard_keeps_its_own_routes(
+    bundled_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the bare root redirects: the operator still reaches the dashboard at
+    its deep links."""
+    monkeypatch.setattr(settings, "demo_org_id", str(uuid.uuid4()))
+    for path in ("/observe", "/lenses/churn"):
+        r = bundled_client.get(path, follow_redirects=False)
+        assert r.status_code == 200, path
+        assert r.headers["content-type"].startswith("text/html")
 
 
 @pytest.mark.parametrize("path", ["/v1/nope", "/mgmt/nope", "/health/nope"])
