@@ -38,7 +38,7 @@ row-level security whose failure mode is *no rows*, never cross-tenant
 | Route | Description |
 |---|---|
 | `GET /health` | Liveness: the process is up |
-| `GET /ready` | Readiness. Four checks gate `status`: DB, MCP session manager, schema state, and whether trace writes are landing. Reported but never gating: `embeddings`, `certified_matching`, `plugins`, and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
+| `GET /ready` | Readiness. Five checks gate `status`: DB, MCP session manager, schema state, whether trace writes are landing, and `typed_decisions` (`ok`, `off`, or `degraded (…)` while the typed-decision provider is failing, until a typed decision succeeds again). Reported but never gating: `embeddings`, `certified_matching`, `plugins`, and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
 
 ## Data plane (`/v1`)
 

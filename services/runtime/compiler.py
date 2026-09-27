@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import sqlglot
 from sqlglot import exp
@@ -439,14 +441,57 @@ def _definition_sql(model: SemanticModel, term: str) -> str:
     raise CompileError(f"unknown definition '{term}'")
 
 
-def _predicate(col: str, f: IntentFilter, dialect: str) -> str:
+# The dialects whose reading of a zone-qualified string literal is verified
+# (tests/test_window_lens_timezone.py runs both): against a zone-aware column
+# the offset fixes the instant, against a zone-less one it is ignored and the
+# wall clock compares as before, and neither depends on the session's time
+# zone. How BigQuery, Snowflake and MySQL read an offset against their
+# zone-less timestamp types is not verified, so the bound stays a plain
+# literal there.
+_ZONED_DIALECTS = frozenset({"duckdb", "postgres"})
+_NAIVE_MOMENT = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$")
+
+
+def _member_type(entity: Entity, name: str) -> str | None:
+    member = name.rpartition(".")[2]
+    for f in entity.fields:
+        if f.name == member:
+            return f.type
+    for d in entity.dimensions:
+        if d.name == member:
+            return d.type
+    return None
+
+
+def _in_zone(value: Any, zone: str) -> Any:
+    """A date or zone-less moment as that moment in ``zone``, its offset written
+    out ('2026-08-01' in UTC -> '2026-08-01 00:00:00+00:00'); any other value
+    unchanged. A plain '2026-08-01' against a timestamp-with-time-zone column
+    is read in the warehouse session's zone, so the same window counted
+    different rows on servers in different zones."""
+    if not isinstance(value, str) or not _NAIVE_MOMENT.match(value):
+        return value
+    try:
+        moment = datetime.fromisoformat(value).replace(tzinfo=ZoneInfo(zone))
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise CompileError(f"cannot place {value!r} in the lens timezone {zone!r}: {exc}") from exc
+    return moment.isoformat(sep=" ")
+
+
+def _predicate(col: str, f: IntentFilter, dialect: str, zone: str = "") -> str:
+    """``zone``: the lens timezone when ``col`` is a timestamp whose bounds are
+    placed in it; empty otherwise."""
+
+    def lit(v: Any) -> str:
+        return _lit(_in_zone(v, zone) if zone else v)
+
     if f.op == "in":
         vals = f.value if isinstance(f.value, list) else [f.value]
-        return f"{col} IN ({', '.join(_lit(v) for v in vals)})"
+        return f"{col} IN ({', '.join(lit(v) for v in vals)})"
     if f.op == "like":
         return f"{col} LIKE {_lit(f.value)}"
     if f.op in _COMPARISON:
-        return f"{col} {f.op} {_lit(f.value)}"
+        return f"{col} {f.op} {lit(f.value)}"
     raise CompileError(f"unsupported operator '{f.op}'")
 
 
@@ -587,10 +632,15 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # normalized text: dropping an exact duplicate can never change semantics.
     predicates: list[str] = []
     seen_predicates: set[str] = set()
+    # A bound on a timestamp is a moment in the lens's declared clock; an
+    # undeclared clock is never invented, and the literal then stays plain.
+    zone = model.timezone if dialect in _ZONED_DIALECTS else ""
     for pred in (
         [
-            _predicate(expr, f, dialect)
-            for f, (_o, expr) in zip(intent.filters, filter_exprs, strict=True)
+            _predicate(
+                expr, f, dialect, zone if _member_type(owner, f.field) == "timestamp" else ""
+            )
+            for f, (owner, expr) in zip(intent.filters, filter_exprs, strict=True)
         ]
         + [f"({expr})" for expr in definition_exprs]
         + [f"({f})" for f in shared_metric_filters]

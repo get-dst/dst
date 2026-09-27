@@ -19,8 +19,8 @@ extracted from prose.
 | reading | the declared readings of an ambiguous term | `definitions` with `possible_mappings` |
 | metric, dimension, grain | the entity's declared metrics, dimensions and time grains | the entity file |
 | ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
-| filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
-| window | none — a stated period is parsed, never decided | `timewindow` |
+| filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this; a value spelled like a common word, such as a team named `Most`, only where the question writes it as a name: capitalised mid-sentence, quoted, or possessive), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
+| window | none — a stated period is parsed, never decided; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone | `timewindow` |
 
 A slot the question does not settle is asked back as a **clarification naming
 the slot**: which metric, which value of `status`. The asking agent answers by
@@ -31,6 +31,14 @@ default with `untyped_fallback: true` in `lens.yaml`, for callers that cannot be
 expected to know the flag. A caller's `allow_untyped: false` still demands
 typed-only. Such an answer carries `typed: false` on its ledger and an
 `UNTYPED:` line, and the audit counts it apart.
+
+When the typed-decision provider itself fails (an HTTP error, a timeout, the
+network), the typed attempt ends and the request does not. A question that
+accepts an untyped answer is served by raw-SQL generation, and its `UNTYPED:`
+line names the failure: `typed decisions unavailable: typesafe HTTP 402`. A
+typed-only question is refused with the same reason; asked again once the
+provider recovers, it types. The server logs the failure once until a typed
+decision succeeds again, and `/ready` reports it under `typed_decisions`.
 
 ## The policy: act unless none
 

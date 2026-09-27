@@ -106,7 +106,11 @@ class TypesafeDecider:
             try:
                 r = client.post("/v1/systemone", headers=headers, json=body)
             except httpx.HTTPError as exc:
-                last = f"transport: {exc}"
+                last = (
+                    "timed out"
+                    if isinstance(exc, httpx.TimeoutException)
+                    else f"unreachable ({type(exc).__name__})"
+                )
                 if attempt + 1 < self._attempts:
                     time.sleep(0.2 * (2**attempt))
                     continue
@@ -116,8 +120,7 @@ class TypesafeDecider:
                 time.sleep(0.5 * (2**attempt))
                 continue
             if r.status_code >= 400:
-                detail = r.text[:300]
-                raise ProviderError("typesafe", f"HTTP {r.status_code}: {detail}")
+                raise ProviderError("typesafe", r.text[:300], status=r.status_code)
             data = r.json()
             if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
                 raise ProviderError("typesafe", "malformed response: no answers map")

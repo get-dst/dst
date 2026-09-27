@@ -51,7 +51,7 @@ from services.contracts.query_intent import (
 from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
-from services.runtime import ambiguity, decision_policy, reading, timewindow
+from services.runtime import ambiguity, decision_policy, reading, timewindow, typed_health
 from services.runtime.compiler import CompileError, compile_intent, is_predicate
 from services.runtime.intent_generator import intent_term
 from services.runtime.option_sets import option_sets
@@ -123,6 +123,48 @@ def _plural(value: str) -> str:
     return value + "s"
 
 
+# Words a question uses for its grammar, not its subject: determiners,
+# quantifiers, comparatives and superlatives, pronouns, prepositions,
+# conjunctions, auxiliaries, question words, and the generic nouns of a
+# question about teams and players. A stored value spelled like one ("Most", a
+# team; "top", a lane) is far more often the word than the value.
+_ORDINARY = frozenset(
+    """
+    a about above after again against all also an and any are as at be been before
+    best better between biggest both bottom but by can could did do does down during
+    each either else enough even ever every few fewer fewest first for from had has
+    have he her here highest his how i if in into is it its just largest last least
+    less like lowest many more most much my neither never next no none nor not now of
+    off on once one only or other others our out over overall per player players same
+    she should since smallest so some such than that the their them then there these
+    they this those through to too top total team teams under until up us very was we
+    were what when where which while who whom whose why will with within without worst
+    would you your
+    """.split()
+)
+_QUOTES = "'\"`‘’“”"
+
+
+def _sentence_initial(text: str, start: int) -> bool:
+    """Does the word at ``start`` open the question or a sentence of it?"""
+    before = text[:start].rstrip(" \t\"'`‘“([")
+    return not before or before[-1] in ".!?:;\n"
+
+
+def _written_as_name(question: str, start: int, end: int, stored: set[str]) -> bool:
+    """Is the occurrence at [start, end) marked as a name, not read as a word:
+    possessive ("Most's"), quoted, or a capitalised stored value written as
+    stored and not where every word is capitalised (the start of a sentence)."""
+    if question[end : end + 2].lower() in ("'s", "’s"):
+        return True
+    if start > 0 and question[start - 1] in _QUOTES and question[end : end + 1] in _QUOTES:
+        return True
+    written = question[start:end]
+    return (
+        written in stored and written != written.lower() and not _sentence_initial(question, start)
+    )
+
+
 def named_values(
     question: str,
     domains: dict[str, list[str]],
@@ -144,6 +186,16 @@ def named_values(
     is a limit or a threshold as often as a stored value), and a short
     all-capitals code matches only as written — the country code 'IN' is not
     the word "in", nor 'NO' the word "no".
+
+    A one-word value spelled like a function or quantifier word (``_ORDINARY``:
+    a team named 'Most', a lane stored as 'top') is named only where the
+    question marks it as a name: possessive ("Most's record"), quoted ("'top'
+    lane"), or — for a capitalised value — written as stored mid-sentence ("How
+    did Most do this patch?"). Otherwise "Which country has the most pro
+    players?" would restrict the count to one team. A sentence-initial capital
+    is every word's, and a type noun in front is no signal either ("which team
+    most often wins"). Multi-word values and words with no ordinary reading
+    ("liquid", "team spirit") match in any case, as ever.
 
     ``aliases`` (column -> {word: stored value}, from a definition's
     ``value_aliases``) adds the words people use for a value that are neither
@@ -173,6 +225,10 @@ def named_values(
                 for key in (word.lower(), _plural(word.lower())):
                     groups.setdefault(key, {}).setdefault(column, value)
     lowered = question.lower()
+    # The written form is read off the question only where lowercasing kept
+    # every offset (it does for all but a few scripts); elsewhere an ordinary
+    # word's value needs the possessive or quotes it would need anyway.
+    as_written = question if len(lowered) == len(question) else lowered
     taken: list[tuple[int, int]] = []
     found: list[tuple[int, dict[str, str]]] = []
     for key in sorted(groups, key=lambda k: (-len(k), k)):
@@ -181,10 +237,13 @@ def named_values(
             # The regex below can only match where the key occurs; a dictionary
             # of thousands would otherwise compile a pattern per value per call.
             continue
+        ordinary = key in _ORDINARY
+        stored = set(groups[key].values())
         spans = [
             m.span()
             for m in re.finditer(rf"(?<!\w){re.escape(key)}(?!\w)", text)
             if not any(m.start() < end and start < m.end() for start, end in taken)
+            and (not ordinary or _written_as_name(as_written, m.start(), m.end(), stored))
         ]
         if spans:
             taken += spans
@@ -1599,7 +1658,18 @@ class TypedIntentGenerator:
         feedback: str | None = None,
     ) -> GeneratedQuery:
         notes = [c.text for c in prose_context if c.source.startswith("ambiguity-resolution:")]
-        res = self._resolver.resolve(question, semantic_model, notes=notes)
+        try:
+            res = self._resolver.resolve(question, semantic_model, notes=notes)
+        except Exception as exc:
+            # The provider failing is not the question failing to type: the
+            # pipeline serves it untyped where that is accepted, or refuses it
+            # with the failure named. Anything else is a defect and propagates.
+            what = typed_health.provider_failure(exc)
+            if what is None:
+                raise
+            typed_health.failed(what)
+            raise typed_health.TypedUnavailable(what) from exc
+        typed_health.succeeded()
         if res.clarification is not None:
             return GeneratedQuery(sql="", clarification=res.clarification, decisions=res.decisions)
         if res.intent is None:

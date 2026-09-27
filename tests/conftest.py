@@ -498,6 +498,18 @@ def _fresh_embedder_cache() -> Iterator[None]:
     registry.reset_embedder_cache()
 
 
+@pytest.fixture(autouse=True)
+def _typed_provider_healthy() -> Iterator[None]:
+    """A typed-provider failure one test provokes stands process-wide until a
+    typed decision succeeds (it is what /ready reports), so it is forgotten
+    around every test."""
+    from services.runtime import typed_health
+
+    typed_health.reset()
+    yield
+    typed_health.reset()
+
+
 @pytest.fixture(scope="session")
 def live_client() -> Iterator[TestClient]:
     with TestClient(app) as client:

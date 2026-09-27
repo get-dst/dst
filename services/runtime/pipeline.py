@@ -57,6 +57,7 @@ from services.runtime import (
     shape_guard,
     sql_guard,
     time_guard,
+    typed_health,
     value_guard,
     verification,
 )
@@ -764,13 +765,23 @@ def run_query(
         # ledger — and the rail is re-run for any further term; below the
         # bar the clarification stands, its record on the trace.
         reader = typed_decider() if det is not None else None
+        reader_down: str | None = None
         for _ in range(len(semantic_model.definitions)):
             if det is None or reader is None:
                 break
             canonical = next((d for d in semantic_model.definitions if d.term == det.term), None)
             if canonical is None:
                 break
-            picked, record = reading.decide_reading(reader, rails_text, canonical)
+            try:
+                picked, record = reading.decide_reading(reader, rails_text, canonical)
+            except Exception as exc:
+                # The provider failing leaves the reading undecided: the
+                # clarification stands, as on an install with no typed decider.
+                reader_down = typed_health.provider_failure(exc)
+                if reader_down is None:
+                    raise
+                typed_health.failed(reader_down)
+                break
             pre_records.append(record)
             if picked is None:
                 break
@@ -789,7 +800,15 @@ def run_query(
             resolution_disclosures.append(ambiguity.disclosure_line(picked))
             det = deterministic_clarification(rails_text, semantic_model)
         if det is not None:
-            return _clarification_result(det)
+            asked = _clarification_result(det)
+            if reader_down is not None:
+                undecided = (
+                    f"DEGRADED: {typed_health.UNAVAILABLE}: {reader_down} — the "
+                    f"reading of '{det.term}' was not decided, so it is asked instead"
+                )
+                asked.response.degraded = [*asked.response.degraded, undecided]
+                asked.trace.degraded = list(asked.response.degraded)
+            return asked
 
     feedback: str | None = None
     # The last SQL the guard actually refused, with its reason — kept across repair
@@ -827,7 +846,9 @@ def run_query(
             # A typed reading that failed a check before serving is repaired by
             # raw-SQL generation on a lens that accepts untyped answers: that
             # answer is untyped too, and says so like any other.
-            untyped_reason = "its typed reading failed a check before serving"
+            untyped_reason = (
+                "the question did not type: its typed reading failed a check before serving"
+            )
         gen_started = time.perf_counter()
         try:
             # Bounded: a wedged provider must surface as an error,
@@ -847,6 +868,29 @@ def run_query(
         except ServingTimeout as exc:
             _mark("generate", gen_started)
             return _trace_failure("error", refused[0] if refused else None, str(exc))
+        except typed_health.TypedUnavailable as exc:
+            _mark("generate", gen_started)
+            if escalate_generator is not None and active is not escalate_generator:
+                # The typed lane is down, not the question: on a lens that
+                # accepts untyped answers raw-SQL generation serves it, and the
+                # UNTYPED line names the failure.
+                untyped_reason = str(exc)
+                attempt += 1
+                feedback = None
+                continue
+            # Typed-only: refused with the failure named — a retry can succeed
+            # once the provider recovers, which is what `refused` tells a caller.
+            down = _trace_failure(
+                "refused",
+                None,
+                f"{exc} — this question takes typed answers only (the lens has no "
+                "untyped_fallback, or the caller passed allow_untyped: false), so it "
+                "was not answered; retry when the provider recovers, or allow an "
+                "untyped answer",
+            )
+            down.response.degraded = [f"DEGRADED: {exc}"]
+            down.trace.degraded = list(down.response.degraded)
+            return down
         _mark("generate", gen_started)
         gen_model = getattr(active, "model", model_name)
         ai_in += gen.input_tokens
@@ -865,7 +909,7 @@ def run_query(
             # The caller accepted an UNTYPED answer: the question did not type,
             # so raw-SQL generation runs instead — disclosed below, and the
             # decisions that did not type ride the ledger with it.
-            untyped_reason = (
+            untyped_reason = "the question did not type: " + (
                 gen.clarification.question if gen.clarification else str(gen.no_answer_reason)
             )
             untyped_decisions = list(gen.decisions)
@@ -1410,7 +1454,8 @@ def run_query(
                     "generator": escalate_generator,
                     "escalate_generator": None,
                     "untyped": (
-                        "its typed reading returned rows that do not answer it "
+                        "the question did not type: its typed reading returned rows "
+                        "that do not answer it "
                         f"({ans.no_answer_reason})",
                         list(gen.decisions),
                     ),
@@ -1851,9 +1896,7 @@ def run_query(
     if untyped_reason is not None:
         # Rule 4: an escalated figure says so on its face. The line rides
         # `degraded` so every surface (CLI, MCP rule, trace) relays it verbatim.
-        degraded_notes.append(
-            f"UNTYPED: served by raw-SQL generation — the question did not type: {untyped_reason}"
-        )
+        degraded_notes.append(f"UNTYPED: served by raw-SQL generation — {untyped_reason}")
         ledger.decisions = [*untyped_decisions, *ledger.decisions]
         ledger.typed = False
     if certification != "certified" and report is not None:

@@ -515,6 +515,22 @@ def _matching_status() -> str:
         return "unavailable"
 
 
+def _typed_status() -> str:
+    """The typed-decision lane: "degraded (…)" while its provider is failing
+    (services/runtime/typed_health.py), else "ok" when typed serving is on and
+    "off" when this install has no typed decider."""
+    from services.runtime import typed_health
+    from services.runtime.assembly import typed_decider
+
+    down = typed_health.status()
+    if down is not None:
+        return down
+    try:
+        return "ok" if typed_decider() is not None else "off"
+    except Exception:  # readiness must never crash on a config read
+        return "unknown"
+
+
 def _schema_status() -> tuple[str, bool]:
     """(one-line schema state, is-it-a-gate). `SELECT 1` answered "the database is
     reachable" and was read as "the database is right" — a schema two revisions behind
@@ -554,10 +570,15 @@ async def ready() -> dict[str, str]:
     models = await run_in_threadpool(_models_status)
     schema, schema_blocks = await run_in_threadpool(_schema_status)
     traces = trace_logger.trace_write_status()
+    typed = await run_in_threadpool(_typed_status)
     return {
         "status": (
             "ready"
-            if db == "ok" and mcp == "ok" and not schema_blocks and traces == "ok"
+            if db == "ok"
+            and mcp == "ok"
+            and not schema_blocks
+            and traces == "ok"
+            and not typed.startswith("degraded")
             else "degraded"
         ),
         "db": db,
@@ -569,6 +590,10 @@ async def ready() -> dict[str, str]:
         "mcp": mcp,
         "embeddings": embeddings,
         "certified_matching": matching,
+        # A typed-decision provider that is failing: answers fall back to
+        # raw-SQL generation where accepted and are refused where not, so the
+        # install is degraded until a typed decision succeeds again.
+        "typed_decisions": typed,
         "models": models,
         # What an entry-point plugin added to this install's route table. Never a
         # readiness gate — a plugin is an extension, not a dependency — but an

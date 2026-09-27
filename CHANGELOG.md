@@ -29,6 +29,44 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.10] — 2026-09-27
+
+No schema change.
+
+### Fixed
+
+- **A failing typed-decision provider no longer errors every answer.** When the provider
+  behind typed serving answered every call with an HTTP error (a 402 billing error, a
+  520) or timed out, every question failed with a 502, even on a lens that declares
+  `untyped_fallback: true`. The provider's failure now ends the typed attempt, not the
+  request. Where the lens or the caller accepts an untyped answer, raw-SQL generation
+  serves the question and its `UNTYPED:` line names the failure
+  (`typed decisions unavailable: <provider> HTTP 402`). Where it does not, the question
+  is refused with the same reason instead of erroring. An ambiguous term the provider
+  could not decide is asked back, as on an install with no typed decider. The server
+  logs the failure once at WARNING until a typed decision succeeds again, and `/ready`
+  reports it in `typed_decisions` and turns `degraded` meanwhile.
+- **A common word no longer binds a stored value.** "Which country has the most pro
+  players?" compiled `WHERE team_name = 'Most'`, because a team is named Most and a
+  question's words were matched to stored values without regard to case. A one-word
+  value spelled like a function or quantifier word (most, top, all, first, any and the
+  like) now binds only where the question writes it as a name: capitalised as stored in
+  the middle of a sentence ("How did Most do this patch?"), quoted, or possessive
+  ("Most's record"). A capital at the start of a sentence is not enough, and neither is
+  a type noun in front of the word ("which team most often wins"). Multi-word values
+  and words with no ordinary reading ("team spirit", "liquid") match in any case, as
+  before.
+- **A time window on a timestamp column follows the lens's clock, not the server's.**
+  "How many matches were played last month?" bounded a timestamp-with-time-zone column
+  with plain dates (`>= '2026-08-01'`), which the warehouse reads in its session's zone:
+  the same query counted one match more on a server in UTC than on one in Europe/Paris,
+  though the lens declares `timezone: UTC`. On DuckDB and Postgres the bounds now carry
+  the lens zone's offset (`'2026-08-01 00:00:00+00:00'`), so a zone-aware column is cut
+  at the lens's midnight under any session zone, and a zone-less column still compares
+  wall clock to wall clock, as before. A lens with no declared timezone keeps plain
+  dates. BigQuery, Snowflake and MySQL keep plain dates for now: how each reads an
+  offset against its zone-less timestamp types is not yet verified.
+
 ## [0.5.9] — 2026-09-26
 
 No schema change.
