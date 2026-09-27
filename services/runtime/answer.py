@@ -22,6 +22,7 @@ from the call that wrote the sentence it forbade.
 
 from __future__ import annotations
 
+import datetime
 import decimal
 import re
 from collections.abc import Sequence
@@ -70,6 +71,53 @@ _SYSTEM = (
     "report it, never NO_ANSWER."
 )
 
+# Who reads the sentence. `engineer` (the default everywhere) is the answer as
+# the operator reads it: the definition applied, the population as declared, a
+# figure's source named. `consumer` is a public demo's audience
+# (`demo.audience: consumer`): a person who knows the domain and not the
+# system, for whom "per the hero_win_rate definition (wins ÷ games, shown only
+# where games ≥ 20)" is noise and "NULL rows" is a word from someone else's
+# job. The consumer prompt keeps every guarantee the engineer prompt carries —
+# figures only from the rows, the definitions govern what a value means, the
+# scope is disclosed, a question the rows do not answer declines — and changes
+# only how they are said: the scope once, in one plain clause derived from the
+# declared population; no metric, column, definition, lens, window or table
+# named; a decline in plain words. The same reconcile and numeric gate grade
+# both, so a plain sentence is never a less grounded one.
+Audience = Literal["engineer", "consumer"]
+
+_CONSUMER_SYSTEM = (
+    "You answer a question about data for a person who knows the subject but not "
+    "the system that holds it, in 1-3 plain sentences. "
+    "Use ONLY the provided result rows — never invent numbers, and never state a "
+    "figure that is not in the rows; if a caveat would need one, state the caveat "
+    "without it. Write figures in plain decimal notation with thousands "
+    "separators, copying the digits from the result exactly — never scientific "
+    "notation, never a rounded form presented as the exact figure. "
+    "The definitions given with the result GOVERN what its values mean: read "
+    "every value the way its definition reads it, and never write a sentence a "
+    "definition contradicts. A stored code is a value, not a gap — never call "
+    "one missing, null, empty or 'not recorded' unless the cell is truly NULL, "
+    "and then say the value is not available, never 'NULL'. "
+    "Speak only of the subject: never name a metric, a column, a definition, a "
+    "table, a lens, a query, a threshold, a 'window' or the system itself, and "
+    "never quote an identifier such as hero_win_rate — say what the figure is in "
+    "words only where the question needs it ('wins as a share of games'). "
+    "Where the result covers a subset, say what the figures cover ONCE, in one "
+    "plain clause a person would say, from the scope you are given below — never "
+    "quoted, never expanded into how the data is built. "
+    "Never attach a currency symbol, code or unit (such as $, €, USD or EUR) that "
+    "the result and its notes do not state: if a monetary amount is given a "
+    "currency below, write it in that currency; if none is stated, write the bare "
+    "number and name no currency at all. "
+    "Names listed in order of a rate answer 'which is best' even when the rate "
+    "itself is not a column. Only when neither the rows nor the shape of the "
+    "result address what the question asks — it asks about something this data "
+    "never touches — reply with exactly one line, 'NO_ANSWER: <why, in one plain "
+    "sentence a person would understand, naming no table or column>', and nothing "
+    "else. An empty result or a zero IS an answer: report it, never NO_ANSWER."
+)
+
 # The composer's own decline, parsed like the generator's `no_answer`: the one
 # stage that sees the rows beside the question says they do not answer it, and
 # that verdict must reach the status, not just the prose.
@@ -80,6 +128,12 @@ _DEFS_HEADER = "Definitions governing the result columns (they decide what the v
 _NOTES_HEADER = (
     "Data notes — declared facts about the projected columns (from the table "
     "profile); a number used from here must be attributed 'per the table profile':"
+)
+# The consumer reads no attribution: a note steers how a value is read and
+# lends the prose no figure of its own.
+_CONSUMER_NOTES_HEADER = (
+    "Data notes — declared facts about the projected columns; read the values by "
+    "them, and never state a figure taken from here:"
 )
 
 
@@ -205,6 +259,36 @@ def data_notes(semantic_model: SemanticModel, columns: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
+def population_scopes(semantic_model: SemanticModel, sql: str) -> list[str]:
+    """The declared populations of the scoped entities this SQL reads — by
+    entity name or source table, word-bounded — deduplicated in model order.
+    One function for every rail the scope rides: the compose prompt, the
+    grounding of the prose, the trust summary."""
+    scoped = [
+        e.population
+        for e in semantic_model.entities
+        if e.population
+        and re.search(
+            rf"\b{re.escape(e.name)}\b|\b{re.escape(e.source.table.split('.')[-1])}\b",
+            sql,
+            re.IGNORECASE,
+        )
+    ]
+    return list(dict.fromkeys(scoped))
+
+
+def grounding_notes(semantic_model: SemanticModel, columns: Sequence[str], sql: str) -> str:
+    """Every declared text the composer was handed and told to state, for the
+    numeric gate and the reconcile: the profile notes on the projected columns
+    (`data_notes`) and the population scope of the entities the SQL reads. A
+    figure in either — a null rate, 'since September 2025', 'games ≥ 20' — is a
+    declared fact restated, never an invention; without the scope here, a prose
+    that says its population in words is withheld for the year it names."""
+    return "\n".join(
+        filter(None, [data_notes(semantic_model, columns), *population_scopes(semantic_model, sql)])
+    )
+
+
 Style = Literal["money", "percent", "stored", "number"]
 
 _IDENTIFIER = re.compile(r"^(?:id|.*_id|year|.*_year)$")
@@ -288,6 +372,36 @@ def certified_frame(
     return f"{question} — {count} result {noun}:\n{table}{tail}"
 
 
+_MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def spoken_date(iso_day: str, *, today: datetime.date | None = None) -> str:
+    """An ISO day as a person writes it — '26 September', with the year only
+    when it is not this year's ('26 September 2025'). For the consumer's
+    freshness line; the engineer keeps the ISO form. Month names are pinned
+    here rather than read from the locale, so the wire never depends on the
+    server's language. A value that is not an ISO day passes through as it is."""
+    try:
+        day = datetime.date.fromisoformat(iso_day[:10])
+    except ValueError:
+        return iso_day
+    year = f" {day.year}" if day.year != (today or datetime.date.today()).year else ""
+    return f"{day.day} {_MONTHS[day.month - 1]}{year}"
+
+
 def render_definitions(defs: Sequence[Definition]) -> str:
     """The governed pages as the composer is shown them — the generator's own line
     shape minus ``[sql:]``, ``grain`` and ``sources``, which shape SQL and would
@@ -330,6 +444,7 @@ def compose_prompt(
     max_rows: int = 200,
     row_count_exact: bool = True,
     feedback: str | None = None,
+    audience: Audience = "engineer",
 ) -> tuple[str, str]:
     """The composer's (system, user turn) — the second model call, verbatim.
 
@@ -337,12 +452,18 @@ def compose_prompt(
     reason, named in-prompt so the second attempt knows exactly which figure it
     must not restate. Appended by code, never by a model.
 
+    ``audience`` picks the register (see `Audience`): the inputs — question,
+    SQL, definitions, notes, rows — are the same either way, so the consumer
+    prompt is never the engineer prompt with facts removed; the instructions
+    over them change, and the engineer prompt is untouched by the switch.
+
     Split out of `compose()` so `dst lens prompt` renders the SAME text the
     model is sent rather than a second description of it. The surface that exists
     to answer "what does the model actually see" showed only the generation half
     for as long as this call had no renderer, which is how a definition that WAS
     in the generation prompt could be absent here with nothing to show it.
     """
+    consumer = audience == "consumer"
     # `max_rows` is the PROMPT budget, not the caller's payload cap (the
     # pipeline owns that one and states it in the answer): say plainly how
     # much of the result these rows are, so a summary written from a slice
@@ -362,24 +483,36 @@ def compose_prompt(
     defs = governing_definitions(semantic_model, result.columns, generated.definition_used)
     block = f"{render_definitions(defs)}\n" if defs else ""
     notes = data_notes(semantic_model, result.columns)
-    notes_block = f"{_NOTES_HEADER}\n{notes}\n" if notes else ""
+    notes_header = _CONSUMER_NOTES_HEADER if consumer else _NOTES_HEADER
+    notes_block = f"{notes_header}\n{notes}\n" if notes else ""
     currency = declared_currency(semantic_model, result.columns)
     money = (
         f"Monetary amounts are in {currency}; write them in that currency.\n" if currency else ""
     )
     clock = (
-        f"Dates and day boundaries are {semantic_model.timezone}; say so if the answer "
-        f"depends on a period boundary.\n"
+        (
+            f"Dates and day boundaries are {semantic_model.timezone}; say so only if the "
+            f"answer turns on a day boundary.\n"
+            if consumer
+            else f"Dates and day boundaries are {semantic_model.timezone}; say so if the "
+            f"answer depends on a period boundary.\n"
+        )
         if semantic_model.timezone
         else ""
     )
     # The freshness contract steers what the composer may CLAIM, not what it
     # computes: measured freshness (data_as_of) is a response-only trust signal
-    # the model never sees, so the one wrong move here is inventing one.
+    # the model never sees, so the one wrong move here is inventing one. The
+    # consumer is not handed the number of days either: "stale after 2 days per
+    # this lens" is what a model writes when it has one.
     fresh = (
-        f"This lens declares data stale after {semantic_model.stale_after_days} days; "
-        f"actual freshness is measured and reported by the service — do not assert "
-        f"how current the data is.\n"
+        (
+            "Never say how current, fresh or old the data is: the service states the date itself.\n"
+            if consumer
+            else f"This lens declares data stale after {semantic_model.stale_after_days} "
+            f"days; actual freshness is measured and reported by the service — do not "
+            f"assert how current the data is.\n"
+        )
         if semantic_model.stale_after_days
         else ""
     )
@@ -393,19 +526,22 @@ def compose_prompt(
     # The scope rides the composer too: a scoped-subset number
     # presented as the whole population is exactly the quiet-wrong shape, and
     # the prose is where a reader meets it first.
-    scoped = [
-        e.population
-        for e in semantic_model.entities
-        if e.population
-        and re.search(
-            rf"\b{re.escape(e.name)}\b|\b{re.escape(e.source.table.split('.')[-1])}\b",
-            generated.sql,
-            re.IGNORECASE,
-        )
-    ]
+    scoped = population_scopes(semantic_model, generated.sql)
+    # The consumer hears the scope once, as a person would say it, derived
+    # from the declared population and from nothing else: the declaration is
+    # the only source, so nothing about the scope can be invented, and the
+    # rewrite is the register, not the content.
     population = (
-        "The data covers ONLY " + "; ".join(dict.fromkeys(scoped)) + " — state this "
-        "scope in the answer; never present the figure as covering everything.\n"
+        (
+            "The figures cover ONLY: " + "; ".join(scoped).rstrip(".") + ". Say what "
+            "they cover once, in one plain clause a person would say (as in 'in ranked "
+            "public matches at Divine' or 'in top-tier pro leagues since September 2025'), "
+            "drawn from that text and nothing else — never quote it, never explain how "
+            "the data is built, and never present the figure as covering everything.\n"
+            if consumer
+            else "The data covers ONLY " + "; ".join(scoped) + " — state this "
+            "scope in the answer; never present the figure as covering everything.\n"
+        )
         if scoped
         else ""
     )
@@ -438,7 +574,7 @@ def compose_prompt(
         f"{fix}"
         "Write the answer."
     )
-    return _SYSTEM, user
+    return (_CONSUMER_SYSTEM if consumer else _SYSTEM), user
 
 
 class AnswerComposer:
@@ -466,6 +602,7 @@ class AnswerComposer:
         max_rows: int = 200,
         row_count_exact: bool = True,
         feedback: str | None = None,
+        audience: Audience = "engineer",
     ) -> AnswerResult:
         system, user = compose_prompt(
             question=question,
@@ -475,6 +612,7 @@ class AnswerComposer:
             max_rows=max_rows,
             row_count_exact=row_count_exact,
             feedback=feedback,
+            audience=audience,
         )
         res = self._llm.complete(
             # Only the fixed instructions are cacheable — the governed definitions

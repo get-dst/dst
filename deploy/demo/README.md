@@ -62,11 +62,17 @@ any of that. Open `https://<DEMO_DOMAIN>/demo`: sign in, get a key, ask.
 ## The page
 
 `/demo` is written for the people the demo serves. Before sign-in it shows the instance
-name, one sentence, the sign-in, and one line per lens (its display name and the first
-common question its entities declare). After sign-in it shows how to connect Claude,
-Claude Code, Codex, ChatGPT and Cursor, each with a copy button and a link to that
-client's own docs, then the key, then curl and OpenAI-compatible snippets under "Other
-ways in". Sign-in, including a Google, GitHub or Discord round trip, returns to `/demo`.
+name, one sentence, one line to paste into whatever AI the visitor uses
+(`Connect me to <name>: https://<DEMO_DOMAIN>/SKILL.md`) with a copy button, the sign-in,
+and one line per lens (its display name and the first common question its entities
+declare). The AI fetches `/SKILL.md`, a public markdown file dst generates from the
+deployment: the MCP URL, the setup for Claude, Claude Code, Codex, ChatGPT and Cursor,
+which of them sign in through OAuth and which take the key, the same topics with an
+example question each, and the limits and log notice the fine print states. After sign-in
+the line carries the visitor's key, and the per-client setup, each with a copy button and
+a link to that client's own docs, folds under "Or connect by hand", then the key, then
+curl and OpenAI-compatible snippets under "Other ways in". Sign-in, including a Google,
+GitHub or Discord round trip, returns to `/demo`.
 
 The rest comes from a `demo:` section in the project's `dst.yaml`, applied with
 `dst apply` like everything else ([reference](../../docs/reference/configuration.md#demo-page-demo)):

@@ -8,6 +8,7 @@ Clerk verification is faked at `verify_token` — a token is not a test fixture.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterator
 
@@ -17,7 +18,7 @@ from sqlalchemy import create_engine, text
 
 from services.api.oauth import _resolve_grant_identity
 from services.auth import clerk, demo
-from services.config import settings
+from services.config import instance_name, settings
 from services.contracts.fakes import ScriptedLLM, fake_llm_providers
 from services.contracts.lens_config import AccessRule
 from services.db.session import org_session
@@ -141,6 +142,10 @@ def test_mint_issues_one_live_key_per_person(client: TestClient, demo_org: uuid.
     assert list(connect) == ["claude", "claude-code", "codex", "chatgpt", "cursor"]
     assert all(f"{body['base_url']}/mcp" in c["code"] for c in connect.values())
     assert all(body["key"] in connect[c]["code"] for c in ("claude-code", "codex", "cursor"))
+    # and the one line for the visitor's AI, with the key in it
+    assert body["agent_line"] == (
+        f"Connect me to {instance_name()}: {body['base_url']}/SKILL.md — my key: {body['key']}"
+    )
     assert [o["id"] for o in body["other"]] == ["curl", "openai"]
     assert all(body["key"] in o["code"] for o in body["other"])
     # The minted key is a real caller key on the data plane.
@@ -291,6 +296,55 @@ def test_the_page_says_what_the_demo_is_about_before_sign_in(
     assert 'class="chat"' not in page
 
 
+@needs_db
+def test_the_file_an_agent_reads_serves_the_demo(
+    client: TestClient, demo_org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /SKILL.md: public markdown, cached briefly, naming the instance and its
+    MCP URL, with a section per AI client and the demo's topics from the same
+    listing the page uses. The page's one line points at it, without a key until
+    sign-in."""
+    from services.api.demo import _example, connect_snippets
+
+    monkeypatch.setenv("DST_INSTANCE_NAME", "roshan")
+    monkeypatch.setattr(settings, "clerk_publishable_key", "pk_test_x")
+    monkeypatch.setattr(clerk, "issuer", lambda: "https://ex.clerk.accounts.dev")
+    r = client.get("/SKILL.md")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "text/markdown; charset=utf-8"
+    assert r.headers["cache-control"] == "public, max-age=300"
+    md = r.text
+    assert md.startswith("# roshan\n")
+    assert "MCP URL: http://testserver/mcp" in md
+    for item in connect_snippets("http://testserver", "roshan", "<KEY>", None):
+        assert f"## {item['label']}\n" in md, item["id"]
+    bundle = jaffle_customer_value_bundle()  # the lens the fixture published
+    question = _example(bundle)
+    assert f"- {bundle.config.display_name}{f' — {question}' if question else ''}\n" in md
+    assert "## Limits" in md
+    page = client.get("/demo").text
+    assert '<pre id="line">Connect me to roshan: http://testserver/SKILL.md</pre>' in page
+
+
+def test_the_file_an_agent_reads_outside_demo_mode(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every deployment serves it, from its public address: without one there is
+    nothing to point a client at, and the 404 says which setting gives it."""
+    monkeypatch.setattr(settings, "demo_org_id", None)
+    monkeypatch.setattr(settings, "public_base_url", None)
+    r = client.get("/SKILL.md")
+    assert r.status_code == 404
+    assert "DST_PUBLIC_BASE_URL" in r.json()["detail"]
+    monkeypatch.setattr(settings, "public_base_url", "https://dst.example.com/")
+    r = client.get("/SKILL.md")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "text/markdown; charset=utf-8"
+    assert "MCP URL: https://dst.example.com/mcp" in r.text
+    assert "ask the operator of" in r.text
+    assert "## Limits" not in r.text and "/demo" not in r.text
+
+
 @pytest.fixture
 def project_demo_org(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[uuid.UUID, dict[str, str]]]:
     """Demo mode on a fresh org that `dst apply` manages (no lens outside the
@@ -393,12 +447,30 @@ def test_a_demo_section_off_the_demo_org_says_it_is_not_shown(demo_org: uuid.UUI
 # ── the audience knob: a consumer demo's answers carry no working ────────────
 
 
-def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+# The sentence as each audience's composer writes it. The pipeline is faked
+# here, so the prose is canned: what the door owes is to ask for the right one
+# (the `audience` it threads into run_query) and to hand it over whole.
+_ENGINEER_PROSE = (
+    "There are 19 repeat customers (per the repeat_customer definition: two or more "
+    "orders). This covers only customers within the loaded window, and the data is stale "
+    "after 2 days per this lens; the NULL rows are customers below the threshold. "
+    "(data as of 2026-09-26)"
+)
+_CONSUMER_PROSE = "19 customers have ordered more than once (as of 26 September)."
+# What a consumer's sentence never carries: an identifier, or the system's
+# words for its own machinery.
+_IDENTIFIER = re.compile(r"\b[a-z]+(?:_[a-z0-9]+)+\b")
+_MACHINERY = re.compile(r"\b(?:definition|lens|window|NULL|threshold)\b", re.IGNORECASE)
+
+
+def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Pin the pipeline's outcome to an answer carrying every block a consumer
     must not see: the working (SQL, rows, citations, checks, the ledger whose
     inferred slots are SQL text) and the trust apparatus meant for the operator
     (grade, certification and its provenance, trust summary, degraded lines,
-    receipt, composition). The shaping under test starts where run_query returns."""
+    receipt, composition). The shaping under test starts where run_query returns.
+    Returns the list the fake appends each call's `audience` to."""
+    seen: list[str] = []
     from services.api import query as query_api
     from services.contracts.resolution import Resolution, Slot
     from services.contracts.response import (
@@ -421,10 +493,11 @@ def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run_query(**kw: object) -> PipelineResult:
         rid = f"req-{uuid.uuid4()}"
         lens = str(kw["lens_name"])
+        seen.append(str(kw.get("audience")))
         return PipelineResult(
             response=QueryResponse(
                 lens=lens,
-                answer="There are 19 repeat customers. Scope: all customers; data as of today.",
+                answer=_CONSUMER_PROSE if kw.get("audience") == "consumer" else _ENGINEER_PROSE,
                 sql="SELECT 42",
                 data=DataPayload(columns=["n"], rows=[[42]], row_count=1),
                 definition_used="repeat customer: two or more orders",
@@ -485,6 +558,7 @@ def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "services.llm.anthropic_provider.AnthropicProvider", lambda _k, **_: ScriptedLLM([])
     )
+    return seen
 
 
 def _set_audience(org: uuid.UUID, audience: str) -> None:
@@ -543,8 +617,10 @@ def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
     sentence with its status, clarification, freshness date and request id, and
     not one field of the working or of the trust apparatus (receipt, grade,
     certification, trust summary, degraded lines, ledger), as a key, a value or a
-    null — while the request log keeps the whole thing for the operator.
-    `engineer` (the default) is the answer as it always was."""
+    null — while the request log keeps the whole thing for the operator. The
+    sentence itself is composed for that audience: the door threads it into the
+    pipeline, and what comes back names no metric, column, definition, lens,
+    window or threshold. `engineer` (the default) is the answer as it always was."""
     import asyncio
     import json
 
@@ -552,14 +628,16 @@ def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
 
     from services.mcp import server as srv
 
-    _fake_pipeline(monkeypatch)
+    seen = _fake_pipeline(monkeypatch)
     _set_audience(demo_org, "consumer")
     q = {"q": "how many repeat customers?"}
     r = client.post(f"/v1/lenses/{LENS_NAME}/query", json=q, headers=_auth("clerk-ok"))
     assert r.status_code == 200, r.text
     body = r.json()
     assert set(body) == _CONSUMER_KEYS
-    assert body["answer"].startswith("There are 19 repeat customers.")
+    assert seen == ["consumer"]
+    assert body["answer"] == _CONSUMER_PROSE
+    assert not _IDENTIFIER.search(body["answer"]) and not _MACHINERY.search(body["answer"])
     assert body["status"] == "ok" and body["data_as_of"] == "2026-09-26"
     _assert_nothing_of_the_operators(r.text)
     with _admin.connect() as c:
@@ -578,7 +656,7 @@ def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
     )
     assert r.status_code == 200, r.text
     completion = r.json()
-    assert "19 repeat customers" in completion["choices"][0]["message"]["content"]
+    assert completion["choices"][0]["message"]["content"] == _CONSUMER_PROSE
     assert set(completion["dst"]) == _CONSUMER_KEYS - {"answer"}
     _assert_nothing_of_the_operators(r.text)
 
@@ -603,12 +681,16 @@ def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
         ),
     )
     out = asyncio.run(srv.query(LENS_NAME, q["q"], ctx=None))
-    assert out["ok"] is True and "19 repeat customers" in out["answer"]
+    assert out["ok"] is True and out["answer"] == _CONSUMER_PROSE
     assert set(out) == {"ok", *_CONSUMER_KEYS}
     _assert_nothing_of_the_operators(json.dumps(out))
+    assert seen == ["consumer"] * 3
 
     _set_audience(demo_org, "engineer")
     body = client.post(f"/v1/lenses/{LENS_NAME}/query", json=q, headers=_auth("clerk-ok")).json()
+    assert seen[-1] == "engineer"
+    assert body["answer"] == _ENGINEER_PROSE
+    assert _IDENTIFIER.search(body["answer"]) and _MACHINERY.search(body["answer"])
     assert body["sql"] == "SELECT 42" and body["data"]["rows"] == [[42]]
     assert body["citations"] == [{"type": "sql", "ref": "SELECT 42"}]
     assert body["confidence"] == "verified" and body["certification"] == "certified"

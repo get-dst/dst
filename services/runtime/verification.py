@@ -29,7 +29,7 @@ from services.contracts.verification import (
 from services.contracts.warehouse import QueryResult
 from services.lenses.profile_enrich import EntityCoverage
 from services.runtime import adversary, faithfulness, sql_canon
-from services.runtime.answer import data_notes as answer_data_notes
+from services.runtime.answer import grounding_notes
 from services.runtime.timewindow import sql_engages_time, temporal_terms, window_ranges
 
 _DISTINCT_ASK = re.compile(r"\b(unique|distinct|individual|deduplicated)\b", re.IGNORECASE)
@@ -848,8 +848,9 @@ def build_report(
             # Declared profile facts about the projected columns are groundable —
             # the composer is handed them with an attribution rule; flagging a
             # restated profile stat as invented is the dominant unverified
-            # false positive.
-            notes_text=answer_data_notes(semantic_model, result.columns),
+            # false positive. So is the declared population the composer is
+            # told to state: a scope said in words carries its year.
+            notes_text=grounding_notes(semantic_model, result.columns, sql),
             # …and so are the served SQL's own literals (the WHERE clause's year
             # is provenance the caller can read in the trace, not an invention),
             # and the lens clock's current/previous year — "this year" resolved

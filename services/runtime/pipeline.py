@@ -61,8 +61,16 @@ from services.runtime import (
     value_guard,
     verification,
 )
-from services.runtime.answer import AnswerComposer, AnswerResult, certified_frame, citations_for
-from services.runtime.answer import data_notes as answer_data_notes
+from services.runtime.answer import (
+    AnswerComposer,
+    AnswerResult,
+    Audience,
+    certified_frame,
+    citations_for,
+    grounding_notes,
+    population_scopes,
+    spoken_date,
+)
 from services.runtime.assembly import ANSWER_CONTRACT_SOURCE, typed_decider
 from services.runtime.bounded import (
     ServingTimeout,
@@ -485,6 +493,11 @@ def run_query(
     entity_coverage: dict[str, EntityCoverage] | None = None,
     scan_text: str | None = None,
     untyped: tuple[str, list[DecisionRecord]] | None = None,
+    # Who reads the answer (answer.Audience). `consumer` changes the register of
+    # the composed prose and of the lines this function appends — the scope in
+    # words, the date as a person writes it, a decline in plain terms — and
+    # nothing about what is served, checked or logged.
+    audience: Audience = "engineer",
 ) -> PipelineResult:
     """Ground → generate → guard → execute → compose, with execution-guided self-repair.
 
@@ -526,6 +539,17 @@ def run_query(
     call_args = dict(locals())
     rid = request_id or "req_" + uuid.uuid4().hex[:16]
     org = str(org_id)
+    consumer = audience == "consumer"
+
+    def _cannot(reason: str | None) -> str:
+        """The composer's own decline as the caller reads it — the reason is the
+        composer's, written in the same register as the prompt asked for."""
+        return (
+            f"I can't answer that from this data: {reason}"
+            if consumer
+            else f"I can't answer this from this lens's data: {reason}"
+        )
+
     prose = list(prose_context or [])
     # Which context actually rode in the prompt. The answer contract is an
     # instruction, not a source the answer drew on — excluded here exactly as the
@@ -554,7 +578,11 @@ def run_query(
     ) -> PipelineResult:
         reason = reason or "unknown reason"
         if status == "rejected":
-            msg = f"I couldn't form an in-scope query: {reason}"
+            msg = (
+                f"I can't answer that from this data: {reason}"
+                if consumer
+                else f"I couldn't form an in-scope query: {reason}"
+            )
         elif status == "refused":
             # A governed refusal (the not_computable rail): the reason IS the
             # caller-facing sentence — never dressed as an execution failure.
@@ -1406,6 +1434,7 @@ def run_query(
                     prose_context=prose,
                     max_rows=compose_rows,
                     row_count_exact=not fetch_capped,
+                    audience=audience,
                 ),
             )
         except ServingTimeout as exc:
@@ -1424,7 +1453,7 @@ def run_query(
                 (d.body for d in semantic_model.definitions if d.term == definition_used), ""
             ),
             question_text=question,
-            notes_text=answer_data_notes(semantic_model, served.columns),
+            notes_text=grounding_notes(semantic_model, served.columns, guard.sql),
             sql_text=guard.sql,
             dialect=semantic_model.dialect,
             clock_years=verification.clock_years(semantic_model.timezone),
@@ -1461,11 +1490,7 @@ def run_query(
                     ),
                 }
             )
-        return _trace_failure(
-            "refused",
-            guard.sql,
-            f"I can't answer this from this lens's data: {ans.no_answer_reason}",
-        )
+        return _trace_failure("refused", guard.sql, _cannot(ans.no_answer_reason))
     # The ambiguity-disclosure floor: when the clarification
     # rail missed (aliases cannot enumerate language) and the SQL identifiably
     # used ONE declared reading, the answer says which — every miss becomes a
@@ -1543,6 +1568,7 @@ def run_query(
                         max_rows=compose_rows,
                         row_count_exact=not fetch_capped,
                         feedback=gate.reason,
+                        audience=audience,
                     ),
                 )
             except ServingTimeout:
@@ -1552,11 +1578,7 @@ def run_query(
                 retry = None
             _mark("compose", retry_started)
             if retry is not None and retry.no_answer_reason:
-                return _trace_failure(
-                    "refused",
-                    guard.sql,
-                    f"I can't answer this from this lens's data: {retry.no_answer_reason}",
-                )
+                return _trace_failure("refused", guard.sql, _cannot(retry.no_answer_reason))
             if retry is not None:
                 retry_model = getattr(composer, "model", model_name)
                 ai_in += retry.input_tokens
@@ -1572,7 +1594,7 @@ def run_query(
                         "",
                     ),
                     question_text=question,
-                    notes_text=answer_data_notes(semantic_model, served.columns),
+                    notes_text=grounding_notes(semantic_model, served.columns, guard.sql),
                     sql_text=guard.sql,
                     dialect=semantic_model.dialect,
                     clock_years=verification.clock_years(semantic_model.timezone),
@@ -1741,11 +1763,17 @@ def run_query(
     # a 21,056-row answer read as a 5000-row one. Raising max_rows_to_return is
     # also the wrong advice there (the fetch cap is above it), so the two cases
     # give different instructions.
+    # The consumer gets the same facts in the same places, in words for a person
+    # who has no SQL to aggregate in and no lens setting to raise: what is
+    # shown, what is not, and that the rest exists. Never fewer notes.
     returned = min(max_rows, total_rows)
     answer_text = ans.text
     if fetch_capped:
         answer_text += (
-            f" Note: this answer returns {returned} rows, but the query matched more "
+            f" Only the first {returned} rows are shown; the full result is larger than "
+            f"{total_rows} rows, so totals beyond these are not stated."
+            if consumer
+            else f" Note: this answer returns {returned} rows, but the query matched more "
             f"than {total_rows} — more than dst fetches in one request — so the "
             "full total is not known here; totals beyond this window are not "
             "stated. Aggregate in SQL, or page with LIMIT/OFFSET, to cover the "
@@ -1753,13 +1781,18 @@ def run_query(
         )
     elif truncated:
         answer_text += (
-            f" Note: this answer returns only the first {returned} of {total_rows} "
+            f" Only the first {returned} of {total_rows} rows are shown, so totals beyond "
+            "these are not stated; a narrower question gets the rest."
+            if consumer
+            else f" Note: this answer returns only the first {returned} of {total_rows} "
             "result rows — totals beyond this window are not stated; narrow the "
             "question, or raise the lens's max_rows_to_return, to get the rest."
         )
     elif composer is not None and total_rows > compose_rows:
         answer_text += (
-            f" Note: the summary above reads the first {compose_rows} of {total_rows} "
+            f" This reads the first {compose_rows} of {total_rows} rows."
+            if consumer
+            else f" Note: the summary above reads the first {compose_rows} of {total_rows} "
             "result rows; the full result is in the data payload."
         )
 
@@ -1770,7 +1803,9 @@ def run_query(
     # that hides data. Deterministic signal, same append idiom as above.
     if getattr(ans, "finish_reason", None) == "length":
         answer_text += (
-            " Note: this answer was cut off by the response limit — anything it "
+            " This answer was cut short, so anything it lists is incomplete."
+            if consumer
+            else " Note: this answer was cut off by the response limit — anything it "
             "enumerates is incomplete, and the full result is in the data payload."
         )
 
@@ -1808,7 +1843,11 @@ def run_query(
         None,
     )
     if stale is not None and stale.reason:
-        answer_text += f" Note: {stale.reason}."
+        answer_text += (
+            f" The data is from {spoken_date(str(data_as_of)[:10])} and may be out of date."
+            if consumer and data_as_of
+            else f" Note: {stale.reason}."
+        )
 
     # A period beyond the measured coverage, likewise: the number the caller is
     # reading is a zero over rows that were never loaded, and only this rail
@@ -1826,8 +1865,13 @@ def run_query(
     # a lagging snapshot — the date makes those self-evident. Same
     # deterministic-append idiom; skipped when the prose
     # already carries the date, and on windowless envelopes (no text).
-    if data_as_of and answer_text and (as_of_day := str(data_as_of)[:10]) not in answer_text:
-        answer_text += f" (data as of {as_of_day})"
+    # The consumer reads the date as a person writes it ("as of 26 September");
+    # the stale line above already carries it in that form when it fired.
+    if data_as_of and answer_text:
+        as_of_day = str(data_as_of)[:10]
+        stamp = spoken_date(as_of_day) if consumer else as_of_day
+        if stamp not in answer_text:
+            answer_text += f" (as of {stamp})" if consumer else f" (data as of {as_of_day})"
 
     data = DataPayload(
         columns=served.columns,
@@ -1843,16 +1887,7 @@ def run_query(
     # The scope travels with the number: an answer computed over
     # a scoped subset names the population in the field agents lead with —
     # whether or not the filter was enforced (the check grades that half).
-    population_scopes = [
-        e.population
-        for e in semantic_model.entities
-        if e.population
-        and re.search(
-            rf"\b{re.escape(e.name)}\b|\b{re.escape(e.source.table.split('.')[-1])}\b",
-            guard.sql,
-            re.IGNORECASE,
-        )
-    ]
+    scopes = population_scopes(semantic_model, guard.sql)
     if certified_provenance is not None:
         approver = _actor_label(certified_provenance.certified_by)
         if certified_match == "parameterized" and certified_provenance.bound_values:
@@ -1872,8 +1907,8 @@ def run_query(
                 f"on {certified_provenance.certified_at[:10]}; "
                 "served from approved SQL, no AI generation."
             )
-    if population_scopes:
-        scope_line = "Population: " + "; ".join(dict.fromkeys(population_scopes)) + "."
+    if scopes:
+        scope_line = "Population: " + "; ".join(scopes) + "."
         trust_summary = f"{trust_summary} {scope_line}" if trust_summary else scope_line
     if disclosure:
         # The reading rides the field agents lead with, not only the prose —

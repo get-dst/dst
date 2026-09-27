@@ -1187,3 +1187,141 @@ def test_a_month_the_window_fixes_is_not_also_a_grouping() -> None:
             )
         )
     assert shapes == {((), (("month", "=", "2026-08"),))}
+
+
+def _two_table_model(*, position_has_metrics: bool = True) -> SemanticModel:
+    """Two sibling tables of one lens: heroes per patch (no position) and heroes
+    per position. Both carry the same win-rate metric, so the metric options are
+    qualified and the metric decision names the entity."""
+
+    def _metrics(table: str) -> list[Metric]:
+        return [
+            Metric(name="games", agg="sum", expr=f"{table}.games"),
+            Metric(name="wins", agg="sum", expr=f"{table}.wins"),
+            Metric(
+                name="win_rate",
+                type="ratio",
+                numerator="wins",
+                denominator="games",
+                format="percent",
+                better="higher",
+            ),
+        ]
+
+    trends = Entity(
+        name="hero_patch_trends",
+        source=EntitySource(connection="wh", table="hero_patch_trends"),
+        fields=[
+            Field(name="hero_name", type="string"),
+            Field(name="patch_name", type="string"),
+            Field(name="games", type="integer"),
+            Field(name="wins", type="integer"),
+        ],
+        dimensions=[Dimension(name="hero_name"), Dimension(name="patch_name")],
+        metrics=_metrics("hero_patch_trends"),
+    )
+    meta = Entity(
+        name="hero_position_meta",
+        source=EntitySource(connection="wh", table="hero_position_meta"),
+        fields=[
+            Field(name="hero_name", type="string"),
+            Field(name="position_name", type="string"),
+            Field(name="games", type="integer"),
+            Field(name="wins", type="integer"),
+        ],
+        dimensions=[Dimension(name="hero_name"), Dimension(name="position_name")],
+        metrics=_metrics("hero_position_meta") if position_has_metrics else [],
+    )
+    return SemanticModel(lens="dota", dialect="duckdb", entities=[trends, meta])
+
+
+_CARRIES = "Which carry heroes have the highest win rate on the current patch?"
+
+
+def test_a_role_word_the_chosen_entity_cannot_filter_moves_the_answer_to_one_that_can() -> None:
+    """'carry' is a stored position — held by hero_position_meta, not by the
+    per-patch table the win-rate metric first landed on. Served there, every
+    hero came back with a note that no position filter applied: a filter the
+    question stated, dropped because the chosen table could not apply it. The
+    metric is decided again among the tables that hold the value, and the value
+    binds the filter on the one chosen."""
+    decider = _Prefers(
+        "ranking",
+        "hero_patch_trends.win_rate",
+        "hero_position_meta.win_rate",
+        "position_name",
+        "hero_name",
+        "unstated",
+    )
+    res = TypedResolver(decider, domains=POSITIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+        _CARRIES, _two_table_model()
+    )
+    assert res.intent is not None, res.clarification
+    i = res.intent
+    assert i.entity == "hero_position_meta" and i.metrics == ["win_rate"]
+    assert i.dimensions == ["hero_name"]
+    assert [(f.field, f.op, f.value) for f in i.filters] == [("position_name", "=", "carry")]
+    assert res.matched == ["position_name"]
+    # the ledger shows the first pick and the constrained one that replaced it
+    assert [d.chosen for d in res.decisions if d.slot == "metric"][:2] == [
+        "hero_patch_trends.win_rate",
+        "hero_position_meta.win_rate",
+    ]
+    sql = compile_intent(i, _two_table_model())
+    assert "hero_position_meta" in sql and "'carry'" in sql and "hero_patch_trends" not in sql
+
+
+def test_a_role_word_no_entity_can_answer_with_clarifies_never_serves_without_it() -> None:
+    """The table holding the position carries no figure for the question: the
+    resolver asks which entity should answer, naming both, rather than serving
+    the per-patch figure with the position gone."""
+    model = _two_table_model(position_has_metrics=False)
+    decider = _Prefers("ranking", "win_rate", "position_name", "hero_name", "unstated")
+    res = TypedResolver(decider, domains=POSITIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+        _CARRIES, model
+    )
+    assert res.intent is None and res.clarification is not None
+    c = res.clarification
+    assert c.kind == "unresolved_slot" and c.term == "carry"
+    assert "hero_position_meta has it; hero_patch_trends does not" in c.question
+    assert c.options == ["hero_position_meta", "hero_patch_trends"]
+
+
+def test_an_unconfident_pick_among_the_holders_clarifies_too() -> None:
+    # the decider finds no metric it wants among the tables holding 'carry'
+    decider = _Prefers(
+        "ranking", "hero_patch_trends.win_rate", "position_name", "hero_name", "unstated"
+    )
+    res = TypedResolver(decider, domains=POSITIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+        _CARRIES, _two_table_model()
+    )
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "carry"
+
+
+def test_the_move_to_the_holding_entity_is_the_same_on_every_run() -> None:
+    seen = set()
+    for _ in range(3):
+        decider = _Prefers(
+            "ranking",
+            "hero_patch_trends.win_rate",
+            "hero_position_meta.win_rate",
+            "position_name",
+            "hero_name",
+            "unstated",
+        )
+        res = TypedResolver(decider, domains=POSITIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+            _CARRIES, _two_table_model()
+        )
+        assert res.intent is not None, res.clarification
+        seen.add(
+            (
+                res.intent.entity,
+                tuple(res.intent.metrics),
+                tuple(res.intent.dimensions),
+                tuple((f.field, f.op, str(f.value)) for f in res.intent.filters),
+            )
+        )
+    assert seen == {
+        ("hero_position_meta", ("win_rate",), ("hero_name",), (("position_name", "=", "carry"),))
+    }

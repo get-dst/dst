@@ -29,6 +29,7 @@ from services import __version__ as services_version
 from services.api.auth_local import router as auth_local_router
 from services.api.auth_local import users_router as mgmt_users_router
 from services.api.demo import router as demo_router
+from services.api.demo import skill_router
 from services.api.mgmt import router as mgmt_router
 from services.api.mgmt_activation import router as mgmt_activation_router
 from services.api.mgmt_audit import router as mgmt_audit_router
@@ -100,7 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # One description per tag — /docs is the reference of record for the control plane,
 # so a tag without one renders as a bare label (the docs-parity test pins these).
 _openapi_tags = [
-    {"name": "meta", "description": "Liveness and readiness — no auth."},
+    {"name": "meta", "description": "Liveness, readiness and /SKILL.md — no auth."},
     {"name": "mgmt", "description": "Admin-token sanity: ping + whoami."},
     {"name": "auth", "description": "Local dashboard sessions (`dstsess_`) — login, logout, me."},
     {"name": "users", "description": "Local dashboard users (admin)."},
@@ -234,6 +235,8 @@ app.include_router(mgmt_router)
 app.include_router(auth_local_router)
 # Public demo mode only (DST_DEMO_ORG_ID): /demo + /auth/demo-key, 404 otherwise.
 app.include_router(demo_router)
+# /SKILL.md — the file a visitor's AI reads to connect itself; every deployment.
+app.include_router(skill_router)
 app.include_router(mgmt_users_router)
 app.include_router(mgmt_lenses_router)
 app.include_router(mgmt_callers_router)

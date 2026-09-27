@@ -39,6 +39,13 @@ row-level security whose failure mode is *no rows*, never cross-tenant
 |---|---|
 | `GET /health` | Liveness: the process is up |
 | `GET /ready` | Readiness. Five checks gate `status`: DB, MCP session manager, schema state, whether trace writes are landing, and `typed_decisions` (`ok`, `off`, or `degraded (…)` while the typed-decision provider is failing, until a typed decision succeeds again). Reported but never gating: `embeddings`, `certified_matching`, `plugins`, and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
+| `GET /SKILL.md` | The file an agent reads to connect itself: the instance name, the MCP URL, the setup for Claude, Claude Code, Codex, ChatGPT and Cursor with the key as a placeholder, which of them sign in through OAuth instead, and in demo mode the topics and the limits. Public, `text/markdown`, cached for five minutes. Outside demo mode it needs `DST_PUBLIC_BASE_URL` and answers 404 with the reason without it |
+
+`/SKILL.md` is how a person connects their AI with one line: they paste
+`Connect me to <name>: <base>/SKILL.md — my key: <key>` into the AI they use, and it fetches
+the file and follows the steps for its own client. The file holds no key. Clients that sign
+in through OAuth (Claude on the web and Desktop, ChatGPT) need none; the others take the key
+from the line, which the demo page fills in after sign-in and an operator hands out otherwise.
 
 ## Data plane (`/v1`)
 
@@ -200,8 +207,8 @@ sign-in never reaches `/mgmt` (403, admin is a `dstadm_` token).
 
 | Route | Description |
 |---|---|
-| `GET /demo` | Server-rendered sign-in page: boots Clerk, mints the visitor's key, then shows how to connect Claude, Claude Code, Codex, ChatGPT and Cursor, the key, and curl and OpenAI-compatible snippets. Its tagline, example conversation and privacy link come from `dst.yaml`'s [`demo:` section](configuration.md#demo-page-demo) |
-| `POST /auth/demo-key` | Bearer = the Clerk session token → `{caller, key, expires_in_days, lenses, examples, base_url, connect, other}`, where `connect` and `other` are the page's setup snippets (`{id, label, code, …}`); one live `dst_` key per person (a re-mint revokes the last), budgeted per source address |
+| `GET /demo` | Server-rendered sign-in page. It opens with the one line for the visitor's AI (`Connect me to <name>: <base>/SKILL.md`, the key added after sign-in), boots Clerk, mints the visitor's key, then shows how to connect Claude, Claude Code, Codex, ChatGPT and Cursor by hand, the key, and curl and OpenAI-compatible snippets. Its tagline, example conversation and privacy link come from `dst.yaml`'s [`demo:` section](configuration.md#demo-page-demo) |
+| `POST /auth/demo-key` | Bearer = the Clerk session token → `{caller, key, expires_in_days, lenses, examples, base_url, agent_line, connect, other}`, where `agent_line` is the one line with the key in it and `connect` and `other` are the page's setup snippets (`{id, label, auth, code, …}`); one live `dst_` key per person (a re-mint revokes the last), budgeted per source address |
 
 Sign-in on both `/demo` and the MCP consent page returns to the page it started on, query
 string included, after an OAuth provider's redirect.

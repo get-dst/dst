@@ -28,12 +28,14 @@ client = TestClient(app)
 # Paths that answer without a database or credentials, one per surface. `/mcp` is
 # there because the transport gate answers that one itself, at the ASGI edge and
 # before routing — the middleware has to be outside it, or the surface most likely
-# to be pointed at a hostile client is the one with no headers.
+# to be pointed at a hostile client is the one with no headers. `/SKILL.md` is the
+# one public file an agent fetches.
 _PATHS = [
     "/health",
     "/.well-known/oauth-authorization-server",
     "/mgmt/ping",
     "/mcp",
+    "/SKILL.md",
     "/no-such-endpoint",
 ]
 

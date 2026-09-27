@@ -813,11 +813,13 @@ class TypedResolver:
         if entity_name is None:
             raise _Decline("no entity of this lens holds what the question asks about")
         entity = next(e for e in model.entities if e.name == entity_name)
-        own_metrics = [
-            o
-            for o in sets["metric"]
-            if o.name.rsplit(".", 1)[-1] in {m.name for m in entity.metrics}
-        ]
+        entity, first_metric = self._holds_the_named(
+            question, model, entity, shape, first_metric, sets["metric"], owner_of, records
+        )
+        # By owner, not by bare name: two siblings declaring `win_rate` each
+        # have the other's qualified option match the bare name, and "another
+        # metric?" then offers the sibling's figure as this entity's own.
+        own_metrics = [o for o in sets["metric"] if owner_of.get(o.name) == entity.name]
         own_members = [
             *(Option(d.name, d.description or "") for d in entity.dimensions),
             *(
@@ -1070,6 +1072,99 @@ class TypedResolver:
             limit=limit,
         )
         return intent, supplied
+
+    def _holds_the_named(
+        self,
+        question: str,
+        model: SemanticModel,
+        entity: Entity,
+        shape: str,
+        first_metric: str | None,
+        metric_options: list[Option],
+        owner_of: dict[str, str],
+        records: list[DecisionRecord],
+    ) -> tuple[Entity, str | None]:
+        """A value the question names (a dictionary member, or a word a
+        definition's ``value_aliases`` maps to one) is a restriction the answer
+        must carry — and the entity the metric or the listing chose may have no
+        column that holds it. "Which carry heroes have the highest win rate on
+        the current patch?" typed onto a per-patch table with no position and
+        served every hero, with a note that no position filter applied: the
+        filter the question stated was dropped because the chosen table could
+        not apply it, while its sibling could. A stated filter the chosen entity
+        cannot apply changes the entity or asks; it is never dropped.
+
+        Among the entities of the lens that hold a column for EVERY such value,
+        the figure's metric (or the listing's entity) is decided again,
+        constrained to them — the metric names the entity, so the same decision
+        that chose the first table chooses the right one. No holder with a
+        figure to offer, or no confident pick among them, is a clarification
+        naming both sides."""
+        here = {v for named in self._named(question, entity) for v in named.values()}
+        # value -> the columns holding it -> the entities with that column
+        missing: dict[str, dict[str, set[str]]] = {}
+        for e in model.entities:
+            if e.name == entity.name:
+                continue
+            for named in self._named(question, e):
+                for column, value in named.items():
+                    if value not in here:
+                        missing.setdefault(value, {}).setdefault(column, set()).add(e.name)
+        if not missing:
+            return entity, first_metric
+        holding = set.intersection(
+            *(
+                {e for holders in by_column.values() for e in holders}
+                for by_column in missing.values()
+            )
+        )
+        # Model order throughout, so the options and the question read the same
+        # on every run of the same question.
+        holders = [e.name for e in model.entities if e.name in holding]
+        stated = "; ".join(
+            f"'{value}' is a {' / '.join(sorted(by_column))} value"
+            for value, by_column in missing.items()
+        )
+        where = ", ".join(holders) or "no entity of this lens"
+        if shape in _FIGURES:
+            slot = "metric"
+            options = [o for o in metric_options if owner_of.get(o.name) in holding]
+            ask = "Which governed metric of those does the question ask for?"
+        else:
+            slot = "entity"
+            options = [
+                Option(e.name, " ".join(p for p in (e.description or "", e.grain or "") if p))
+                for e in model.entities
+                if e.name in holding
+            ]
+            ask = "Which of those is the question about?"
+        if slot == "entity" and len(options) == 1:
+            # The one table that holds the value the listing is restricted by.
+            return next(e for e in model.entities if e.name == options[0].name), None
+        if options:
+            d, verdict, _idx = self._decide(
+                slot,
+                question,
+                f"{stated} — a field {where} holds and {entity.name} does not, and the "
+                f"question restricts by it. {ask}",
+                [*options, Option(_NONE, "none of these answers the question")],
+                allow_none=True,
+                records=records,
+            )
+            if verdict == "act" and d.chosen is not None:
+                if slot == "metric":
+                    owner = owner_of[d.chosen]
+                    return next(e for e in model.entities if e.name == owner), d.chosen
+                return next(e for e in model.entities if e.name == d.chosen), None
+        raise _Clarify(
+            ClarificationRequest(
+                kind="unresolved_slot",
+                term=next(iter(missing)),
+                question=f"{stated}: {where} has it; {entity.name} does not — which should "
+                "answer, or is the question meant without it?",
+                options=[*holders, entity.name],
+            )
+        )
 
     def _noted(self, context: str) -> str:
         return f"{context} {self._notes}".strip() if getattr(self, "_notes", "") else context

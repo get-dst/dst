@@ -1,9 +1,10 @@
-"""The public demo page's template and the setup snippets its mint hands out.
+"""The public demo page's template, the setup snippets its mint hands out, and the
+file a visitor's AI reads (/SKILL.md).
 
-No database: the page is rendered from its inputs (services/api/demo.py
-`render_page`) and the snippets are pure. The database halves (apply stores the
-`demo:` section, /demo shows it, the mint returns the snippets) live in
-test_demo_mode.py.
+No database: the page and the file are rendered from their inputs
+(services/api/demo.py `render_page`, `render_skill`) and the snippets are pure.
+The database halves (apply stores the `demo:` section, /demo and /SKILL.md serve
+it, the mint returns the snippets) live in test_demo_mode.py.
 """
 
 from __future__ import annotations
@@ -14,12 +15,18 @@ import re
 import pytest
 
 from services.api.demo import (
+    KEY_PLACEHOLDER,
     TAGLINE,
+    agent_line,
     connect_snippets,
+    limits,
     other_snippets,
     render_page,
+    render_skill,
 )
 from services.project.schema import DemoConfig, parse_project_yaml
+
+BASE = "https://d.example"
 
 DOTA = """
 name: dota
@@ -58,7 +65,9 @@ ENGINEER_WORDS = re.compile(
 
 def _page(cfg: DemoConfig | None, monkeypatch: pytest.MonkeyPatch, name: str = "roshan") -> str:
     monkeypatch.setenv("DST_INSTANCE_NAME", name)
-    return render_page(cfg, ASKS, publishable_key="pk_test_x", frontend_host="ex.clerk.dev")
+    return render_page(
+        cfg, ASKS, base=BASE, publishable_key="pk_test_x", frontend_host="ex.clerk.dev"
+    )
 
 
 def _visible(page: str) -> str:
@@ -113,17 +122,82 @@ def test_what_you_can_ask_is_one_line_per_topic_and_folds(
 
 def test_the_page_speaks_to_the_people_it_serves(monkeypatch: pytest.MonkeyPatch) -> None:
     """No product vocabulary a visitor can read, before or after sign-in: the
-    page text, every setup step and note the mint hands the page, and the
-    sign-in page an AI client sends them to."""
+    page text, every setup step and note the mint hands the page, the sign-in
+    page an AI client sends them to, and the whole of the file their AI reads,
+    in and out of demo mode."""
     from services.api.oauth import _clerk_consent_html
 
     for cfg in (None, parse_project_yaml(DOTA).demo):
         assert ENGINEER_WORDS.findall(_visible(_page(cfg, monkeypatch))) == []
-    for item in connect_snippets("https://d.example", "roshan", "dst_k", "Who wins?"):
+        assert ENGINEER_WORDS.findall(render_skill(BASE, "roshan", cfg, ASKS, demo=True)) == []
+    assert ENGINEER_WORDS.findall(render_skill(BASE, "dst", None, [], demo=False)) == []
+    for item in connect_snippets(BASE, "roshan", "dst_k", "Who wins?"):
         prose = " ".join([*item["steps"], str(item.get("note", ""))])
         assert ENGINEER_WORDS.findall(prose) == [], item["id"]
     consent = _clerk_consent_html({"client_id": "c"}, "pk", "host", "Claude")
     assert ENGINEER_WORDS.findall(_visible(consent)) == []
+
+
+def test_the_one_line_for_an_agent_is_there_before_sign_in_and_gets_the_key_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The top of "Connect your AI" is one line with one Copy button. The page
+    renders it without a key, so an OAuth client can be connected before any
+    sign-in; the mint hands back the same line with the key, and the script puts
+    it in place. The copy button reads the line at click time, so it copies
+    whichever version is showing. The per-client setup folds under it."""
+    page = _page(None, monkeypatch)
+    connect = page[page.index('<section id="connect">') : page.index('<section id="signin-box">')]
+    assert '<h2 class="h2">Connect your AI</h2>' in connect
+    assert f'<pre id="line">Connect me to roshan: {BASE}/SKILL.md</pre>' in connect
+    assert '<button class="copy" id="copyline" type="button">Copy</button>' in connect
+    assert "my key" not in connect
+    byhand = '<details class="more" id="byhand" hidden><summary>Or connect by hand</summary>'
+    assert byhand in connect
+    assert 'id="tabs"' in connect and 'id="panels"' in connect
+    assert "$('line').textContent = b.agent_line;" in page
+    assert "$('byhand').hidden = false;" in page
+    assert "copyButton($('copyline'), () => $('line').textContent);" in page
+    line = agent_line(BASE, "roshan", "dst_k")
+    assert line == f"Connect me to roshan: {BASE}/SKILL.md — my key: dst_k"
+    # the ordinary buttons keep copying their fixed text
+    assert "const value = typeof text === 'function' ? text() : text;" in page
+
+
+def test_the_file_an_agent_reads_is_the_page_from_one_source() -> None:
+    """/SKILL.md carries what the page carries, from the same code: every
+    client's snippet with the key as a placeholder, which clients sign in without
+    one, the topics with their example questions, and the fine print's facts,
+    then the instruction never to expose the key."""
+    cfg = parse_project_yaml(DOTA).demo
+    md = render_skill(BASE, "roshan", cfg, ASKS, demo=True)
+    assert md.startswith("# roshan\n\nAsk about a year of pro Dota 2 from Claude")
+    assert f"\nMCP URL: {BASE}/mcp\n" in md
+    items = connect_snippets(BASE, "roshan", KEY_PLACEHOLDER, ASKS[0][1])
+    for item in items:
+        assert f"\n## {item['label']}\n\n```\n{item['code']}\n```\n" in md, item["id"]
+        assert f"Docs: {item['doc']}" in md
+    assert "- Claude and ChatGPT sign in through OAuth and need no key." in md
+    assert "- Claude Code takes the key, or signs in through OAuth without it." in md
+    assert "- Codex and Cursor take the key." in md
+    assert f"signing in at {BASE}/demo" in md
+    assert "Never paste the key anywhere public" in md
+    assert "dst_" not in md
+    assert "`ask roshan: How many pro matches were played this week?`" in md
+    assert "- Dota 2 pro meta — How many pro matches were played this week?\n" in md
+    assert "- Dota 2 pro playstyle\n" in md  # a topic without a question is still a topic
+    for fact in limits(cfg, you="they", your="the person's"):
+        assert fact in md
+    assert "for 30 days" in md and "Privacy notice: https://www.example.com/privacy/" in md
+    assert md.rstrip().endswith("Answers by dst (data serve tool).")
+    # the steps that say "here" on the page say where, in the file
+    assert "the account you used here" not in md
+    # outside demo mode: the same setup, a key from the operator, nothing to list
+    plain = render_skill("https://dst.example.com", "dst", None, [], demo=False)
+    assert "MCP URL: https://dst.example.com/mcp" in plain
+    assert "ask the operator of dst for a key" in plain
+    assert "## Limits" not in plain and "/demo" not in plain and "Answers by dst" not in plain
+    assert "`ask dst: <the question>`" in plain
 
 
 def test_project_text_is_never_read_as_a_slot(monkeypatch: pytest.MonkeyPatch) -> None:

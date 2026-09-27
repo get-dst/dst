@@ -41,7 +41,7 @@ from services.project import demo_page
 from services.reviews import service as reviews_service
 from services.reviews import store as reviews_store
 from services.runtime import assembly
-from services.runtime.answer import AnswerComposer
+from services.runtime.answer import AnswerComposer, Audience
 from services.runtime.attribution import Attribution, attributed
 from services.runtime.compiler import CompileError, compile_intent
 from services.runtime.generator import FixedSQLGenerator
@@ -585,8 +585,16 @@ def _fail_on_warehouse_timeout(result: PipelineResult, caller: CallerIdentity) -
     )
 
 
+def _audience(caller: CallerIdentity) -> Audience:
+    """Who this caller's answer is written for — decided once per request, before
+    the pipeline runs, and read twice: the composer writes in that register and
+    `_shaped` cuts the envelope to it. The same predicate for both, so the
+    consumer never gets an engineer's sentence in a consumer's envelope."""
+    return "consumer" if demo_page.consumer_view(caller) else "engineer"
+
+
 def _shaped(
-    response: QueryResponse, fmt: AnswerFormat, caller: CallerIdentity
+    response: QueryResponse, fmt: AnswerFormat, audience: Audience
 ) -> QueryResponse | ConsumerAnswer:
     """Apply the response-side half of `format`, and the demo's audience.
 
@@ -602,7 +610,7 @@ def _shaped(
     """
     if fmt == "prose":
         response = response.model_copy(update={"data": None})
-    if demo_page.consumer_view(caller):
+    if audience == "consumer":
         return ConsumerAnswer.of(response)
     return response
 
@@ -668,6 +676,7 @@ def run_lens_query(
         if assembled.certified is not None
         else None
     )
+    audience = _audience(caller)
     with attributed(
         Attribution(
             principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
@@ -679,6 +688,7 @@ def run_lens_query(
             org_id=caller.org_id,
             caller=caller.name,
             request_id=rid,
+            audience=audience,
             semantic_model=assembled.model,
             value_domains=assembled.value_domains,
             entity_coverage=assembled.entity_coverage,
@@ -749,7 +759,7 @@ def run_lens_query(
     # The lens can auto-flag its own low-confidence answers for review (origin=ai).
     if _auto_review_flags(bundle.config.auto_review, result.response):
         background.add_task(_auto_review, caller.org_id, result.response.request_id)
-    return _shaped(result.response, fmt, caller)
+    return _shaped(result.response, fmt, audience)
 
 
 @router.post("/lenses/{name}/query", response_model=QueryResponse | ConsumerAnswer)
@@ -871,6 +881,7 @@ def run_lens_metrics(
 
     profiles, as_of = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
+    audience = _audience(caller)
     with attributed(
         Attribution(
             principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
@@ -884,6 +895,7 @@ def run_lens_metrics(
             org_id=caller.org_id,
             caller=caller.name,
             request_id=rid,
+            audience=audience,
             semantic_model=bundle.semantic_model,
             connector=connector,
             # The caller's own intent names the metric — basis provenance is a
@@ -910,7 +922,7 @@ def run_lens_metrics(
     )
     result.trace.agent = caller.agent
     background.add_task(log_trace, result.trace)
-    return _shaped(result.response, fmt, caller)
+    return _shaped(result.response, fmt, audience)
 
 
 @router.post("/lenses/{name}/metrics", response_model=QueryResponse | ConsumerAnswer)
@@ -1056,6 +1068,7 @@ def run_certified_for_caller(
     profiles, as_of = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     fmt: AnswerFormat = body.format if body else "both"
+    audience = _audience(caller)
     with attributed(
         Attribution(
             principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
@@ -1067,6 +1080,7 @@ def run_certified_for_caller(
             org_id=caller.org_id,
             caller=caller.name,
             request_id=rid,
+            audience=audience,
             semantic_model=bundle.semantic_model,
             connector=connector,
             generator=FixedSQLGenerator(served_sql),
@@ -1099,4 +1113,4 @@ def run_certified_for_caller(
     )
     result.trace.agent = caller.agent
     background.add_task(log_trace, result.trace)
-    return _shaped(result.response, fmt, caller)
+    return _shaped(result.response, fmt, audience)

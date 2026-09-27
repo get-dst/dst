@@ -29,6 +29,54 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.6.0] — 2026-09-27
+
+No schema change.
+
+### Added
+
+- **One line connects an AI.** Every deployment serves `GET /SKILL.md`, a public markdown
+  file generated from the instance: its name, its MCP URL, the setup for Claude, Claude
+  Code, Codex, ChatGPT and Cursor with the key as a placeholder, which of those sign in
+  through OAuth and need no key, and in demo mode the topics with an example question each
+  and the limits the page states. A person pastes
+  `Connect me to <name>: <base>/SKILL.md — my key: <key>` into the AI they use, and it
+  connects itself. The demo page now opens its "Connect your AI" block with that line and
+  one Copy button, without the key before sign-in and with it after; the per-client setup
+  folds under "Or connect by hand". Outside demo mode the file needs `DST_PUBLIC_BASE_URL`
+  and answers 404 with the reason without it.
+
+### Changed
+
+- **A consumer demo's sentence is written for the person asking.** Under
+  `demo.audience: consumer` the envelope had lost its trust fields, but the sentence
+  inside still spoke the system's language: the metric and its definition by name, the
+  declared population quoted whole, "stale after 2 days per this lens", "NULL rows", the
+  date as `(data as of 2026-09-26)`. The composer now writes in a register chosen by the
+  same audience the envelope is cut to: the figures as figures, no metric, column,
+  definition, table, lens or threshold named, the scope said once in one plain clause
+  derived from the declared population and from nothing else, and a decline in plain
+  words. The date reads as a person writes it ("as of 26 September"), and a truncation,
+  a cut-off answer or stale data are said in the same words. Everything checked stays
+  checked: the same reconcile and numeric gate grade both registers, the scope is still
+  disclosed, and the engineer's answer is unchanged. The declared population now also
+  grounds the numeric gate on every serve, so a scope that names a year ("since September
+  2025") is no longer withheld as an invented figure.
+
+### Fixed
+
+- **A filter the question states is never dropped for the table's sake.** A typed
+  question naming a stored value — "which carry heroes have the highest win rate on the
+  current patch" — could land on an entity with no column for that value (a per-patch
+  table with no position), and was answered over every hero with a note that no
+  position filter applied, while a sibling entity held the column. When the entity a
+  question types onto has no column for a value the question names, the resolver now
+  decides the metric (or, for a listing, the entity) again among the entities of the
+  lens that hold it, and the value binds the filter there; when none of them carries a
+  figure for the question, or no pick is confident, it asks which entity should answer,
+  naming both, instead of serving with the filter gone. Two entities declaring a metric
+  of the same name no longer see each other's figure offered as their own.
+
 ## [0.5.13] — 2026-09-27
 
 No schema change.
