@@ -65,6 +65,7 @@ nav:
       - Environments and CI: guides/environments-and-ci.md
   - Deploying: deployment.md
   - Security and data flow: security.md
+  - Privacy: privacy.md
   - Upgrading: upgrading.md
   - Reference:
       - CLI: reference/cli.md

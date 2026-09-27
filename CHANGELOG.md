@@ -29,6 +29,49 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.5.11] — 2026-09-27
+
+No schema change.
+
+No schema change.
+
+### Fixed
+
+- **Sign-in returns to the page it started on.** After signing in through Google, GitHub
+  or Discord, a visitor to a public demo's `/demo` page landed on the site root, which is
+  the dashboard login, instead of back on `/demo` with their key. The MCP consent page
+  had the same fault and lost the pending OAuth request with it. Both pages now pass
+  Clerk's `forceRedirectUrl` and `signUpForceRedirectUrl` set to the page's own URL,
+  query string included.
+
+### Added
+
+- **A `demo:` section in `dst.yaml`** for what a public demo's page shows besides what dst
+  derives itself: `tagline` (the sentence under the instance name), `example` (an example
+  conversation as a list of `user`, `tool`, `assistant` and `receipt` turns), `privacy_url`
+  and `log_days`. `dst plan` and `dst apply` validate it with the rest of the file, so an
+  unknown key or an empty turn is an error naming the key. Apply stores it per org, and a
+  pushed `dst.yaml` without the section clears it. Apply warns when the org it lands in
+  is not the deployment's demo org, since nothing there would show it.
+- **`demo.audience: consumer`** cuts a demo caller's answers to what a consumer reads:
+  the prose with its scope and freshness lines, a clarification or a refusal's reason,
+  and the receipt. `sql`, `data`, `citations`, `verification` and `resolution` are
+  omitted on every door, REST, the OpenAI-compatible endpoint and MCP alike. The request
+  log keeps the whole answer, so `dst observe` and the dashboard show it as before.
+  The default, `engineer`, is the answer as it always was, and so is every caller
+  outside the demo group.
+
+### Changed
+
+- **The public demo page is shorter and leads with connecting an AI.** Before sign-in it
+  shows the instance name, one sentence, the sign-in and one line per lens with an
+  example question. After sign-in it shows setup for Claude, Claude Code, Codex, ChatGPT
+  and Cursor first, each with a copy button and a link to that client's docs, then the
+  key, then curl and OpenAI-compatible snippets under "Other ways in", then the example
+  conversation, folded. The page no longer scrolls sideways at phone width. `POST
+  /auth/demo-key` returns the setup snippets as `connect` and `other`; its existing
+  fields are unchanged.
+
 ## [0.5.10] — 2026-09-27
 
 No schema change.

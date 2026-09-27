@@ -59,6 +59,36 @@ docker compose exec app dst demo --org-id <org id> \
 granted to group `demo`, and bounds each caller to 50 answers a day. Re-run it to change
 any of that. Open `https://<DEMO_DOMAIN>/demo`: sign in, get a key, ask.
 
+## The page
+
+`/demo` is written for the people the demo serves. Before sign-in it shows the instance
+name, one sentence, the sign-in, and one line per lens (its display name and the first
+common question its entities declare). After sign-in it shows how to connect Claude,
+Claude Code, Codex, ChatGPT and Cursor, each with a copy button and a link to that
+client's own docs, then the key, then curl and OpenAI-compatible snippets under "Other
+ways in". Sign-in, including a Google, GitHub or Discord round trip, returns to `/demo`.
+
+The rest comes from a `demo:` section in the project's `dst.yaml`, applied with
+`dst apply` like everything else ([reference](../../docs/reference/configuration.md#demo-page-demo)):
+the sentence under the name, an example conversation, the privacy notice link, and how
+long the log is kept. Apply it to the demo org with the admin token bootstrap printed:
+
+```yaml
+demo:
+  tagline: Ask about the shop's customers and orders from any AI you use.
+  privacy_url: https://www.example.com/privacy/
+  log_days: 30
+  example:
+    - user: Who are our best customers?
+    - tool: asked dst — top customers by lifetime value
+    - assistant: <paste the answer the demo actually gave>
+```
+
+`log_days` states what the prune-log cron below does; keep the two in step. For a demo
+whose visitors are not engineers, add `audience: consumer`: their AI then receives the
+answer without its SQL, rows, citations and checks, and the request log still keeps
+them for you.
+
 The three doors a visitor gets, all governed by the same lens allow-list and budgets:
 
 - `POST /v1/lenses/customer_value/query` with the key as a bearer

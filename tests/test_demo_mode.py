@@ -18,11 +18,14 @@ from sqlalchemy import create_engine, text
 from services.api.oauth import _resolve_grant_identity
 from services.auth import clerk, demo
 from services.config import settings
+from services.contracts.fakes import ScriptedLLM, fake_llm_providers
 from services.contracts.lens_config import AccessRule
 from services.db.session import org_session
 from services.governance import ratelimit
 from services.lenses import store
 from services.lenses.demo import LENS_NAME, jaffle_customer_value_bundle
+from services.project import demo_page
+from services.project.schema import DemoConfig
 
 
 def _reachable(url: str) -> bool:
@@ -133,6 +136,13 @@ def test_mint_issues_one_live_key_per_person(client: TestClient, demo_org: uuid.
     # each lens comes with a question its own semantic layer declares, not a fixed one
     assert set(body["examples"]) == {LENS_NAME}
     assert body["expires_in_days"] == settings.demo_key_days
+    # each AI client's setup, around the key the mint just issued
+    connect = {c["id"]: c for c in body["connect"]}
+    assert list(connect) == ["claude", "claude-code", "codex", "chatgpt", "cursor"]
+    assert all(f"{body['base_url']}/mcp" in c["code"] for c in connect.values())
+    assert all(body["key"] in connect[c]["code"] for c in ("claude-code", "codex", "cursor"))
+    assert [o["id"] for o in body["other"]] == ["curl", "openai"]
+    assert all(body["key"] in o["code"] for o in body["other"])
     # The minted key is a real caller key on the data plane.
     assert client.get(f"/v1/lenses/{LENS_NAME}", headers=_auth(body["key"])).status_code == 200
     # A re-mint retires the previous key.
@@ -213,6 +223,34 @@ def test_every_page_a_person_sees_carries_the_instance_name(
     assert "<title>dst · demo</title>" in page and "answers by dst" not in page
 
 
+def test_sign_in_returns_to_the_page_it_started_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a Google/GitHub/Discord round trip Clerk lands the person on the
+    mount's redirect props — or, without them, on the instance default, which is
+    the site root (the dashboard login), key and consent both lost. Every mount on
+    both pages passes the page's own URL, query string kept: on the consent page
+    the query is the pending OAuth request."""
+    import re
+
+    from services.api.oauth import _clerk_consent_html
+
+    monkeypatch.setattr(settings, "demo_org_id", str(uuid.uuid4()))
+    monkeypatch.setattr(settings, "clerk_publishable_key", "pk_test_x")
+    monkeypatch.setattr(clerk, "issuer", lambda: "https://ex.clerk.accounts.dev")
+    pages = {
+        "demo": client.get("/demo").text,
+        "consent": _clerk_consent_html({"client_id": "c", "state": "s"}, "pk", "host", "Claude"),
+    }
+    for which, page in pages.items():
+        mounts = re.findall(r"Clerk\.mountSignIn\(([^)]*)\)", page)
+        assert mounts, which
+        for props in mounts:
+            assert "forceRedirectUrl: here" in props, which
+            assert "signUpForceRedirectUrl: here" in props, which
+        assert "const here = location.origin + location.pathname + location.search;" in page
+
+
 def test_a_demo_oauth_token_lives_as_long_as_a_demo_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """There is no refresh token, so a demo client's grant is the token's whole
     life: the week the demo promises, then the person reconnects. Outside demo
@@ -234,14 +272,274 @@ def test_the_page_says_what_the_demo_is_about_before_sign_in(
     client: TestClient, demo_org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A visitor sees what they will be able to ask before signing in: each lens a
-    demo caller may use, by its display name and description, with an example
-    question its own semantic layer declares — and the name to give the connector."""
+    demo caller may use, by its display name, with an example question its own
+    semantic layer declares. With no `demo:` section applied the page carries
+    dst's own sentence and no example."""
+    from services.api.demo import TAGLINE, _example
+
     monkeypatch.setenv("DST_INSTANCE_NAME", "roshan")
     monkeypatch.setattr(settings, "clerk_publishable_key", "pk_test_x")
     monkeypatch.setattr(clerk, "issuer", lambda: "https://ex.clerk.accounts.dev")
-    cfg = jaffle_customer_value_bundle().config  # the lens the fixture published
+    bundle = jaffle_customer_value_bundle()  # the lens the fixture published
+    cfg = bundle.config
     page = client.get("/demo").text
-    assert "<h1>roshan</h1>" in page
+    assert '<h1 class="name">roshan</h1>' in page
+    assert TAGLINE in page
     assert "What you can ask" in page
-    assert f"<b>{cfg.display_name or cfg.name}</b>" in page
-    assert "custom connector named <b>roshan</b>" in page
+    assert f'<span class="ln">{cfg.display_name or cfg.name}</span>' in page
+    assert f'<span class="q">{_example(bundle) or ""}</span>' in page
+    assert 'class="chat"' not in page
+
+
+@pytest.fixture
+def project_demo_org(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[uuid.UUID, dict[str, str]]]:
+    """Demo mode on a fresh org that `dst apply` manages (no lens outside the
+    project, so an apply has nothing of its own to recompile), with an admin token."""
+    from services.auth.tokens import hash_token, new_admin_token
+
+    raw = new_admin_token()
+    with _admin.begin() as c:
+        org = c.execute(
+            text("INSERT INTO org (name) VALUES ('DemoProject') RETURNING id")
+        ).scalar_one()
+        c.execute(
+            text("INSERT INTO admin_token (org_id, token_hash, label) VALUES (:o, :h, 't')"),
+            {"o": org, "h": hash_token(raw)},
+        )
+    monkeypatch.setattr(settings, "demo_org_id", str(org))
+    monkeypatch.setattr(settings, "clerk_publishable_key", "pk_test_x")
+    monkeypatch.setattr(clerk, "issuer", lambda: "https://ex.clerk.accounts.dev")
+    try:
+        yield uuid.UUID(str(org)), _auth(raw)
+    finally:
+        with _admin.begin() as c:
+            c.execute(text("DELETE FROM org WHERE id = :o"), {"o": org})
+
+
+_DEMO_YAML = """name: demo
+demo:
+  tagline: Ask about the shop from any AI you use.
+  example:
+    - user: Who are our best customers?
+    - tool: asked roshan — top customers by lifetime value
+    - assistant: Three customers account for a fifth of revenue.
+    - receipt:
+        zeta: last
+        alpha: first
+"""
+
+
+@needs_db
+def test_the_demo_section_rides_apply_and_shows_on_the_page(
+    client: TestClient, project_demo_org: tuple[uuid.UUID, dict[str, str]]
+) -> None:
+    """dst.yaml's `demo:` lands through `dst apply` (files win: absent from a
+    pushed dst.yaml, it clears), and /demo renders exactly what was applied.
+    A malformed section is rejected at plan and aborts apply."""
+    _org, admin = project_demo_org
+
+    def apply(yaml_text: str) -> list[dict[str, object]]:
+        r = client.post(
+            "/mgmt/project/apply", json={"files": {"dst.yaml": yaml_text}}, headers=admin
+        )
+        assert r.status_code == 200, r.text
+        return list(r.json())
+
+    rows = [r for r in apply(_DEMO_YAML) if r.get("scope") == "demo"]
+    assert rows == [
+        {
+            "scope": "demo",
+            "applied": ["demo page: tagline, example of 4 turn(s)"],
+            "warnings": [],  # this org IS the demo org: nothing stored unseen
+            "errors": [],
+        }
+    ]
+    page = client.get("/demo").text
+    assert "Ask about the shop from any AI you use." in page
+    assert '<div class="u">Who are our best customers?</div>' in page
+    # jsonb reorders object keys; the receipt keeps the order it was written in
+    assert page.index("<b>zeta</b>") < page.index("<b>alpha</b>")
+    # unchanged → silent
+    assert not [r for r in apply(_DEMO_YAML) if r.get("scope") == "demo"]
+
+    bad = _DEMO_YAML.replace("- user:", "- usr:")
+    plan = client.post("/mgmt/project/plan", json={"files": {"dst.yaml": bad}}, headers=admin)
+    assert any(
+        r.get("scope") == "project" and "unknown key `usr`" in str(r.get("error"))
+        for r in plan.json()
+    )
+    assert apply(bad)[-1]["action"] == "aborted"
+    assert "Who are our best customers?" in client.get("/demo").text  # prior state stands
+
+    cleared = [r for r in apply("name: demo\n") if r.get("scope") == "demo"]
+    assert cleared and cleared[0]["applied"] == ["demo page: cleared"]
+    assert 'class="chat"' not in client.get("/demo").text
+
+
+@needs_db
+def test_a_demo_section_off_the_demo_org_says_it_is_not_shown(demo_org: uuid.UUID) -> None:
+    """Stored either way, but a section this server will never render says so."""
+    from services.project import demo_page
+    from services.project.schema import DemoConfig
+
+    with org_session(demo_org) as session:
+        applied, warnings = demo_page.apply(
+            session, DemoConfig.model_validate({"tagline": "x"}), org_id=uuid.uuid4()
+        )
+    assert applied == ["demo page: tagline"]
+    assert warnings and "DST_DEMO_ORG_ID" in warnings[0]
+
+
+# ── the audience knob: a consumer demo's answers carry no working ────────────
+
+
+def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the pipeline's outcome to an answer with every block a consumer must
+    not see: SQL, rows, citations, checks and the ledger (whose inferred slots
+    are SQL text). The shaping under test starts where run_query returns."""
+    from services.api import query as query_api
+    from services.contracts.resolution import Resolution, Slot
+    from services.contracts.response import Citation, DataPayload, QueryResponse
+    from services.contracts.trace import TraceLog
+    from services.contracts.verification import VerificationCheck, VerificationReport
+    from services.runtime.pipeline import PipelineResult
+
+    def fake_run_query(**kw: object) -> PipelineResult:
+        rid = f"req-{uuid.uuid4()}"
+        return PipelineResult(
+            response=QueryResponse(
+                lens=str(kw["lens_name"]),
+                answer="There are 19 repeat customers. Scope: all customers; data as of today.",
+                sql="SELECT 42",
+                data=DataPayload(columns=["n"], rows=[[42]], row_count=1),
+                citations=[Citation(type="sql", ref="SELECT 42")],
+                confidence="verified",
+                verification=VerificationReport(
+                    grade="verified",
+                    checks=[VerificationCheck(name="guard", status="pass", reason="SELECT 42")],
+                ),
+                resolution=Resolution(
+                    method="construction",
+                    slots=[Slot(kind="metric", name="COUNT(SELECT 42)", source="inferred")],
+                    tag="inferred",
+                ),
+                request_id=rid,
+            ),
+            trace=TraceLog(
+                request_id=rid,
+                org_id=str(kw["org_id"]),
+                lens=str(kw["lens_name"]),
+                caller=str(kw["caller"]),
+                question=str(kw["question"]),
+                sql="SELECT 42",
+                valid=True,
+                row_count=1,
+                answer="There are 19 repeat customers.",
+                confidence="verified",
+                status="ok",
+            ),
+        )
+
+    monkeypatch.setattr(query_api, "run_query", fake_run_query)
+    # A provider must resolve before the pipeline is reached; scripted, never dialled.
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider", lambda _k, **_: ScriptedLLM([])
+    )
+
+
+def _set_audience(org: uuid.UUID, audience: str) -> None:
+    with org_session(org) as session:
+        demo_page.apply(session, DemoConfig(audience=audience), org_id=org)  # type: ignore[arg-type]
+
+
+@needs_db
+def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
+    client: TestClient, demo_org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`demo.audience: consumer`: a demo caller's answer, on every door, is the
+    prose with its scope and freshness and nothing that carries SQL — while the
+    request log keeps the whole thing for the operator. `engineer` (the default)
+    is the answer as it always was."""
+    import asyncio
+    import json
+
+    import httpx
+
+    from services.mcp import server as srv
+
+    _fake_pipeline(monkeypatch)
+    _set_audience(demo_org, "consumer")
+    q = {"q": "how many repeat customers?"}
+    r = client.post(f"/v1/lenses/{LENS_NAME}/query", json=q, headers=_auth("clerk-ok"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["answer"].startswith("There are 19 repeat customers.")
+    assert body["status"] == "ok" and body["confidence"] == "verified"
+    assert body["sql"] is None and body["data"] is None and body["citations"] == []
+    assert body["verification"] is None and body["resolution"] is None
+    assert "SELECT 42" not in r.text
+    with _admin.connect() as c:
+        logged = c.execute(
+            text("SELECT sql FROM request_log WHERE request_id = :r"), {"r": body["request_id"]}
+        ).scalar_one()
+    assert logged == "SELECT 42"
+
+    # the OpenAI-compatible door maps the same shaped response
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": f"dst/{LENS_NAME}", "messages": [{"role": "user", "content": q["q"]}]},
+        headers=_auth("clerk-ok"),
+    )
+    assert r.status_code == 200 and "19 repeat customers" in r.text
+    assert "SELECT 42" not in r.text
+
+    # the MCP tool relays the API body: with a minted demo key, through the real app
+    key = client.post("/auth/demo-key", headers=_auth("clerk-ok")).json()["key"]
+
+    def forward(request: httpx.Request) -> httpx.Response:
+        proxied = client.request(
+            request.method,
+            request.url.path,
+            content=request.content,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        return httpx.Response(proxied.status_code, json=proxied.json())
+
+    monkeypatch.setattr(srv, "DST_API_KEY", key)
+    monkeypatch.setattr(
+        srv,
+        "_client",
+        lambda key, agent="mcp": httpx.AsyncClient(
+            transport=httpx.MockTransport(forward), base_url="http://dst.test"
+        ),
+    )
+    out = asyncio.run(srv.query(LENS_NAME, q["q"], ctx=None))
+    assert out["ok"] is True and "19 repeat customers" in out["answer"]
+    assert "SELECT 42" not in json.dumps(out)
+
+    _set_audience(demo_org, "engineer")
+    body = client.post(f"/v1/lenses/{LENS_NAME}/query", json=q, headers=_auth("clerk-ok")).json()
+    assert body["sql"] == "SELECT 42" and body["data"]["rows"] == [[42]]
+    assert body["citations"] == [{"type": "sql", "ref": "SELECT 42"}]
+
+
+@needs_db
+def test_the_consumer_view_is_only_for_demo_callers_in_the_demo_org(
+    demo_org: uuid.UUID,
+) -> None:
+    from services.governance.credentials import CallerIdentity
+
+    _set_audience(demo_org, "consumer")
+    visitor = CallerIdentity(org_id=demo_org, name="v", is_admin=False, groups=["demo"])
+    assert demo_page.consumer_view(visitor)
+    # a caller outside the demo group — a service key in the same org — sees everything
+    assert not demo_page.consumer_view(
+        CallerIdentity(org_id=demo_org, name="svc", is_admin=False, groups=[])
+    )
+    # a demo-group caller in some other org: not this deployment's demo
+    assert not demo_page.consumer_view(
+        CallerIdentity(org_id=uuid.uuid4(), name="v", is_admin=False, groups=["demo"])
+    )
+    _set_audience(demo_org, "engineer")
+    assert not demo_page.consumer_view(visitor)

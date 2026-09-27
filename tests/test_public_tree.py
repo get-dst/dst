@@ -30,7 +30,7 @@ TOP_LEVEL = {
 DOCS = {
     "865eaecbc35c0ab54b57dd8393d12684.txt", "assets", "blog", "concepts",
     "deployment.md", "faq.md", "google538d044e7b29d27c.html", "guides", "index.md",
-    "llms.txt", "on-screen.md", "quickstart.md", "reference", "robots.txt",
+    "llms.txt", "on-screen.md", "privacy.md", "quickstart.md", "reference", "robots.txt",
     "security.md", "stylesheets", "upgrading.md",
 }  # fmt: skip
 

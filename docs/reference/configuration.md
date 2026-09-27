@@ -27,6 +27,7 @@ Top-level keys (`services/project/schema.py`):
 | `default_provider` | which entry bare model refs fall back to (else the first declared) |
 | `ai_pricing` | per-model prices, `{"model": [usd_per_mtok_in, usd_per_mtok_out]}`. **This is the authority.** dst ships a dated fallback list (`AI_PRICES_AS_OF` in `services/observability/cost.py`) so a fresh install traces something, but a released package cannot track vendor pricing, your negotiated rate, or a model newer than it — declare the models you actually run. A model absent from both traces as unpriced, and its whole trace's cost is `NULL`, never a default |
 | `connections` | warehouse declarations, keyed by name |
+| `demo` | what a public demo's `/demo` page shows besides what dst derives itself; see [Demo page](#demo-page-demo) |
 
 ### Provider fields (`providers.<name>`)
 
@@ -177,6 +178,43 @@ providers:
 Every YAML `dst init` scaffolds ends with a commented reference block rendered from
 these schemas (`services/project/template.py`): a new config field can never silently
 miss the docs. Uncomment fields there instead of guessing names.
+
+### Demo page (`demo`)
+
+A deployment in [public demo mode](api.md#public-demo-mode) serves a sign-in
+page at `/demo`. The page lists what visitors can ask from the published lenses' own
+display names and common questions; the `demo:` section adds what only the operator
+knows. Every key is optional, and an absent key renders nothing.
+
+| Key | What |
+|---|---|
+| `tagline` | the one sentence under the instance name. Without it the page says "Ask your questions from Claude, ChatGPT or any AI you use." |
+| `example` | an example conversation, shown folded after sign-in: a list of turns, each exactly one of `user` (what the person asks), `tool` (the tool-call line, conventionally `asked <instance> — <question>`), `assistant` (the reply) or `receipt` (lines under a reply, `label: value`, shown in the order written) |
+| `privacy_url` | the operator's privacy notice, linked in the fine print; an `http(s)` URL |
+| `log_days` | how long questions stay in the request log, stated in the fine print. dst does not prune on its own; schedule `dst prune-log --keep-days <n>` to make it true |
+| `audience` | `engineer` (default) or `consumer`. Under `consumer`, a demo caller's answer on every door (REST, the OpenAI-compatible endpoint, MCP) carries the prose with its scope and freshness lines, a clarification or a refusal's reason, and the receipt; `sql`, `data`, `citations`, `verification` and `resolution` are omitted. The request log keeps all of it, so `dst observe` and the dashboard are unchanged. Other callers in the org, and every other deployment, get the whole answer |
+
+```yaml
+demo:
+  tagline: Ask about a year of pro Dota 2 from Claude, ChatGPT or any AI you use.
+  privacy_url: https://www.example.com/privacy/
+  log_days: 30
+  example:
+    - user: I want to learn a carry this patch. What's strong?
+    - tool: asked roshan — which carry heroes win their lane most often on the current patch?
+    - assistant: >-
+        Shadow Fiend stands out: pro carries on him win their lane 59.1% of the time
+        this patch, ahead of Magnus and Drow Ranger.
+    - receipt:
+        lane win: 400 gold ahead at minute 10
+        scope: premium and professional leagues
+```
+
+`dst plan` and `dst apply` validate the section with the rest of `dst.yaml`: an unknown
+key, an empty turn, or a turn with two kinds is an error that names the key. Apply
+stores it per org, and a pushed `dst.yaml` without the section clears it. Only a
+deployment whose `DST_DEMO_ORG_ID` is the org being applied shows it; anywhere else
+apply says so in a warning.
 
 ## Entity rails (`semantic/entities/<name>.yaml`)
 

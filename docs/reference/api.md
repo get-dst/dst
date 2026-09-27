@@ -200,8 +200,11 @@ sign-in never reaches `/mgmt` (403, admin is a `dstadm_` token).
 
 | Route | Description |
 |---|---|
-| `GET /demo` | Server-rendered sign-in page: boots Clerk, mints the visitor's key, shows the three ways in |
-| `POST /auth/demo-key` | Bearer = the Clerk session token → `{caller, key, expires_in_days, lenses, base_url}`; one live `dst_` key per person (a re-mint revokes the last), budgeted per source address |
+| `GET /demo` | Server-rendered sign-in page: boots Clerk, mints the visitor's key, then shows how to connect Claude, Claude Code, Codex, ChatGPT and Cursor, the key, and curl and OpenAI-compatible snippets. Its tagline, example conversation and privacy link come from `dst.yaml`'s [`demo:` section](configuration.md#demo-page-demo) |
+| `POST /auth/demo-key` | Bearer = the Clerk session token → `{caller, key, expires_in_days, lenses, examples, base_url, connect, other}`, where `connect` and `other` are the page's setup snippets (`{id, label, code, …}`); one live `dst_` key per person (a re-mint revokes the last), budgeted per source address |
+
+Sign-in on both `/demo` and the MCP consent page returns to the page it started on, query
+string included, after an OAuth provider's redirect.
 
 ## Control plane (`/mgmt`)
 

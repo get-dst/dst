@@ -10,8 +10,9 @@ POST /mgmt/project/plan   → terraform-style dry run: per-asset and per-lens
      lenses whose compiled provenance the push invalidates recompile on apply —
      plus server-only objects: DB lenses/connections the push doesn't carry
      (adopt via export or leave for their owner; absence never deletes).
-POST /mgmt/project/apply  → files win, blue/green: connections → shared assets
-     → lenses (select compiled against the DB post-upsert) → recompile pass
+POST /mgmt/project/apply  → files win, blue/green: connections (with dst.yaml's
+     `demo:` page content) → shared assets → lenses (select compiled
+     against the DB post-upsert) → recompile pass
      over every stale published lens, including lenses absent from the push —
      ALL staged in one transaction. Any error (probe failure, malformed file,
      validation, eval-gate block, certified-answer gate, failed recompile)
@@ -43,6 +44,7 @@ from services.evals import store as eval_store
 from services.lenses import connection_store, store
 from services.lenses.repo import render_lens_repo
 from services.project import apply as apply_engine
+from services.project import demo_page
 from services.project import plan as plan_engine
 from services.project.compile import (
     relationship_pairs,
@@ -624,6 +626,12 @@ def _apply(
                 "capabilities": capabilities,
             }
         )
+        # The public demo page's content: set, cleared, or silent when unchanged.
+        demo_applied, demo_warnings = demo_page.apply(session, project.demo, org_id=org_id)
+        if demo_applied:
+            out.append(
+                {"scope": "demo", "applied": demo_applied, "warnings": demo_warnings, "errors": []}
+            )
     # Probe artifacts land after connections (the same push may declare theirs)
     # and before lenses (whose missing-table check reads the store these fill).
     profile_applied, profile_warnings = apply_engine.apply_profiles(session, body.files)

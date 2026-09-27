@@ -352,9 +352,22 @@ async function boot() {
     return;
   }
   window.Clerk.addListener((res) => { if (res.user) grant(); });
-  window.Clerk.mountSignIn(document.getElementById('signin'));
+  document.getElementById('status').remove();
+  mountSignIn(document.getElementById('signin'));
 }
+__MOUNT_SIGNIN_FN__
 </script></body></html>"""
+
+# Every page that mounts Clerk's sign-in sends the person back to itself: the exact
+# URL, query string kept (on the consent page the query IS the pending OAuth
+# request), Clerk's own `#/sso-callback` fragment dropped. Without the redirect
+# props Clerk falls back to the instance's default after-sign-in URL once an
+# OAuth provider (Google, GitHub, …) redirects back — the site root, which is the
+# dashboard login, not the page the person was signing in on.
+CLERK_MOUNT_SIGNIN = """function mountSignIn(node) {
+  const here = location.origin + location.pathname + location.search;
+  window.Clerk.mountSignIn(node, {forceRedirectUrl: here, signUpForceRedirectUrl: here});
+}"""
 
 
 # The Clerk sign-in page restricts framing and nothing else, on purpose.
@@ -383,6 +396,7 @@ def _clerk_consent_html(
         .replace("__HOST__", html.escape(frontend_host, quote=True))
         .replace("__CLIENT__", html.escape(client_name or "an MCP client"))
         .replace("__NAME__", html.escape(instance_name()))
+        .replace("__MOUNT_SIGNIN_FN__", CLERK_MOUNT_SIGNIN)
     )
 
 

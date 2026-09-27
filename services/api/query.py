@@ -37,6 +37,7 @@ from services.lenses.connections import resolve_connector
 from services.lenses.describe import LensDescription, describe_model
 from services.lenses.store import LensBundle, list_published_for_org, load_published_lens
 from services.observability.logger import log_trace
+from services.project import demo_page
 from services.reviews import service as reviews_service
 from services.reviews import store as reviews_store
 from services.runtime import assembly
@@ -584,14 +585,34 @@ def _fail_on_warehouse_timeout(result: PipelineResult, caller: CallerIdentity) -
     )
 
 
-def _shaped(response: QueryResponse, fmt: AnswerFormat) -> QueryResponse:
-    """Apply the response-side half of `format`.
+# What a consumer-audience demo caller never receives: everything that carries
+# SQL text or the working behind the figure. The prose, its scope and freshness
+# lines, the clarification, the refusal reason and the receipt (hashes, no SQL)
+# stay. The trace keeps all of it for the operator.
+_CONSUMER_DROPS: dict[str, object] = {
+    "sql": None,
+    "data": None,
+    "citations": [],
+    "verification": None,
+    "resolution": None,
+}
+
+
+def _shaped(response: QueryResponse, fmt: AnswerFormat, caller: CallerIdentity) -> QueryResponse:
+    """Apply the response-side half of `format`, and the demo's audience.
 
     Rows-only is handled upstream (the composer is simply never built, which is where
-    the latency goes); `prose` only has to drop the payload the caller declined. The
-    TRACE keeps the full result either way — observability is not the caller's choice.
+    the latency goes); `prose` only has to drop the payload the caller declined. A
+    public demo serving consumers (`demo.audience: consumer` in its dst.yaml) drops
+    the SQL, rows, citations and checks from a demo caller's answer — the people it
+    serves read the sentence, not the working. The TRACE keeps the full result either
+    way — observability is neither the caller's nor the page's choice.
     """
-    return response.model_copy(update={"data": None}) if fmt == "prose" else response
+    if fmt == "prose":
+        response = response.model_copy(update={"data": None})
+    if demo_page.consumer_view(caller):
+        response = response.model_copy(update=dict(_CONSUMER_DROPS))
+    return response
 
 
 def run_lens_query(
@@ -736,7 +757,7 @@ def run_lens_query(
     # The lens can auto-flag its own low-confidence answers for review (origin=ai).
     if _auto_review_flags(bundle.config.auto_review, result.response):
         background.add_task(_auto_review, caller.org_id, result.response.request_id)
-    return _shaped(result.response, fmt)
+    return _shaped(result.response, fmt, caller)
 
 
 @router.post("/lenses/{name}/query", response_model=QueryResponse)
@@ -897,7 +918,7 @@ def run_lens_metrics(
     )
     result.trace.agent = caller.agent
     background.add_task(log_trace, result.trace)
-    return _shaped(result.response, fmt)
+    return _shaped(result.response, fmt, caller)
 
 
 @router.post("/lenses/{name}/metrics", response_model=QueryResponse)
@@ -1084,4 +1105,4 @@ def run_certified_for_caller(
     )
     result.trace.agent = caller.agent
     background.add_task(log_trace, result.trace)
-    return _shaped(result.response, fmt)
+    return _shaped(result.response, fmt, caller)
