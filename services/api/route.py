@@ -38,7 +38,7 @@ from services.api.query import (
     run_lens_query,
 )
 from services.auth.deps import get_caller
-from services.contracts.response import QueryResponse
+from services.contracts.response import ConsumerAnswer, QueryResponse
 from services.db import embedding_meta
 from services.db.session import org_session
 from services.governance.credentials import CallerIdentity
@@ -223,7 +223,8 @@ class RoutedAnswer(BaseModel):
 
     covered: bool = True
     routed_to: RouteProvenance
-    answer: QueryResponse
+    # The ConsumerAnswer when the demo's audience is consumer (services/api/query.py).
+    answer: QueryResponse | ConsumerAnswer
 
 
 class UncoveredEnvelope(BaseModel):

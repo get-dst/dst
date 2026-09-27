@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict
 
 from services.api.query import run_lens_query
 from services.auth.deps import get_caller
-from services.contracts.response import QueryResponse
+from services.contracts.response import ConsumerAnswer, QueryResponse
 from services.governance.credentials import CallerIdentity
 from services.governance.policy import authorize
 from services.lenses.store import list_published_for_org
@@ -101,7 +101,11 @@ def _last_user_question(messages: list[ChatMessage]) -> str:
     raise HTTPException(status_code=400, detail="no user message with content to answer")
 
 
-def _dst_extras(resp: QueryResponse) -> dict[str, Any]:
+def _dst_extras(resp: QueryResponse | ConsumerAnswer) -> dict[str, Any]:
+    if isinstance(resp, ConsumerAnswer):
+        # The consumer view, minus the sentence already in the message content:
+        # the same fields on this door as on every other, and nothing else.
+        return resp.model_dump(mode="json", exclude={"answer"})
     return {
         "lens": resp.lens,
         # Whether SQL ran at all. The allow-list is hand-written, so a caller on
@@ -122,7 +126,7 @@ def _dst_extras(resp: QueryResponse) -> dict[str, Any]:
     }
 
 
-def _completion(model: str, resp: QueryResponse, created: int) -> dict[str, Any]:
+def _completion(model: str, resp: QueryResponse | ConsumerAnswer, created: int) -> dict[str, Any]:
     return {
         "id": resp.request_id,
         "object": "chat.completion",
@@ -140,7 +144,7 @@ def _completion(model: str, resp: QueryResponse, created: int) -> dict[str, Any]
     }
 
 
-def _stream(model: str, resp: QueryResponse, created: int) -> StreamingResponse:
+def _stream(model: str, resp: QueryResponse | ConsumerAnswer, created: int) -> StreamingResponse:
     """Emit a single content delta then [DONE] — a valid SSE stream most clients accept.
 
     The pipeline composes the whole answer synchronously, so there's nothing to stream

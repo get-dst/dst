@@ -394,41 +394,78 @@ def test_a_demo_section_off_the_demo_org_says_it_is_not_shown(demo_org: uuid.UUI
 
 
 def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the pipeline's outcome to an answer with every block a consumer must
-    not see: SQL, rows, citations, checks and the ledger (whose inferred slots
-    are SQL text). The shaping under test starts where run_query returns."""
+    """Pin the pipeline's outcome to an answer carrying every block a consumer
+    must not see: the working (SQL, rows, citations, checks, the ledger whose
+    inferred slots are SQL text) and the trust apparatus meant for the operator
+    (grade, certification and its provenance, trust summary, degraded lines,
+    receipt, composition). The shaping under test starts where run_query returns."""
     from services.api import query as query_api
     from services.contracts.resolution import Resolution, Slot
-    from services.contracts.response import Citation, DataPayload, QueryResponse
+    from services.contracts.response import (
+        CertifiedProvenance,
+        Citation,
+        DataPayload,
+        QueryResponse,
+        Receipt,
+    )
     from services.contracts.trace import TraceLog
     from services.contracts.verification import VerificationCheck, VerificationReport
     from services.runtime.pipeline import PipelineResult
 
+    ledger = Resolution(
+        method="construction",
+        slots=[Slot(kind="metric", name="COUNT(SELECT 42)", source="inferred")],
+        tag="inferred",
+    )
+
     def fake_run_query(**kw: object) -> PipelineResult:
         rid = f"req-{uuid.uuid4()}"
+        lens = str(kw["lens_name"])
         return PipelineResult(
             response=QueryResponse(
-                lens=str(kw["lens_name"]),
+                lens=lens,
                 answer="There are 19 repeat customers. Scope: all customers; data as of today.",
                 sql="SELECT 42",
                 data=DataPayload(columns=["n"], rows=[[42]], row_count=1),
+                definition_used="repeat customer: two or more orders",
                 citations=[Citation(type="sql", ref="SELECT 42")],
                 confidence="verified",
                 verification=VerificationReport(
                     grade="verified",
                     checks=[VerificationCheck(name="guard", status="pass", reason="SELECT 42")],
                 ),
-                resolution=Resolution(
-                    method="construction",
-                    slots=[Slot(kind="metric", name="COUNT(SELECT 42)", source="inferred")],
-                    tag="inferred",
+                certification="certified",
+                certified_match="exact",
+                certified_provenance=CertifiedProvenance(
+                    cert_id="cert_1", certified_by="apply", certified_at="2026-09-20T00:00:00Z"
                 ),
+                trust_summary="Certified answer — approved by apply on 2026-09-20; served from "
+                "approved SQL, no AI generation. Population: all customers.",
+                data_as_of="2026-09-26",
+                composition="fallback",
+                degraded=[
+                    "UNTYPED: served by raw-SQL generation — the question did not type",
+                    "graded on 6 of 12 checks",
+                ],
+                receipt=Receipt(
+                    request_id=rid,
+                    lens=lens,
+                    served_at="2026-09-27T00:00:00Z",
+                    certification="certified",
+                    cert_id="cert_1",
+                    confidence="verified",
+                    sql_sha256="0" * 64,
+                    data_as_of="2026-09-26",
+                    resolution_tag="inferred",
+                    digest="f" * 64,
+                ),
+                resolution=ledger,
                 request_id=rid,
             ),
             trace=TraceLog(
                 request_id=rid,
                 org_id=str(kw["org_id"]),
-                lens=str(kw["lens_name"]),
+                lens=lens,
                 caller=str(kw["caller"]),
                 question=str(kw["question"]),
                 sql="SELECT 42",
@@ -436,6 +473,8 @@ def _fake_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
                 row_count=1,
                 answer="There are 19 repeat customers.",
                 confidence="verified",
+                resolution=ledger,
+                resolution_tag="inferred",
                 status="ok",
             ),
         )
@@ -453,14 +492,59 @@ def _set_audience(org: uuid.UUID, audience: str) -> None:
         demo_page.apply(session, DemoConfig(audience=audience), org_id=org)  # type: ignore[arg-type]
 
 
+# What a consumer's answer is, on every door: the sentence and what it is, a
+# clarification to answer, when the data is from, whether the rows were capped,
+# and the id the operator can look the request up by. Nothing else, not as a
+# key, a value or a null.
+_CONSUMER_KEYS = {
+    "lens",
+    "status",
+    "answer",
+    "clarification",
+    "data_as_of",
+    "truncated",
+    "request_id",
+}
+
+# The operator's words: the working and the trust apparatus. None may reach a
+# consumer's wire on any door, in a key or in a value.
+_OPERATOR_WORDS = (
+    "SELECT 42",
+    "sql",
+    "citations",
+    "verification",
+    "resolution",
+    "confidence",
+    "verified",
+    "partial",
+    "certif",
+    "Certified answer",
+    "trust_summary",
+    "degraded",
+    "UNTYPED",
+    "graded on",
+    "receipt",
+    "sql_sha256",
+    "definition_used",
+    "composition",
+)
+
+
+def _assert_nothing_of_the_operators(wire: str) -> None:
+    leaked = [word for word in _OPERATOR_WORDS if word in wire]
+    assert not leaked, leaked
+
+
 @needs_db
 def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
     client: TestClient, demo_org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`demo.audience: consumer`: a demo caller's answer, on every door, is the
-    prose with its scope and freshness and nothing that carries SQL — while the
-    request log keeps the whole thing for the operator. `engineer` (the default)
-    is the answer as it always was."""
+    sentence with its status, clarification, freshness date and request id, and
+    not one field of the working or of the trust apparatus (receipt, grade,
+    certification, trust summary, degraded lines, ledger), as a key, a value or a
+    null — while the request log keeps the whole thing for the operator.
+    `engineer` (the default) is the answer as it always was."""
     import asyncio
     import json
 
@@ -474,25 +558,29 @@ def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
     r = client.post(f"/v1/lenses/{LENS_NAME}/query", json=q, headers=_auth("clerk-ok"))
     assert r.status_code == 200, r.text
     body = r.json()
+    assert set(body) == _CONSUMER_KEYS
     assert body["answer"].startswith("There are 19 repeat customers.")
-    assert body["status"] == "ok" and body["confidence"] == "verified"
-    assert body["sql"] is None and body["data"] is None and body["citations"] == []
-    assert body["verification"] is None and body["resolution"] is None
-    assert "SELECT 42" not in r.text
+    assert body["status"] == "ok" and body["data_as_of"] == "2026-09-26"
+    _assert_nothing_of_the_operators(r.text)
     with _admin.connect() as c:
         logged = c.execute(
-            text("SELECT sql FROM request_log WHERE request_id = :r"), {"r": body["request_id"]}
-        ).scalar_one()
-    assert logged == "SELECT 42"
+            text("SELECT sql, resolution, confidence FROM request_log WHERE request_id = :r"),
+            {"r": body["request_id"]},
+        ).one()
+    assert logged.sql == "SELECT 42" and logged.confidence == "verified"
+    assert logged.resolution["tag"] == "inferred"
 
-    # the OpenAI-compatible door maps the same shaped response
+    # the OpenAI-compatible door: the sentence as the message, the same fields in `dst`
     r = client.post(
         "/v1/chat/completions",
         json={"model": f"dst/{LENS_NAME}", "messages": [{"role": "user", "content": q["q"]}]},
         headers=_auth("clerk-ok"),
     )
-    assert r.status_code == 200 and "19 repeat customers" in r.text
-    assert "SELECT 42" not in r.text
+    assert r.status_code == 200, r.text
+    completion = r.json()
+    assert "19 repeat customers" in completion["choices"][0]["message"]["content"]
+    assert set(completion["dst"]) == _CONSUMER_KEYS - {"answer"}
+    _assert_nothing_of_the_operators(r.text)
 
     # the MCP tool relays the API body: with a minted demo key, through the real app
     key = client.post("/auth/demo-key", headers=_auth("clerk-ok")).json()["key"]
@@ -516,12 +604,18 @@ def test_consumer_audience_keeps_the_sentence_and_drops_the_working(
     )
     out = asyncio.run(srv.query(LENS_NAME, q["q"], ctx=None))
     assert out["ok"] is True and "19 repeat customers" in out["answer"]
-    assert "SELECT 42" not in json.dumps(out)
+    assert set(out) == {"ok", *_CONSUMER_KEYS}
+    _assert_nothing_of_the_operators(json.dumps(out))
 
     _set_audience(demo_org, "engineer")
     body = client.post(f"/v1/lenses/{LENS_NAME}/query", json=q, headers=_auth("clerk-ok")).json()
     assert body["sql"] == "SELECT 42" and body["data"]["rows"] == [[42]]
     assert body["citations"] == [{"type": "sql", "ref": "SELECT 42"}]
+    assert body["confidence"] == "verified" and body["certification"] == "certified"
+    assert body["trust_summary"].startswith("Certified answer")
+    assert body["receipt"]["sql_sha256"] == "0" * 64
+    assert any(line.startswith("UNTYPED") for line in body["degraded"])
+    assert body["resolution"]["tag"] == "inferred"
 
 
 @needs_db

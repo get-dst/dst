@@ -29,9 +29,22 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
-## [0.5.11] — 2026-09-27
+## [0.5.12] — 2026-09-27
 
 No schema change.
+
+### Fixed
+
+- **A consumer demo's answers carry no trust fields.** Under `demo.audience: consumer`,
+  a demo caller's answer still carried the receipt, the trust summary, the grade, the
+  certification and its provenance, the degraded lines, `definition_used` and
+  `composition`: the operator's apparatus, which the person asking has no use for and
+  can read as a warning. The answer is now a response type of its own, with the answer
+  text, `status`, `clarification`, `data_as_of`, `truncated` and `request_id` and
+  nothing else, on REST, the OpenAI-compatible endpoint and MCP alike, with no null
+  where a trust field would be. The request log keeps the whole answer as before.
+
+## [0.5.11] — 2026-09-27
 
 No schema change.
 

@@ -108,22 +108,26 @@ class Receipt(BaseModel):
     digest: str | None = None
 
 
+# What a response IS, so a caller never has to read English to find out.
+# Same vocabulary the trace has always carried (contracts/trace.py), minus
+# "deny" — an authorization denial is an HTTP error and never becomes a body:
+#   ok            an answer: SQL ran, `data` and `verification` are populated
+#   refused       the lens DECLINED — the question is not answerable from its
+#                 data and it named the gap. A governed outcome, not a fault;
+#                 refusing beats a low-confidence answer, and this is the
+#                 field that keeps that promise legible.
+#   clarification the lens needs an ambiguous governed term pinned down first
+#   rejected      no in-scope SQL could be formed (the guard, or a parse error)
+#   error         SQL never executed: the warehouse or the provider failed
+# Only "ok" carries an answer.
+AnswerStatus = Literal["ok", "refused", "clarification", "rejected", "error"]
+
+
 class QueryResponse(BaseModel):
     lens: str
-    # What this response IS, so a caller never has to read English to find out.
-    # Same vocabulary the trace has always carried (contracts/trace.py), minus
-    # "deny" — an authorization denial is an HTTP error and never becomes a body:
-    #   ok            an answer: SQL ran, `data` and `verification` are populated
-    #   refused       the lens DECLINED — the question is not answerable from its
-    #                 data and it named the gap. A governed outcome, not a fault;
-    #                 refusing beats a low-confidence answer, and this is the
-    #                 field that keeps that promise legible.
-    #   clarification the lens needs an ambiguous governed term pinned down first
-    #   rejected      no in-scope SQL could be formed (the guard, or a parse error)
-    #   error         SQL never executed: the warehouse or the provider failed
-    # Only "ok" carries an answer. Defaults to "ok" so every existing caller,
-    # and every response built elsewhere, keeps validating unchanged.
-    status: Literal["ok", "refused", "clarification", "rejected", "error"] = "ok"
+    # Defaults to "ok" so every existing caller, and every response built
+    # elsewhere, keeps validating unchanged.
+    status: AnswerStatus = "ok"
     answer: str
     data: DataPayload | None = None
     sql: str | None = None
@@ -190,3 +194,35 @@ class QueryResponse(BaseModel):
     # model summed a column it chose.
     resolution: Resolution | None = None
     request_id: str
+
+
+class ConsumerAnswer(BaseModel):
+    """The answer as the person it serves reads it (`demo.audience: consumer`).
+
+    The sentence, what it is, a clarification to answer, when the data is from,
+    whether the rows were capped — and nothing of the working or the trust
+    apparatus: no SQL, rows, citations, checks, grade, certification, receipt,
+    trust summary, degraded lines or ledger. Those are the operator's, and the
+    trace keeps every one of them. A response type of its own rather than a
+    QueryResponse with holes, so the wire carries no key a consumer has no use
+    for, and no null where a trust field would be."""
+
+    lens: str
+    status: AnswerStatus = "ok"
+    answer: str
+    clarification: ClarificationRequest | None = None
+    data_as_of: str | None = None
+    truncated: TruncationInfo | None = None
+    request_id: str
+
+    @classmethod
+    def of(cls, response: QueryResponse) -> ConsumerAnswer:
+        return cls(
+            lens=response.lens,
+            status=response.status,
+            answer=response.answer,
+            clarification=response.clarification,
+            data_as_of=response.data_as_of,
+            truncated=response.truncated,
+            request_id=response.request_id,
+        )

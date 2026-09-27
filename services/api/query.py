@@ -26,7 +26,7 @@ from services.contracts.correction import CorrectionDelta
 from services.contracts.lens_config import LensConfig
 from services.contracts.protocols import Connector
 from services.contracts.query_intent import QueryIntent
-from services.contracts.response import CertifiedProvenance, QueryResponse
+from services.contracts.response import CertifiedProvenance, ConsumerAnswer, QueryResponse
 from services.db.session import org_session
 from services.governance import audit, drift_watch, quota, ratelimit
 from services.governance.credentials import CallerIdentity
@@ -585,33 +585,25 @@ def _fail_on_warehouse_timeout(result: PipelineResult, caller: CallerIdentity) -
     )
 
 
-# What a consumer-audience demo caller never receives: everything that carries
-# SQL text or the working behind the figure. The prose, its scope and freshness
-# lines, the clarification, the refusal reason and the receipt (hashes, no SQL)
-# stay. The trace keeps all of it for the operator.
-_CONSUMER_DROPS: dict[str, object] = {
-    "sql": None,
-    "data": None,
-    "citations": [],
-    "verification": None,
-    "resolution": None,
-}
-
-
-def _shaped(response: QueryResponse, fmt: AnswerFormat, caller: CallerIdentity) -> QueryResponse:
+def _shaped(
+    response: QueryResponse, fmt: AnswerFormat, caller: CallerIdentity
+) -> QueryResponse | ConsumerAnswer:
     """Apply the response-side half of `format`, and the demo's audience.
 
     Rows-only is handled upstream (the composer is simply never built, which is where
     the latency goes); `prose` only has to drop the payload the caller declined. A
-    public demo serving consumers (`demo.audience: consumer` in its dst.yaml) drops
-    the SQL, rows, citations and checks from a demo caller's answer — the people it
-    serves read the sentence, not the working. The TRACE keeps the full result either
-    way — observability is neither the caller's nor the page's choice.
+    public demo serving consumers (`demo.audience: consumer` in its dst.yaml) hands a
+    demo caller the ConsumerAnswer: the sentence, its status, a clarification, the
+    freshness date — none of the working and none of the trust apparatus (receipt,
+    grade, certification, degraded lines, ledger), which belong to the operator and
+    only read as noise, or as a warning, to the person the demo serves. The TRACE
+    keeps the full result either way — observability is neither the caller's nor
+    the page's choice.
     """
     if fmt == "prose":
         response = response.model_copy(update={"data": None})
     if demo_page.consumer_view(caller):
-        response = response.model_copy(update=dict(_CONSUMER_DROPS))
+        return ConsumerAnswer.of(response)
     return response
 
 
@@ -623,7 +615,7 @@ def run_lens_query(
     fmt: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
     allow_untyped: bool | None = None,
-) -> QueryResponse:
+) -> QueryResponse | ConsumerAnswer:
     """Authorize + run the governed query pipeline for one lens question.
 
     request_id_generated_here — the join key. Generated up front so the audit rows
@@ -760,13 +752,13 @@ def run_lens_query(
     return _shaped(result.response, fmt, caller)
 
 
-@router.post("/lenses/{name}/query", response_model=QueryResponse)
+@router.post("/lenses/{name}/query", response_model=QueryResponse | ConsumerAnswer)
 async def query_lens(
     name: str,
     body: QueryBody,
     background: BackgroundTasks,
     caller: CallerIdentity = Depends(get_caller),
-) -> QueryResponse:
+) -> QueryResponse | ConsumerAnswer:
     """Ask this lens a question — the governed door: certified match, else generated
     SQL, guarded execution, and receipts on every answer (`sql`, `citations`, graded
     `confidence`, `data_as_of`, `request_id`). `format` is `both` (default) |
@@ -841,7 +833,7 @@ def run_lens_metrics(
     caller: CallerIdentity,
     background: BackgroundTasks,
     fmt: AnswerFormat = "structured",
-) -> QueryResponse:
+) -> QueryResponse | ConsumerAnswer:
     """Authorize + compile + run a STRUCTURED intent — the door with no LLM in it.
 
     The metric layer already resolves names, joins, aggregation and dialect
@@ -921,13 +913,13 @@ def run_lens_metrics(
     return _shaped(result.response, fmt, caller)
 
 
-@router.post("/lenses/{name}/metrics", response_model=QueryResponse)
+@router.post("/lenses/{name}/metrics", response_model=QueryResponse | ConsumerAnswer)
 def query_lens_metrics(
     name: str,
     body: MetricsBody,
     background: BackgroundTasks,
     caller: CallerIdentity = Depends(get_caller),
-) -> QueryResponse:
+) -> QueryResponse | ConsumerAnswer:
     """Ask with a structured intent — metrics/dimensions/filters instead of prose.
     Same governance, receipts, and trace as the prose door; the intent is spelled
     back into words for the request log."""
@@ -987,14 +979,16 @@ def list_certified_for_caller(
     )
 
 
-@router.post("/lenses/{name}/certified/{cert_id}/run", response_model=QueryResponse)
+@router.post(
+    "/lenses/{name}/certified/{cert_id}/run", response_model=QueryResponse | ConsumerAnswer
+)
 def run_certified_for_caller(
     name: str,
     cert_id: str,
     background: BackgroundTasks,
     body: CertifiedRunBody | None = None,
     caller: CallerIdentity = Depends(get_caller),
-) -> QueryResponse:
+) -> QueryResponse | ConsumerAnswer:
     """Run a certified answer exactly as approved — guard + execute, zero SQL generation.
 
     The deterministic door: the approved SQL goes through the same sql_guard and
