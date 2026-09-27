@@ -1325,3 +1325,217 @@ def test_the_move_to_the_holding_entity_is_the_same_on_every_run() -> None:
     assert seen == {
         ("hero_position_meta", ("win_rate",), ("hero_name",), (("position_name", "=", "carry"),))
     }
+
+
+def _entity(name: str, fields: list[Field], dims: list[str], metrics: list[Metric]) -> Entity:
+    return Entity(
+        name=name,
+        source=EntitySource(connection="wh", table=name),
+        fields=fields,
+        dimensions=[Dimension(name=d) for d in dims],
+        metrics=metrics,
+    )
+
+
+def _sides_model() -> SemanticModel:
+    """Matches, one row each, with the Radiant side's record as a metric; and
+    team sides, two rows a match, holding the side as a stored value."""
+    matches = _entity(
+        "pro_matches",
+        [Field(name="match_id", type="integer"), Field(name="radiant_win", type="boolean")],
+        [],
+        [
+            Metric(name="match_count", agg="count", expr="pro_matches.match_id"),
+            Metric(
+                name="radiant_wins",
+                agg="sum",
+                expr="CASE WHEN pro_matches.radiant_win THEN 1 ELSE 0 END",
+            ),
+            Metric(
+                name="radiant_win_rate",
+                type="ratio",
+                numerator="radiant_wins",
+                denominator="match_count",
+                format="percent",
+            ),
+        ],
+    )
+    sides = _entity(
+        "team_matches",
+        [
+            Field(name="match_id", type="integer"),
+            Field(name="side", type="string"),
+            Field(name="won", type="boolean"),
+        ],
+        ["side"],
+        [
+            Metric(name="team_games", agg="count", expr="team_matches.match_id"),
+            Metric(
+                name="team_wins", agg="sum", expr="CASE WHEN team_matches.won THEN 1 ELSE 0 END"
+            ),
+            Metric(
+                name="team_win_rate",
+                type="ratio",
+                numerator="team_wins",
+                denominator="team_games",
+                format="percent",
+            ),
+        ],
+    )
+    return SemanticModel(lens="dota", dialect="duckdb", entities=[matches, sides])
+
+
+def _drafts_model() -> SemanticModel:
+    """Per-hero draft counts (no pick/ban column) beside the pick-and-ban log,
+    whose `action` stores 'pick' and 'ban'."""
+    stats = _entity(
+        "hero_draft_stats",
+        [Field(name="hero_name", type="string"), Field(name="first_picks", type="integer")],
+        ["hero_name"],
+        [Metric(name="hero_first_picks", agg="sum", expr="hero_draft_stats.first_picks")],
+    )
+    log = _entity(
+        "draft_phases",
+        [
+            Field(name="hero_name", type="string"),
+            Field(name="action", type="string"),
+            Field(name="is_first_pick", type="boolean"),
+        ],
+        ["hero_name", "action"],
+        [
+            Metric(
+                name="first_pick_matches",
+                agg="sum",
+                expr="CASE WHEN draft_phases.is_first_pick THEN 1 ELSE 0 END",
+            ),
+        ],
+    )
+    return SemanticModel(lens="dota", dialect="duckdb", entities=[stats, log])
+
+
+def _lanes_model() -> SemanticModel:
+    """Lane counts per hero (no result column) beside one row per laner, whose
+    `lane_result` stores won / drawn / lost — and whose own draw rate counts
+    the drawn rows by that literal."""
+    hero = _entity(
+        "hero_playstyle",
+        [
+            Field(name="hero_name", type="string"),
+            Field(name="lanes_drawn", type="integer"),
+            Field(name="lane_games", type="integer"),
+        ],
+        ["hero_name"],
+        [
+            Metric(name="lanes_drawn", agg="sum", expr="hero_playstyle.lanes_drawn"),
+            Metric(name="lane_games", agg="sum", expr="hero_playstyle.lane_games"),
+            Metric(
+                name="lane_draw_rate",
+                type="ratio",
+                numerator="lanes_drawn",
+                denominator="lane_games",
+                format="percent",
+            ),
+        ],
+    )
+    laners = _entity(
+        "lanes_per_match",
+        [
+            Field(name="match_id", type="integer"),
+            Field(name="team_name", type="string"),
+            Field(name="lane_result", type="string"),
+        ],
+        ["team_name", "lane_result"],
+        [
+            Metric(name="laning_games", agg="count", expr="lanes_per_match.match_id"),
+            Metric(
+                name="lanes_drawn_count",
+                agg="sum",
+                expr="CASE WHEN lanes_per_match.lane_result = 'drawn' THEN 1 ELSE 0 END",
+            ),
+            Metric(
+                name="team_lane_draw_rate",
+                type="derived",
+                expr="{lanes_drawn_count} * 1.0 / NULLIF({laning_games}, 0)",
+                format="percent",
+            ),
+        ],
+    )
+    return SemanticModel(lens="dota", dialect="duckdb", entities=[hero, laners])
+
+
+_SIDES = {"side": ["radiant", "dire"]}
+_ACTIONS = {"action": ["pick", "ban"], "hero_name": ["Shadow Fiend", "Lion"]}
+_RESULTS = {"lane_result": ["won", "drawn", "lost"], "team_name": ["Team Liquid", "OG"]}
+
+
+def _metric_picks(res) -> list[str]:  # type: ignore[no-untyped-def]
+    """The metrics chosen on the ledger: a second, constrained pick shows here."""
+    return [d.chosen for d in res.decisions if d.slot == "metric" and d.chosen]
+
+
+def test_a_value_the_metric_is_named_for_needs_no_filter() -> None:
+    """'radiant' is a stored side — held by the per-side table, not by the
+    matches table. But the radiant win rate IS the Radiant side's record: the
+    value is carried by the metric, not a restriction the answer lacks. Read as
+    a missing filter, the answer left the metric the question named and then
+    asked for a filter nobody needed."""
+    decider = _Prefers("aggregate", "radiant_win_rate")
+    res = TypedResolver(decider, domains=_SIDES, today=TODAY).resolve(  # type: ignore[arg-type]
+        "How often does the Radiant side win in pro matches?", _sides_model()
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.entity == "pro_matches" and res.intent.metrics == ["radiant_win_rate"]
+    assert res.intent.filters == []
+    assert _metric_picks(res) == ["radiant_win_rate"]
+
+
+def test_a_count_named_for_the_value_stays_on_its_entity() -> None:
+    """'pick' is a stored draft action only the pick-and-ban log holds; the
+    hero's first-pick count is named for it. The count stays the one the
+    question asked for, restricted to the hero — never the log's per-match
+    count the constrained re-decision offered in its place."""
+    decider = _Prefers("aggregate", "hero_first_picks", "first_pick_matches", "hero_name", "action")
+    res = TypedResolver(decider, domains=_ACTIONS, today=TODAY).resolve(  # type: ignore[arg-type]
+        "How many times was Shadow Fiend the first pick in pro drafts?", _drafts_model()
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.entity == "hero_draft_stats" and res.intent.metrics == ["hero_first_picks"]
+    assert [(f.field, f.op, f.value) for f in res.intent.filters] == [
+        ("hero_name", "=", "Shadow Fiend")
+    ]
+    assert _metric_picks(res) == ["hero_first_picks"]
+
+
+def test_a_share_named_for_the_value_is_not_moved_onto_a_filtered_table() -> None:
+    """'drawn' is a stored lane result only the per-laner table holds. Moved
+    there, the draw rate was computed over drawn lanes alone and served 1.0 —
+    the share of drawn lanes that were drawn. The draw rate over every lane is
+    the answer."""
+    decider = _Prefers("aggregate", "lane_draw_rate", "team_lane_draw_rate", "lane_result")
+    model = _lanes_model()
+    res = TypedResolver(decider, domains=_RESULTS, today=TODAY).resolve(  # type: ignore[arg-type]
+        "What share of lanes are drawn at the ten-minute mark?", model
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.entity == "hero_playstyle" and res.intent.metrics == ["lane_draw_rate"]
+    assert res.intent.filters == []
+    assert "lanes_per_match" not in compile_intent(res.intent, model)
+
+
+def test_a_filter_on_the_value_the_metric_counts_by_is_never_applied() -> None:
+    """The per-laner draw rate counts `lane_result = 'drawn'` in its numerator;
+    a filter to the same value makes every row a drawn one and the rate 1.0. The
+    question's 'drawn' is the metric's, and the team the question names is the
+    filter."""
+    decider = _Prefers("aggregate", "team_lane_draw_rate", "team_name", "lane_result")
+    model = _lanes_model()
+    res = TypedResolver(decider, domains=_RESULTS, today=TODAY).resolve(  # type: ignore[arg-type]
+        "What share of Team Liquid's lanes are drawn?", model
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.entity == "lanes_per_match"
+    assert res.intent.metrics == ["team_lane_draw_rate"]
+    assert [(f.field, f.op, f.value) for f in res.intent.filters] == [
+        ("team_name", "=", "Team Liquid")
+    ]
+    assert res.matched == ["team_name"]

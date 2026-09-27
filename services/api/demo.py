@@ -592,7 +592,8 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div class="snip"><pre id="line">__LINE__</pre>
       <button class="copy" id="copyline" type="button">Copy</button></div>
     <p class="note" id="linenote">Paste this into the AI you use: it reads the file and connects
-    itself. Sign in below and your key is added to the line.</p>
+    itself. Claude and ChatGPT sign in on their own and need no key; for Claude Code, Codex
+    or Cursor, sign in below and your key is added to the line.</p>
     <details class="more" id="byhand" hidden><summary>Or connect by hand</summary>
       <div class="tabs" id="tabs" role="tablist" aria-label="Your AI"></div>
       <div id="panels"></div></details>

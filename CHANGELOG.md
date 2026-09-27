@@ -29,6 +29,31 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.6.1] — 2026-09-27
+
+No schema change.
+
+### Fixed
+
+- **A value the metric is named for is no longer read as a missing filter.** Since 0.6.0
+  a typed question naming a stored value that the chosen entity holds no column for moved
+  the answer to an entity that does. That also fired when the value was the metric's own
+  subject. "How often does the Radiant side win" left `radiant_win_rate` for a per-side
+  table and then asked which field 'radiant' should restrict. "How many times was Shadow
+  Fiend the first pick" left the hero's first-pick count for a per-match count, because
+  'pick' is a stored draft action. "What share of lanes are drawn" moved to a per-laner
+  draw rate and filtered it to `lane_result = 'drawn'`, which served 1.0 instead of the
+  share of all lanes. A stored value that the chosen metric's name or the columns and
+  literals of its SQL already carry is now part of the metric, not a restriction: the
+  answer stays on the metric the question named and no filter is asked for. The same
+  check closes an older hole: an equality filter to a value the metric's own SQL selects
+  its rows by (a draw rate counting `lane_result = 'drawn'`) is no longer applied, so the
+  rate can't collapse to 1.0.
+- **The demo page says who needs a key.** The note under the connect line read as if
+  signing in came first. It now says Claude and ChatGPT sign in on their own and need no
+  key, and that Claude Code, Codex and Cursor get the key added to the line after signing
+  in.
+
 ## [0.6.0] — 2026-09-27
 
 No schema change.

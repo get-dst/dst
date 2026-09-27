@@ -52,7 +52,7 @@ from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.runtime import ambiguity, decision_policy, reading, timewindow, typed_health
-from services.runtime.compiler import CompileError, compile_intent, is_predicate
+from services.runtime.compiler import CompileError, compile_intent, is_predicate, metric_sql
 from services.runtime.intent_generator import intent_term
 from services.runtime.option_sets import option_sets
 
@@ -346,6 +346,61 @@ def _expr_columns(metric: Metric) -> set[str]:
         except sqlglot.errors.ParseError:
             continue
     return cols
+
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+@dataclass(frozen=True)
+class _Carried:
+    """What the answer's metrics already say about the rows they count, read
+    off their own SQL: the words of each metric's name and of every column its
+    expansion reads, and the (column, value) pairs it selects rows by."""
+
+    words: tuple[tuple[str, ...], ...] = ()
+    selects: frozenset[tuple[str, str]] = frozenset()
+
+    def carries(self, value: str) -> bool:
+        """Is a stored value the question names the metric's own subject —
+        'radiant' of radiant_win_rate, 'pick' of hero_first_picks, 'drawn' of a
+        rate over lanes_drawn or over `lane_result = 'drawn'`? Such a value is
+        not a restriction the answer lacks."""
+        v = value.lower()
+        if any(val == v for _col, val in self.selects):
+            return True
+        want = _WORD.findall(v)
+        if not want:
+            return False
+        forms = (want, [*want[:-1], _plural(want[-1])])
+        n = len(want)
+        return any(
+            list(ws[i : i + n]) in forms for ws in self.words for i in range(len(ws) - n + 1)
+        )
+
+
+def _carried(entity: Entity, metrics: list[str], dialect: str | None) -> _Carried:
+    by_name = {m.name: m for m in entity.metrics}
+    words: list[tuple[str, ...]] = []
+    selects: set[tuple[str, str]] = set()
+    for name in metrics:
+        metric = by_name.get(name.rsplit(".", 1)[-1])
+        if metric is None:
+            continue
+        words.append(tuple(_WORD.findall(metric.name.lower())))
+        try:
+            tree = sqlglot.parse_one(metric_sql(metric, entity), read=dialect or None)
+        except (CompileError, sqlglot.errors.ParseError):
+            continue
+        words += [tuple(_WORD.findall(c.name.lower())) for c in tree.find_all(exp.Column)]
+        for eq in tree.find_all(exp.EQ):
+            if isinstance(eq.parent, exp.Not):
+                continue  # `NOT lane_result = 'drawn'` counts the other rows
+            col, lit = eq.this, eq.expression
+            if isinstance(lit, exp.Column):
+                col, lit = lit, col
+            if isinstance(col, exp.Column) and isinstance(lit, exp.Literal) and lit.is_string:
+                selects.add((col.name.lower(), lit.this.lower()))
+    return _Carried(tuple(words), frozenset(selects))
 
 
 def _refuse_self_defining_filters(
@@ -1024,7 +1079,9 @@ class TypedResolver:
             grain = g if g in {o.name for o in sets["grain"]} else None  # type: ignore[assignment]
 
         definitions = self._definitions(question, model, records)
-        filters, supplied = self._filters(question, entity, own_members, records)
+        filters, supplied = self._filters(
+            question, entity, own_members, _carried(entity, metrics, model.dialect), records
+        )
         if conflict := _population_conflict(entity, filters, model.dialect):
             raise _Decline(conflict)
         _refuse_self_defining_filters(entity, metrics, filters)
@@ -1101,6 +1158,9 @@ class TypedResolver:
         figure to offer, or no confident pick among them, is a clarification
         naming both sides."""
         here = {v for named in self._named(question, entity) for v in named.values()}
+        # A value the chosen metric is named for (radiant_win_rate's 'radiant')
+        # is what it counts, not a restriction the entity fails to hold.
+        carried = _carried(entity, [first_metric] if first_metric else [], model.dialect)
         # value -> the columns holding it -> the entities with that column
         missing: dict[str, dict[str, set[str]]] = {}
         for e in model.entities:
@@ -1108,7 +1168,7 @@ class TypedResolver:
                 continue
             for named in self._named(question, e):
                 for column, value in named.items():
-                    if value not in here:
+                    if value not in here and not carried.carries(value):
                         missing.setdefault(value, {}).setdefault(column, set()).add(e.name)
         if not missing:
             return entity, first_metric
@@ -1253,6 +1313,7 @@ class TypedResolver:
         question: str,
         entity: Entity,
         members: list[Option],
+        carried: _Carried,
         records: list[DecisionRecord],
     ) -> tuple[list[IntentFilter], list[str]]:
         filters: list[IntentFilter] = []
@@ -1285,7 +1346,7 @@ class TypedResolver:
         # unused one gets a focused decision among the columns holding it; a
         # "none" there is still never a silent drop — the caller is asked.
         for named in self._named(question, entity):
-            if _uses(named, filters):
+            if _uses(named, filters) or any(carried.carries(v) for v in named.values()):
                 continue
             value = next(iter(named.values()))
             free = [c for c in sorted(named) if c not in columns]
@@ -1322,6 +1383,20 @@ class TypedResolver:
                     options=sorted(named),
                 )
             )
+        # A filter to the value the metric selects its rows by decides it: the
+        # draw rate over `lane_result = 'drawn'`, filtered to drawn lanes, is
+        # 1.0 on every row. The question's 'drawn' is the metric's already.
+        decided = [
+            f
+            for f in filters
+            if f.op == "="
+            and f.field not in supplied
+            and (f.field.lower(), str(f.value).lower()) in carried.selects
+        ]
+        for f in decided:
+            filters.remove(f)
+            if f.field in self._matched:
+                self._matched.remove(f.field)
         return filters, supplied
 
     def _named(self, question: str, entity: Entity) -> list[dict[str, str]]:
