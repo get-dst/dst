@@ -249,6 +249,21 @@ def connect_snippets(
             "11175166-get-started-with-custom-connectors-using-remote-mcp",
         },
         {
+            "id": "chatgpt",
+            "label": "ChatGPT",
+            "auth": "oauth",
+            "code": url,
+            "steps": [
+                "On chatgpt.com, open Settings → Security and login and turn on Developer mode.",
+                f"Go to chatgpt.com/plugins, click +, name it `{server}`, paste this URL "
+                f"under Connection with OAuth, and sign in with {account}.",
+                f"In a chat, choose Developer mode from the + menu. {then}",
+            ],
+            "note": "Developer mode is on the web, for Plus, Pro, Business, Enterprise and "
+            "Education accounts.",
+            "doc": "https://developers.openai.com/api/docs/guides/developer-mode",
+        },
+        {
             "id": "claude-code",
             "label": "Claude Code",
             "auth": "either",
@@ -272,21 +287,6 @@ def connect_snippets(
                 f"Start `codex`. {then}",
             ],
             "doc": "https://developers.openai.com/codex/mcp",
-        },
-        {
-            "id": "chatgpt",
-            "label": "ChatGPT",
-            "auth": "oauth",
-            "code": url,
-            "steps": [
-                "On chatgpt.com, open Settings → Security and login and turn on Developer mode.",
-                f"Go to chatgpt.com/plugins, click +, name it `{server}`, paste this URL "
-                f"under Connection with OAuth, and sign in with {account}.",
-                f"In a chat, choose Developer mode from the + menu. {then}",
-            ],
-            "note": "Developer mode is on the web, for Plus, Pro, Business, Enterprise and "
-            "Education accounts.",
-            "doc": "https://developers.openai.com/api/docs/guides/developer-mode",
         },
         {
             "id": "cursor",
@@ -387,6 +387,11 @@ def render_skill(
     out += [
         f"This file is for the AI reading it. Connect yourself to {name} with the steps for "
         "your client below, then ask it the person's questions.",
+        "",
+        "If you are a chat assistant that cannot add a connector or run a command yourself "
+        "(Claude on claude.ai or in the desktop app, ChatGPT), don't try: show the person "
+        "the steps under your own name below. They take a minute, and adding the connector "
+        "is theirs to do.",
         "",
         f"MCP URL: {base}/mcp",
         "",
@@ -497,8 +502,9 @@ def demo_key(
 # reaches the layout only through the element ids below. Same policy as the MCP
 # consent page in oauth.py.
 #
-#   #connect     always: the one line for an agent (#line, #copyline, #linenote), and
-#                #byhand, the folded per-client setup (#tabs + #panels), shown after sign-in
+#   #connect     always: the per-client setup (#tabs + #panels, the key filled in after
+#                sign-in), and #oneline, the folded line for a coding agent (#line,
+#                #copyline, #linenote)
 #   #signin-box  shown before sign-in: the heading, #status and the #signin mount
 #   #issued      shown after: #key #copykey #days, #other
 #   #example     the folded example conversation (absent without one), shown after
@@ -589,14 +595,18 @@ _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   </header>
   <section id="connect">
     <h2 class="h2">Connect your AI</h2>
-    <div class="snip"><pre id="line">__LINE__</pre>
-      <button class="copy" id="copyline" type="button">Copy</button></div>
-    <p class="note" id="linenote">Paste this into the AI you use: it reads the file and connects
-    itself. Claude and ChatGPT sign in on their own and need no key; for Claude Code, Codex
-    or Cursor, sign in below and your key is added to the line.</p>
-    <details class="more" id="byhand" hidden><summary>Or connect by hand</summary>
-      <div class="tabs" id="tabs" role="tablist" aria-label="Your AI"></div>
-      <div id="panels"></div></details>
+    <p class="note" id="connectnote">Pick the AI you use. Claude and ChatGPT sign you in when
+    you connect and need no key; Claude Code, Codex and Cursor take the key you get by
+    signing in below.</p>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Your AI"></div>
+    <div id="panels"></div>
+    <details class="more" id="oneline"><summary>Claude Code, Codex or Cursor: one line sets it
+      up</summary>
+      <div class="snip"><pre id="line">__LINE__</pre>
+        <button class="copy" id="copyline" type="button">Copy</button></div>
+      <p class="note" id="linenote">Paste this into Claude Code, Codex or Cursor: it reads the
+      file and runs the setup itself. Chat apps such as Claude and ChatGPT can't add a
+      connector on their own, so use the steps above there.</p></details>
   </section>
   <section id="signin-box">
     <h2 class="h2">Sign in for your key</h2>
@@ -651,9 +661,12 @@ function withCode(text) {           // `x` in a step renders as code
   text.split('`').forEach((part, i) => li.append(i % 2 ? make('code', '', part) : part));
   return li;
 }
-function renderConnect(items) {
+let shown = 0;                      // the tab a re-render keeps selected
+function renderConnect(items, signedIn) {
+  $('tabs').replaceChildren(); $('panels').replaceChildren();
   const tabs = [], panels = [];
   const select = (i) => items.forEach((_, j) => {
+    shown = i;
     tabs[j].setAttribute('aria-selected', String(i === j));
     tabs[j].tabIndex = i === j ? 0 : -1;
     panels[j].hidden = i !== j;
@@ -672,7 +685,9 @@ function renderConnect(items) {
     panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
     const steps = make('ol', 'steps');
     item.steps.forEach((s) => steps.append(withCode(s)));
-    const note = make('p', 'note', item.note ? item.note + ' ' : '');
+    const pending = !signedIn && item.auth !== 'oauth'
+      ? 'Sign in below and <KEY> becomes your key. ' : '';
+    const note = make('p', 'note', pending + (item.note ? item.note + ' ' : ''));
     const doc = make('a', '', item.label + ' docs');
     doc.href = item.doc; doc.rel = 'noopener';
     note.append(doc);
@@ -680,8 +695,9 @@ function renderConnect(items) {
     tabs.push(tab); panels.push(panel);
     $('tabs').append(tab); $('panels').append(panel);
   });
-  select(0);
+  select(Math.min(shown, items.length - 1));
 }
+renderConnect(__CONNECT__, false);
 copyButton($('copyline'), () => $('line').textContent);
 let minting = false;
 async function mint() {
@@ -701,10 +717,9 @@ async function mint() {
   }
   const b = await r.json();
   $('line').textContent = b.agent_line;
-  $('linenote').textContent = 'Paste this into the AI you use: it reads the file and ' +
-    'connects itself with your key.';
-  renderConnect(b.connect);
-  $('byhand').hidden = false;
+  $('linenote').textContent = 'Paste this into Claude Code, Codex or Cursor: it reads the ' +
+    'file and sets itself up with your key. In Claude or ChatGPT, use the steps above.';
+  renderConnect(b.connect, true);
   $('key').textContent = b.key.slice(0, 8) + '…' + b.key.slice(-4);
   copyButton($('copykey'), b.key);
   $('days').textContent = b.expires_in_days;
@@ -755,6 +770,18 @@ def demo_page_view(request: Request) -> HTMLResponse:
     )
 
 
+def page_connect(base: str, name: str, asks: list[tuple[str, str | None]]) -> list[dict[str, Any]]:
+    """The per-client setup the page shows before sign-in: the key is a placeholder
+    until the visitor has one, and a client signing in through OAuth needs none."""
+    ask = next((q for _, q in asks if q), None)
+    return connect_snippets(base, name, KEY_PLACEHOLDER, ask, account="any account it offers")
+
+
+def _script_json(value: object) -> str:
+    """JSON safe inside an inline <script>: no `<` can close the element."""
+    return json.dumps(value).replace("<", "\\u003c")
+
+
 def render_page(
     cfg: DemoConfig | None,
     asks: list[tuple[str, str | None]],
@@ -769,6 +796,7 @@ def render_page(
         _SCRIPT.replace("__PK__", html.escape(publishable_key, quote=True))
         .replace("__HOST__", html.escape(frontend_host, quote=True))
         .replace("__MOUNT_SIGNIN_FN__", CLERK_MOUNT_SIGNIN)
+        .replace("__CONNECT__", _script_json(page_connect(base, name, asks)))
     )
     slots = {
         "NAME": html.escape(name),

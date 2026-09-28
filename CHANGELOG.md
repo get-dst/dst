@@ -29,6 +29,22 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.6.2] — 2026-09-28
+
+No schema change.
+
+### Fixed
+
+- **The demo page leads with the steps, not the one line.** The page opened with "Connect
+  me to <name>: …/SKILL.md" for every visitor, but a chat app such as Claude or ChatGPT
+  cannot add a connector from a pasted line: a person adds it in the app's settings, and
+  Claude rightly treats an unknown file that asks to be followed as untrusted. The first
+  thing most visitors tried was refused. "Connect your AI" now opens on each client's
+  steps, before any sign-in, Claude and ChatGPT first since they sign in when connecting
+  and need no key; the key fills in after sign-in. The one line folds under them for
+  Claude Code, Codex and Cursor, which can run the setup themselves. `/SKILL.md` now tells
+  a chat assistant that cannot add a connector to show the person the steps instead.
+
 ## [0.6.1] — 2026-09-27
 
 No schema change.

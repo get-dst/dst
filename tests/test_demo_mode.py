@@ -139,7 +139,7 @@ def test_mint_issues_one_live_key_per_person(client: TestClient, demo_org: uuid.
     assert body["expires_in_days"] == settings.demo_key_days
     # each AI client's setup, around the key the mint just issued
     connect = {c["id"]: c for c in body["connect"]}
-    assert list(connect) == ["claude", "claude-code", "codex", "chatgpt", "cursor"]
+    assert list(connect) == ["claude", "chatgpt", "claude-code", "codex", "cursor"]
     assert all(f"{body['base_url']}/mcp" in c["code"] for c in connect.values())
     assert all(body["key"] in connect[c]["code"] for c in ("claude-code", "codex", "cursor"))
     # and the one line for the visitor's AI, with the key in it
@@ -324,6 +324,7 @@ def test_the_file_an_agent_reads_serves_the_demo(
     assert "## Limits" in md
     page = client.get("/demo").text
     assert '<pre id="line">Connect me to roshan: http://testserver/SKILL.md</pre>' in page
+    assert "If you are a chat assistant that cannot add a connector" in md
 
 
 def test_the_file_an_agent_reads_outside_demo_mode(

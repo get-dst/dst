@@ -17,10 +17,12 @@ import pytest
 from services.api.demo import (
     KEY_PLACEHOLDER,
     TAGLINE,
+    _script_json,
     agent_line,
     connect_snippets,
     limits,
     other_snippets,
+    page_connect,
     render_page,
     render_skill,
 )
@@ -138,30 +140,54 @@ def test_the_page_speaks_to_the_people_it_serves(monkeypatch: pytest.MonkeyPatch
     assert ENGINEER_WORDS.findall(_visible(consent)) == []
 
 
-def test_the_one_line_for_an_agent_is_there_before_sign_in_and_gets_the_key_after(
+def test_the_steps_for_each_ai_lead_and_the_one_line_folds_under_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The top of "Connect your AI" is one line with one Copy button. The page
-    renders it without a key, so an OAuth client can be connected before any
-    sign-in; the mint hands back the same line with the key, and the script puts
-    it in place. The copy button reads the line at click time, so it copies
-    whichever version is showing. The per-client setup folds under it."""
+    """ "Connect your AI" opens on the per-client steps, before any sign-in: a chat
+    app such as Claude or ChatGPT cannot add a connector from a pasted line, so the
+    person needs the steps, and those two sign in through OAuth with no key. The
+    steps are in the page itself, with the key as a placeholder, and the mint
+    renders them again with the key. The one line for a coding agent folds under
+    them, says who it is for, and gets the key after sign-in the same way."""
     page = _page(None, monkeypatch)
     connect = page[page.index('<section id="connect">') : page.index('<section id="signin-box">')]
     assert '<h2 class="h2">Connect your AI</h2>' in connect
+    assert connect.index('id="tabs"') < connect.index('id="oneline"')
+    assert 'id="panels"' in connect and " hidden" not in connect.split('id="oneline"')[0]
+    assert '<details class="more" id="oneline"><summary>Claude Code, Codex or Cursor' in connect
     assert f'<pre id="line">Connect me to roshan: {BASE}/SKILL.md</pre>' in connect
-    assert '<button class="copy" id="copyline" type="button">Copy</button>' in connect
+    assert "can't add a" in connect and "use the steps above there" in connect
     assert "my key" not in connect
-    byhand = '<details class="more" id="byhand" hidden><summary>Or connect by hand</summary>'
-    assert byhand in connect
-    assert 'id="tabs"' in connect and 'id="panels"' in connect
+    # the steps ship with the page, placeholder key, Claude then ChatGPT first
+    items = page_connect(BASE, "roshan", [])
+    assert [i["id"] for i in items][:2] == ["claude", "chatgpt"]
+    shipped = page.split("renderConnect(", 2)[2].split(", false);", 1)[0]
+    assert [i["id"] for i in json.loads(shipped)] == [i["id"] for i in items]
+    assert "Add custom connector" in shipped and "\\u003cKEY>" in shipped
+    assert "renderConnect(b.connect, true);" in page
     assert "$('line').textContent = b.agent_line;" in page
-    assert "$('byhand').hidden = false;" in page
     assert "copyButton($('copyline'), () => $('line').textContent);" in page
     line = agent_line(BASE, "roshan", "dst_k")
     assert line == f"Connect me to roshan: {BASE}/SKILL.md — my key: dst_k"
     # the ordinary buttons keep copying their fixed text
     assert "const value = typeof text === 'function' ? text() : text;" in page
+
+
+def test_script_json_cannot_close_the_script_element() -> None:
+    """A step, a question or a name the project supplied is data inside an inline
+    script; no `</script>` in it can end the element."""
+    out = _script_json([{"q": "</script><script>alert(1)</script>"}])
+    assert "<" not in out
+    assert json.loads(out) == [{"q": "</script><script>alert(1)</script>"}]
+
+
+def test_the_file_tells_a_chat_assistant_to_hand_the_steps_over() -> None:
+    """A chat assistant cannot add a connector itself; the file says so, so it
+    shows the person the steps instead of refusing or improvising."""
+    md = render_skill(BASE, "roshan", None, [], demo=True)
+    assert "If you are a chat assistant that cannot add a connector" in md
+    assert "show the person the steps under your own name below" in md
+    assert md.index("## Claude\n") < md.index("## ChatGPT\n") < md.index("## Claude Code\n")
 
 
 def test_the_file_an_agent_reads_is_the_page_from_one_source() -> None:
@@ -217,7 +243,7 @@ def test_each_ai_gets_its_documented_setup() -> None:
         i["id"]: i
         for i in connect_snippets("https://d.example", "roshan", "dst_k", "Who wins lane?")
     }
-    assert list(items) == ["claude", "claude-code", "codex", "chatgpt", "cursor"]
+    assert list(items) == ["claude", "chatgpt", "claude-code", "codex", "cursor"]
     assert all(str(i["doc"]).startswith("https://") for i in items.values())
     assert items["claude"]["code"] == "https://d.example/mcp"
     assert items["chatgpt"]["code"] == "https://d.example/mcp"
@@ -240,7 +266,7 @@ def test_each_ai_gets_its_documented_setup() -> None:
     assert "`ask roshan: Who wins lane?`" in items["claude"]["steps"][-1]
     # a name no client config accepts as a key is made into one
     odd = connect_snippets("https://d.example", "Roshan Demo!", "dst_k", None)
-    assert "codex mcp add roshan-demo --url" in str(odd[2]["code"])
+    assert "codex mcp add roshan-demo --url" in str(odd[3]["code"])
 
 
 def test_the_other_ways_in_quote_the_question_safely() -> None:
