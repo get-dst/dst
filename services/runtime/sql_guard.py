@@ -21,7 +21,10 @@ Enforces, via sqlglot:
     set operation counts) — that is what the caller receives. A star confined to a
     CTE/subquery — bare or table-qualified — is allowed: the outer projection
     names the columns that come back, and the inner scope's tables are
-    allow-listed like any other.
+    allow-listed like any other. The one lens-scoped exception: a statement
+    whose every table is an EXPOSED entity with no hidden column, where a star
+    reveals nothing the lens withholds (an exposed table's fields ARE its
+    columns as profiled).
 
 Returns a GuardResult; the pipeline executes only `result.sql` when `ok`.
 NOTE: fine-grained resolution of *unqualified* columns across deep subqueries is a
@@ -166,6 +169,60 @@ def widen_single_precision(stmt: exp.Expr) -> None:
             cast.set("to", exp.DataType.build("DOUBLE"))
 
 
+def _all_exposed_whole(stmt: exp.Expression, model: SemanticModel, cte_names: set[str]) -> bool:
+    """True when every table the statement reads is an exposed entity none of
+    whose columns is hidden — the case where ``SELECT *`` can reveal nothing the
+    lens withholds. Any other table (a declared entity, an unknown name, a
+    partially hidden exposed table) keeps the star ban; so does a statement
+    reading no table at all."""
+    found = False
+    for tbl in stmt.find_all(exp.Table):
+        if not isinstance(tbl.this, exp.Identifier):
+            continue
+        name = tbl.name.lower()
+        if name in cte_names and not tbl.db and not tbl.catalog:
+            continue
+        written = ".".join(p.lower() for p in (tbl.catalog, tbl.db, tbl.name) if p)
+        owners = [
+            e
+            for e in model.entities
+            if _ref_matches(written, e.source.table) or (written == e.name.lower())
+        ]
+        if not owners or not all(e.exposed and e.exposed_whole for e in owners):
+            return False
+        found = True
+    return found
+
+
+def exposed_tables(sql: str | None, model: SemanticModel) -> list[str]:
+    """The exposed tables the served SQL reads, as their sources name them —
+    what the EXPOSED disclosure lists. Resolution is the guard's own (a
+    reference denotes a table when its segments are a tail of the source's, or
+    names the entity); unparseable SQL reads nothing, and says nothing."""
+    if not sql or not sql.strip():
+        return []
+    try:
+        stmt = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001 — a disclosure never raises
+        return []
+    cte_names = {c.alias_or_name.lower() for c in stmt.find_all(exp.CTE)}
+    out: list[str] = []
+    for tbl in stmt.find_all(exp.Table):
+        if not isinstance(tbl.this, exp.Identifier):
+            continue
+        if tbl.name.lower() in cte_names and not tbl.db and not tbl.catalog:
+            continue
+        written = ".".join(p.lower() for p in (tbl.catalog, tbl.db, tbl.name) if p)
+        for e in model.entities:
+            if (
+                e.exposed
+                and e.source.table not in out
+                and (_ref_matches(written, e.source.table) or written == e.name.lower())
+            ):
+                out.append(e.source.table)
+    return sorted(out)
+
+
 def _lens_names(model: SemanticModel) -> set[str]:
     """Every identifier the lens owns — exactly what `serialize_model` shows the
     generator and so exactly what it can copy back at us, bare."""
@@ -304,12 +361,16 @@ def check(
     if not isinstance(stmt, exp.Select | exp.Union | exp.Subquery | exp.With):
         return GuardResult(False, reason="only SELECT queries are allowed")
 
+    cte_names = {c.alias_or_name.lower() for c in stmt.find_all(exp.CTE)}
+
     # No bare star projections (SELECT * / t.*) in what the CALLER receives.
     # Scanning the whole statement instead refused the CTE-staging idiom — a star
     # inside a CTE/subquery under an explicit outer projection leaks nothing,
     # because the outer projection is what comes back. An unclassifiable root
     # falls back to scanning everything, so an unknown shape fails closed.
-    if not allow_star:
+    # Exposed-only statements are the exception named in the module doc: the
+    # columns a star returns there are exactly the fields the lens lists.
+    if not allow_star and not _all_exposed_whole(stmt, model, cte_names):
         projections = _output_projections(stmt)
         for subtree in [stmt] if projections is None else projections:
             for star in subtree.find_all(exp.Star):
@@ -333,7 +394,6 @@ def check(
         for ref in {e.name.lower(), e.source.table.split(".")[-1].lower()}:
             claimed = entity_tables.get(ref, e.source.table)
             entity_tables[ref] = e.source.table if claimed == e.source.table else None
-    cte_names = {c.alias_or_name.lower() for c in stmt.find_all(exp.CTE)}
 
     alias_to_table: dict[str, str] = {}
     for tbl in stmt.find_all(exp.Table):

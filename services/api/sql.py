@@ -46,7 +46,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from services.api.query import _authorized_bundle, _authorized_connector
+from services.api.query import (
+    PURPOSE_HELP,
+    PURPOSE_MAX,
+    _authorized_bundle,
+    _authorized_connector,
+    _logged_purpose,
+)
 from services.auth.deps import get_caller
 from services.contracts.protocols import Connector
 from services.contracts.semantic_model import SemanticModel
@@ -75,6 +81,7 @@ class SqlBody(BaseModel):
     connection: str | None = None
     lens: str | None = None
     limit: int = Field(default=PROBE_DEFAULT_ROWS, ge=1, le=PROBE_MAX_ROWS)
+    purpose: str = Field(default="", max_length=PURPOSE_MAX, description=PURPOSE_HELP)
 
 
 class SqlResponse(BaseModel):
@@ -131,6 +138,9 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         guard = sql_guard.check(
             body.sql, _probe_model(connector.kind), trust_tables=True, allow_star=True
         )
+        # No lens here, so nothing has opted in to keeping the sentence: the admin
+        # scope never stores a purpose, whatever the body carried.
+        purpose: str | None = None
     else:
         assert body.lens is not None
         bundle = _authorized_bundle(body.lens, caller)
@@ -141,6 +151,9 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         scope = body.lens
         wh = ", ".join(sorted({e.source.connection for e in bundle.semantic_model.entities}))
         guard = sql_guard.check(body.sql, bundle.semantic_model)
+        # Kept only when the lens sets `logging.log_purpose`, exactly as on /query:
+        # the probe behind an authoring decision is the read whose "why" explains it.
+        purpose = _logged_purpose(body.purpose, bundle.config)
 
     trace = TraceLog(
         request_id=request_id,
@@ -152,6 +165,8 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         # Which path produced the SQL. Not a generation tier — a human wrote it, which
         # is exactly what makes the row worth keeping.
         generator_tier="probe",
+        # Set once, before any log_trace: the refusal and error paths log too.
+        purpose=purpose,
     )
     if not guard.ok:
         # Logged synchronously, not as a background task: the failure paths raise, and

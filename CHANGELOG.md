@@ -29,6 +29,45 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.8.0] — 2026-10-15
+
+No schema change.
+
+### Added
+
+- **Expose tables that have no definitions.** A lens may declare `expose:` grants in
+  `lens.yaml` (connection, table patterns, `hide` column patterns); apply resolves them
+  against the connection's profiled tables, and each match becomes an entity with the
+  profile's columns and nothing else. A pattern that matches nothing, or a bare name that
+  collides with a selected entity, fails apply by name. `dst plan` prints
+  `exposes N tables (M columns)` per lens and warns when `untyped_fallback` is off.
+- **EXPOSED disclosure.** An answer that reads an exposed table carries
+  `EXPOSED: reads <table>, a table with no governed definitions` in `degraded`, the way an
+  untyped answer carries `UNTYPED`; such columns never count as declared in the resolution
+  ledger.
+- **`describe_lens` lists exposed tables apart** from entities, under `exposed_tables`,
+  with a note that answers from them are ungoverned.
+- **Basis over every read.** The observe KPIs and the windowed audit statement carry a
+  `basis` block counting every served caller read by what its figure rested on: `certified`,
+  `declared`, `mixed`, `inferred`, `raw` for the caller's own SQL, `unknown` for rows written
+  before the ledger, with `n` and a `governed_share` that is null when nothing was read. The
+  raw probe sits inside this denominator, where it was always excluded from the governed
+  counters, so the share no longer flatters itself; the admin passthrough stays out.
+  `dst observe` prints the split as one `basis:` line with the governed share.
+- **`purpose` on the SQL probe.** `POST /v1/sql` and the `sql` MCP tool take an optional
+  `purpose` sentence like the other asking doors, stored on the lens-scoped log row only
+  when the lens sets `logging.log_purpose`; the connection scope never stores it.
+
+### Changed
+
+- **SQL guard star rule.** `SELECT *` is admitted when every table in the statement is an
+  exposed table with no hidden column; everything else is refused as before.
+- **Typed serving and routing ignore exposed tables.** The typed resolver never offers them
+  (a question about one does not type and follows the lens's untyped rule), and the router
+  takes no anchors from them.
+- **Drift audit names lenses.** `dst drift` cross-references `expose:` grants, so a dropped
+  exposed table is reported as a breaking reference to the lens that exposes it.
+
 ## [0.7.0] — 2026-10-15
 
 Schema change: migration 0068 adds `request_log.purpose`. Run `dst migrate`.

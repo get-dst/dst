@@ -39,12 +39,16 @@ def coverage_profile(
     # "Use this when…" asks are curated, in-the-user's-voice routing anchors:
     # the phrasings people actually use, which the specific metric/definition anchors miss.
     anchors += list(sm.use_when)
-    anchors += [e.name.replace("_", " ") for e in sm.entities]
-    anchors += [m.name.replace("_", " ") for e in sm.entities for m in e.metrics]
+    # Exposed tables contribute no anchors: the router routes to what a lens
+    # GOVERNS, and an exposed table governs nothing. Its table stays in
+    # ``scope`` — the lens does read it.
+    governed = [e for e in sm.entities if not e.exposed]
+    anchors += [e.name.replace("_", " ") for e in governed]
+    anchors += [m.name.replace("_", " ") for e in governed for m in e.metrics]
     # Entity-level meta: canonical questions and use-cases are question-shaped —
     # exactly the phrasings the router should hit near-exactly.
-    anchors += [q for e in sm.entities for q in e.common_questions]
-    anchors += [u for e in sm.entities for u in e.use_cases]
+    anchors += [q for e in governed for q in e.common_questions]
+    anchors += [u for e in governed for u in e.use_cases]
 
     pages = certified
     if pages is None and cfg.model.certified_dir:

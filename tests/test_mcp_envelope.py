@@ -445,6 +445,12 @@ def test_purpose_reaches_the_data_plane_only_when_sent(monkeypatch: pytest.Monke
     assert sent["/v1/query"]["purpose"] == why
     asyncio.run(srv.run_certified("churn", ctx=None, cert_id="c9", purpose=why))
     assert sent["/v1/lenses/churn/certified/c9/run"]["purpose"] == why
+    # The probe is an asking tool too: the "why" behind a raw read is the one
+    # that explains the ungoverned share.
+    asyncio.run(srv.sql("churn", "SELECT 1 AS n", ctx=None, purpose=why))
+    assert sent["/v1/sql"]["purpose"] == why
     # Blank or whitespace is "not sent".
     asyncio.run(srv.query("churn", "ARR over time", ctx=None, purpose="  "))
     assert "purpose" not in sent["/v1/lenses/churn/query"]
+    asyncio.run(srv.sql("churn", "SELECT 1 AS n", ctx=None))
+    assert "purpose" not in sent["/v1/sql"]

@@ -244,6 +244,47 @@ class NotComputable(Authored):
     )
 
 
+class ExposeGrant(Authored):
+    """Tables a lens reads WITHOUT definitions — a declared grant, resolved at
+    apply against the connection's stored table profiles (`dst probe`).
+
+    Each matched table becomes an entity carrying the profile's columns and
+    nothing else: no metric, no dimension, no meaning. Answers from it are
+    ungoverned and say so (EXPOSED), the typed rail never offers it, and the
+    router never anchors on it. It replaces the meaning-free entity file per
+    staging table, which rots with every upstream column."""
+
+    connection: str = Field(
+        description="the dst.yaml connection whose profiled tables the patterns match"
+    )
+    tables: StrList = Field(
+        description="table patterns, fnmatch-style on the name exactly as introspect "
+        "names it (schema.table), e.g. ['staging.*', 'analytics.dim_*']. A pattern "
+        "that matches no profiled table fails apply"
+    )
+    hide: StrList = Field(
+        default_factory=list,
+        description="column patterns to withhold, matched as table.column — bare "
+        "('*.ssn', 'customers.email') or qualified ('staging.customers.email'). A "
+        "hidden column is absent from the lens: naming it is out of scope",
+    )
+
+    @field_validator("tables")
+    @classmethod
+    def _some_tables(cls, v: list[str]) -> list[str]:
+        cleaned = [p.strip() for p in v if p and p.strip()]
+        if not cleaned:
+            raise ValueError("needs at least one table pattern, e.g. tables: ['staging.*']")
+        return cleaned
+
+    @field_validator("connection")
+    @classmethod
+    def _non_empty_connection(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("connection must name a dst.yaml connection")
+        return v.strip()
+
+
 class LensConfig(Authored):
     name: str = Field(
         description="slug id for this lens, unique in the org and immutable after "
@@ -317,6 +358,14 @@ class LensConfig(Authored):
     select: SelectSpec = Field(
         default_factory=SelectSpec,
         description="what this lens pulls from the shared semantic layer (semantic/)",
+    )
+    expose: list[ExposeGrant] = Field(
+        default_factory=list,
+        description="tables this lens reads WITHOUT definitions: {connection, tables: "
+        "[patterns], hide: [column patterns]}, resolved at apply against the "
+        "connection's profiled tables (`dst probe`). Answers from them are "
+        "ungoverned, disclosed EXPOSED, and never typed — set untyped_fallback "
+        "or `query` cannot answer from them (the `sql` tool still can)",
     )
     not_computable: list[NotComputable] = Field(
         default_factory=list,

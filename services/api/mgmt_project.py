@@ -383,10 +383,16 @@ def plan_project(
     # layered in because apply lands them BEFORE any lens compiles.
     incoming = split_by_lens(body.files)
     incoming_connections, project_error = _declared_connections(body.files)
+    # Probe artifacts the push carries layer in like its connections do:
+    # apply lands them before any lens compiles, and an `expose:` grant
+    # resolves against them.
+    pushed_profiles = apply_engine.incoming_profiles(body.files)
     incoming_configs: dict[str, LensConfig] = {}
     db_trees = _db_trees(session)
     for entry in plan_engine.plan_lenses(db_trees, incoming):
         gate_errors: list[str] = []
+        exposes: str | None = None
+        expose_warnings: list[str] = []
         try:
             source = load_lens_source(incoming[entry.lens])
             incoming_configs[entry.lens] = source.config
@@ -401,7 +407,11 @@ def plan_project(
                     incoming_relationships=incoming_relationships,
                     incoming_connections=incoming_connections,
                     asset_hashes=effective,
+                    incoming_profiles=pushed_profiles,
                 )
+            exposes, expose_warnings = apply_engine.expose_plan_notes(
+                session, source.config, incoming=pushed_profiles
+            )
         except (ValueError, KeyError) as exc:
             parse_error = str(exc)
         errors = [parse_error] if parse_error else gate_errors
@@ -414,6 +424,10 @@ def plan_project(
             "errors": errors,
             "diffs": [{"path": d.path, "diff": d.diff} for d in entry.diffs],
         }
+        if exposes:
+            row["exposes"] = exposes
+        if expose_warnings:
+            row["warnings"] = expose_warnings
         if entry.lens in stale:
             row["stale"] = stale[entry.lens]
             row["note"] = "will recompile on apply"

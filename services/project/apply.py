@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -45,6 +45,7 @@ from services.certify.generate import _MAX_ROWS, _value_summary
 from services.config import EnvRefError, settings
 from services.contracts.authoring import collapse_notes
 from services.contracts.lens_config import LensConfig
+from services.contracts.profile import TableProfile
 from services.contracts.protocols import Connector, Embedder
 from services.contracts.semantic_model import Definition, SemanticModel
 from services.contracts.shared_semantic import (
@@ -566,6 +567,76 @@ def _default_qualifiers(
     return out
 
 
+def _expose_profiles(
+    session: Session,
+    config: LensConfig,
+    *,
+    incoming: Mapping[str, Sequence[TableProfile]] | None = None,
+) -> dict[str, list[TableProfile]]:
+    """Connection -> stored table profiles, for every connection the lens's
+    `expose:` grants name. ``incoming`` is the push's own probe artifacts, for
+    the DRY RUN: apply lands them before any lens compiles, so a plan that read
+    only the store would reject a grant the same push is about to satisfy. An
+    incoming profile replaces the stored one for its table."""
+    from services.lenses import profile_store
+
+    out: dict[str, list[TableProfile]] = {}
+    for grant in config.expose:
+        if grant.connection in out:
+            continue
+        stored = {
+            p.profile.table: p.profile
+            for p in profile_store.list_profiles(session, grant.connection)
+        }
+        for profile in (incoming or {}).get(grant.connection, ()):
+            stored[profile.table] = profile
+        out[grant.connection] = list(stored.values())
+    return out
+
+
+def incoming_profiles(files: Mapping[str, str]) -> dict[str, list[TableProfile]]:
+    """The probe artifacts a push carries, by connection — the plan-side twin
+    of ``apply_profiles``. A malformed artifact contributes nothing here, the
+    way apply skips it with a warning."""
+    from services.project.probe import is_probe_path, parse_probe
+
+    out: dict[str, list[TableProfile]] = {}
+    for path in sorted(files):
+        if not is_probe_path(path):
+            continue
+        try:
+            artifact = parse_probe(files[path], path)
+        except ValueError:
+            continue
+        out.setdefault(artifact.connection, []).extend(
+            p.model_copy(update={"connection": artifact.connection}) for p in artifact.tables
+        )
+    return out
+
+
+def expose_plan_notes(
+    session: Session,
+    config: LensConfig,
+    *,
+    incoming: Mapping[str, Sequence[TableProfile]] | None = None,
+) -> tuple[str | None, list[str]]:
+    """What `dst plan` says about a lens's `expose:` grants: the count line
+    (None when the grants do not resolve — the compile error already names
+    why) and the warnings, chiefly a grant on a lens whose `query` door
+    cannot serve it."""
+    from services.project.expose import UNTYPED_WARNING, expose_summary, resolve_expose
+
+    if not config.expose:
+        return None, []
+    entities, errors = resolve_expose(
+        config,
+        _expose_profiles(session, config, incoming=incoming),
+        declared=[p.name for p in config.select.entities],
+    )
+    warnings = [UNTYPED_WARNING] if not config.untyped_fallback else []
+    return (None if errors else expose_summary(entities)), warnings
+
+
 def _lens_dialect(
     session: Session, config: LensConfig, *, declared: dict[str, ConnectionDecl] | None = None
 ) -> str:
@@ -819,6 +890,7 @@ def apply_lens(
             dialect=dialect,
             asset_hashes=semantic_store.asset_hashes(session),
             default_qualifiers=_default_qualifiers(session),
+            profiles=_expose_profiles(session, config),
         )
     except CompileError as exc:
         return LensApplyResult(lens=name, action="rejected", errors=[str(exc)])
@@ -943,6 +1015,7 @@ def check_lens(
     incoming_relationships: dict[str, SharedRelationship],
     incoming_connections: dict[str, ConnectionDecl],
     asset_hashes: dict[str, str],
+    incoming_profiles: Mapping[str, Sequence[TableProfile]] | None = None,
 ) -> list[str]:
     """Every gate ``apply_lens`` would REJECT this lens on that a dry run can run.
 
@@ -978,6 +1051,7 @@ def check_lens(
             dialect=_lens_dialect(session, config, declared=incoming_connections),
             asset_hashes=asset_hashes,
             default_qualifiers=_default_qualifiers(session, declared=incoming_connections),
+            profiles=_expose_profiles(session, config, incoming=incoming_profiles),
         )
     except CompileError as exc:
         return [str(exc)]
@@ -1041,6 +1115,7 @@ def check_recompiles(
                 dialect=sm.dialect,
                 asset_hashes=asset_hashes,
                 default_qualifiers=_default_qualifiers(session, declared=incoming_connections),
+                profiles=_expose_profiles(session, bundle.config),
             )
         except CompileError as exc:
             out[name] = [str(exc)]
@@ -1091,6 +1166,7 @@ def recompile_stale(
                 dialect=sm.dialect,
                 asset_hashes=hashes,
                 default_qualifiers=qualifiers,
+                profiles=_expose_profiles(session, bundle.config),
             )
         except CompileError as exc:
             results.append(

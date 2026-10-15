@@ -59,8 +59,8 @@ SCHEMA_KINDS: frozenset[str] = frozenset(
 class LayerRef(BaseModel):
     """One semantic asset that reads the table a delta landed on."""
 
-    kind: Literal["entity", "definition", "relationship", "certified"]
-    name: str  # entity name / definition term / relationship name / certified question
+    kind: Literal["entity", "definition", "relationship", "certified", "lens"]
+    name: str  # entity name / definition term / relationship name / certified question / lens
     path: str  # semantic/definitions/discounts.md
     why: str  # the sentence fragment that says HOW it reads it
     sql_expr: str | None = None  # the derivation a new column may supersede
@@ -264,6 +264,65 @@ def parse_certified(files: dict[str, str]) -> list[CertifiedRef]:
     return out
 
 
+class ExposeRef(BaseModel):
+    """One `expose:` pattern of a lens — a grant that reads tables no entity
+    file names, so drift has to learn about them from lens.yaml."""
+
+    lens: str
+    connection: str
+    pattern: str
+    path: str  # lenses/<lens>/lens.yaml
+
+
+def parse_exposes(files: dict[str, str]) -> list[ExposeRef]:
+    """`lenses/*/lens.yaml` → every expose pattern. Same degradation rule as
+    `parse_certified`: a file that does not parse is skipped, not raised."""
+    import yaml
+
+    out: list[ExposeRef] = []
+    for path, content in sorted(files.items()):
+        parts = path.split("/")
+        if not (len(parts) == 3 and parts[0] == "lenses" and parts[2] == "lens.yaml"):
+            continue
+        try:
+            data = yaml.safe_load(content)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = str(data.get("name") or parts[1])
+        for grant in data.get("expose") or []:
+            if not isinstance(grant, dict):
+                continue
+            patterns = grant.get("tables") or []
+            patterns = [patterns] if isinstance(patterns, str) else patterns
+            out += [
+                ExposeRef(
+                    lens=name, connection=str(grant.get("connection", "")), pattern=p, path=path
+                )
+                for p in patterns
+                if isinstance(p, str) and p
+            ]
+    return out
+
+
+def _expose_refs(table: str, exposes: list[ExposeRef]) -> list[LayerRef]:
+    """A lens whose expose pattern matches the table reads it — the grant is
+    resolved at apply, so a dropped table is a grant that stops resolving."""
+    from fnmatch import fnmatchcase
+
+    return [
+        LayerRef(
+            kind="lens",
+            name=ref.lens,
+            path=ref.path,
+            why=f"exposes this table (pattern '{ref.pattern}' on {ref.connection})",
+        )
+        for ref in exposes
+        if fnmatchcase(table.lower(), ref.pattern.lower())
+    ]
+
+
 def parse_layer(
     files: dict[str, str],
 ) -> tuple[dict[str, SharedEntity], dict[str, Definition], dict[str, SharedRelationship]]:
@@ -436,6 +495,7 @@ def cross_reference(
     defs: dict[str, Definition],
     certified: list[CertifiedRef] | None = None,
     relationships: dict[str, SharedRelationship] | None = None,
+    exposes: list[ExposeRef] | None = None,
 ) -> list[Finding]:
     """Each delta with the semantic assets that read the table it landed on.
 
@@ -449,6 +509,7 @@ def cross_reference(
         )
         refs += _relationship_refs(d.table, _column_of(d), entities, relationships or {})
         refs += _certified_refs(d.table, _column_of(d), d.kind, certified or [])
+        refs += _expose_refs(d.table, exposes or [])
         if d.kind == "column_added":
             named = {(r.kind, r.name) for r in refs}
             refs += [
@@ -523,6 +584,15 @@ def _consequence(finding: Finding, ref: LayerRef) -> str:
         return (
             f"derives from this table: `{ref.sql_expr}` — review whether "
             f"`{finding.detail}` supersedes the derivation"
+        )
+    if ref.kind == "lens" and finding.kind == "table_dropped":
+        return f"{ref.why} — the grant no longer resolves; apply fails until the pattern is fixed"
+    if ref.kind == "lens" and finding.kind == "table_added":
+        return f"{ref.why} — the grant picks it up on the next apply"
+    if ref.kind == "lens":
+        return (
+            f"{ref.why} — the published lens still carries the columns as last profiled; "
+            "re-apply to resolve the grant against the table as it stands"
         )
     if finding.kind in ("column_dropped", "table_dropped"):
         return f"{ref.why} — that reference is now broken"

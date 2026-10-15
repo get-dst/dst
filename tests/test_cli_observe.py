@@ -173,9 +173,47 @@ def test_json_is_parseable_for_agents(_routes, capsys) -> None:
     assert parsed["callers"][0]["caller"] == "a"
 
 
-def test_summary_prints_the_governed_basis_and_names_the_unmeasured(_routes, capsys) -> None:
-    """The ledger histogram as one `basis:` line; `unknown` = recorded before
-    the ledger, printed as itself. A pre-ledger server prints no line."""
+def test_summary_prints_the_basis_over_every_read_with_raw_inside(_routes, capsys) -> None:
+    """One `basis:` line as shares of every served caller read, the caller's
+    own SQL (`raw`) inside the denominator, the governed share after it.
+    Zero buckets stay off the line; no reads, no line."""
+    _routes["/kpis"] = {
+        "queries": 1045,
+        "ai_cost_usd": 0.1,
+        "errors": 0,
+        "declined": 0,
+        "outcomes": {"ok": 1045},
+        "resolution_histogram": {"certified": 500, "declared": 388, "mixed": 48, "inferred": 109},
+        "basis": {
+            "certified": 500,
+            "declared": 388,
+            "mixed": 48,
+            "inferred": 109,
+            "raw": 167,
+            "unknown": 0,
+            "n": 1212,
+            "governed_share": 0.7723,
+        },
+    }
+    _routes["/callers"] = [{"caller": "a", "queries": 1045, "cost_usd": 0.1, "errors": 0}]
+    assert cli._observe(_args()) == 0
+    out = capsys.readouterr().out
+    assert (
+        "basis: certified 41% · declared 32% · mixed 4% · inferred 9% · raw 14%  "
+        "(n = 1,212) · governed 77%"
+    ) in out
+    assert "unknown" not in out
+
+    _routes["/kpis"]["basis"] = {k: 0 for k in _routes["/kpis"]["basis"]} | {"governed_share": None}
+    _routes["/kpis"]["resolution_histogram"] = {}
+    assert cli._observe(_args()) == 0
+    assert "basis:" not in capsys.readouterr().out
+
+
+def test_summary_against_a_pre_basis_server_prints_the_governed_histogram(_routes, capsys) -> None:
+    """A server without the basis block: the governed-only ledger histogram as
+    counts; `unknown` = recorded before the ledger, printed as itself. A
+    pre-ledger server prints no line."""
     _routes["/kpis"] = {
         "queries": 10,
         "ai_cost_usd": 0.1,

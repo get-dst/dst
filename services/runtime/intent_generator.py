@@ -78,6 +78,11 @@ def serialize_layer(model: SemanticModel) -> str:
     lines += ["", "Building blocks (use ONLY these names):"]
     for e in model.entities:
         lines.append(f"Entity '{e.name}':")
+        if e.exposed:
+            lines.append(
+                "  no governed definitions — an exposed table: raw columns only, no "
+                "metric, dimension or definition of this lens applies to it"
+            )
         if e.grain:
             lines.append(f"  Grain: {e.grain}")
         if e.population:

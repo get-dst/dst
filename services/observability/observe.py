@@ -24,6 +24,16 @@ def kpis(session: Session) -> dict[str, object]:
     every governed counter here: blending them in overstates governed usage and
     cost, and passthrough volume can be a large share of total rows. They get
     their own ``sql_probes`` block — audited, counted, never blended.
+
+    ``basis`` answers a different question — "how much of what people read
+    rested on a certified definition?" — and that number is only honest over
+    EVERY employee read. So there the caller lens probe (``raw``) sits INSIDE
+    the denominator: a row an agent read with its own SQL is an ungoverned
+    read, and leaving it out would inflate the governed share exactly where it
+    is being measured. The admin passthrough (``lens LIKE 'sql:%'``) is still
+    out: an authoring probe against an org credential is not an employee read.
+    ``governed_share`` is (certified + declared + mixed) / n and None when
+    nothing was read, never a vacuous 100%.
     """
     governed = "COALESCE(generator_tier, '') <> 'probe'"
     row = session.execute(
@@ -72,6 +82,7 @@ def kpis(session: Session) -> dict[str, object]:
     # certified or declared definition. NULL rows predate the ledger and are
     # reported as `unknown`, never folded into "not governed".
     resolution_histogram = _resolution_histogram(session, f"status = 'ok' AND {governed}", {})
+    basis = _basis(session)
     return {
         "queries": int(row[0]),
         "ai_cost_usd": round(float(row[1]), 4),
@@ -106,6 +117,46 @@ def kpis(session: Session) -> dict[str, object]:
             "lens_scoped": int(probe_row[0]) - int(probe_row[1]),
             "warehouse_cost_usd": round(float(probe_row[2]), 4),
         },
+        "basis": basis,
+    }
+
+
+def _basis(
+    session: Session, where: str = "TRUE", params: dict[str, object] | None = None
+) -> dict[str, object]:
+    """Every served caller read, split by what its figure rested on: the ledger
+    tags, `raw` for the lens-scoped SQL probe, `unknown` for served answers with
+    no tag (written before the ledger). The buckets partition `n`. `where`
+    narrows the rows (a time window); the read/probe/passthrough rules are fixed
+    here so every caller of the block means the same thing by it."""
+    probe = "COALESCE(generator_tier, '') = 'probe'"
+    row = session.execute(
+        text(
+            "SELECT "
+            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'certified'), "
+            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'declared'), "
+            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'mixed'), "
+            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'inferred'), "
+            f"count(*) FILTER (WHERE {probe}), "
+            f"count(*) FILTER (WHERE NOT {probe} AND COALESCE(resolution_tag, '') "
+            "NOT IN ('certified', 'declared', 'mixed', 'inferred')), "
+            "count(*) "
+            "FROM request_log WHERE status = 'ok' AND COALESCE(lens, '') NOT LIKE 'sql:%' "
+            f"AND {where}"
+        ),
+        params or {},
+    ).first()
+    assert row is not None
+    certified, declared, mixed, inferred, raw, unknown, n = (int(v) for v in row)
+    return {
+        "certified": certified,
+        "declared": declared,
+        "mixed": mixed,
+        "inferred": inferred,
+        "raw": raw,
+        "unknown": unknown,
+        "n": n,
+        "governed_share": round((certified + declared + mixed) / n, 4) if n else None,
     }
 
 
@@ -455,6 +506,9 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
     resolution_histogram = _resolution_histogram(
         session, f"status = 'ok' AND {governed} AND {win}", {"d": days}
     )
+    # The same basis block as kpis(), over this window: every served caller
+    # read, the raw probe inside the denominator, the admin passthrough out.
+    basis = _basis(session, win, {"d": days})
 
     # Per-lens rollup over the window: owner and the degraded mark from the
     # lens row, the latest regression-gate score from eval_run. Verified share
@@ -541,6 +595,7 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
         else None,
         "resolution_unknown": int(current["resolution_unknown"]),
         "resolution_histogram": resolution_histogram,
+        "basis": basis,
         # Typed serving: % of answers where every slot typed (no escalation),
         # the answers served before typed serving existed, and the slots that
         # keep clarifying — the dictionary gaps to profile.

@@ -1940,6 +1940,16 @@ def run_query(
         degraded_notes.append(f"UNTYPED: served by raw-SQL generation — {untyped_reason}")
         ledger.decisions = [*untyped_decisions, *ledger.decisions]
         ledger.typed = False
+    if certification != "certified" and (
+        exposed := sql_guard.exposed_tables(guard.sql, semantic_model)
+    ):
+        # Same idiom as UNTYPED: an answer read from a table the lens exposes
+        # without definitions says so on its face, on every surface. The
+        # ledger already reads such columns as inferred (resolution._governed).
+        what = "a table" if len(exposed) == 1 else "tables"
+        degraded_notes.append(
+            f"EXPOSED: reads {', '.join(exposed)}, {what} with no governed definitions"
+        )
     if certification != "certified" and report is not None:
         # The trigger is THE SAME line the grade draws
         # (`_semantic_abstained`): announce exactly when the badge was capped for

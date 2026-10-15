@@ -175,6 +175,13 @@ def serialize_model(m: SemanticModel) -> str:
         if e.description:
             head += f"  # {e.description}"
         lines.append(head)
+        if e.exposed:
+            # The grant, stated where the model reads it: raw columns, and no
+            # metric or definition of the lens applies to them.
+            lines.append(
+                "    no governed definitions — an exposed table: raw columns only, no "
+                "metric, dimension or definition of this lens applies to it"
+            )
         if e.grain:
             lines.append(f"    grain: {e.grain}")
         if e.population:

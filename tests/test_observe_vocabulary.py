@@ -407,3 +407,138 @@ def test_eval_trend_carries_the_latest_calibration(org: object) -> None:
     with org_session(org) as session:
         (row,) = [t for t in observe.eval_trend(session) if t["lens"] == "customer_value"]
     assert row["calibration"] == {"vote:m:k=5 [lens]": {"n": 20}}
+
+
+@needs_db
+def test_basis_counts_every_employee_read_with_raw_inside_the_denominator(org: object) -> None:
+    """ "How much of what people read used a certified definition" is only a
+    number over ALL reads: the caller's own SQL (`raw`) sits inside `n`, the
+    admin passthrough does not (not an employee read), declines are not reads,
+    and the older governed counters keep excluding every probe row."""
+    with org_session(org) as session:
+        rows = [
+            ("reporting", None, "certified", "ok"),
+            ("reporting", None, "certified", "ok"),
+            ("reporting", None, "declared", "ok"),
+            ("reporting", None, "mixed", "ok"),
+            ("reporting", None, "inferred", "ok"),
+            ("reporting", None, None, "ok"),  # written before the ledger
+            ("reporting", "probe", None, "ok"),  # the caller's own SQL: raw, counted
+            ("sql:bigquery", "probe", None, "ok"),  # admin passthrough: never a read
+            ("reporting", None, None, "refused"),  # a decline: nothing was read
+            ("reporting", "probe", None, "rejected"),  # a refused probe: nothing was read
+        ]
+        for lens, tier, tag, status in rows:
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, question, "
+                    "status, generator_tier, resolution_tag) VALUES (:o, :r, :l, 'a', 'q', "
+                    ":s, :t, :g)"
+                ),
+                {
+                    "o": org,
+                    "r": f"req-{uuid.uuid4()}",
+                    "l": lens,
+                    "s": status,
+                    "t": tier,
+                    "g": tag,
+                },
+            )
+    with org_session(org) as session:
+        k = observe.kpis(session)
+
+    assert k["basis"] == {
+        "certified": 2,
+        "declared": 1,
+        "mixed": 1,
+        "inferred": 1,
+        "raw": 1,
+        "unknown": 1,
+        "n": 7,
+        "governed_share": round(4 / 7, 4),
+    }
+    # The older counters are untouched: governed rows only, probes in their own block.
+    assert k["queries"] == 7
+    assert k["outcomes"]["ok"] == 6
+    assert k["resolution_histogram"] == {
+        "certified": 2,
+        "declared": 1,
+        "mixed": 1,
+        "inferred": 1,
+        "unknown": 1,
+    }
+    assert k["sql_probes"] == {
+        "queries": 3,
+        "admin_sql": 1,
+        "lens_scoped": 2,
+        "warehouse_cost_usd": 0.0,
+    }
+
+
+@needs_db
+def test_basis_share_is_null_when_nothing_was_read(org: object) -> None:
+    """An admin probe and a decline are not reads: n = 0 and the share is
+    None, never a vacuous 100%."""
+    with org_session(org) as session:
+        for lens, tier, status in [("sql:bigquery", "probe", "ok"), ("reporting", None, "refused")]:
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, question, "
+                    "status, generator_tier) VALUES (:o, :r, :l, 'a', 'q', :s, :t)"
+                ),
+                {"o": org, "r": f"req-{uuid.uuid4()}", "l": lens, "s": status, "t": tier},
+            )
+    with org_session(org) as session:
+        k = observe.kpis(session)
+    assert k["basis"]["n"] == 0 and k["basis"]["governed_share"] is None
+    assert k["basis"]["raw"] == 0
+
+
+@needs_db
+def test_audit_statement_carries_the_basis_over_the_window(org: object) -> None:
+    """The Statement's `basis` means exactly what kpis()'s does, narrowed to
+    the window: one read per bucket plus the caller's own SQL inside `n`, the
+    admin passthrough out, and the row outside the window never counted."""
+    with org_session(org) as session:
+        rows = [
+            ("reporting", None, "certified", "1 day"),
+            ("reporting", None, "declared", "2 days"),
+            ("reporting", None, "mixed", "3 days"),
+            ("reporting", None, "inferred", "4 days"),
+            ("reporting", None, None, "5 days"),  # pre-ledger: unknown
+            ("reporting", "probe", None, "6 days"),  # the caller's own SQL: raw
+            ("sql:bigquery", "probe", None, "7 days"),  # admin passthrough: out
+            ("reporting", None, "certified", "40 days"),  # outside the window
+        ]
+        for lens, tier, tag, age in rows:
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, question, "
+                    "status, generator_tier, resolution_tag, created_at) VALUES (:o, :r, :l, "
+                    "'a', 'q', 'ok', :t, :g, NOW() - CAST(:age AS interval))"
+                ),
+                {
+                    "o": org,
+                    "r": f"req-{uuid.uuid4()}",
+                    "l": lens,
+                    "t": tier,
+                    "g": tag,
+                    "age": age,
+                },
+            )
+    with org_session(org) as session:
+        d = observe.audit_statement(session, days=30)
+        k = observe.kpis(session)
+
+    assert d["basis"] == {
+        "certified": 1,
+        "declared": 1,
+        "mixed": 1,
+        "inferred": 1,
+        "raw": 1,
+        "unknown": 1,
+        "n": 6,
+        "governed_share": 0.5,
+    }
+    # Unwindowed, the same block sees the older certified read too.
+    assert k["basis"]["certified"] == 2 and k["basis"]["n"] == 7

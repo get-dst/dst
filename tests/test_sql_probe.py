@@ -277,3 +277,58 @@ def test_the_cli_verb_prints_rows_and_reports_a_refusal(org_admin, monkeypatch, 
     err = capsys.readouterr().err
     assert "only SELECT queries are allowed" in err
     assert "dst introspect --connection jaffle" in err
+
+
+@needs_db
+def test_purpose_is_kept_on_the_lens_door_only_when_the_lens_opts_in(org_admin) -> None:
+    """The probe takes `purpose` like the asking doors. The lens scope stores it
+    only under `logging.log_purpose` (NULL otherwise, never ''); the connection
+    scope has no lens to opt in and never stores it."""
+    org, raw = org_admin
+    ah = {"Authorization": f"Bearer {raw}"}
+    bundle = jaffle_customer_value_bundle()
+    bundle.config.access.allow = [AccessRule(caller="agent1")]
+    assert (
+        client.post("/mgmt/lenses", json=bundle.model_dump(mode="json"), headers=ah).status_code
+        == 201
+    )
+    assert client.post("/mgmt/lenses/customer_value/publish", headers=ah).status_code == 200
+    assert client.post("/mgmt/callers", json={"name": "agent1"}, headers=ah).status_code == 201
+    granted = client.post("/mgmt/callers/agent1/keys", headers=ah).json()["key"]
+    why = "checking whether refunds are negative amounts"
+
+    def stored(**where: object) -> object:
+        clause = " AND ".join(f"{k} = :{k}" for k in where)
+        with create_engine(settings.database_admin_url).connect() as c:
+            return c.execute(
+                text(f"SELECT purpose FROM request_log WHERE org_id = :o AND {clause}"),
+                {"o": org, **where},
+            ).scalar_one()
+
+    select = "SELECT customer_id FROM customers"
+    r = _probe(granted, lens="customer_value", sql=select, limit=1, purpose=why)
+    assert r.status_code == 200, r.text
+    assert stored(request_id=r.json()["request_id"]) is None
+
+    bundle.config.logging.log_purpose = True
+    assert (
+        client.put(
+            "/mgmt/lenses/customer_value", json=bundle.model_dump(mode="json"), headers=ah
+        ).status_code
+        == 200
+    )
+    assert client.post("/mgmt/lenses/customer_value/publish", headers=ah).status_code == 200
+    r = _probe(granted, lens="customer_value", sql=select, limit=1, purpose=why)
+    assert r.status_code == 200, r.text
+    assert stored(request_id=r.json()["request_id"]) == why
+    # The refusal row carries it too: it is logged before the guard raises.
+    star = "SELECT * FROM customers"
+    assert _probe(granted, lens="customer_value", sql=star, purpose=why).status_code == 400
+    assert stored(question=star, status="rejected") == why
+    # Over the cap is a 422 at the door, same as /query.
+    assert _probe(granted, lens="customer_value", sql=select, purpose="x" * 301).status_code == 422
+
+    # The admin door: no lens, no opt-in, nothing stored.
+    r = _probe(raw, connection="jaffle", sql="SELECT 1 AS n", purpose=why)
+    assert r.status_code == 200, r.text
+    assert stored(request_id=r.json()["request_id"]) is None

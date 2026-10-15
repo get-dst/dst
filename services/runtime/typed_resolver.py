@@ -764,7 +764,18 @@ class TypedResolver:
         self._matched: list[str] = []
         self._notes = " ".join(notes or [])
         self._value_aliases = _value_aliases(model)
+        # An exposed table is never a typed option: it declares no metric, no
+        # dimension and no meaning, so a decision over it would be a closed-set
+        # choice among ungoverned columns. The resolver sees the governed
+        # model only; a question about an exposed table does not type and
+        # follows the lens's untyped rule.
+        model = model.model_copy(update={"entities": [e for e in model.entities if not e.exposed]})
         try:
+            if not model.entities:
+                raise _Decline(
+                    "no governed entity of this lens answers the question "
+                    "(its tables are exposed without definitions)"
+                )
             intent, supplied = self._resolve(question, model, records)
         except _Clarify as c:
             return TypedResolution(

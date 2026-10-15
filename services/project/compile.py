@@ -12,14 +12,16 @@ layer exists to kill.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from services.contracts.lens_config import LensConfig
+from services.contracts.profile import TableProfile
 from services.contracts.semantic_model import (
     Definition,
     Entity,
+    EntitySource,
     Join,
     Metric,
     SampleQuery,
@@ -31,6 +33,7 @@ from services.contracts.shared_semantic import (
     SharedRelationship,
     asset_content_hash,
 )
+from services.project.expose import resolve_expose
 from services.semantic.resolve import resolve_model
 
 # Connection type → SQL dialect. 1:1 today; the seam for gateway types later.
@@ -103,7 +106,10 @@ def compile_lens_model(
     dialect: str,
     asset_hashes: dict[str, str] | None = None,
     default_qualifiers: Mapping[str, str] | None = None,
+    profiles: Mapping[str, Sequence[TableProfile]] | None = None,
 ) -> tuple[SemanticModel, list[str]]:
+    """``profiles`` (connection -> stored table profiles) is what the lens's
+    `expose:` grants resolve against; a lens that exposes nothing needs none."""
     warnings: list[str] = []
     consumed: dict[str, str] = {}
     hashes = asset_hashes or {}
@@ -158,6 +164,22 @@ def compile_lens_model(
         entities.append(Entity.model_validate(entity_dict))
         selected_names.add(pick.name)
         consumed[f"entity/{pick.name}"] = hashes.get(f"entity/{pick.name}", "")
+    # Exposed tables ride as entities of the same model — same allow-list, same
+    # drift check — flagged so every runtime rail reads them as ungoverned.
+    # Resolved from the profiles, never from a file, so the columns are the
+    # warehouse's as of the last probe; they qualify like a declared source.
+    if config.expose:
+        exposed, expose_errors = resolve_expose(
+            config, profiles or {}, declared=sorted(selected_names)
+        )
+        if expose_errors:
+            raise CompileError("\n".join(expose_errors))
+        for entity in exposed:
+            table = qualify_table(
+                entity.source.table, (default_qualifiers or {}).get(entity.source.connection)
+            )
+            entity.source = EntitySource(connection=entity.source.connection, table=table)
+            entities.append(entity)
     # A relationship rides iff the lens selects BOTH endpoints; with exactly one
     # selected it is dropped with a warning (the author meant to join something
     # this lens cannot see). Neither endpoint selected = not this lens's fact.
@@ -206,7 +228,10 @@ def compile_lens_model(
                 "rename the local term or edit the shared page instead"
             )
         definitions.append(local)
-    definitions = _tailor_ambiguous(definitions, entities, warnings)
+    # Only governed entities can resolve an ambiguous term's meaning: a
+    # mapping onto an exposed table's column would be a "declared" reading of
+    # a table that declares nothing.
+    definitions = _tailor_ambiguous(definitions, [e for e in entities if not e.exposed], warnings)
 
     # Selection is a visible boundary: record the metric names the subsets
     # DROPPED (minus any a selected entity still defines) so the runtime can

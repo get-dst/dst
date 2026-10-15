@@ -230,6 +230,55 @@ naming exactly what this lens loses on the first pass;
 `dst lens prompt <lens> "<question>"` renders both prompts so you can check
 what actually reached the model.
 
+## Exposing tables that have no definitions
+
+Not every read is a governed one. Investigative work on staging tables or a stray
+dimension needs the columns, not a metric, and an entity file per such table is a
+meaning-free file that rots with every upstream column. A lens can instead declare a
+grant in `lens.yaml`, beside `select:`:
+
+```yaml
+expose:
+  - connection: warehouse
+    tables: ["staging.*", "analytics.dim_*"]
+    hide: ["*.ssn", "staging.customers.email"]
+```
+
+Patterns are fnmatch-style on the table name exactly as `dst introspect` names it
+(`schema.table`); `hide` patterns match `table.column`, with the table bare or
+qualified. The grant is resolved at **apply**, against the connection's stored
+profiles (`dst probe` / `dst introspect` push them; a probe artifact in the same push
+counts). Each matched table becomes an entity in the compiled model: name = the bare
+table name, fields = the profile's columns minus `hide`, description = the profile's,
+and no metrics, dimensions or time field. Because it is resolved from the profile, the
+columns are the warehouse's as of the last probe; re-apply after a probe and the entity
+follows the table.
+
+Apply fails loud when a pattern matches no profiled table (the error names the
+pattern: run `dst probe` or fix it) and when a matched bare name collides with an
+entity the same lens selects. `dst plan` prints `exposes N tables (M columns)` per
+lens, and warns when `expose` is set with `untyped_fallback: false`: a question about
+an exposed table never types, so `query` cannot answer from it until the lens accepts
+untyped answers (the `sql` tool reads it either way).
+
+What an exposed table is, on every rail:
+
+- the SQL guard admits its tables and columns like any entity's; a hidden column is
+  simply absent, so naming it is out of scope. `SELECT *` is allowed only when every
+  table in the statement is an exposed table with no hidden column.
+- the typed resolver never offers it; the raw-SQL prompt lists it with its columns
+  and the line `no governed definitions`; the router takes no anchors from it.
+- an answer that reads one carries a line in `degraded`, in the same idiom as
+  `UNTYPED`: `EXPOSED: reads staging.orders, a table with no governed definitions`.
+  Its columns never count as declared sources in the resolution ledger, so a measure
+  read from it is `inferred`, never `declared` or `certified`.
+- `describe_lens` lists it under `exposed_tables`, apart from `entities`, with a note
+  that answers from it are ungoverned.
+
+Promote a table into a real entity the moment a number from it is going to be
+repeated: the first metric, the first definition someone asks about, the first
+certified answer. An exposed table is for looking; an entity is for serving.
+
 ## Deletion is explicit: certified answers follow their file
 
 File absence never deletes *objects*: `dst lens rm` prints the cascade first and

@@ -39,7 +39,7 @@ Twelve tools (`services/mcp/server.py`):
 | `route_query` | **the default door**: dst picks the lens or declines; on a decline you get `covered: false` with a reason and nearest miss, never a wrong-lens guess |
 | `query` | ask a named lens |
 | `query_metrics` | ask with a structured intent (metrics, dimensions, filters) instead of prose |
-| `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged |
+| `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; takes `purpose` like the other asking tools |
 | `list_lenses` / `describe_lens` | what this caller may see: schema, definitions, certified count |
 | `lookup_definition` | a governed term's approved meaning verbatim; no SQL, no warehouse call |
 | `search_certified` | similarity-ranked [certified answers](../concepts/certified.md) |
@@ -51,6 +51,13 @@ Twelve tools (`services/mcp/server.py`):
 Plus a `getting_started` prompt. Every tool returns a uniform envelope, `{"ok": true, …}`
 or `{"ok": false, "code": auth|forbidden|not_found|rate_limited|no_exact_match|upstream|
 unreachable, "error": …}`, so agents branch on `ok` and `code`, never parse prose.
+
+A lens can also [expose tables that have no
+definitions](project-files.md#exposing-tables-that-have-no-definitions).
+`describe_lens` lists them under `exposed_tables`, apart from `entities`, with
+their columns and a note that answers from them are ungoverned; the `sql` tool
+reads them inside the lens's scope, and an answer that touches one carries an
+`EXPOSED` line in `degraded` the way an untyped answer carries `UNTYPED`.
 
 ## Scoping a lens per agent
 

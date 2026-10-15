@@ -244,6 +244,24 @@ scaffold's reference block carries the full key list
 | `stale_after_days` (top level) | unset | the freshness contract: days after the scope's measured last-update at which answers flag stale: the freshness check fails, the grade caps at `partial`, and the answer says so. Unset = undeclared; the check reports skip, never a vacuous pass. Read [how `data_as_of` is measured](../guides/project-files.md#freshness-is-a-declared-contract) before setting it |
 | `model.answer_contract` | `strict` | the output-grid contract in every generation prompt: project exactly the asked quantities at the asked grain, full precision. `off` removes the block (a bare `off` is fine; YAML 1.1 parses it as a boolean and the loader coerces it back) |
 
+### Tables without definitions (`expose`)
+
+A lens may read tables no entity file describes
+([guide](../guides/project-files.md#exposing-tables-that-have-no-definitions)).
+The grant is a list under `expose:`, resolved at apply against the connection's
+stored profiles:
+
+| Key | Type | What it declares |
+|---|---|---|
+| `expose[].connection` | string | the dst.yaml connection whose profiled tables the patterns match; must be in the lens's `connections` |
+| `expose[].tables` | list of patterns | fnmatch-style on `schema.table` as introspect names it (`staging.*`, `analytics.dim_*`); a pattern matching no profiled table fails apply |
+| `expose[].hide` | list of patterns | columns withheld, matched as `table.column` bare or qualified (`*.ssn`, `staging.customers.email`); a hidden column is out of scope |
+
+Each matched table compiles to an entity with the profile's columns and nothing
+else. Answers from it are disclosed `EXPOSED`, never typed, and never `declared`
+in the ledger; with `untyped_fallback: false` the `query` door cannot serve them
+(plan warns), while the `sql` tool reads them directly.
+
 ## Server environment
 
 Loaded from the process env / `.env` (`services/config.py`). Every setting is

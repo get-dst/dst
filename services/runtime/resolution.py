@@ -39,10 +39,17 @@ _TIME_TYPES = {"date", "timestamp"}
 # ── shared model lookups ─────────────────────────────────────────────────────
 
 
+def _governed(model: SemanticModel) -> list[Entity]:
+    """The entities whose members can be a DECLARED source. An exposed table
+    declares nothing — its columns are the warehouse's, not the author's — so a
+    column read from one is inferred, whatever its name or type."""
+    return [e for e in model.entities if not e.exposed]
+
+
 def _time_fields(model: SemanticModel) -> set[str]:
     """Every field name the model treats as a time axis (lowercased)."""
     out: set[str] = set()
-    for e in model.entities:
+    for e in _governed(model):
         if e.default_time_field:
             out.add(e.default_time_field.lower())
         out.update(m.agg_time_field.lower() for m in e.metrics if m.agg_time_field)
@@ -109,7 +116,9 @@ def from_intent(
         # period total is the silent-wrong class this slot exists to name.
         slots.append(Slot(kind="window", name=reading[0], source="declared", value=reading[1]))
     time_fields = _time_fields(model)
-    bool_fields = {f.name.lower() for e in model.entities for f in e.fields if f.type == "boolean"}
+    bool_fields = {
+        f.name.lower() for e in _governed(model) for f in e.fields if f.type == "boolean"
+    }
     governed = _governed_predicates(model, set(intent.metrics), model.dialect)
     for f in intent.filters:
         field = f.field.rsplit(".", 1)[-1]
@@ -353,7 +362,7 @@ def _time_field_slot(node: exp.Expr, model: SemanticModel, sql: str) -> Slot:
 
 
 def _column_on_present_entity(name: str, model: SemanticModel, sql: str) -> bool:
-    for e in model.entities:
+    for e in _governed(model):
         members = {d.name.lower() for d in e.dimensions} | {f.name.lower() for f in e.fields}
         if name in members and _entity_present(e, sql):
             return True
@@ -456,7 +465,9 @@ def _filter_slots(
 ) -> list[Slot]:
     slots: list[Slot] = []
     time_fields = _time_fields(model)
-    bool_fields = {f.name.lower() for e in model.entities for f in e.fields if f.type == "boolean"}
+    bool_fields = {
+        f.name.lower() for e in _governed(model) for f in e.fields if f.type == "boolean"
+    }
     seen: set[str] = set()
     for where in stmt.find_all(exp.Where):
         for pred in _split_and(where.this):

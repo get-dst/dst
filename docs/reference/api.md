@@ -59,7 +59,7 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 | `POST /v1/lenses/{name}/query` | Ask: body `{"q": "..."}` → a governed answer |
 | `POST /v1/lenses/{name}/metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; same governance and receipts |
 | `GET /v1/definitions` | Look a governed term up across every lens this key may use: the approved meaning verbatim, no SQL, no warehouse (`dst define`) |
-| `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key); row-capped (`limit`, default 20, max 500) and logged |
+| `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key); row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
 | `GET /v1/lenses/{name}/certified` | The lens's certified library; with `?q=` results are similarity-ranked (top 5, scored) |
 | `POST /v1/lenses/{name}/certified/{cert_id}/run` | Run an approved question→SQL pair exactly as certified; zero AI SQL generation |
 | `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope |

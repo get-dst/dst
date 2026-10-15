@@ -397,6 +397,16 @@ class Entity(Authored):
         "to one value) or group by — e.g. ['currency']: a SUM across them is a "
         "number denominated in nothing",
     )
+    # An entity resolved at apply from a lens's `expose:` grant, not authored:
+    # the table's columns as the profile holds them, no metrics, no dimensions,
+    # no meaning. The runtime treats it as ungoverned on every rail — never
+    # offered to a typed decision, no router anchors, never a declared source
+    # in the ledger, and every answer that reads it says EXPOSED. `exposed_whole`
+    # is True when no `hide` pattern withheld a column, which is the one case
+    # the SQL guard lets `SELECT *` through: a star over it reveals nothing the
+    # lens withholds.
+    exposed: bool = False
+    exposed_whole: bool = False
 
 
 class Join(Authored):

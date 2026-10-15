@@ -333,6 +333,8 @@ async def describe_lens(name: str, ctx: Context) -> dict[str, Any]:  # type: ign
 
     If certified_count > 0, prefer search_certified before query — a certified answer
     is human-approved and served deterministically (no AI generation).
+    `exposed_tables` are tables the lens reads WITHOUT definitions: answers from
+    them are ungoverned (EXPOSED, UNTYPED), and the sql tool reads them directly.
 
     Args:
         name: the lens name from list_lenses.
@@ -610,6 +612,7 @@ async def sql(
     sql: str,
     ctx: Context,  # type: ignore[type-arg]
     limit: int = 20,
+    purpose: str = "",
 ) -> dict[str, Any]:
     """Run your OWN read-only SQL inside a lens's scope, and get the rows back.
 
@@ -629,9 +632,14 @@ async def sql(
         lens: the lens name from list_lenses.
         sql: one SELECT statement over that lens's tables.
         limit: rows to return (default 20, max 500).
+        purpose: one sentence on what the user is trying to accomplish, when you
+            know it. Optional; it never changes what the SQL may read.
     """
     payload, failure = await _request(
-        ctx, "POST", "/v1/sql", json_body={"lens": lens, "sql": sql, "limit": limit}
+        ctx,
+        "POST",
+        "/v1/sql",
+        json_body={"lens": lens, "sql": sql, "limit": limit, **_purpose(purpose)},
     )
     if failure is not None:
         return failure

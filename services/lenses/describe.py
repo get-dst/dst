@@ -31,6 +31,22 @@ class LensEntityInfo(BaseModel):
     fields: list[LensFieldInfo]
 
 
+class ExposedTableInfo(BaseModel):
+    """A table the lens reads WITHOUT definitions (an `expose:` grant): its
+    columns as profiled, and nothing else — no metric, no meaning."""
+
+    table: str
+    columns: list[LensFieldInfo]
+    description: str | None = None
+
+
+EXPOSED_NOTE = (
+    "exposed_tables are read without governed definitions: answers from them are "
+    "ungoverned, carry an EXPOSED line, and serve as UNTYPED (raw SQL) — the sql "
+    "tool reads them directly"
+)
+
+
 class LensDefinitionInfo(BaseModel):
     term: str
     body: str
@@ -54,6 +70,11 @@ class LensDescription(BaseModel):
     # before paying for generation.
     certified_count: int = 0
     certified_examples: list[str] = []
+    # Tables the lens exposes without definitions, listed APART from entities:
+    # an agent must never read one as a governed entity. ``note`` says what an
+    # answer from them is, so the caller learns it before it pays for an ask.
+    exposed_tables: list[ExposedTableInfo] = []
+    note: str | None = None
 
 
 def describe_model(
@@ -81,7 +102,21 @@ def describe_model(
                 ],
             )
             for e in model.entities
+            if not e.exposed
         ],
+        exposed_tables=[
+            ExposedTableInfo(
+                table=e.source.table,
+                description=e.description,
+                columns=[
+                    LensFieldInfo(name=f.name, type=f.type, description=f.description)
+                    for f in e.fields
+                ],
+            )
+            for e in model.entities
+            if e.exposed
+        ],
+        note=EXPOSED_NOTE if any(e.exposed for e in model.entities) else None,
         definitions=[
             LensDefinitionInfo(
                 term=d.term,

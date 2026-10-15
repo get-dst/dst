@@ -1351,6 +1351,7 @@ def _drift(args: argparse.Namespace) -> int:
         definitions,
         wd.parse_certified(project_files),
         relationships,
+        wd.parse_exposes(project_files),
     )
     if args.as_json:
         print(
@@ -2574,6 +2575,12 @@ def _render_plan(plan: list[dict[str, Any]], write: Callable[[str], None]) -> in
         # rest of a plan cannot express — nothing here is a diff to apply.
         for line in entry.get("semantics", []):
             write(f"  ! {line}")
+        # The grant resolved at apply: how many tables the lens reads without
+        # definitions, and the one warning that makes the grant unreachable.
+        if entry.get("exposes"):
+            write(f"  {entry['exposes']}")
+        for line in entry.get("warnings", []):
+            write(f"  ! {line}")
         if entry.get("certified"):  # re-verify is a human act — the plan only names them
             write(f"  {entry['certified']['note']}")
             for q in entry["certified"]["questions"]:
@@ -2652,6 +2659,10 @@ def _summarize_plan(plan: list[dict[str, Any]]) -> None:
             row(entry.get("status") or "update", str(entry.get("lens") or ""), note or status)
         for line in entry.get("semantics", []):
             rows.append("  " + style.warn("!") + f" {line}")
+        if entry.get("exposes"):
+            rows.append(f"    {entry.get('lens')}: {entry['exposes']}")
+        for line in entry.get("warnings", []):
+            rows.append("  " + style.warn("!") + f" {entry.get('lens')}: {line}")
         if entry.get("certified"):
             n = len(entry["certified"].get("questions") or [])
             rows.append(
@@ -4454,13 +4465,25 @@ def _observe(args: argparse.Namespace) -> int:
             print(f"{head} · {split}" if split else head)
         else:  # pre-split server: 'errors' there means every non-ok outcome
             print(f"{head} · {kpis.get('errors', 0)} non-ok")
-        basis = kpis.get("resolution_histogram")
-        if isinstance(basis, dict) and basis:
-            # Governed basis: how many served figures rested on a certified or
-            # declared definition. `unknown` = recorded before the ledger, said
-            # as itself — a pre-ledger server prints no line at all.
+        basis = kpis.get("basis")
+        if isinstance(basis, dict) and int(basis.get("n") or 0):
+            # Basis over EVERY served caller read, `raw` (the caller's own SQL)
+            # inside the denominator: the governed share is only honest when
+            # the ungoverned reads count against it. Nonzero buckets only;
+            # `unknown` = recorded before the ledger, said as itself.
+            n = int(basis["n"])
+            buckets = ("certified", "declared", "mixed", "inferred", "raw", "unknown")
+            split = " · ".join(
+                f"{k} {round(100 * int(basis.get(k) or 0) / n)}%" for k in buckets if basis.get(k)
+            )
+            share = basis.get("governed_share")
+            governed = f" · governed {round(100 * float(share))}%" if share is not None else ""
+            print(f"{style.accent('basis:')} {split}  (n = {n:,}){governed}")
+        elif isinstance(hist := kpis.get("resolution_histogram"), dict) and hist:
+            # A server from before the basis block: the governed-only histogram
+            # as counts. A pre-ledger server prints no line at all.
             order = ("certified", "declared", "mixed", "inferred", "unknown")
-            split = " · ".join(f"{basis.get(k, 0)} {k}" for k in order if basis.get(k))
+            split = " · ".join(f"{hist.get(k, 0)} {k}" for k in order if hist.get(k))
             print(f"{style.accent('basis:')} {split}")
         print()
     if not callers:
