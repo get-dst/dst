@@ -336,14 +336,87 @@ def _time_bucket(
             f"entity '{entity.name}' names '{field}' as its time field, but has no such "
             "field — fix default_time_field/agg_time_field"
         )
-    # Quoting is per-identifier (the entity may need it while the field does not),
+    return f"{field}_{grain}", _trunc_sql(entity.name, field, grain, dialect)
+
+
+def _trunc_sql(table: str, field: str, grain: str, dialect: str) -> str:
+    """``table.field`` truncated to *grain*, in the dialect's own DATE_TRUNC form."""
+    # Quoting is per-identifier (the table may need it while the field does not),
     # so build the column from two identifiers rather than one `quoted=` flag.
     column = exp.column(
         exp.to_identifier(field, quoted=is_reserved(field, dialect)),
-        table=exp.to_identifier(entity.name, quoted=is_reserved(entity.name, dialect)),
+        table=exp.to_identifier(table, quoted=is_reserved(table, dialect)),
     )
     node = exp.DateTrunc(this=column, unit=exp.Literal.string(grain))  # type: ignore[no-untyped-call]
-    return f"{field}_{grain}", node.sql(dialect=dialect)
+    return node.sql(dialect=dialect)
+
+
+def level_time_field(entity: Entity, metrics: Sequence[Metric]) -> str | None:
+    """The snapshot field a level reading restricts, or None when no selected
+    metric is a level. A level beside a flow is refused: one WHERE cannot both
+    keep every row of the window and keep only its last snapshot."""
+    levels = [m for m in metrics if m.additivity == "level"]
+    if not levels:
+        return None
+    if len(levels) != len(metrics):
+        flows = ", ".join(sorted(m.name for m in metrics if m.additivity != "level"))
+        raise CompileError(
+            f"metrics disagree about additivity: {', '.join(sorted(m.name for m in levels))} "
+            f"read as the latest snapshot and {flows} as a sum over the window — ask for "
+            "them separately"
+        )
+    effective = {m.agg_time_field or entity.default_time_field for m in levels}
+    if len(effective) > 1:
+        named = ", ".join(sorted(f or "(none)" for f in effective))
+        raise CompileError(
+            f"level metrics disagree about which time field holds the snapshot ({named}) "
+            "— ask for them separately"
+        )
+    field = next(iter(effective))
+    if not field:
+        raise CompileError(
+            f"entity '{entity.name}' declares no default_time_field, so a level metric "
+            "cannot find its latest snapshot — add `default_time_field:` to the entity, "
+            "or `agg_time_field:` to the metric"
+        )
+    if not any(f.name == field for f in entity.fields):
+        raise CompileError(
+            f"entity '{entity.name}' names '{field}' as its time field, but has no such "
+            "field — fix default_time_field/agg_time_field"
+        )
+    return field
+
+
+def _latest_snapshot(
+    entity: Entity,
+    field: str,
+    window: list[IntentFilter],
+    grain: str | None,
+    dialect: str,
+    zone: str,
+) -> str:
+    """The predicate that makes a level metric read as a snapshot: the time
+    field equals the latest value inside the window (or inside each grain
+    bucket, so a monthly trend is each month's last snapshot). A correlated
+    scalar subquery over the same table, which every supported dialect runs;
+    the window predicates ride into it so "end of August" is August's last
+    snapshot and not the table's.
+
+    Only the window restricts the subquery: a snapshot is of the whole
+    population at one date, so a dimension or a metric filter aggregates rows
+    AT that date rather than moving the date per group — a group that vanished
+    before the snapshot reads as absent, which is what its stock was."""
+    inner = f"{entity.name}_latest"
+    col = f"{quote_ident(inner, dialect)}.{quote_ident(field, dialect)}"
+    conds = [_predicate(col, f, dialect, zone) for f in window]
+    if grain:
+        same_bucket = _trunc_sql(entity.name, field, grain, dialect)
+        conds.append(f"{_trunc_sql(inner, field, grain, dialect)} = {same_bucket}")
+    table = quote_table(entity.source.table, dialect)
+    sub = f"SELECT MAX({col}) FROM {table} AS {quote_ident(inner, dialect)}"
+    if conds:
+        sub += " WHERE " + " AND ".join(conds)
+    return f"{_qualify(entity, field, dialect)} = ({sub})"
 
 
 def unsafe_join_reason(model: SemanticModel, base: str, target: str) -> str | None:
@@ -651,6 +724,28 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
             continue
         seen_predicates.add(key)
         predicates.append(pred)
+    # A level metric (ARR, headcount, a balance) is a snapshot: its figure for a
+    # window is the LAST snapshot inside it, never SUM over every snapshot row.
+    # Without this a quarter's "total ARR" summed three month-ends into one
+    # number three times too large — a silent wrong answer the aggregate alone
+    # cannot see, because the rows and the SQL are both well-formed.
+    snapshot_field = level_time_field(entity, [metrics_by[m] for m in intent.metrics])
+    if snapshot_field is not None:
+        window = [
+            f
+            for f, (owner, _expr) in zip(intent.filters, filter_exprs, strict=True)
+            if owner is entity and f.field.rpartition(".")[2] == snapshot_field
+        ]
+        predicates.append(
+            _latest_snapshot(
+                entity,
+                snapshot_field,
+                window,
+                intent.grain,
+                dialect,
+                zone if _member_type(entity, snapshot_field) == "timestamp" else "",
+            )
+        )
     if predicates:
         sql += " WHERE " + " AND ".join(predicates)
     if intent.metrics and group:

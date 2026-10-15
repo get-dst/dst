@@ -9,17 +9,23 @@ No warehouse, no composer — the cost is the decisions. An answer certified
 before the ledger carries no stored gold; its human-approved SQL is attributed
 into slots instead (``method: attributed``) and graded the same way, provided
 the attribution found a governed measure — an empty gold would pass anything,
-so it is skipped and counted instead.
+so it is skipped WITH ITS REASON (``SlotLaneOutcome.skipped``), never dropped
+on the floor: graded plus skipped is every active answer. A templated answer
+is graded on its first sample binding, the same rendering the rows lane
+executes; one with no valid sample binding is skipped and says so.
 
 ``repeat`` resolves every question N times: the verdict holds only when every
 run passes AND every run produced the same typed intent — determinism is the
 claim typed serving makes, and here it is measured, not assumed.
 
 The compiled SQL is a deterministic function of the intent, so the lane also
-compares it to the certified SQL text (both sqlglot-canonicalised): identical
-means the query is proven without a warehouse; different means only that the
-certified text was written another way (a raw-SQL CTE, a CASE) — the rows lane
-on apply is the oracle for those until they earn typed gold.
+compares it to the certified SQL text: identical (the same query after
+sqlglot canonicalisation) or equivalent (the same query once both are run
+through sqlglot's optimizer — aliases, predicate order and a subquery wrapper
+are spelling, a different literal is not) means the query is proven without a
+warehouse; differs means only that the certified text was written another way
+(a raw-SQL CTE, a CASE) — the rows lane on apply is the oracle for those until
+they earn typed gold.
 
 Pure over an injected resolver; `dst test --slots` builds it from the install's
 decider and the assembly seam.
@@ -29,12 +35,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
 
 import sqlglot
+from sqlglot import exp
+from sqlglot.optimizer import optimize
 
 from services.certify.store import CertifiedAnswer, is_active
+from services.contracts.eval import EvalResult
 from services.contracts.resolution import MEASURE_KINDS, DecisionRecord, Resolution
 from services.contracts.semantic_model import SemanticModel
 from services.evals.calibration import GradedDecision
@@ -43,6 +52,11 @@ from services.runtime.compiler import CompileError, compile_intent
 from services.runtime.typed_resolver import TypedResolution
 
 GOVERNED = {"declared", "certified"}
+
+# identical: the same query text once canonicalised; equivalent: the same
+# query once both sides are optimised (aliases, predicate order, a wrapping
+# subquery are spelling); differs: written another way, the rows lane decides.
+SqlMatch = Literal["identical", "equivalent", "differs"]
 
 
 @dataclass
@@ -57,10 +71,10 @@ class SlotCase:
     gold: str = "stored"  # stored | attributed
     runs: int = 1
     agreement: int = 1  # runs whose typed intent equals the first run's
-    # Compiled SQL vs the certified SQL text, canonicalised: True = proven
-    # identical (no warehouse needed), False = written another way, None = no
-    # compiled SQL (the question did not type).
-    sql_match: bool | None = None
+    # Compiled SQL vs the certified SQL text: identical or equivalent = proven
+    # (no warehouse needed), differs = written another way, None = no compiled
+    # SQL (the question did not type).
+    sql_match: SqlMatch | None = None
     # Per resolution (mean over runs): wall seconds, provider calls, tokens,
     # and USD from the provider's price (None when unpriced).
     elapsed_s: float = 0.0
@@ -70,10 +84,24 @@ class SlotCase:
     cost_usd: float | None = None
 
 
+@dataclass(frozen=True)
+class SkippedAnswer:
+    """An active certified answer the lane did not grade, and why."""
+
+    answer_id: str
+    question: str
+    reason: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"answer_id": self.answer_id, "question": self.question, "reason": self.reason}
+
+
 @dataclass
 class SlotLaneOutcome:
     cases: list[SlotCase]
-    skipped_no_gold: int
+    # Every active answer not in ``cases``, each with the reason — the count a
+    # reader adds to the graded cases to get back to the corpus.
+    skipped: list[SkippedAnswer] = field(default_factory=list)
     attributed_gold: int = 0
     elapsed_s: float = 0.0
     workers: int = 1
@@ -91,12 +119,26 @@ class SlotLaneOutcome:
     def failed(self) -> int:
         return sum(1 for c in self.cases if c.verdict == "failed")
 
+    @property
+    def skipped_no_gold(self) -> int:
+        return sum(1 for s in self.skipped if s.reason.startswith(NO_GOLD))
+
+    @property
+    def skipped_templates(self) -> int:
+        return sum(1 for s in self.skipped if s.reason.startswith(TEMPLATED))
+
+
+NO_GOLD = "no gold"
+TEMPLATED = "templated"
+
 
 def _gold_names(expected: Resolution, kind: str) -> set[str]:
     return {s.name for s in expected.slots if s.kind == kind and s.source in GOVERNED}
 
 
-def grade_decisions(records: list[DecisionRecord], expected: Resolution) -> list[GradedDecision]:
+def grade_decisions(
+    records: list[DecisionRecord], expected: Resolution, question: str | None = None
+) -> list[GradedDecision]:
     """Each slot decision against the gold the stored slots imply.
 
     ``shape``: a figure (aggregate or ranking) iff the gold carries a measure slot. ``metric`` /
@@ -141,6 +183,7 @@ def grade_decisions(records: list[DecisionRecord], expected: Resolution) -> list
                 gold=gold,
                 p=r.p,
                 margin=r.margin,
+                question=question,
             )
         )
     return out
@@ -151,6 +194,66 @@ def canonical_sql(sql: str, dialect: str) -> str:
         return sqlglot.parse_one(sql, read=dialect).sql(dialect=dialect).lower()
     except Exception:  # noqa: BLE001 — unparseable SQL canonicalises to itself
         return " ".join(sql.split()).lower()
+
+
+def _equivalence_form(sql: str, dialect: str) -> str | None:
+    """The query as sqlglot's optimizer writes it (columns qualified, predicates
+    normalised, mergeable subqueries merged), with table aliases renamed in
+    order of appearance so ``orders o`` and ``orders AS orders`` read the same.
+    Literals survive untouched: a different filter value stays a different
+    query. None when the text does not parse or optimise (no schema is given,
+    so an unqualified column two tables could own is one such case)."""
+    try:
+        tree = optimize(_unwrapped(sqlglot.parse_one(sql, read=dialect)), dialect=dialect)
+    except Exception:  # noqa: BLE001 — not provable this way; the plain compare decides
+        return None
+    aliases: dict[str, str] = {}
+    for table in tree.find_all(exp.Table):
+        if table.alias and table.alias not in aliases:
+            aliases[table.alias] = f"_t{len(aliases)}"
+
+    def rename(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.Table) and node.alias in aliases:
+            node.set("alias", exp.TableAlias(this=exp.to_identifier(aliases[node.alias])))
+        elif isinstance(node, exp.Column) and node.table in aliases:
+            node.set("table", exp.to_identifier(aliases[node.table]))
+        return node
+
+    return tree.transform(rename).sql(dialect=dialect).lower()
+
+
+def _unwrapped(tree: exp.Expr) -> exp.Expr:
+    """``SELECT * FROM (q) AS x`` (or the same columns q projects, in q's order,
+    unrenamed) with no other clause IS q. The optimizer keeps a derived table
+    that groups, so a hand-written wrapper is peeled here, by shape alone."""
+    while isinstance(tree, exp.Select):
+        source = tree.args.get("from_")
+        inner = source.this if source is not None else None
+        if not isinstance(inner, exp.Subquery) or not isinstance(inner.this, exp.Select):
+            break
+        if any(
+            tree.args.get(k)
+            for k in ("where", "group", "having", "order", "limit", "joins", "distinct", "with")
+        ):
+            break
+        star = len(tree.selects) == 1 and isinstance(tree.selects[0], exp.Star)
+        plain = all(isinstance(c, exp.Column) and not c.table for c in tree.selects)
+        if not star and not (plain and [c.name for c in tree.selects] == inner.this.named_selects):
+            break
+        tree = inner.this
+    return tree
+
+
+def sql_match(compiled: str, certified: str, dialect: str) -> SqlMatch:
+    """How the compiled SQL relates to the certified text — see ``SqlMatch``.
+    Both proofs are syntactic: nothing here runs, and a text the optimizer
+    cannot settle falls back to the canonical compare, never to a guess."""
+    if canonical_sql(compiled, dialect) == canonical_sql(certified, dialect):
+        return "identical"
+    a, b = _equivalence_form(compiled, dialect), _equivalence_form(certified, dialect)
+    if a is not None and a == b:
+        return "equivalent"
+    return "differs"
 
 
 class EmissionResolver:
@@ -219,6 +322,20 @@ def gold_for(a: CertifiedAnswer, model: SemanticModel, resolver: Any) -> Resolut
     return None
 
 
+def render_sample(a: CertifiedAnswer, dialect: str) -> CertifiedAnswer | None:
+    """A templated answer as the concrete case the suite asks: question and
+    SQL rendered from the first sample binding (the rows lane's rendering),
+    the template keys cleared so the resolver sees a plain question. None when
+    no sample binding validates."""
+    from services.evals.certified_suite import _render_template_case
+
+    rendered = _render_template_case(a, dialect)
+    if rendered is None:
+        return None
+    sql, question = rendered
+    return replace(a, sql=sql, question=question, slots=None, sample_bindings=None)
+
+
 @dataclass
 class _Run:
     verdict: str
@@ -227,7 +344,7 @@ class _Run:
     decisions: list[DecisionRecord]
     graded: list[GradedDecision]
     intent_key: str | None
-    sql_match: bool | None = None
+    sql_match: SqlMatch | None = None
     elapsed_s: float = 0.0
     usage: dict[str, tuple[float, float, float]] = field(
         default_factory=dict
@@ -264,7 +381,7 @@ def _run_once(
                 i + r.usage.get("input_tokens", 0.0),
                 o + r.usage.get("output_tokens", 0.0),
             )
-    graded = grade_decisions(res.decisions, expected)
+    graded = grade_decisions(res.decisions, expected, a.question)
     if res.intent is None:
         why = res.clarification.question if res.clarification else (res.decline or "did not type")
         return _Run(
@@ -279,13 +396,13 @@ def _run_once(
         )
     got = ledger.from_intent(res.intent, model, resolver._domains, supplied=res.supplied)
     verdict, evidence = ledger.grade(expected, got)
-    sql_match: bool | None = None
+    match: SqlMatch | None = None
     try:
         compiled = compile_intent(res.intent, model)
     except CompileError:
         compiled = None
     if compiled is not None and a.sql.strip():
-        sql_match = canonical_sql(compiled, model.dialect) == canonical_sql(a.sql, model.dialect)
+        match = sql_match(compiled, a.sql, model.dialect)
     return _Run(
         verdict,
         evidence,
@@ -293,7 +410,7 @@ def _run_once(
         res.decisions,
         graded,
         res.intent.model_dump_json(),
-        sql_match,
+        match,
         elapsed_s=elapsed,
         usage=usage,
     )
@@ -321,11 +438,18 @@ def _fold(a: CertifiedAnswer, runs: list[_Run], gold: str) -> SlotCase:
         evidence=evidence,
         typed=all(r.typed for r in runs),
         decisions=first.decisions,
-        graded=[g for r in runs for g in r.graded],
+        # Every run's decisions ride the case, each stamped with its repeat:
+        # the calibration keeps the first and drops the rest (one measurement
+        # per question, however many times it was re-asked).
+        graded=[replace(g, repeat=i) for i, r in enumerate(runs) for g in r.graded],
         gold=gold,
         runs=len(runs),
         agreement=agreement,
-        sql_match=first.sql_match if all(r.sql_match == first.sql_match for r in runs) else False,
+        # Runs that disagree about the SQL proved nothing: differs, so the rows
+        # lane executes the case.
+        sql_match=(
+            first.sql_match if all(r.sql_match == first.sql_match for r in runs) else "differs"
+        ),
         elapsed_s=round(sum(r.elapsed_s for r in runs) / len(runs), 3),
         calls=round(sum(c for r in runs for c, _i, _o in r.usage.values()) / len(runs), 3),
         input_tokens=round(sum(i for r in runs for _c, i, _o in r.usage.values()) / len(runs), 1),
@@ -360,13 +484,33 @@ def run_slot_lane(
     came back first."""
     started = time.perf_counter()
     eligible: list[tuple[CertifiedAnswer, Resolution, str]] = []
-    skipped = attributed = 0
+    skipped: list[SkippedAnswer] = []
+    attributed = 0
     for a in answers:
-        if not is_active(a.status) or a.slots:
+        if not is_active(a.status):
             continue
+        if a.slots:
+            rendered = render_sample(a, model.dialect)
+            if rendered is None:
+                skipped.append(
+                    SkippedAnswer(
+                        a.id,
+                        a.question,
+                        f"{TEMPLATED}: no valid sample binding renders the question and SQL",
+                    )
+                )
+                continue
+            a = rendered
         expected = gold_for(a, model, resolver_for(a))
         if expected is None:
-            skipped += 1
+            skipped.append(
+                SkippedAnswer(
+                    a.id,
+                    a.question,
+                    f"{NO_GOLD}: no stored typed resolution, and the certified SQL "
+                    "attributes to no declared metric or definition",
+                )
+            )
             continue
         if not a.resolution:
             attributed += 1
@@ -398,7 +542,7 @@ def run_slot_lane(
         lane_cost = pricing.add_cost(lane_cost, pricing.decisions_cost_usd(by_provider))
     return SlotLaneOutcome(
         cases=cases,
-        skipped_no_gold=skipped,
+        skipped=skipped,
         attributed_gold=attributed,
         elapsed_s=round(time.perf_counter() - started, 2),
         workers=workers,
@@ -406,3 +550,64 @@ def run_slot_lane(
         cost_usd=None if lane_cost is None else round(lane_cost, 6),
         latencies_s=[round(r.elapsed_s, 3) for r in results],
     )
+
+
+def eval_results(cases: list[SlotCase]) -> list[EvalResult]:
+    """The lane's cases as eval results, so a run records them beside the rows
+    lane's (``slots:<answer id>``) and a run-over-run compare can see a slot
+    verdict flip. ``run_id`` is stamped by the caller that creates the run."""
+    return [
+        EvalResult(
+            run_id="",
+            case_id=f"slots:{c.answer_id}",
+            question=c.question,
+            passed=c.verdict == "passed",
+            grade="pass" if c.verdict == "passed" else "fail",
+            checks={
+                "lane": "slots",
+                "typed": c.typed,
+                "gold": c.gold,
+                "sql_match": c.sql_match,
+                "runs": c.runs,
+                "agreement": c.agreement,
+            },
+            reason=c.evidence or None,
+        )
+        for c in cases
+    ]
+
+
+def summary(lanes: list[tuple[str, SlotLaneOutcome]], *, repeat: int) -> dict[str, Any] | None:
+    """The ``slot_lane`` block of ``dst test --json`` over every lens's lane:
+    what was resolved, proven, skipped (each with its reason) and what it
+    cost. None when no lane ran."""
+    if not lanes:
+        return None
+    latencies = sorted(t for _lens, lane in lanes for t in lane.latencies_s)
+    cost: float | None = 0.0
+    for _lens, lane in lanes:
+        cost = None if cost is None or lane.cost_usd is None else cost + lane.cost_usd
+    return {
+        "graded": sum(len(lane.cases) for _lens, lane in lanes),
+        "resolutions": sum(len(lane.cases) * lane.repeat for _lens, lane in lanes),
+        "sql_identical": sum(
+            1 for _lens, lane in lanes for c in lane.cases if c.sql_match == "identical"
+        ),
+        "sql_equivalent": sum(
+            1 for _lens, lane in lanes for c in lane.cases if c.sql_match == "equivalent"
+        ),
+        # Active answers the lane did not grade — graded + skipped is the corpus.
+        "skipped": [{"lens": lens, **sk.as_dict()} for lens, lane in lanes for sk in lane.skipped],
+        "elapsed_s": round(sum(lane.elapsed_s for _lens, lane in lanes), 1),
+        "cost_usd": None if cost is None else round(cost, 6),
+        "latency_s": (
+            {
+                "median": latencies[len(latencies) // 2],
+                "p90": latencies[min(len(latencies) - 1, int(len(latencies) * 0.9))],
+            }
+            if latencies
+            else None
+        ),
+        "workers": max(lane.workers for _lens, lane in lanes),
+        "repeat": repeat,
+    }

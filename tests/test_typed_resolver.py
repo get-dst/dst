@@ -76,16 +76,16 @@ def _resolver(decisions: list[Decision], **kw: object) -> TypedResolver:
 
 
 def test_every_slot_acts_and_the_intent_compiles() -> None:
-    # shape, metric, another-metric(none), dimension, filter column, filter
-    # value, another filter(none) — no grain: the question asks for no
-    # breakdown over time, so none is posed; no second dimension: `status` is
-    # the column of the value the question names ("shipped"), a filter, so
-    # `country` is the only dimension on offer and "another?" has nothing to ask
+    # shape, metric, filter column, filter value, another filter(none) — no
+    # "another metric?": no second metric name is in the question, so the
+    # round is not asked; "by country" is read off the text, not decided; no
+    # grain: the question asks for no breakdown over time, so none is posed;
+    # no second dimension: `status` is the column of the value the question
+    # names ("shipped"), a filter, so `country` is the only dimension on offer
+    # and "another?" has nothing to ask
     decisions = [
         _sure("aggregate"),
         _sure("revenue"),
-        _sure(None),
-        _sure("country"),
         _sure("status"),
         _sure(None),
     ]
@@ -101,16 +101,17 @@ def test_every_slot_acts_and_the_intent_compiles() -> None:
     assert [d.slot for d in res.decisions] == [
         "shape",
         "metric",
-        "metric",
         "dimension",
         "filter",
         "filter_value",
         "filter",
     ]
     assert all(d.verdict == "act" for d in res.decisions)
-    # "shipped" is a stored status value the question names: read off the
-    # text, recorded as such, never decided
-    value = res.decisions[5]
+    # "by country" and "shipped" (a stored status value) are said in the
+    # question: read off the text, recorded as such, never decided
+    grouping = res.decisions[2]
+    assert grouping.chosen == "country" and grouping.provider == "question-text"
+    value = res.decisions[4]
     assert value.chosen == "shipped" and value.provider == "question-text" and value.p is None
     assert res.matched == ["status"]
     sql = compile_intent(i, _model())
@@ -161,7 +162,7 @@ def test_a_ranking_with_no_measure_to_rank_on_clarifies_never_serves_a_bare_list
 def test_best_or_worst_never_types_its_direction_depends_on_the_measure() -> None:
     """'Best' means highest for revenue and lowest for deaths: the resolver cannot
     pick a direction, so it asks rather than serve an unordered figure."""
-    decisions = [_sure("aggregate"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    decisions = [_sure("aggregate"), _sure("revenue"), _sure("country"), _sure(None)]
     res = _resolver(decisions).resolve("Which country has the best revenue?", _model())
     assert res.intent is None and res.clarification is not None
     assert res.clarification.term == "order"
@@ -170,7 +171,7 @@ def test_best_or_worst_never_types_its_direction_depends_on_the_measure() -> Non
 def test_a_ranking_is_one_figure_per_dimension_ordered_by_it() -> None:
     """'Which country has the highest revenue?' is a ranking: revenue per country,
     highest first — the shape the listing reading dropped to a bare list of names."""
-    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    decisions = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
     res = _resolver(decisions).resolve("Which country has the highest revenue?", _model())
     assert res.intent is not None, res.clarification
     i = res.intent
@@ -181,13 +182,13 @@ def test_a_ranking_is_one_figure_per_dimension_ordered_by_it() -> None:
 
 
 def test_a_top_n_ranking_carries_its_limit() -> None:
-    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    decisions = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
     res = _resolver(decisions).resolve("top 3 countries by revenue", _model())
     assert res.intent is not None and res.intent.limit == 3
 
 
 def test_a_ranking_with_no_stated_direction_clarifies() -> None:
-    decisions = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    decisions = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
     res = _resolver(decisions).resolve("rank the countries by revenue", _model())
     assert res.intent is None and res.clarification is not None
     assert res.clarification.term == "order"
@@ -220,7 +221,7 @@ def _ranked_model(better: str | None) -> SemanticModel:
 def test_best_and_worst_follow_the_declared_better_end() -> None:
     """'Best' orders toward the metric's declared better end, 'worst' away from
     it — the author's fact, never the resolver's guess."""
-    steps = [_sure("ranking"), _sure("revenue"), _sure(None), _sure("country"), _sure(None)]
+    steps = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
     best = _resolver(list(steps)).resolve(
         "Which country has the best revenue?", _ranked_model("higher")
     )
@@ -282,9 +283,9 @@ def test_a_filter_outside_the_declared_population_declines() -> None:
     is read off the declared population and declines before any query runs."""
     model = _model()
     model.entities[0].population_filter = "orders.status = 'shipped'"
-    # the fifth "none" is the general filter step; the named value then gets its
+    # the fourth "none" is the general filter step; the named value then gets its
     # focused decision, which places it on status
-    steps = [_sure("aggregate"), _sure("revenue"), *[_sure(None)] * 3, _sure("status"), _sure(None)]
+    steps = [_sure("aggregate"), _sure("revenue"), *[_sure(None)] * 2, _sure("status"), _sure(None)]
     res = _resolver(list(steps)).resolve("revenue from open orders", model)
     assert res.intent is None and res.decline and "open" in res.decline
     ok = _resolver(list(steps)).resolve("revenue from shipped orders", model)
@@ -311,13 +312,13 @@ def test_a_number_stated_once_restricts_one_column() -> None:
     a filter on a value nobody gave. The second column reading the same literal
     asks which field it restricts."""
     steps = [
-        _sure("aggregate"), _sure("revenue"), _sure(None), _sure(None),
+        _sure("aggregate"), _sure("revenue"), _sure(None),
         _sure("order_id"), _sure("="), _sure("amount"), _sure("="), _sure(None),
     ]  # fmt: skip
     res = _resolver(steps).resolve("revenue from order 7", _model())
     assert res.intent is None and res.clarification is not None
     assert set(res.clarification.options) == {"order_id", "amount"}
-    one = [_sure("aggregate"), _sure("revenue"), _sure(None), _sure(None), _sure("order_id")]
+    one = [_sure("aggregate"), _sure("revenue"), _sure(None), _sure("order_id")]
     ok = _resolver([*one, _sure("="), _sure(None)]).resolve("revenue from order 7", _model())
     assert ok.intent is not None
     assert [(f.field, f.value) for f in ok.intent.filters] == [("order_id", 7)]
@@ -343,7 +344,6 @@ def test_a_filter_on_a_ratios_numerator_column_is_refused() -> None:
             [
                 _sure("ranking"),
                 _sure("paid_rate"),
-                _sure(None),
                 _sure("country"),
                 _sure(None),
                 _sure("is_paid"),
@@ -371,7 +371,6 @@ def test_open_value_comes_from_bindings_or_clarifies() -> None:
         _sure("aggregate"),
         _sure("revenue"),
         _sure(None),
-        _sure(None),
         _sure("customer_name"),
         _sure(None),
     ]
@@ -393,7 +392,6 @@ def test_a_number_in_the_question_resolves_only_when_alone() -> None:
         _sure("aggregate"),
         _sure("order_count"),
         _sure(None),
-        _sure(None),
         _sure("amount"),
         _sure(">"),
         _sure(None),
@@ -401,7 +399,7 @@ def test_a_number_in_the_question_resolves_only_when_alone() -> None:
     res = _resolver(list(steps)).resolve("how many orders above 500 in 2026", _model())
     assert res.intent is not None
     assert ("amount", ">", 500) in [(f.field, f.op, f.value) for f in res.intent.filters]
-    two = _resolver(list(steps[:5])).resolve("orders between 500 and 900", _model())
+    two = _resolver(list(steps[:4])).resolve("orders between 500 and 900", _model())
     assert two.clarification is not None and two.clarification.term == "amount"
 
 
@@ -424,7 +422,6 @@ def test_definition_engaged_by_decision() -> None:
         _sure("aggregate"),
         _sure("order_count"),
         _sure(None),
-        _sure(None),
         _sure("engaged"),
         _sure(None),
     ]
@@ -439,14 +436,13 @@ def test_generator_seam_carries_decisions_and_typed_flag() -> None:
         _sure("revenue"),
         _sure(None),
         _sure(None),
-        _sure(None),
     ]
     gen = TypedIntentGenerator(_resolver(steps))
     out = gen.generate(
         question="total revenue", semantic_model=_model(), prose_context=[], dialect="duckdb"
     )
     assert out.sql and out.intent is not None and out.typed is True
-    assert out.definition_used == "revenue" and len(out.decisions) == 5
+    assert out.definition_used == "revenue" and len(out.decisions) == 4
     clar = TypedIntentGenerator(_resolver([_sure("aggregate"), _unsure("revenue", "order_count")]))
     out2 = clar.generate(
         question="how much", semantic_model=_model(), prose_context=[], dialect="duckdb"
@@ -481,22 +477,22 @@ class _BatchingDecider:
 
 
 def test_a_batching_decider_types_a_typical_question_in_three_calls() -> None:
-    """Round 1 asks shape (+ entity when there are several); round 2 the
-    first metric, first dimension, grain, definitions and first filter; round
-    3 the second of each and the first filter's value. A question with one
-    metric, one dimension and one dictionary filter never asks a fourth time.
-    Same intent as the sequential path — three calls."""
+    """Round 1 asks shape and the first metric (+ entity when there are
+    several); round 2 what depends on the entity — the first dimension, grain,
+    definitions and first filter; round 3 the second of each and the first
+    filter's value. A question with one metric, one dimension and one
+    dictionary filter never asks a fourth time. Same intent as the sequential
+    path — three calls."""
     decider = _BatchingDecider(
         {
             "shape": "aggregate",
             "metric:0": "revenue",
-            "dimension:0": "country",
             "grain": None,
             "filter:0": "status",
-            # round three: the second metric / filter say none — all in the
-            # same call; no second dimension is asked, since `status` holds the
-            # value the question names and is a filter, never a grouping
-            "metric:1": None,
+            # round three: the second filter says none; no second dimension is
+            # asked, since `status` holds the value the question names and is
+            # a filter, never a grouping; "by country" is read off the text and
+            # "another metric?" is not asked — no second metric is named
             "filter:1": None,
         }
     )
@@ -508,16 +504,17 @@ def test_a_batching_decider_types_a_typical_question_in_three_calls() -> None:
     assert ("status", "=", "shipped") in [(f.field, f.op, f.value) for f in res.intent.filters]
     batched = [c for c in decider.calls if c != ["<single>"]]
     assert set(batched[0]) == {"shape", "metric:0"}  # one entity → no entity question
-    assert set(batched[1]) == {"metric:1", "dimension:0", "filter:0"}  # no grain asked
+    assert set(batched[1]) == {"filter:0"}  # no grain asked; the dimension was read
     # the value is named in the question: matched, so round three never asks it
     assert set(batched[2]) == {"filter:1"}
     assert len(batched) == 3 and decider.calls.count(["<single>"]) == 0
-    # Every decision is on the ledger, batched ones first in spec order.
+    # Every decision is on the ledger, batched ones first in spec order, the
+    # dimension read off the text between the rounds.
     assert [d.slot for d in res.decisions][:4] == [
         "shape",
         "metric",
-        "metric",
         "dimension",
+        "filter",
     ]
 
 
@@ -701,7 +698,6 @@ def test_a_filter_column_the_question_states_no_value_for_is_dropped_not_clarifi
         _sure("aggregate"),
         _sure("revenue"),
         _sure(None),
-        _sure(None),
         _sure("status"),
         _sure("unstated"),
         _sure(None),
@@ -711,7 +707,7 @@ def test_a_filter_column_the_question_states_no_value_for_is_dropped_not_clarifi
     assert [d.slot for d in res.decisions][-3:] == ["filter", "filter_value", "filter"]
     # the same with "none": a stated value the dictionary lacks → unknown_value
     unknown = list(steps)
-    unknown[5] = _sure(None)
+    unknown[4] = _sure(None)
     out = _resolver(unknown).resolve("total revenue for cancelled orders", _model())
     assert out.clarification is not None and out.clarification.kind == "unknown_value"
     # no dictionary (customer_name): "unstated" drops it, "stated" asks for a binding
@@ -719,14 +715,13 @@ def test_a_filter_column_the_question_states_no_value_for_is_dropped_not_clarifi
         _sure("aggregate"),
         _sure("revenue"),
         _sure(None),
-        _sure(None),
         _sure("customer_name"),
         _sure("unstated"),
         _sure(None),
     ]
     dropped = _resolver(list(free)).resolve("total revenue", _model())
     assert dropped.intent is not None and dropped.intent.filters == []
-    free[5] = _sure("stated")
+    free[4] = _sure("stated")
     asked = _resolver(list(free)).resolve("revenue for one customer", _model())
     assert asked.clarification is not None and asked.clarification.term == "customer_name"
 
@@ -1061,14 +1056,7 @@ def test_a_window_on_a_timestamp_ends_before_the_next_day_not_on_the_last_one() 
         f.model_copy(update={"type": "timestamp"}) if f.name == "order_date" else f
         for f in orders.fields
     ]
-    decisions = [
-        _sure("aggregate"),
-        _sure("revenue"),
-        _sure(None),
-        _sure("country"),
-        _sure("status"),
-        _sure(None),
-    ]
+    decisions = [_sure("aggregate"), _sure("revenue"), _sure("status"), _sure(None)]
     res = _resolver(decisions).resolve("revenue by country for shipped orders last month", model)
     assert res.intent is not None, res.clarification
     assert [(f.field, f.op, f.value) for f in res.intent.filters] == [
@@ -1539,3 +1527,202 @@ def test_a_filter_on_the_value_the_metric_counts_by_is_never_applied() -> None:
         ("team_name", "=", "Team Liquid")
     ]
     assert res.matched == ["team_name"]
+
+
+def test_end_of_a_period_on_a_level_metric_types_to_that_periods_last_snapshot() -> None:
+    """ "at the end of August 2026" is August's window, which the parser already
+    reads; the snapshot reading is the metric's declaration, so the compiled
+    SQL restricts to the window's latest snapshot. "as of 2026-08-31" is the
+    day. No phrase is sniffed."""
+    snapshots = Entity(
+        name="arr_snapshots",
+        source=EntitySource(connection="wh", table="arr_snapshots"),
+        default_time_field="snapshot_date",
+        fields=[
+            Field(name="snapshot_date", type="date"),
+            Field(name="customer_id", type="integer"),
+            Field(name="arr", type="number"),
+        ],
+        metrics=[Metric(name="arr", agg="sum", expr="arr_snapshots.arr", additivity="level")],
+    )
+    model = SemanticModel(lens="finance", dialect="duckdb", entities=[snapshots])
+    steps = [_sure("aggregate"), _sure("arr"), _sure(None)]
+    res = TypedResolver(ScriptedDecider(list(steps)), domains={}, today=TODAY).resolve(  # type: ignore[arg-type]
+        "What was total ARR at the end of August 2026?", model
+    )
+    assert res.intent is not None and res.intent.grain is None
+    assert [(f.op, f.value) for f in res.intent.filters] == [
+        (">=", "2026-08-01"),
+        ("<=", "2026-08-31"),
+    ]
+    sql = compile_intent(res.intent, model)
+    assert "= (SELECT MAX(arr_snapshots_latest.snapshot_date)" in sql and "'2026-08-31'" in sql
+    as_of = TypedResolver(ScriptedDecider(list(steps)), domains={}, today=TODAY).resolve(  # type: ignore[arg-type]
+        "ARR as of 2026-08-31", model
+    )
+    assert as_of.intent is not None
+    assert [(f.op, f.value) for f in as_of.intent.filters] == [
+        (">=", "2026-08-31"),
+        ("<=", "2026-08-31"),
+    ]
+
+
+# ── names the question says word for word ────────────────────────────────────
+
+
+def _arr_model() -> SemanticModel:
+    return SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="accounts",
+                source=EntitySource(connection="wh", table="accounts"),
+                default_time_field="as_of_date",
+                fields=[
+                    Field(name="account_id", type="integer"),
+                    Field(name="mrr", type="number"),
+                    Field(name="customer_tier", type="string"),
+                    Field(name="region", type="string"),
+                    Field(name="as_of_date", type="date"),
+                ],
+                dimensions=[Dimension(name="customer_tier"), Dimension(name="region")],
+                metrics=[
+                    Metric(name="arr", agg="sum", expr="accounts.mrr * 12"),
+                    Metric(name="customers", agg="count_distinct", expr="accounts.account_id"),
+                    Metric(
+                        name="subscription_arr",
+                        agg="sum",
+                        expr="accounts.mrr * 12",
+                        filters=["accounts.customer_tier = 'subscription'"],
+                    ),
+                    Metric(
+                        name="payment_arr",
+                        agg="sum",
+                        expr="accounts.mrr * 12",
+                        filters=["accounts.customer_tier = 'payment'"],
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def _split_arr_model() -> SemanticModel:
+    """subscription_arr and payment_arr on two different entities."""
+    model = _arr_model()
+    accounts = model.entities[0]
+    subscriptions = accounts.model_copy(
+        update={
+            "name": "subscriptions",
+            "metrics": [m for m in accounts.metrics if m.name in ("arr", "subscription_arr")],
+        }
+    )
+    payments = accounts.model_copy(
+        update={
+            "name": "payments",
+            "metrics": [m for m in accounts.metrics if m.name == "payment_arr"],
+        }
+    )
+    return model.model_copy(update={"entities": [subscriptions, payments]})
+
+
+_SPLIT_VOTE = Decision(
+    chosen="subscription_arr",
+    probs={"subscription_arr": 0.5, "payment_arr": 0.5},
+    provider="scripted",
+)
+
+
+def test_two_metrics_named_word_for_word_are_the_metrics_not_a_clarification() -> None:
+    """The first pick splits 0.5/0.5 between subscription_arr and payment_arr
+    because the question asks for BOTH: two governed names said word for word
+    are the answer's metrics, read off the text and recorded as such — never a
+    clarification, and `arr` is not named a third time off their tails."""
+    decider = ScriptedDecider([_sure("aggregate"), _SPLIT_VOTE, _sure(None)])
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "What is the split between subscription ARR and payment ARR today?", _arr_model()
+    )
+    assert res.intent is not None and res.clarification is None, res.clarification
+    assert res.intent.metrics == ["subscription_arr", "payment_arr"]
+    assert res.intent.dimensions == []
+    # the decider's split stays on the ledger as what it was; the two names
+    # follow it as question-text decisions
+    metric = [d for d in res.decisions if d.slot == "metric"]
+    assert metric[0].verdict == "clarify" and metric[0].provider == "scripted"
+    assert [(d.chosen, d.provider) for d in metric[1:]] == [
+        ("subscription_arr", "question-text"),
+        ("payment_arr", "question-text"),
+    ]
+    # no "another metric?" round: no third metric is named in the question
+    assert not any("no further one is asked for" in c["options"] for c in decider.calls)
+    assert "SUM(" in compile_intent(res.intent, _arr_model())
+
+
+def test_named_metrics_on_different_entities_still_clarify_and_say_why() -> None:
+    decider = ScriptedDecider([_sure("aggregate"), _SPLIT_VOTE, _sure(None)])
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "What is the split between subscription ARR and payment ARR today?", _split_arr_model()
+    )
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "metric"
+    assert "different entities" in res.clarification.question
+    assert "subscriptions" in res.clarification.question
+    assert "payments" in res.clarification.question
+    assert res.clarification.options == ["subscription_arr", "payment_arr"]
+
+
+def test_a_metric_the_question_names_once_still_clarifies_when_unsure() -> None:
+    """One named metric is the ordinary case: a split the text does not settle
+    asks, as before."""
+    decider = ScriptedDecider([_sure("aggregate"), _unsure("arr", "customers")])
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "how much ARR do we have", _arr_model()
+    )
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "metric"
+
+
+def test_by_dimension_is_read_off_the_text_and_another_metric_is_not_asked() -> None:
+    """ "ARR by customer tier": the breakdown is said in words and read, not
+    decided; the word "customer" cannot pull the `customers` metric through
+    the "another metric?" round, because that round offers only metrics named
+    outside the dimension phrase — here none, so it is not asked at all. The
+    decider would pick `customers` on it if it were."""
+    decider = _Prefers("aggregate", "arr", "customers")
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "What is our ARR by customer tier today?", _arr_model()
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.metrics == ["arr"]
+    assert res.intent.dimensions == ["customer_tier"]
+    assert [d.slot for d in res.decisions].count("metric") == 1
+    grouping = next(d for d in res.decisions if d.slot == "dimension")
+    assert grouping.chosen == "customer_tier" and grouping.provider == "question-text"
+
+
+def test_a_dimension_word_that_overlaps_a_metric_name_keeps_both_straight() -> None:
+    """ "Customers by region": the first pick is `customers` and the breakdown is
+    `region` — the dimension phrase is blanked only for the further-metric
+    rounds, never for the first pick."""
+    decider = _Prefers("aggregate", "customers", "arr")
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "Customers by region", _arr_model()
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.metrics == ["customers"]
+    assert res.intent.dimensions == ["region"]
+
+
+def test_by_month_is_a_time_breakdown_and_the_dimension_is_still_decided() -> None:
+    """ "ARR by month" names no dimension: the grain rail owns it, and the
+    dimension question is posed to the decider as before."""
+    decider = _Prefers("aggregate", "arr", "month")
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "ARR by month", _arr_model()
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.metrics == ["arr"] and res.intent.grain == "month"
+    assert res.intent.dimensions == []
+    grouping = next(d for d in res.decisions if d.slot == "dimension")
+    assert grouping.chosen is None and grouping.provider == "scripted"

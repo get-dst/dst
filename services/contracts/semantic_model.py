@@ -56,6 +56,12 @@ def _source_needs_two_keys(v: object) -> object:
 
 FieldType = Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
 AggType = Literal["sum", "count", "count_distinct", "avg", "min", "max"]
+# flow: the rows are events, and a period's figure aggregates every row in it.
+# level: the rows are snapshots of a stock (ARR, headcount, a balance), and a
+# period's figure is its LAST snapshot — summing snapshots across a quarter
+# reports three months of the same balance as one number.
+Additivity = Literal["flow", "level"]
+ADDITIVITIES: tuple[str, ...] = get_args(Additivity)
 
 FIELD_TYPES: tuple[str, ...] = get_args(FieldType)
 
@@ -250,6 +256,22 @@ class Metric(Authored):
         "guesses one. Set, 'best' and 'worst' rank by it; unset, a question asking "
         "for the best or worst by this metric asks which end is meant.",
     )
+    additivity: Additivity | None = PField(
+        default=None,
+        description="flow (the default): rows are events and a period's figure "
+        "aggregates every row in it. level: rows are snapshots of a stock (ARR, "
+        "headcount, a balance) and a period's figure is the LAST snapshot inside it, "
+        "never a sum of snapshots; needs a time field (agg_time_field or the entity's "
+        "default_time_field). The author's judgment — the product never guesses one.",
+    )
+
+    @field_validator("additivity", mode="before")
+    @classmethod
+    def _additivity_enum(cls, v: object) -> object:
+        # Named like `type:` is — the author sees the two words, not a class name.
+        if isinstance(v, str) and v not in ADDITIVITIES:
+            raise ValueError(f"'{v}' is not one of {', '.join(ADDITIVITIES)}")
+        return v
 
     @field_validator("type", mode="before")
     @classmethod

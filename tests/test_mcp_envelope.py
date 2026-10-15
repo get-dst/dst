@@ -417,3 +417,34 @@ def test_send_for_review_without_a_correction_files_only_a_flag(
     _capture_reviews(monkeypatch, sent)
     asyncio.run(srv.send_for_review("req_9", ctx=None))
     assert sent == {"request_id": "req_9"}
+
+
+def test_purpose_reaches_the_data_plane_only_when_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`purpose` is the caller's one sentence on why; it rides every asking tool's
+    body when the agent sends one, and is absent from the body otherwise, so the
+    log row measures what agents actually send rather than a default."""
+    sent: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            sent[request.url.path] = json.loads(request.content)
+        return httpx.Response(200, json={"answer": "ok", "request_id": "req_1"})
+
+    monkeypatch.setattr(srv, "DST_API_KEY", "dst_test")
+    monkeypatch.setattr(
+        srv,
+        "_client",
+        lambda key, agent="mcp": httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://dst.test"
+        ),
+    )
+    why = "building a forecasting app"
+    asyncio.run(srv.query("churn", "ARR over time", ctx=None, purpose=why))
+    assert sent["/v1/lenses/churn/query"]["purpose"] == why
+    asyncio.run(srv.route_query("ARR over time", ctx=None, purpose=why))
+    assert sent["/v1/query"]["purpose"] == why
+    asyncio.run(srv.run_certified("churn", ctx=None, cert_id="c9", purpose=why))
+    assert sent["/v1/lenses/churn/certified/c9/run"]["purpose"] == why
+    # Blank or whitespace is "not sent".
+    asyncio.run(srv.query("churn", "ARR over time", ctx=None, purpose="  "))
+    assert "purpose" not in sent["/v1/lenses/churn/query"]

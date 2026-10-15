@@ -241,6 +241,11 @@ class Decision:
     provider: str
     # What the decision cost — None when the decider did not measure it.
     usage: DecisionUsage | None = None
+    # The vote behind ``probs`` when the decider sampled: how many of the ``k``
+    # samples chose ``chosen``. None for a decider that measured another way
+    # (a probability wire) or measured nothing.
+    votes: int | None = None
+    k: int | None = None
 
     @property
     def p(self) -> float | None:
@@ -260,6 +265,16 @@ class Decision:
     def margin(self) -> float | None:
         p, r = self.p, self.runner_up
         return None if p is None or r is None else p - r
+
+    @property
+    def p_lower(self) -> float | None:
+        """The disclosed bound under the vote: Laplace's rule of succession,
+        (votes + 1) / (k + 2). Five of five is 0.857, not the 1.0 the vote share
+        reads as — a unanimous sample of five is not certainty. None when no
+        vote was taken."""
+        if self.votes is None or self.k is None:
+            return None
+        return (self.votes + 1) / (self.k + 2)
 
 
 @runtime_checkable

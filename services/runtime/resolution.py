@@ -103,6 +103,11 @@ def from_intent(
         slots.append(
             Slot(kind="grain", name=field or "time", source="declared", value=intent.grain)
         )
+    if (reading := level_reading(intent, model)) is not None:
+        # The metric's own declaration, so declared; never moves the tag (a
+        # window slot), always on the ledger: a snapshot figure that reads as a
+        # period total is the silent-wrong class this slot exists to name.
+        slots.append(Slot(kind="window", name=reading[0], source="declared", value=reading[1]))
     time_fields = _time_fields(model)
     bool_fields = {f.name.lower() for e in model.entities for f in e.fields if f.type == "boolean"}
     governed = _governed_predicates(model, set(intent.metrics), model.dialect)
@@ -133,6 +138,45 @@ def from_intent(
             source = "supplied"
         slots.append(Slot(kind="filter", name=field, source=source, value=text))  # type: ignore[arg-type]
     return Resolution(method="construction", slots=slots, tag=derive_tag(slots))
+
+
+LEVEL_READING = "latest snapshot in the window"
+
+
+def level_reading(intent: QueryIntent, model: SemanticModel) -> tuple[str, str] | None:
+    """``(time field, reading)`` when the intent's metrics are levels — the
+    figure is the last snapshot inside the window (per bucket under a grain),
+    not an aggregate over every snapshot row. None for flow metrics."""
+    if not intent.metrics:
+        return None
+    # The named entity, else the one carrying every metric (how the compiler
+    # resolves an intent that names none).
+    owners = [e for e in model.entities if e.name == intent.entity] or [
+        e for e in model.entities if {m.name for m in e.metrics} >= set(intent.metrics)
+    ]
+    if len(owners) != 1:
+        return None
+    entity = owners[0]
+    metrics = [m for m in entity.metrics if m.name in intent.metrics]
+    if not metrics or any(m.additivity != "level" for m in metrics):
+        return None
+    field = next((m.agg_time_field for m in metrics if m.agg_time_field), None)
+    field = field or entity.default_time_field or "time"
+    return field, LEVEL_READING + (f" per {intent.grain}" if intent.grain else "")
+
+
+def level_disclosure(intent: QueryIntent, model: SemanticModel) -> str | None:
+    """The level reading said out loud on the answer, in the disclosure idiom
+    the audience-resolved readings use: the figure is a snapshot, not a sum."""
+    reading = level_reading(intent, model)
+    if reading is None:
+        return None
+    names = ", ".join(f"`{m}`" for m in intent.metrics)
+    per = f" for each {intent.grain}" if intent.grain else ""
+    return (
+        f"Reading applied: {names} is a level (a snapshot), so the figure is the "
+        f"{LEVEL_READING}{per} on `{reading[0]}`, not a sum over every snapshot in it."
+    )
 
 
 def _sql_literal(value: object) -> str:
@@ -501,7 +545,13 @@ def attribute(
         *ratio_slots,
         *(s for s in metric_slots if s.name not in {r.name for r in ratio_slots}),
     ]
-    definition_slots = _matched_definitions(model, sql, sql_norm)
+    # A definition whose term is a matched metric's name is that metric read a
+    # second time (the matcher finds the expression anywhere in the SQL, a
+    # filter subquery included) — one meaning, one slot, under the metric's kind.
+    metric_names = {s.name for s in metric_slots if s.source == "declared"}
+    definition_slots = [
+        s for s in _matched_definitions(model, sql, sql_norm) if s.name not in metric_names
+    ]
     slots: list[Slot] = [
         *metric_slots,
         *_inferred_aggregates(metric_outer, matched_exprs, model),
@@ -598,7 +648,13 @@ def grade(expected: Resolution, got: Resolution | None) -> tuple[str, str]:
         return "passed", ""
 
     def _show(names: set[tuple[str, str]], res: Resolution) -> str:
-        governed = ", ".join(sorted(n for _k, n in names)) or "nothing declared"
+        # The same name under two kinds (a metric and a definition both called
+        # arr) prints with its kind, so a real duplicate never reads "arr, arr".
+        shared = {n for _k, n in names if sum(1 for _k2, n2 in names if n2 == n) > 1}
+        governed = (
+            ", ".join(sorted(f"{k}:{n}" if n in shared else n for k, n in names))
+            or "nothing declared"
+        )
         invented = [s.name for s in res.slots if s.kind in kinds and s.source == "inferred"]
         return governed + (f" (inferred: {', '.join(invented)})" if invented else "")
 

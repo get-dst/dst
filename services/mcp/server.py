@@ -294,6 +294,13 @@ async def _request(
         return None, _fail("unreachable", f"Could not reach dst at {DST_URL}: {exc}")
 
 
+def _purpose(purpose: str) -> dict[str, str]:
+    """The `purpose` field for a data-plane body — present only when the agent sent one,
+    so the log row measures what agents actually send."""
+    purpose = (purpose or "").strip()
+    return {"purpose": purpose} if purpose else {}
+
+
 @mcp.tool()
 async def list_lenses(ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
     """List the governed dst lenses this caller is permitted to use.
@@ -406,6 +413,7 @@ async def run_certified(
     question: str = "",
     bindings: dict[str, str] | None = None,
     format: AnswerFormat = "both",
+    purpose: str = "",
 ) -> dict[str, Any]:
     """Run a certified answer exactly as approved — zero AI SQL generation.
 
@@ -432,6 +440,8 @@ async def run_certified(
             skips the model call that writes one — on this door that IS the wait
             (everything else is guard + warehouse). Prefer it unless you want
             dst's wording; trust_summary and provenance come back either way.
+        purpose: one sentence on what the user is trying to accomplish, when you
+            know it. Optional; it never changes the approved SQL.
     """
     if not cert_id and not question:
         return _fail("not_found", "Pass cert_id or question to run_certified.")
@@ -460,7 +470,7 @@ async def run_certified(
         ctx,
         "POST",
         f"/v1/lenses/{lens}/certified/{cert_id}/run",
-        json_body={"bindings": bindings or {}, "format": format},
+        json_body={"bindings": bindings or {}, "format": format, **_purpose(purpose)},
     )
     if failure is not None:
         return failure
@@ -475,6 +485,7 @@ async def query(
     format: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
     allow_untyped: bool | None = None,
+    purpose: str = "",
 ) -> dict[str, Any]:
     """Ask a governed, natural-language question against a NAMED lens.
 
@@ -508,6 +519,9 @@ async def query(
             does not type (disclosed with an UNTYPED line) — only when the user
             accepts an ungoverned figure; false demands typed-only; omitted, the
             lens's own default applies.
+        purpose: one sentence on what the user is trying to accomplish, when you
+            know it — 'building a forecasting app', 'preparing the board deck'.
+            Optional; it never changes what a term means.
     """
     payload, failure = await _request(
         ctx,
@@ -518,6 +532,7 @@ async def query(
             "format": format,
             "bindings": bindings or {},
             **({"allow_untyped": allow_untyped} if allow_untyped is not None else {}),
+            **_purpose(purpose),
         },
     )
     if failure is not None:
@@ -630,6 +645,7 @@ async def route_query(
     format: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
     allow_untyped: bool | None = None,
+    purpose: str = "",
 ) -> dict[str, Any]:
     """Ask a governed question WITHOUT naming a lens — the DEFAULT way to ask.
 
@@ -645,13 +661,15 @@ async def route_query(
     present answer.answer to the user and note it came from routed_to.lens.
     On a decline: {ok: true, covered: false, reason, nearest_miss} — there is NO
     governed answer; tell the user the question is uncovered (do not fabricate one).
+    A routed lens that REFUSES (answer.status == "refused") is an outcome, not an
+    error: the reason is inside answer.answer — relay it.
 
     Args:
         question: the user's natural-language question, as asked.
         format: as in `query` — 'structured' returns the routed lens's rows with no
             written answer and skips the model call that writes it; the routing
             provenance (routed_to) is unaffected.
-        bindings / allow_untyped: as in `query`.
+        bindings / allow_untyped / purpose: as in `query`.
     """
     payload, failure = await _request(
         ctx,
@@ -661,6 +679,7 @@ async def route_query(
             "q": question,
             "format": format,
             "bindings": bindings or {},
+            **_purpose(purpose),
             **({"allow_untyped": allow_untyped} if allow_untyped is not None else {}),
         },
     )

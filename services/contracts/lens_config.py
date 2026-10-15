@@ -196,6 +196,12 @@ class LoggingConfig(Authored):
         "(sample) — off by default, because the sample is the answer's real "
         "values and the log outlives the request",
     )
+    log_purpose: bool = Field(
+        default=False,
+        description="store the caller's `purpose` sentence on its request_log row — "
+        "off by default, because it is a fragment of someone's conversation with "
+        "their AI and the log outlives the request",
+    )
 
 
 class RateLimitConfig(Authored):

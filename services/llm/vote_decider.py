@@ -168,4 +168,8 @@ class VoteDecider:
             probs=probs,
             provider=self.provider,
             usage=_usage(),
+            # The vote itself rides along: p is the share of the VALID replies,
+            # so a reader needs votes/k to tell 5/5 from 3 of 5 that agreed.
+            votes=votes.get(best, 0),
+            k=self._k,
         )

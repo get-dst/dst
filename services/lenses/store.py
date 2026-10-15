@@ -6,6 +6,7 @@ A lens row stores a draft and (after publish) a published bundle, each a
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime
 from typing import Any
@@ -67,6 +68,19 @@ def _stored(bundle: LensBundle) -> str:
     was the one boundary that did not.
     """
     return bundle.model_dump_json(exclude_none=True)
+
+
+def bundle_fingerprint(bundle: LensBundle) -> str:
+    """sha256 of the bundle as stored (``_stored``: unset keys omitted) — the
+    identity an eval run is recorded under (``eval_run.lens_version``). Two
+    runs with the same fingerprint measured the same lens, so a verdict that
+    differs between them is a flip of the machinery, not of the authoring.
+    The compile timestamp is left out: the asset hashes beside it already say
+    what the model was built from, and a recompile of the same files is the
+    same lens."""
+    exclude = {"semantic_model": {"shared_provenance": {"compiled_at"}}}
+    canonical = bundle.model_dump_json(exclude_none=True, exclude=exclude)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _bundle_shape(bundle: dict[str, Any] | None) -> tuple[int, int, int]:

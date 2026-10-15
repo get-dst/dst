@@ -546,11 +546,17 @@ def apply_project(
     # Per-case: the override names the failing case ids it covers (repeatable);
     # it applies only when every failing case is named.
     allow_case: list[str] = Query(default=[]),
+    # Publish only these lenses of the push (repeatable); the rest are treated
+    # as unchanged. Refused when the push would leave one of them stale.
+    lens: list[str] = Query(default=[]),
 ) -> list[dict[str, object]]:
     """Apply a pushed file tree — the single deployment door (`dst apply`).
     One transaction per org under an advisory lock (a concurrent apply gets a
     409), landing connections → profiles → semantic layer → lenses blue/green.
-    Returns one result row per scope."""
+    Returns one result row per scope. ``?lens=x`` (repeatable) publishes only
+    those lenses; the push's other lenses are treated as unchanged, and a
+    push whose shared inputs would leave a non-selected published lens stale
+    is refused (422) naming it."""
     if (allow_failing_cases or allow_case) and not override_reason.strip():
         raise HTTPException(
             status_code=422,
@@ -569,6 +575,7 @@ def apply_project(
             require_gates=require_gates,
             gate_override=gate_override,
             allow_cases=allow_cases,
+            only=frozenset(n.strip() for n in lens if n.strip()) or None,
         )
     except ApplyStepTimeout as exc:
         # The wedge that held the org's apply lock for as long as the process
@@ -591,8 +598,11 @@ def _apply(
     require_gates: bool,
     gate_override: str | None,
     allow_cases: frozenset[str] | None,
+    only: frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
-    """The apply itself, under the org's lock: one transaction, blue/green."""
+    """The apply itself, under the org's lock: one transaction, blue/green.
+    ``only``: the lenses to publish (``dst apply --lens``); None is every lens
+    of the push."""
     # One apply per org at a time: a transaction-scoped advisory lock, released
     # with this request's commit/rollback. A concurrent apply would interleave
     # asset upserts and recompiles halfway through another's — refuse it cleanly.
@@ -658,6 +668,49 @@ def _apply(
         )
     rejected: set[str] = set()
     incoming_trees = split_by_lens(body.files)
+    if only is not None:
+        if missing := sorted(only - set(incoming_trees)):
+            session.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail=f"--lens names {', '.join(missing)}, not in the push — "
+                "a selected lens must be under lenses/ in the project",
+            )
+        # A selection publishes the named lenses and nothing else, but it may
+        # not leave a published sibling compiled against shared provenance
+        # that no longer matches: the shared assets this push landed (or an
+        # earlier one left stale) would recompile it — and recompiling a lens
+        # the operator did not select is the all-or-nothing apply they opted
+        # out of. Refuse, naming the siblings and both ways out.
+        stale = _stale_map(session, semantic_store.asset_hashes(session))
+        if left := sorted(set(stale) - only):
+            session.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail=f"--lens would leave {', '.join(left)} stale against the shared "
+                "layer this push changes ("
+                + "; ".join(f"{name}: {', '.join(stale[name])}" for name in left)
+                + ") — add them to --lens, or drop --lens to apply every lens",
+            )
+        # A changed connection recompiles every lens of the push that declares
+        # it; a non-selected one would keep its old compile.
+        if conn_applied:
+            declared = {
+                name: set(bundle.config.connections)
+                for name, _dn, _desc, bundle in store.list_published(session)
+            }
+            if behind := sorted(
+                name
+                for name in set(incoming_trees) - only
+                if declared.get(name, set()) & set(conn_applied)
+            ):
+                session.rollback()
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"--lens would leave {', '.join(behind)} compiled against a "
+                    f"connection this push changes ({', '.join(conn_applied)}) — add them "
+                    "to --lens, or drop --lens to apply every lens",
+                )
     # A lens whose managed files match the DB (plan's own comparison) and whose
     # inputs this apply didn't touch skips the publish path: recompile, version
     # bump, and the eval gate's live generation would all re-run against
@@ -684,6 +737,10 @@ def _apply(
         # takes the full path too, so a gate rejection stays on the LENS row —
         # not deferred to the recompile pass's rejected-recompile.
         unchanged -= set(_stale_map(session, semantic_store.asset_hashes(session)))
+    if only is not None:
+        # The lenses not selected: unchanged by decree, whatever their files
+        # say — the refusals above guarantee none of them is stale.
+        unchanged |= set(incoming_trees) - only
     for lens, tree in sorted(incoming_trees.items()):
         if lens in unchanged:
             row: dict[str, object] = {"lens": lens, "action": "unchanged"}

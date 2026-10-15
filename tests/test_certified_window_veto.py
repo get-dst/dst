@@ -168,3 +168,45 @@ def test_a_fiscal_period_token_is_not_a_calendar_quarter() -> None:
     assert temporal_terms("total spiff for period FY25-Q1") == frozenset()
     assert temporal_terms("payout row count for FY26-Q3") == frozenset()
     assert temporal_terms("revenue in Q1 2026") == frozenset({"q1", "2026"})
+
+
+def test_iso_month_and_quarter_are_the_period_not_the_year() -> None:
+    """A period written the way a binding renders it, 2026-08 or 2026-Q2, used to
+    parse as the bare year: the window became the whole of 2026 and a monthly
+    figure came back twelve times too large."""
+    from datetime import date
+
+    from services.runtime.timewindow import window_ranges
+
+    today = date(2026, 9, 30)
+    assert temporal_terms("revenue in 2026-08") == {"august", "2026"}
+    assert temporal_terms("revenue in 2026-Q2") == {"q2", "2026"}
+    assert temporal_terms("revenue in 2026-q4?") == {"q4", "2026"}
+    assert window_ranges(temporal_terms("revenue in 2026-08"), today) == [
+        (date(2026, 8, 1), date(2026, 8, 31))
+    ]
+    assert window_ranges(temporal_terms("revenue in 2026-Q2"), today) == [
+        (date(2026, 4, 1), date(2026, 6, 30))
+    ]
+    # The spelled form still reads the same, and a bare year is still a year.
+    assert window_ranges(temporal_terms("revenue in August 2026"), today) == [
+        (date(2026, 8, 1), date(2026, 8, 31))
+    ]
+    assert window_ranges(temporal_terms("revenue in 2026"), today) == [
+        (date(2026, 1, 1), date(2026, 12, 31))
+    ]
+
+
+def test_an_iso_date_is_that_day_not_its_year() -> None:
+    """ "as of 2026-08-31" read as the bare year 2026: a level metric served the
+    year's last snapshot, and two certified answers for different dates
+    matched each other. The day is the window."""
+    from datetime import date
+
+    from services.runtime.timewindow import window_ranges
+
+    terms = temporal_terms("how many customers as of 2026-08-31?")
+    assert terms == {"2026-08-31"}
+    assert window_ranges(terms, date(2026, 10, 15)) == [(date(2026, 8, 31), date(2026, 8, 31))]
+    assert temporal_mismatch("ARR as of 2026-08-31", "ARR as of 2026-09-30")
+    assert window_ranges(temporal_terms("as of 2026-02-30"), date(2026, 10, 15)) == []

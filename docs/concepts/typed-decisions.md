@@ -20,7 +20,7 @@ extracted from prose.
 | metric, dimension, grain | the entity's declared metrics, dimensions and time grains | the entity file |
 | ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
 | filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this; a value spelled like a common word, such as a team named `Most`, only where the question writes it as a name: capitalised mid-sentence, quoted, or possessive), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
-| window | none — a stated period is parsed, never decided; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone | `timewindow` |
+| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"); on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
 
 A slot the question does not settle is asked back as a **clarification naming
 the slot**: which metric, which value of `status`. The asking agent answers by

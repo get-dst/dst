@@ -212,13 +212,13 @@ def test_a_typed_answer_is_marked_typed() -> None:
         return Decision(chosen=name, probs={name or "none": 1.0}, provider="v")
 
     # shape, metric (over every metric of the lens — it names the entity),
-    # another(none), filter(none): the jaffle orders entity declares no
-    # dimensions, so that slot asks nothing, and the question asks for no
-    # breakdown over time, so no grain is posed.
+    # filter(none): "another metric?" is not asked, since the question names
+    # no second metric; the jaffle orders entity declares no dimensions, so
+    # that slot asks nothing, and the question asks for no breakdown over
+    # time, so no grain is posed.
     steps = [
         sure("aggregate"),
         sure("revenue"),
-        sure(None),
         sure(None),
     ]
     gen = TypedIntentGenerator(TypedResolver(ScriptedDecider(steps)))
@@ -228,7 +228,6 @@ def test_a_typed_answer_is_marked_typed() -> None:
     assert res.response.resolution.tag == "declared"
     assert [d.slot for d in res.response.resolution.decisions] == [
         "shape",
-        "metric",
         "metric",
         "filter",
     ]

@@ -334,6 +334,12 @@ def last_run_score(session: Session, lens: str, mode: str) -> float | None:
     return float(row[0])
 
 
+def last_run(session: Session, lens: str, mode: str) -> EvalRunRow | None:
+    """The most recent run for this lens+mode, fingerprint included — what a
+    run-over-run compare loads BEFORE it records the new run."""
+    return next((r for r in list_runs(session, lens) if r.mode == mode), None)
+
+
 def list_runs(session: Session, lens: str) -> list[EvalRunRow]:
     """Return all eval runs for a lens ordered newest first."""
     rows = session.execute(

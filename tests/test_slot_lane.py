@@ -63,9 +63,11 @@ def _resolver(*picks: str | None) -> TypedResolver:
 
 
 def test_typed_resolution_grades_against_stored_gold_without_sql() -> None:
-    # shape, metric, another(none), dimension, another(none), filter(none)
-    right = _resolver("aggregate", "revenue", None, "country", None, None)
-    wrong = _resolver("aggregate", "order_count", None, "country", None, None)
+    # shape, metric, filter(none): "by country" is read off the question, and
+    # "another metric?" is asked only where the question names one the pick
+    # left out — `revenue`, when the pick was order_count
+    right = _resolver("aggregate", "revenue", None)
+    wrong = _resolver("aggregate", "order_count", None, None)
     out = slot_lane.run_slot_lane(
         [_answer(1, GOLD), _answer(2, GOLD), _answer(3, None)],
         MODEL,
@@ -192,8 +194,10 @@ def test_repeat_measures_determinism_and_fails_a_wobbling_resolution() -> None:
 
 def test_compiled_sql_is_compared_to_the_certified_text_without_a_warehouse() -> None:
     """Same query in another spelling canonicalises equal — proven, no
-    execution; a certified text written another way reads as differs (the
-    rows lane's job on apply), never as a failed slot grade."""
+    execution; the same query written another way (aliases, predicate order,
+    a wrapping subquery) optimises equal — proven too; a different literal is
+    a different query and reads as differs (the rows lane's job on apply),
+    never as a failed slot grade."""
     from services.contracts.query_intent import QueryIntent
     from services.runtime.compiler import compile_intent
 
@@ -207,7 +211,8 @@ def test_compiled_sql_is_compared_to_the_certified_text_without_a_warehouse() ->
         "o",
         "sales",
         "revenue by country?",
-        "WITH d AS (SELECT * FROM orders) SELECT country, SUM(amount) AS revenue FROM d GROUP BY 1",
+        "SELECT * FROM (SELECT o.country AS country, SUM(o.amount) AS revenue "
+        "FROM orders AS o WHERE 1 = 1 GROUP BY o.country) AS wrapped",
         "t",
         "2026-01-01",
         resolution=GOLD,
@@ -218,8 +223,25 @@ def test_compiled_sql_is_compared_to_the_certified_text_without_a_warehouse() ->
         lambda a: _resolver("aggregate", "revenue", None, "country", None, None),
     )
     a, b = out.cases
-    assert a.verdict == "passed" and a.sql_match is True
-    assert b.verdict == "passed" and b.sql_match is False
+    assert a.verdict == "passed" and a.sql_match == "identical"
+    assert b.verdict == "passed" and b.sql_match == "equivalent"
+
+
+def test_sql_equivalence_is_syntactic_and_keeps_every_literal() -> None:
+    compiled = (
+        "SELECT orders.country AS country, SUM(orders.amount) AS revenue FROM orders AS orders "
+        "WHERE orders.amount > 100 AND orders.country = 'FI' GROUP BY orders.country"
+    )
+    reordered = (
+        "SELECT o.country, SUM(o.amount) AS revenue FROM orders o "
+        "WHERE o.country = 'FI' AND o.amount > 100 GROUP BY 1"
+    )
+    assert slot_lane.sql_match(compiled, reordered, "duckdb") == "equivalent"
+    assert slot_lane.sql_match(compiled, reordered.replace("> 100", "> 200"), "duckdb") == "differs"
+    assert slot_lane.sql_match(compiled, reordered.replace("'FI'", "'DK'"), "duckdb") == "differs"
+    # unparsable certified text: the plain compare decides, nothing raises
+    assert slot_lane.sql_match(compiled, "SELECT FROM WHERE (((", "duckdb") == "differs"
+    assert slot_lane.sql_match(compiled, compiled.lower(), "duckdb") == "identical"
 
 
 def test_a_decider_that_raises_fails_the_case_with_the_reason_never_the_lane() -> None:
@@ -250,22 +272,15 @@ def test_the_lane_grades_latency_and_cost_per_case() -> None:
 
     def resolver_for(a: CertifiedAnswer) -> TypedResolver:
         return TypedResolver(
-            ScriptedDecider(
-                [
-                    priced("aggregate"),
-                    priced("revenue"),
-                    priced(None),
-                    priced("country"),
-                    priced(None),
-                    priced(None),
-                ]
-            ),
+            ScriptedDecider([priced("aggregate"), priced("revenue"), priced(None)]),
             domains={},
         )  # type: ignore[arg-type]
 
     out = slot_lane.run_slot_lane([_answer(1, GOLD)], MODEL, resolver_for, repeat=2)
     (case,) = out.cases
-    n = len(case.decisions)
+    # the dimension is read off the question ("by country") and costs nothing
+    n = sum(1 for d in case.decisions if d.usage is not None)
+    assert n == 3 and len(case.decisions) == 4
     assert case.verdict == "passed" and case.calls == 5.0 * n and case.elapsed_s >= 0.0
     # n decisions × 100k tokens at $0.14/M per resolution, two resolutions in the lane
     assert case.cost_usd == round(n * 0.014, 6) and out.cost_usd == round(2 * n * 0.014, 6)
@@ -295,3 +310,112 @@ def test_the_emission_arm_grades_the_json_intent_like_a_typed_one() -> None:
     (rec,) = case.decisions
     assert rec.slot == "intent" and rec.provider == "json:deepseek-v4-flash"
     assert case.calls == 1.0 and case.cost_usd == 0.14  # 1M input tokens at $0.14/M
+
+
+# ── not graded is said, per answer, with the reason ──────────────────────────
+
+
+def _template(i: int, sample_bindings: list[dict] | None) -> CertifiedAnswer:
+    return CertifiedAnswer(
+        f"t{i}",
+        "sales",
+        "revenue in {c}?",
+        "SELECT SUM(orders.amount) AS revenue FROM orders WHERE country = {c}",
+        "t",
+        "2026-01-01",
+        slots={"c": {"type": "enum", "values": ["FI", "DK"]}},
+        sample_bindings=sample_bindings,
+    )
+
+
+def test_every_active_answer_is_graded_or_skipped_with_a_reason() -> None:
+    """A templated answer is graded on its first sample binding (the case the
+    rows lane executes); one without a binding is skipped and says so, as is
+    an answer with no gold. Graded plus skipped is the active corpus."""
+    retired = _answer(9, GOLD)
+    retired.status = "retired"
+    answers = [
+        _answer(1, GOLD),
+        _template(1, [{"c": "FI"}]),
+        _template(2, None),
+        _answer(3, None),
+        retired,
+    ]
+    out = slot_lane.run_slot_lane(
+        answers, MODEL, lambda a: _resolver("aggregate", "revenue", None, None, None, None)
+    )
+    assert [c.answer_id for c in out.cases] == ["a1", "t1"]
+    rendered = out.cases[1]
+    assert rendered.question == "revenue in FI?" and rendered.verdict == "passed"
+    assert rendered.gold == "attributed"
+    assert [(s.answer_id, s.reason.split(":")[0]) for s in out.skipped] == [
+        ("t2", "templated"),
+        ("a3", "no gold"),
+    ]
+    assert out.skipped_templates == 1 and out.skipped_no_gold == 1
+    active = [a for a in answers if a.status == "active"]
+    assert len(out.cases) + len(out.skipped) == len(active)
+    block = slot_lane.summary([("sales", out)], repeat=1)
+    assert block is not None and block["graded"] == 2 and block["resolutions"] == 2
+    assert block["skipped"] == [
+        {
+            "lens": "sales",
+            "answer_id": "t2",
+            "question": "revenue in {c}?",
+            "reason": out.skipped[0].reason,
+        },
+        {
+            "lens": "sales",
+            "answer_id": "a3",
+            "question": "revenue by country?",
+            "reason": out.skipped[1].reason,
+        },
+    ]
+    assert slot_lane.summary([], repeat=1) is None
+
+
+# ── a run-over-run flip is visible ───────────────────────────────────────────
+
+
+def test_a_slot_verdict_that_flips_between_two_runs_of_the_same_lens_is_listed() -> None:
+    from services.evals import compare
+    from services.evals.store import EvalResultRow, EvalRunRow
+
+    right = lambda a: _resolver("aggregate", "revenue", None, "country", None, None)  # noqa: E731
+    wrong = lambda a: _resolver("aggregate", "order_count", None, "country", None, None)  # noqa: E731
+    first = slot_lane.eval_results(
+        slot_lane.run_slot_lane([_answer(1, GOLD), _answer(2, GOLD)], MODEL, right).cases
+    )
+    second = slot_lane.eval_results(
+        slot_lane.run_slot_lane(
+            [_answer(1, GOLD), _answer(2, GOLD)],
+            MODEL,
+            lambda a: wrong(a) if a.id == "a2" else right(a),
+        ).cases
+    )
+    assert [r.case_id for r in first] == ["slots:a1", "slots:a2"]
+    assert all(r.passed for r in first) and first[0].checks["lane"] == "slots"
+    assert [r.passed for r in second] == [True, False]
+
+    def run(fingerprint: str | None) -> EvalRunRow:
+        return EvalRunRow("run-1", "sales", fingerprint, "test", 1.0, 2, 0, 0, None, None)
+
+    stored = [
+        EvalResultRow(
+            "x", "run-1", r.case_id, r.question, r.passed, r.grade, None, None, None, None
+        )
+        for r in first
+    ]
+    same = compare.compare_runs(run("fp"), stored, "fp", second, 0.5)
+    assert same["lens_fingerprint_changed"] is False
+    assert same["flips"] == [
+        {"case_id": "slots:a2", "question": "revenue by country?", "from": "pass", "to": "fail"}
+    ]
+    assert "1 verdict flip(s)" in compare.describe(same, "org/sales")[0]
+    changed = compare.compare_runs(run("other"), stored, "fp", second, 0.5)
+    assert changed["lens_fingerprint_changed"] is True and changed["flips"] == []
+    unknown = compare.compare_runs(run(None), stored, "fp", second, 0.5)
+    assert unknown["lens_fingerprint_changed"] is None and unknown["flips"] == []
+    none = compare.compare_runs(None, [], "fp", second, 0.5)
+    assert none["previous_run"] is None and none["flips"] == []
+    assert compare.describe(none, "org/sales") == ["compare org/sales: no previous test run"]

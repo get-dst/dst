@@ -68,3 +68,7 @@ class TraceLog(BaseModel):
     # The clarification a non-answer asked for (kind + the slot it named), so
     # "which columns keep clarifying for want of a dictionary" is a query.
     clarification: ClarificationRequest | None = None
+    # The caller's one-sentence purpose ("building a forecasting app"), as sent.
+    # Self-reported prose, kept only when the lens sets `logging.log_purpose`;
+    # None otherwise, so the column measures what agents actually send.
+    purpose: str | None = None

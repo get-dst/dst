@@ -33,6 +33,8 @@ from services.api import route_store
 from services.api.query import (
     BINDINGS_HELP,
     FORMAT_HELP,
+    PURPOSE_HELP,
+    PURPOSE_MAX,
     UNTYPED_HELP,
     AnswerFormat,
     run_lens_query,
@@ -200,6 +202,7 @@ class JustAskBody(BaseModel):
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
     bindings: dict[str, str] = Field(default_factory=dict, description=BINDINGS_HELP)
     allow_untyped: bool | None = Field(default=None, description=UNTYPED_HELP)
+    purpose: str = Field(default="", max_length=PURPOSE_MAX, description=PURPOSE_HELP)
 
 
 class RouteProvenance(BaseModel):
@@ -290,7 +293,10 @@ async def just_ask(
     caller: CallerIdentity = Depends(get_caller),
 ) -> RoutedAnswer | UncoveredEnvelope:
     """Ask without naming a lens. The router routes to the covering lens (second hop,
-    governed, provenance-stamped) or declines with the uncovered envelope."""
+    governed, provenance-stamped) or declines with the uncovered envelope. A routed
+    lens's own refusal rides the envelope as ``answer.status == "refused"`` with the
+    reason in ``answer.answer`` — the direct door's ``status``/``answer``, one level
+    down."""
     # Off the event loop: routing makes blocking embedder + decider calls over sync httpx.
     decision = await asyncio.to_thread(_route, caller, body.q)
 
@@ -312,6 +318,7 @@ async def just_ask(
             body.format,
             body.bindings,
             body.allow_untyped,
+            body.purpose,
         )
         return RoutedAnswer(
             routed_to=RouteProvenance(

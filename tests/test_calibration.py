@@ -61,3 +61,35 @@ def test_format_report_says_untested_for_nothing() -> None:
     assert "k1" in text and "UNTESTED" in text
     text = cal.format_report(cal.report([_rec(0.9, True, "k5")] * cal.MIN_N))
     assert "brier=" in text and "act at p>=0.90" in text
+
+
+def test_repeats_of_a_question_do_not_inflate_n() -> None:
+    """Under ``--repeat`` the same question is resolved again; the second
+    resolution is the determinism check, not a new sample. n is distinct
+    questions, the statistics use the first repeat only, and the unanimous
+    bin reports its own accuracy."""
+
+    def rec(q: str, repeat: int, correct: bool) -> cal.GradedDecision:
+        return cal.GradedDecision(
+            decider="v",
+            slot="metric",
+            chosen="a",
+            gold="a" if correct else "b",
+            p=1.0,
+            question=q,
+            repeat=repeat,
+        )
+
+    rs = [rec(f"q{i}", r, correct=i != 0) for i in range(10) for r in range(3)]
+    e = cal.report(rs)["v [metric]"]
+    assert e["n"] == 10 and e["decisions"] == 10 and e["repeats_dropped"] == 20
+    assert e["status"] == "n too small"  # 10 measured, not 30
+    assert e["unanimous"] == {"n": 10, "accuracy": 0.9}
+    # Two decisions on one question (a pick and "another?") are two decisions
+    # of one question: n counts the question once.
+    two = [rec("q", 0, True), rec("q", 0, True)]
+    assert cal.report(two)["v [metric]"]["n"] == 1
+    assert cal.report(two)["v [metric]"]["decisions"] == 2
+    assert "n=10" in cal.format_report({"v [metric]": e}) and "unanimous n=10 acc=90%" in (
+        cal.format_report({"v [metric]": e})
+    )

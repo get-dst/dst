@@ -191,7 +191,7 @@ def request_detail(session: Session, request_id: str) -> dict[str, object] | Non
             "citations, definition_used, confidence, verification, certification, latency, "
             "ai_input_tokens, ai_output_tokens, ai_cost_usd, wh_bytes, wh_cost_usd, "
             "status, error, created_at, prompt_hash, generator_tier, repairs, context_refs, "
-            "resolution, resolution_tag, typed, clarification "
+            "resolution, resolution_tag, typed, clarification, purpose "
             "FROM request_log WHERE request_id = :r"
         ),
         {"r": request_id},
@@ -237,6 +237,9 @@ def request_detail(session: Session, request_id: str) -> dict[str, object] | Non
         "resolution_tag": row[27],
         "typed": row[28],
         "clarification": row[29],
+        # The caller's stated purpose (0068): self-reported prose, NULL unless the
+        # lens logs it. A label on the row, never an input to anything.
+        "purpose": row[30],
     }
 
 

@@ -272,7 +272,7 @@ Two more environment-shaped facts worth pinning in your runbook:
   warehouse credentials; each environment has its own, and losing one orphans
   that environment's stored credentials.
 - **`DST_ADMIN_TOKEN`** is per org, so per environment. Mint with
-  `dst bootstrap`, which is idempotent — rerunning mints a fresh token without
-  creating a duplicate org.
+  `dst bootstrap`, which is idempotent — rerunning keeps the token `.env` already
+  holds (`--rotate-admin-token` mints a new one) without creating a duplicate org.
 - **Warehouse credentials** reach CI only as the env vars your connections name
   in `secret_env`, and only in the job that applies to that environment.

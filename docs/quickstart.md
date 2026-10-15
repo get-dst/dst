@@ -77,7 +77,7 @@ the org, and mints an admin token, saved into `.env` as
 `DST_ADMIN_TOKEN`; every later command reads it from there, so nothing below needs
 flags. `--email` also creates the first dashboard admin (log in at
 `http://localhost:8000`); omit it if you don't want the dashboard yet. Rerunning
-bootstrap is safe: it reuses the org and only mints a fresh token.
+bootstrap is safe: it reuses the org and keeps the token already in `.env`.
 
 `apply` deploys the project directory to the server. Each declared connection
 is probed first — dst connects and reads — so a dead credential never replaces

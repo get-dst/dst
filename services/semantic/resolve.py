@@ -313,6 +313,12 @@ def resolve_model(model: SemanticModel) -> tuple[SemanticModel, list[str], list[
         for m in e.metrics:
             if m.agg_time_field:
                 _check_member_name(f"metric {m.name} agg_time_field", e, m.agg_time_field, ctx)
+            if m.additivity == "level" and not (m.agg_time_field or e.default_time_field):
+                ctx.error(
+                    f"metric {m.name}: additivity 'level' needs a time field to find the "
+                    f"latest snapshot — set default_time_field on entity '{e.name}' or "
+                    "agg_time_field on the metric"
+                )
             m.filters = [_resolve_fragment(f, f"metric {m.name} filter", ctx) for f in m.filters]
             if m.type == "simple" and m.expr:
                 m.expr = _resolve_fragment(m.expr, f"metric {m.name}", ctx)

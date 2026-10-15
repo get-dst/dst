@@ -12,7 +12,12 @@ Honesty rules (rule 4, rule 8):
   number — nothing was measured;
 - a cell with fewer than ``MIN_N`` decisions prints ``n too small`` instead of
   a figure that would be read as one;
-- an empty set is reported as UNTESTED, never as clean.
+- an empty set is reported as UNTESTED, never as clean;
+- a question resolved again under ``--repeat`` is the same measurement taken
+  twice: only the first repeat counts, and ``n`` is distinct questions, so a
+  correlated re-run can never grow the sample;
+- the unanimous bin (p = 1.0) reports its own accuracy — a vote of five that
+  agreed is the cell a reader is most tempted to take as certainty.
 """
 
 from __future__ import annotations
@@ -33,10 +38,27 @@ class GradedDecision:
     gold: str | None
     p: float | None  # p(chosen); None = nothing measured
     margin: float | None = None
+    # The question the decision was made for (n counts these), and which
+    # repeat of it produced the record: 0 is the first resolution, later ones
+    # are the determinism check and never enter the calibration.
+    question: str | None = None
+    repeat: int = 0
 
     @property
     def correct(self) -> bool:
         return self.chosen == self.gold
+
+
+def distinct(records: list[GradedDecision]) -> list[GradedDecision]:
+    """The records of the first repeat only — one measurement per decision."""
+    return [r for r in records if r.repeat == 0]
+
+
+def questions(records: list[GradedDecision]) -> int:
+    """The sample size a reader should trust: distinct questions, with a record
+    that names no question counting as its own."""
+    named = {r.question for r in records if r.question is not None}
+    return len(named) + sum(1 for r in records if r.question is None)
 
 
 def brier(records: list[GradedDecision]) -> float | None:
@@ -114,13 +136,22 @@ def report(records: list[GradedDecision]) -> dict[str, dict[str, Any]]:
         # and gating paraphrases are two different calibrations.
         by.setdefault(f"{r.decider} [{r.slot}]", []).append(r)
     out: dict[str, dict[str, Any]] = {}
-    for decider, rs in sorted(by.items()):
+    for decider, every in sorted(by.items()):
+        rs = distinct(every)
         measured = [r for r in rs if r.p is not None]
         entry: dict[str, Any] = {
-            "n": len(rs),
+            "n": questions(rs),
+            "decisions": len(rs),
+            "repeats_dropped": len(every) - len(rs),
             "accuracy": sum(1 for r in rs if r.correct) / len(rs),
             "uncalibrated_n": len(rs) - len(measured),
         }
+        unanimous = [r for r in measured if r.p is not None and r.p >= 1.0]
+        if unanimous:
+            entry["unanimous"] = {
+                "n": len(unanimous),
+                "accuracy": sum(1 for r in unanimous if r.correct) / len(unanimous),
+            }
         if not measured:
             entry["status"] = "UNTESTED"
             entry["reason"] = "no probabilities measured"
@@ -144,6 +175,8 @@ def format_report(rep: dict[str, dict[str, Any]]) -> str:
     lines = ["calibration (per decider):"]
     for decider, e in rep.items():
         head = f"  {decider:<48} n={e['n']:<4} acc={e['accuracy']:.0%}"
+        if u := e.get("unanimous"):
+            head += f"  unanimous n={u['n']} acc={u['accuracy']:.0%}"
         if e["status"] != "measured":
             lines.append(f"{head}  {e['status']} ({e['reason']})")
             continue

@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text
 from services.app import app
 from services.auth.tokens import hash_token, new_admin_token
 from services.config import settings
-from services.contracts.response import QueryResponse
+from services.contracts.response import ConsumerAnswer, QueryResponse
 from services.router import RouteDecision
 
 client = TestClient(app)
@@ -79,8 +79,10 @@ def test_route_runs_the_second_hop_and_stamps_provenance(monkeypatch: pytest.Mon
         fmt: str = "both",
         bindings: dict[str, str] | None = None,
         allow_untyped: bool = False,
+        purpose: str = "",
     ) -> QueryResponse:
         captured["lens"], captured["q"], captured["fmt"] = name, q, fmt
+        captured["purpose"] = purpose
         return _fake_answer(name)
 
     monkeypatch.setattr(
@@ -91,12 +93,14 @@ def test_route_runs_the_second_hop_and_stamps_provenance(monkeypatch: pytest.Mon
     try:
         r = client.post(
             "/v1/query",
-            json={"q": "how many customers?"},
+            json={"q": "how many customers?", "purpose": "sizing the churn model"},
             headers={"Authorization": f"Bearer {raw}"},
         )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["covered"] is True
+        # The second hop gets the caller's purpose, same as a direct lens call.
+        assert captured["purpose"] == "sizing the churn model"
         assert body["routed_to"] == {
             "lens": "customer_value",
             "score": 0.91,
@@ -107,7 +111,12 @@ def test_route_runs_the_second_hop_and_stamps_provenance(monkeypatch: pytest.Mon
         assert body["answer"]["answer"] == "42 customers"
         # the second hop actually ran the routed lens's pipeline with the question,
         # and the caller's answer shape rode through to it
-        assert captured == {"lens": "customer_value", "q": "how many customers?", "fmt": "both"}
+        assert captured == {
+            "lens": "customer_value",
+            "q": "how many customers?",
+            "fmt": "both",
+            "purpose": "sizing the churn model",
+        }
 
         # the decision persisted as a covered route to that lens
         eng = create_engine(settings.database_admin_url)
@@ -121,6 +130,47 @@ def test_route_runs_the_second_hop_and_stamps_provenance(monkeypatch: pytest.Mon
             ).first()
         assert row is not None and row[0] == "customer_value" and row[1] is True
         assert abs(row[2] - 0.91) < 1e-6
+    finally:
+        _cleanup(org)
+
+
+@needs_db
+@pytest.mark.parametrize("audience", ["engineer", "consumer"])
+def test_a_routed_refusal_carries_its_reason(
+    monkeypatch: pytest.MonkeyPatch, audience: str
+) -> None:
+    """A refusal is an outcome, not an error: when the routed lens declines,
+    the routed envelope carries the second hop's status and the reason inside
+    its sentence — at `answer.status` and `answer.answer` — for the engineer's
+    QueryResponse and the consumer's ConsumerAnswer alike."""
+    org, raw = _make_org_token()
+    reason = "no governed metric of this lens answers the question"
+    refused = QueryResponse(
+        lens="customer_value",
+        status="refused",
+        answer=f"I can't answer this from this lens's data: {reason}",
+        request_id="req_route_refused",
+    )
+
+    def fake_run(*a: object, **k: object) -> QueryResponse | ConsumerAnswer:
+        return ConsumerAnswer.of(refused) if audience == "consumer" else refused
+
+    monkeypatch.setattr(
+        "services.api.route._route",
+        lambda caller, q: RouteDecision(True, "customer_value", 0.9, []),
+    )
+    monkeypatch.setattr("services.api.route.run_lens_query", fake_run)
+    try:
+        r = client.post(
+            "/v1/query",
+            json={"q": "what is the churn rate?"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["covered"] is True and body["routed_to"]["lens"] == "customer_value"
+        assert body["answer"]["status"] == "refused"
+        assert reason in body["answer"]["answer"]
     finally:
         _cleanup(org)
 

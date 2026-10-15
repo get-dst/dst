@@ -90,3 +90,70 @@ def test_the_vote_reports_k_calls_and_their_tokens() -> None:
     assert d.usage is not None and d.usage.calls == 5.0
     assert d.usage.input_tokens == 5.0 and d.usage.output_tokens == 5.0  # the fake: 1 + 1 each
     assert d.usage.latency_s >= 0.0
+
+
+def test_a_unanimous_vote_discloses_its_count_and_a_bound_below_one() -> None:
+    """p is the vote share, and 5/5 reads as 1.0 — the record carries the vote
+    (votes of k) and the rule-of-succession bound so a reader is never handed
+    certainty from five samples. The choice is unchanged."""
+    d = VoteDecider(ScriptedLLM(["sales"] * 5), "m", k=5, concurrency=1).decide(
+        question="q", context="", options=OPTS, allow_none=True
+    )
+    assert d.chosen == "sales" and d.p == 1.0
+    assert (d.votes, d.k) == (5, 5)
+    assert d.p_lower == pytest.approx(6 / 7)  # 0.857
+
+
+def test_three_valid_of_five_is_not_five_of_five() -> None:
+    """Two garbage replies leave the denominator: p stays 1.0 (3 of 3 valid
+    agreed) and the verdict is the same, but the vote says 3/5 and the bound
+    falls with it."""
+    d = VoteDecider(
+        ScriptedLLM(["sales", "", "sales", "???", "sales"]), "m", k=5, concurrency=1
+    ).decide(question="q", context="", options=OPTS, allow_none=False)
+    assert d.chosen == "sales" and d.p == 1.0
+    assert (d.votes, d.k) == (3, 5)
+    assert d.p_lower == pytest.approx(4 / 7)
+    unmeasured = VoteDecider(ScriptedLLM(["sales"]), "m", k=1).decide(
+        question="q", context="", options=OPTS, allow_none=False
+    )
+    assert unmeasured.votes is None and unmeasured.k is None and unmeasured.p_lower is None
+
+
+def test_the_vote_rides_the_decision_record() -> None:
+    from services.contracts.semantic_model import Entity, EntitySource, Field, Metric, SemanticModel
+    from services.runtime.typed_resolver import TypedResolver
+
+    model = SemanticModel(
+        lens="s",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="orders",
+                source=EntitySource(connection="wh", table="orders"),
+                fields=[Field(name="amount", type="number")],
+                metrics=[Metric(name="revenue", agg="sum", expr="orders.amount")],
+            )
+        ],
+    )
+
+    class _Votes:
+        provider = "vote:m:k=5"
+
+        def decide(self, *, question, context, options, allow_none):  # type: ignore[no-untyped-def]
+            from services.contracts.protocols import Decision
+
+            names = [o.name for o in options]
+            pick = (
+                "aggregate" if "aggregate" in names else ("revenue" if "revenue" in names else None)
+            )
+            return Decision(
+                chosen=pick, probs={pick or "none": 1.0}, provider=self.provider, votes=5, k=5
+            )
+
+    res = TypedResolver(_Votes(), domains={}).resolve("total revenue?", model)  # type: ignore[arg-type]
+    rec = next(r for r in res.decisions if r.slot == "metric")
+    assert (rec.p, rec.votes, rec.k) == (1.0, 5, 5)
+    assert rec.p_lower == pytest.approx(6 / 7)
+    dumped = rec.model_dump()  # what `dst test --json` prints per decision
+    assert (dumped["votes"], dumped["k"]) == (5, 5) and dumped["p_lower"] is not None

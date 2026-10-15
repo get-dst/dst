@@ -128,7 +128,10 @@ logged CRITICAL and counted on `/ready` rather than swallowed
 (`logger._record_write_failure`). A sample of result rows (the first 5) is
 stored only when the lens sets `logging.log_samples: true`; the default is off,
 and the stored sample is the served rows verbatim
-(`services/runtime/pipeline.py`).
+(`services/runtime/pipeline.py`). A caller may send a one-sentence `purpose` with a
+question ("building a forecasting app"); it is stored only when the lens sets
+`logging.log_purpose: true`, default off, because it is a fragment of someone's
+conversation with their AI.
 
 Stored table profiles keep the sampled value dictionaries and ranges in
 Postgres; they are readable on admin surfaces only. Warehouse credentials are
@@ -215,7 +218,8 @@ So the boundary is yours to draw, and there is exactly one place to draw it:
   at all. It stops the sampling and description passes; it does not stop a
   question whose SQL projects the column.
 - Remember what is retained: `request_log` keeps the question, the SQL, the
-  answer, and — only when a lens sets `logging.log_samples` — a row sample. It
+  answer, and — only when a lens sets `logging.log_samples` — a row sample, and
+  only when it sets `logging.log_purpose` — the caller's purpose sentence. It
   lives in your Postgres, under your retention policy.
 
 Column-level exclusion may be reconsidered later as its own design. It is not

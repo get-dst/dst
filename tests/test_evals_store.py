@@ -216,3 +216,38 @@ def test_eval_result_roundtrip() -> None:
             assert store.get_run(s, str(uuid.uuid4())) is None
     finally:
         _cleanup(org)
+
+
+@needs_db
+def test_a_run_is_recorded_under_the_lens_fingerprint_and_the_last_one_is_readable() -> None:
+    """``dst test --compare-last`` loads the previous run and its results
+    before recording; the fingerprint says whether the two measured the same
+    lens, and ``bundle_fingerprint`` is a pure function of the bundle."""
+    from services.lenses.demo import jaffle_customer_value_bundle
+    from services.lenses.store import bundle_fingerprint
+
+    bundle = jaffle_customer_value_bundle()
+    fp = bundle_fingerprint(bundle)
+    assert fp == bundle_fingerprint(jaffle_customer_value_bundle()) and len(fp) == 64
+    changed = bundle.model_copy(deep=True)
+    changed.config.description = (changed.config.description or "") + " (edited)"
+    assert bundle_fingerprint(changed) != fp
+
+    org = _org()
+    try:
+        with org_session(org) as s:
+            older = store.create_run(s, lens="cv", mode="test", lens_version=fp, score=1.0)
+            store.record_results(
+                s,
+                older,
+                [EvalResult(run_id=older, case_id="slots:a1", question="q1", passed=True)],
+            )
+            store.create_run(s, lens="cv", mode="regression", lens_version=fp, score=0.5)
+        with org_session(org) as s:
+            last = store.last_run(s, "cv", "test")
+            assert last is not None and last.id == older and last.lens_version == fp
+            (row,) = store.list_results(s, last.id)
+            assert row.case_id == "slots:a1" and row.passed
+            assert store.last_run(s, "cv", "health") is None
+    finally:
+        _cleanup(org)

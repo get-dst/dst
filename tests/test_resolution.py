@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from services.contracts.query_intent import IntentFilter, QueryIntent
-from services.contracts.resolution import Slot, derive_tag
+from services.contracts.resolution import Resolution, Slot, derive_tag
 from services.contracts.semantic_model import (
     Definition,
     Dimension,
@@ -391,3 +391,88 @@ def test_certified_overlay_is_typed_by_approval_and_keeps_its_decisions() -> Non
     ]
     cert = certified_overlay(res)
     assert cert.typed is True and cert.decisions == res.decisions
+
+
+# ── a level metric's reading rides the ledger ────────────────────────────────
+
+
+def test_a_level_metric_carries_its_snapshot_reading_as_a_declared_window_slot() -> None:
+    from services.runtime.resolution import level_disclosure
+
+    snapshots = Entity(
+        name="arr_snapshots",
+        source=EntitySource(connection="wh", table="arr_snapshots"),
+        default_time_field="snapshot_date",
+        fields=[Field(name="snapshot_date", type="date"), Field(name="arr", type="number")],
+        metrics=[
+            Metric(name="arr", agg="sum", expr="arr_snapshots.arr", additivity="level"),
+            Metric(name="bookings", agg="sum", expr="arr_snapshots.arr"),
+        ],
+    )
+    m = SemanticModel(lens="t", dialect="duckdb", entities=[snapshots])
+    level = from_intent(QueryIntent(entity="arr_snapshots", metrics=["arr"]), m, None)
+    assert [(s.name, s.source, s.value) for s in level.slots if s.kind == "window"] == [
+        ("snapshot_date", "declared", "latest snapshot in the window")
+    ]
+    assert level.tag == "declared"  # a window slot never moves the tag
+    by_month = from_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["arr"], grain="month"), m, None
+    )
+    assert any(s.value == "latest snapshot in the window per month" for s in by_month.slots)
+    flow = from_intent(QueryIntent(entity="arr_snapshots", metrics=["bookings"]), m, None)
+    assert not [s for s in flow.slots if s.kind == "window"]
+    line = level_disclosure(QueryIntent(entity="arr_snapshots", metrics=["arr"]), m)
+    assert line is not None and "`arr`" in line and "latest snapshot in the window" in line
+    assert level_disclosure(QueryIntent(entity="arr_snapshots", metrics=["bookings"]), m) is None
+
+
+def test_a_definition_named_after_a_metric_is_the_metric_read_once() -> None:
+    """Metric ``arr`` and definition ``arr`` share an expression; the SQL applies
+    it in SELECT and again in a filter subquery. One governed slot, under the
+    metric's kind — the gold never reads "arr, arr" and the typed form passes."""
+    model = SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="subscriptions",
+                source=EntitySource(connection="wh", table="subscriptions"),
+                fields=[Field(name="mrr", type="number"), Field(name="plan", type="string")],
+                dimensions=[Dimension(name="plan")],
+                metrics=[Metric(name="arr", agg="sum", expr="subscriptions.mrr * 12")],
+            )
+        ],
+        definitions=[
+            Definition(
+                term="arr", body="annual recurring revenue", sql_expr="SUM(subscriptions.mrr * 12)"
+            )
+        ],
+    )
+    sql = (
+        "SELECT SUM(subscriptions.mrr * 12) AS arr FROM subscriptions WHERE plan IN "
+        "(SELECT plan FROM subscriptions GROUP BY plan HAVING SUM(subscriptions.mrr * 12) > 0)"
+    )
+    expected = attribute(sql, model, {})
+    governed = [(s.kind, s.name) for s in expected.slots if s.source == "declared"]
+    assert governed == [("metric", "arr")]
+    got = from_intent(QueryIntent(entity="subscriptions", metrics=["arr"]), model, {})
+    assert grade(expected, got) == ("passed", "")
+
+
+def test_a_real_duplicate_name_prints_with_its_kind() -> None:
+    expected = Resolution(
+        method="construction",
+        tag="declared",
+        slots=[
+            Slot(kind="metric", name="arr", source="declared"),
+            Slot(kind="definition", name="arr", source="declared"),
+        ],
+    )
+    got = Resolution(
+        method="construction",
+        tag="declared",
+        slots=[Slot(kind="metric", name="arr", source="declared")],
+    )
+    verdict, evidence = grade(expected, got)
+    assert verdict == "failed"
+    assert evidence == "expected definition:arr, metric:arr; got arr"

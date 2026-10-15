@@ -37,6 +37,7 @@ from services.contracts.fakes import FakeConnector
 from services.contracts.profile import (
     EXACT_PROFILE_MAX_ROWS,
     LOW_CARDINALITY_MAX,
+    SAMPLE_BYTES_BUDGET,
     ColumnProfile,
     ColumnSampleSpec,
     PartitioningProfile,
@@ -569,6 +570,44 @@ def test_bigquery_refuses_over_budget_tables() -> None:
     assert conn.sample_profile([_BQ_SPEC]) == []
     assert client.executed == []
     assert len(client.dry_runs) >= 1  # the gate ran; the scan did not
+
+
+def test_bigquery_budget_refusal_names_the_knob() -> None:
+    """The refusal says where the budget is raised: the per-connection key in
+    dst.yaml, or a narrower probe — a bare number teaches nobody."""
+    conn = _bq_connector(_FakeBQSamplingClient(dry_run_bytes=5_000_000_000))
+    with pytest.raises(SampleBudgetExceeded) as exc:
+        conn._sample_query("SELECT COUNT(*) AS n_rows FROM `proj.jaffle.events`")
+    msg = str(exc.value)
+    assert "sample_bytes_budget" in msg and "dst.yaml" in msg and "--tables" in msg
+
+
+def test_bigquery_sample_budget_is_a_connection_config_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connections.<name>.config.sample_bytes_budget` reaches the connector the
+    same way `max_bytes_billed` does, and is a known key (no lint warning)."""
+    from services.lenses.connections import build_connector, config_warnings
+
+    captured: dict[str, Any] = {}
+
+    def fake_from_info(info: dict[str, object], **kw: Any) -> BigQueryConnector:
+        captured.update(kw)
+        return _bq_connector(
+            _FakeBQSamplingClient(dry_run_bytes=0), budget=int(kw["sample_bytes_budget"])
+        )
+
+    monkeypatch.setattr(BigQueryConnector, "from_info", staticmethod(fake_from_info))
+    conn = build_connector(
+        "bigquery", {"project": "proj", "sample_bytes_budget": 5_000_000_000}, "{}"
+    )
+    assert isinstance(conn, BigQueryConnector)
+    assert captured["sample_bytes_budget"] == 5_000_000_000
+    assert conn._sample_bytes_budget == 5_000_000_000
+    # without the key the contract default applies
+    build_connector("bigquery", {"project": "proj"}, "{}")
+    assert captured["sample_bytes_budget"] == SAMPLE_BYTES_BUDGET
+    assert config_warnings("bigquery", {"sample_bytes_budget": 1}) == []
 
 
 # ---------------------------------------------------------------------------

@@ -165,6 +165,7 @@ def test_query_endpoint_does_not_block_the_event_loop(monkeypatch: pytest.Monkey
         fmt: str = "both",
         bindings: dict[str, str] | None = None,
         allow_untyped: bool = False,
+        purpose: str = "",
     ) -> QueryResponse:
         worker["thread"] = threading.get_ident()
         started.set()
@@ -336,3 +337,71 @@ def test_untyped_fallback_is_the_lens_default_and_the_caller_can_refuse_it() -> 
     assert effective_allow_untyped(lenient, None) is True
     assert effective_allow_untyped(lenient, False) is False
     assert effective_allow_untyped(strict, True) is True
+
+
+def test_purpose_is_capped_at_the_door() -> None:
+    """One sentence, not a transcript: a purpose over the cap is a 422, never
+    truncated into the log silently."""
+    from services.api.query import PURPOSE_MAX, QueryBody
+
+    assert QueryBody(q="how many?").purpose == ""
+    assert QueryBody(q="how many?", purpose="x" * PURPOSE_MAX).purpose
+    with pytest.raises(ValueError):
+        QueryBody(q="how many?", purpose="x" * (PURPOSE_MAX + 1))
+
+
+def test_purpose_is_logged_only_when_the_lens_opts_in() -> None:
+    """The sentence is a fragment of someone's conversation; the lens's
+    `logging.log_purpose` decides whether the log keeps it, and a blank one is
+    never stored as an empty string (the column must measure real sends)."""
+    from services.api.query import _logged_purpose
+
+    cfg = jaffle_customer_value_bundle().config
+    assert cfg.logging.log_purpose is False
+    assert _logged_purpose("building a forecasting app", cfg) is None
+    on = cfg.model_copy(deep=True)
+    on.logging.log_purpose = True
+    assert _logged_purpose("  building a forecasting app ", on) == "building a forecasting app"
+    assert _logged_purpose("   ", on) is None
+
+
+@needs_db
+def test_purpose_sent_to_a_lens_that_does_not_log_it_leaves_the_column_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: the caller sends a purpose, the lens has not opted in, the
+    answer serves and the request_log row carries NULL — not the sentence, not ''."""
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    gen_json = (
+        '{"sql": "SELECT count(*) AS n FROM customers WHERE number_of_orders > 1", '
+        '"definition_used": "repeat_customer"}'
+    )
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.runtime.assembly.IntentSQLGenerator",
+        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+            llm, model=model, temperature=temperature
+        ),
+    )
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider",
+        lambda _key, **_: ScriptedLLM([gen_json, "There are repeat customers."]),
+    )
+    try:
+        r = client.post(
+            "/v1/lenses/customer_value/query",
+            json={"q": "how many repeat customers?", "purpose": "sizing the churn model"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        eng = create_engine(settings.database_admin_url)
+        with eng.connect() as c:
+            row = c.execute(
+                text("SELECT status, purpose FROM request_log WHERE request_id = :r"),
+                {"r": r.json()["request_id"]},
+            ).first()
+        assert row is not None and row[0] == "ok"
+        assert row[1] is None
+    finally:
+        _cleanup(settings.database_admin_url, org)

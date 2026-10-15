@@ -121,6 +121,12 @@ BINDINGS_HELP = (
     "YYYY-Qn period); the answer's `clarification` of kind `unresolved_slot` "
     "names the slot to bind and its grammar"
 )
+PURPOSE_MAX = 300
+PURPOSE_HELP = (
+    "one sentence on what the asker is trying to accomplish — 'building a forecasting "
+    "app', 'preparing the board deck'. Optional. Stored on the request's log row only "
+    "when the lens sets logging.log_purpose; never changes what a term means"
+)
 UNTYPED_HELP = (
     "when the question does not type (a slot clarifies), fall to raw-SQL "
     "generation instead — always disclosed with an UNTYPED line and `typed: false` "
@@ -146,6 +152,7 @@ class QueryBody(BaseModel):
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
     bindings: dict[str, str] = Field(default_factory=dict, description=BINDINGS_HELP)
     allow_untyped: bool | None = Field(default=None, description=UNTYPED_HELP)
+    purpose: str = Field(default="", max_length=PURPOSE_MAX, description=PURPOSE_HELP)
 
 
 router = APIRouter(prefix="/v1", tags=["query"])
@@ -232,6 +239,7 @@ class CertifiedRunBody(BaseModel):
 
     bindings: dict[str, str] = {}
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
+    purpose: str = Field(default="", max_length=PURPOSE_MAX, description=PURPOSE_HELP)
 
 
 class MetricsBody(QueryIntent):
@@ -623,6 +631,7 @@ def run_lens_query(
     fmt: AnswerFormat = "both",
     bindings: dict[str, str] | None = None,
     allow_untyped: bool | None = None,
+    purpose: str = "",
 ) -> QueryResponse | ConsumerAnswer:
     """Authorize + run the governed query pipeline for one lens question.
 
@@ -755,6 +764,7 @@ def run_lens_query(
     # The acting client, stamped once here rather than threaded through five pipeline
     # exits — the person is already `trace.caller`, this is who drove them.
     result.trace.agent = caller.agent
+    result.trace.purpose = _logged_purpose(purpose, bundle.config)
     background.add_task(log_trace, result.trace)
     # The lens can auto-flag its own low-confidence answers for review (origin=ai).
     if _auto_review_flags(bundle.config.auto_review, result.response):
@@ -790,7 +800,15 @@ async def query_lens(
         body.format,
         body.bindings,
         body.allow_untyped,
+        body.purpose,
     )
+
+
+def _logged_purpose(purpose: str, config: LensConfig) -> str | None:
+    """The purpose sentence as the log row keeps it: None unless the lens opted in
+    (`logging.log_purpose`) and the caller sent one."""
+    purpose = purpose.strip()
+    return purpose if purpose and config.logging.log_purpose else None
 
 
 def describe_intent(intent: QueryIntent) -> str:
@@ -1112,5 +1130,6 @@ def run_certified_for_caller(
         connection=bundle.config.connections[0] if bundle.config.connections else "",
     )
     result.trace.agent = caller.agent
+    result.trace.purpose = _logged_purpose(body.purpose if body else "", bundle.config)
     background.add_task(log_trace, result.trace)
     return _shaped(result.response, fmt, audience)

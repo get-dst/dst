@@ -168,6 +168,32 @@ answer carries a bare number and asserts no currency at all
 (`services/contracts/semantic_model.py`). The product never infers one: a bare
 number beats a wrong symbol.
 
+### A level metric is a snapshot, not a sum
+
+`additivity: level` on a metric says its rows are snapshots of a stock (ARR,
+headcount, a balance) rather than events. The compiler then reads a period's
+figure as the **last snapshot inside the window** on the metric's time field
+(`agg_time_field`, else the entity's `default_time_field`), and a trend by
+month as each month's last snapshot. The default, `flow`, aggregates every row
+in the window, which is right for revenue and wrong for ARR: "total ARR for Q3"
+over month-end snapshots would otherwise sum three balances into one number.
+
+```yaml
+metrics:
+  - name: arr
+    agg: sum
+    expr: arr_snapshots.arr
+    additivity: level
+```
+
+A level metric needs a time field, and apply says so when there is none. A
+level and a flow cannot share one query (the window cannot both keep every row
+and keep only the last snapshot), so a question naming both is asked to split.
+The answer discloses the reading (a `Reading applied:` sentence naming the metric) and
+the ledger carries it as a declared window slot, so a snapshot read as a total
+is never silent. "At the end of August 2026" and "as of 2026-08-31" are windows
+the parser already understands: the month, and the day.
+
 ## Freshness is a declared contract
 
 Two facts ride every answer, one measured and one declared. `data_as_of` is

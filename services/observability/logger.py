@@ -41,7 +41,7 @@ _INSERT = text(
         answer, citations, definition_used, confidence, verification, certification,
         latency, ai_input_tokens, ai_output_tokens, ai_cost_usd, wh_bytes, wh_cost_usd,
         status, error, prompt_hash, generator_tier, repairs, context_refs, degraded,
-        resolution, resolution_tag, typed, clarification
+        resolution, resolution_tag, typed, clarification, purpose
     ) VALUES (
         :org_id, :request_id, :lens, :caller, :agent, :question, :sql, :valid, :row_count,
         CAST(:sample AS jsonb), :answer, CAST(:citations AS jsonb), :definition_used,
@@ -49,7 +49,8 @@ _INSERT = text(
         CAST(:latency AS jsonb), :ai_input_tokens, :ai_output_tokens,
         :ai_cost_usd, :wh_bytes, :wh_cost_usd, :status, :error, :prompt_hash,
         :generator_tier, :repairs, CAST(:context_refs AS jsonb), CAST(:degraded AS jsonb),
-        CAST(:resolution AS jsonb), :resolution_tag, :typed, CAST(:clarification AS jsonb)
+        CAST(:resolution AS jsonb), :resolution_tag, :typed, CAST(:clarification AS jsonb),
+        :purpose
     )
     """
 )
@@ -100,6 +101,8 @@ def log_trace(trace: TraceLog) -> None:
         "clarification": (
             json.dumps(trace.clarification.model_dump()) if trace.clarification else None
         ),
+        # The caller's purpose sentence (0068) — None unless the lens logs it.
+        "purpose": trace.purpose,
     }
     try:
         with org_session(trace.org_id) as session:

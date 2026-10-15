@@ -115,6 +115,8 @@ def serialize_layer(model: SemanticModel) -> str:
                     head = f"derived {m.expr}"
                 else:
                     head = f"{m.agg} of {m.expr}"
+                if m.additivity == "level":
+                    head += " [level: a snapshot — a period's figure is its last snapshot]"
                 lines.append(f"    - {m.name}: {head}{filters}{desc}")
         lines.append("  Dimensions & fields (group / filter / order):")
         for d in e.dimensions:

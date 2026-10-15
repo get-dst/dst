@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -332,46 +333,107 @@ def test_bootstrap_creates_first_admin() -> None:
 
 
 @needs_db
-def test_bootstrap_is_idempotent(capsys: pytest.CaptureFixture[str]) -> None:
-    """Rerunning bootstrap reuses the org + user and only mints a fresh token —
-    it must never split credentials across two orgs both named the same (UI findings)."""
+def test_bootstrap_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rerun of bootstrap changes nothing: same org, the token .env already holds
+    is kept (so .env is byte-identical), an existing user keeps its password.
+    `--rotate-admin-token` is the only way to a second token, `--reset-password`
+    the only way to a new password, and a different `--org` against the token in
+    .env is refused rather than silently switching the project."""
     import argparse
 
     from services.cli.main import _bootstrap
 
+    def ns(**kw: object) -> argparse.Namespace:
+        base: dict[str, object] = {
+            "org": "BootstrapTwice",
+            "email": None,
+            "password": None,
+            "rotate_admin_token": False,
+            "reset_password": False,
+        }
+        return argparse.Namespace(**{**base, **kw})
+
+    monkeypatch.chdir(tmp_path)
+    envfile = tmp_path / ".env"
+    envfile.write_text("DST_URL=http://localhost:8000\n", encoding="utf-8")
     admin = create_engine(settings.database_admin_url)
-    try:
-        ns = argparse.Namespace(org="BootstrapTwice", email="two@example.com", password="pw1")
-        assert _bootstrap(ns) == 0
-        assert "created" in capsys.readouterr().out
 
-        # Same org + email again, new password: reuse + update, never a duplicate.
-        ns2 = argparse.Namespace(org="BootstrapTwice", email="two@example.com", password="pw2")
-        assert _bootstrap(ns2) == 0
-        out = capsys.readouterr().out
-        assert "reused" in out
-        assert "admin token" in out  # a fresh token is still minted and printed
-
+    def token_count() -> int:
         with admin.connect() as c:
             org_id = c.execute(
                 text("SELECT id FROM org WHERE name = 'BootstrapTwice'")
             ).scalar_one()  # exactly one org — scalar_one raises on duplicates
-            users = c.execute(
-                text("SELECT count(*) FROM local_user WHERE email = 'two@example.com'")
-            ).scalar_one()
-            assert users == 1
-            tokens = c.execute(
-                text("SELECT count(*) FROM admin_token WHERE org_id = :o AND label = 'bootstrap'"),
-                {"o": org_id},
-            ).scalar_one()
-            assert tokens == 2  # re-running exists to mint a fresh token
+            return int(
+                c.execute(
+                    text(
+                        "SELECT count(*) FROM admin_token WHERE org_id = :o AND label = 'bootstrap'"
+                    ),
+                    {"o": org_id},
+                ).scalar_one()
+            )
 
-        assert local.login("two@example.com", "pw1") is None  # password was updated…
+    def password_hash() -> str:
+        with admin.connect() as c:
+            return str(
+                c.execute(
+                    text("SELECT password_hash FROM local_user WHERE email = 'two@example.com'")
+                ).scalar_one()
+            )
+
+    try:
+        assert _bootstrap(ns(email="two@example.com", password="pw1")) == 0
+        assert "created" in capsys.readouterr().out
+        first_env = envfile.read_bytes()
+        assert b"DST_ADMIN_TOKEN=dstadm_" in first_env
+        assert token_count() == 1
+        first_hash = password_hash()
+
+        # Bare rerun: .env byte-identical, still one token.
+        assert _bootstrap(ns()) == 0
+        out = capsys.readouterr().out
+        assert "reused" in out and "kept the one in .env" in out
+        assert envfile.read_bytes() == first_env
+        assert token_count() == 1
+
+        # Rerun with --email on the existing user and no --reset-password: untouched.
+        assert _bootstrap(ns(email="two@example.com", password="pw2")) == 0
+        assert "left untouched" in capsys.readouterr().out
+        assert password_hash() == first_hash
+        assert local.login("two@example.com", "pw1") is not None
+
+        # --reset-password is the explicit way to a new password.
+        assert _bootstrap(ns(email="two@example.com", password="pw2", reset_password=True)) == 0
+        assert password_hash() != first_hash
+        assert local.login("two@example.com", "pw1") is None
         raw = local.login("two@example.com", "pw2")
-        assert raw is not None  # …to the rerun's one
+        assert raw is not None
         ident = local.resolve(raw)
         assert ident is not None and ident.is_admin is True
+
+        # A different --org against the token in .env is refused, naming both.
+        assert _bootstrap(ns(org="BootstrapElsewhere")) == 1
+        err = capsys.readouterr().err
+        assert "BootstrapTwice" in err and "BootstrapElsewhere" in err
+        assert envfile.read_bytes() == first_env
+        with admin.connect() as c:
+            assert (
+                c.execute(
+                    text("SELECT count(*) FROM org WHERE name = 'BootstrapElsewhere'")
+                ).scalar_one()
+                == 0
+            )
+
+        # --rotate-admin-token mints a second token and rewrites the line.
+        assert _bootstrap(ns(rotate_admin_token=True)) == 0
+        assert "rotated" in capsys.readouterr().out
+        assert envfile.read_bytes() != first_env
+        assert b"DST_ADMIN_TOKEN=dstadm_" in envfile.read_bytes()
+        assert token_count() == 2
     finally:
         with admin.begin() as c:
-            c.execute(text("DELETE FROM org WHERE name = 'BootstrapTwice'"))  # cascades
+            c.execute(
+                text("DELETE FROM org WHERE name IN ('BootstrapTwice', 'BootstrapElsewhere')")
+            )  # cascades
         admin.dispose()

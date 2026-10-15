@@ -79,6 +79,7 @@ def lens_decisions(
             gold=gold,
             p=d.decision.p,
             margin=d.decision.margin,
+            question=question,
         )
 
     return _each(labeled, one, concurrency)

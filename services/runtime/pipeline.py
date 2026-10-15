@@ -1505,6 +1505,12 @@ def run_query(
     # definition is active for this request, so the structural floor above
     # cannot see it, and the caller's wording did not name it (a
     # question-named resolution stays quiet, the floor's own escape hatch).
+    # A level metric's figure is a snapshot, and the prose must say so — "total
+    # ARR for Q3" over a snapshot table is September's balance, not a sum.
+    if certification != "certified" and gen.intent is not None:
+        level_line = resolution.level_disclosure(gen.intent, semantic_model)
+        if level_line is not None:
+            resolution_disclosures.append(level_line)
     if resolution_disclosures:
         disclosure = " ".join(filter(None, [disclosure, *resolution_disclosures]))
     if disclosure:

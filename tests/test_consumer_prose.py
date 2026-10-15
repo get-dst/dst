@@ -19,6 +19,8 @@ from __future__ import annotations
 import datetime
 import re
 
+import pytest
+
 from services.contracts.fakes import FakeConnector
 from services.contracts.protocols import CacheableBlock, GeneratedQuery, LLMResult, Message
 from services.contracts.semantic_model import (
@@ -188,7 +190,13 @@ _ENGINEER_PROSE = (
 _CONSUMER_PROSE = "Anti-Mage wins 48.9% of ranked public matches at Divine."
 
 
-def _serve(audience: str, text: str) -> tuple[str, _Composer]:
+_TODAY = datetime.date(2026, 9, 27)  # the day after the data; the lens is fresh
+
+
+def _serve(audience: str, text: str, monkeypatch: pytest.MonkeyPatch) -> tuple[str, _Composer]:
+    # The freshness check reads the lens clock; pinned, or the fixture's data
+    # goes stale by the calendar and the sentence under test changes.
+    monkeypatch.setattr("services.runtime.verification._lens_today", lambda _tz: _TODAY)
     llm = _Composer(text)
     res = run_query(
         question=_QUESTION,
@@ -206,17 +214,21 @@ def _serve(audience: str, text: str) -> tuple[str, _Composer]:
     return res.response.answer, llm
 
 
-def test_a_consumer_serve_composes_in_the_plain_register_and_dates_as_a_person_writes() -> None:
-    answer, llm = _serve("consumer", _CONSUMER_PROSE)
+def test_a_consumer_serve_composes_in_the_plain_register_and_dates_as_a_person_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer, llm = _serve("consumer", _CONSUMER_PROSE, monkeypatch)
     assert "never name a metric, a column, a definition" in llm.system
-    assert answer == f"{_CONSUMER_PROSE} (as of {spoken_date('2026-09-26')})"
+    assert answer == f"{_CONSUMER_PROSE} (as of {spoken_date('2026-09-26', today=_TODAY)})"
     assert "data as of" not in answer and "2026-09-26" not in answer
     assert not _IDENTIFIER.search(answer), answer
     assert not _MACHINERY.search(answer), answer
 
 
-def test_an_engineer_serve_is_the_answer_as_it_always_was() -> None:
-    answer, llm = _serve("engineer", _ENGINEER_PROSE)
+def test_an_engineer_serve_is_the_answer_as_it_always_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer, llm = _serve("engineer", _ENGINEER_PROSE, monkeypatch)
     assert llm.system == _SYSTEM
     assert answer == f"{_ENGINEER_PROSE} (data as of 2026-09-26)"
     assert _IDENTIFIER.search(answer) and _MACHINERY.search(answer)

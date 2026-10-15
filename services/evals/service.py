@@ -37,7 +37,7 @@ from services.evals.certified_suite import (
 )
 from services.evals.runner import RunOutcome, _finish, run_behavioral, run_health
 from services.lenses.connections import ConnectionUnavailable, resolve_connector
-from services.lenses.store import LensBundle
+from services.lenses.store import LensBundle, bundle_fingerprint
 from services.llm.registry import ResolvedModel
 from services.project.plan import stale_certified
 from services.runtime import assembly
@@ -145,6 +145,9 @@ def build_and_run(
         session,
         lens,
         run.mode,
+        # The published bundle's fingerprint: the identity a later run compares
+        # its verdicts against (same fingerprint, same lens).
+        lens_version=bundle_fingerprint(bundle),
         score=run.score,
         passed=run.passed,
         failed=run.failed,

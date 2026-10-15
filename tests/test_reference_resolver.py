@@ -199,6 +199,22 @@ def test_agg_time_field_is_checked() -> None:
         _compile([bad])
 
 
+def test_a_level_metric_needs_a_time_field() -> None:
+    bad = _sessions(
+        default_time_field=None,
+        metrics=[
+            {
+                "name": "open_sessions",
+                "agg": "count",
+                "expr": "sessions.session_id",
+                "additivity": "level",
+            }
+        ],
+    )
+    with pytest.raises(CompileError, match="metric open_sessions: additivity 'level' needs"):
+        _compile([bad])
+
+
 def test_ratio_and_derived_refs_error_at_compile() -> None:
     ratio = _sessions(
         metrics=[

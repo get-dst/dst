@@ -320,9 +320,14 @@ class BigQueryConnector:
         if not estimate.valid:
             raise RuntimeError(f"sampling query failed dry run: {estimate.error}")
         if (estimate.bytes_estimated or 0) > self._sample_bytes_budget:
+            # Names the knob, file first: the budget is a reviewed per-connection
+            # fact in dst.yaml, and a refusal that only states the number teaches
+            # nobody where to raise it.
             raise SampleBudgetExceeded(
                 f"dry run estimates {estimate.bytes_estimated} bytes, "
-                f"over the {self._sample_bytes_budget}-byte sampling budget"
+                f"over the {self._sample_bytes_budget}-byte sampling budget — raise it "
+                "per connection in dst.yaml (`config: {sample_bytes_budget: <bytes>}`), "
+                "or narrow the probe with --tables"
             )
         cfg = bigquery.QueryJobConfig(maximum_bytes_billed=self._sample_bytes_budget)
         job = self._client.query(sql, job_config=cfg, timeout=_API_TIMEOUT_S)

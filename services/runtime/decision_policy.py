@@ -123,10 +123,17 @@ def low_confidence(records: list[DecisionRecord]) -> list[tuple[DecisionRecord, 
     return out
 
 
+def vote_tag(votes: int | None, k: int | None) -> str:
+    """``5/5`` beside a p that came from a vote — p is the share of the valid
+    replies, so the count is what tells a unanimous five from three that agreed."""
+    return f" ({votes}/{k})" if votes is not None and k is not None else ""
+
+
 def describe_low(low: list[tuple[DecisionRecord, float]]) -> str:
     """One line naming each low-confidence decision: slot, choice, p, bar."""
     return "; ".join(
-        f"{r.slot} decided as {r.chosen or 'none'} at p={r.p:.2f}, below the measured {bar:.2f} bar"
+        f"{r.slot} decided as {r.chosen or 'none'} at p={r.p:.2f}{vote_tag(r.votes, r.k)}, "
+        f"below the measured {bar:.2f} bar"
         for r, bar in low
         if r.p is not None
     )
@@ -162,6 +169,6 @@ def describe(d: Decision, options_shown: int) -> str:
     ranked = sorted(d.probs.items(), key=lambda kv: -kv[1])
     top = ", ".join(f"{k} {v:.2f}" for k, v in ranked[:3])
     return (
-        f"{d.chosen or 'none'} p={d.p:.2f} margin={d.margin:.2f} [{top}] "
-        f"over {options_shown} ({d.provider})"
+        f"{d.chosen or 'none'} p={d.p:.2f}{vote_tag(d.votes, d.k)} margin={d.margin:.2f} "
+        f"[{top}] over {options_shown} ({d.provider})"
     )

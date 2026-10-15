@@ -24,6 +24,7 @@ from services.connectors.duckdb import DuckDBConnector
 from services.connectors.mysql import MySQLConnector
 from services.connectors.postgres import PostgresConnector
 from services.connectors.snowflake import SnowflakeConnector
+from services.contracts.profile import SAMPLE_BYTES_BUDGET
 from services.contracts.protocols import Connector
 from services.db.session import org_session
 from services.lenses import connection_store, credential_resolver
@@ -45,7 +46,9 @@ class ConnectionUnavailable(ValueError):
 # dst.yaml doing nothing across repeated profiling attempts.
 KNOWN_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "duckdb": frozenset({"path", "schema", "read_only", "statement_timeout_ms"}),
-    "bigquery": frozenset({"project", "dataset", "datasets", "schema", "max_bytes_billed"}),
+    "bigquery": frozenset(
+        {"project", "dataset", "datasets", "schema", "max_bytes_billed", "sample_bytes_budget"}
+    ),
     "postgres": frozenset(
         {"host", "port", "database", "user", "schema", "sslmode", "statement_timeout_ms"}
     ),
@@ -124,6 +127,10 @@ def build_connector(type_: str, config: dict[str, Any], secret: str | None) -> C
             project=cfg.get("project"),
             datasets=_bigquery_datasets(cfg),
             max_bytes_billed=int(cfg.get("max_bytes_billed", settings.bigquery_max_bytes_billed)),
+            # The probe's sampling budget rides the same per-connection key shape
+            # as the cost cap; without it the contract default applied to every
+            # warehouse, and a wide table could only be sampled by editing code.
+            sample_bytes_budget=int(cfg.get("sample_bytes_budget", SAMPLE_BYTES_BUDGET)),
         )
     if type_ == "postgres":
         return PostgresConnector.from_record(cfg, secret)

@@ -113,11 +113,16 @@ older skill on purpose is legitimate, and this command's 1 means *not callable*,
 
 ### `dst bootstrap`
 
-Create (or reuse) an org and mint a fresh admin token; idempotent: rerunning never
-creates a duplicate org, only a new token. Saves the token to `./.env` as
-`DST_ADMIN_TOKEN` when that file exists. Talks to the database directly; no server
-needed. Flags: `--org` (default `default`), `--email` (create/update the first
-dashboard admin), `--password` (omit to be prompted).
+Create (or reuse) an org and its admin token, saved to `./.env` as `DST_ADMIN_TOKEN`
+when that file exists. Idempotent: a rerun never creates a duplicate org, and when
+`.env` already holds a live token of that org it keeps it and mints nothing;
+`--rotate-admin-token` mints a new one and replaces the line (earlier tokens stay
+valid until revoked). A rerun whose `--org` names a different org than the token in
+`.env` is refused, naming both, so a project never changes identity by accident.
+Talks to the database directly; no server needed. Flags: `--org` (default
+`default`), `--email` (create the first dashboard admin; an existing user is left
+untouched), `--reset-password` (with `--email`: set an existing user's password and
+make it admin), `--password` (omit to be prompted).
 
 ### `dst env new|ls|rm`
 
@@ -254,7 +259,12 @@ anyway), `--require-gates` (fail closed: abort, exit non-zero, if any lens confi
 for an eval gate had it *skipped* (empty suite, provider error, or unreachable
 warehouse alike); by default a skipped gate publishes with a warning. CI wants this
 flag: without it a provider outage silently converts a gated apply into an ungated
-one that exits 0).
+one that exits 0), `--lens <name>` (repeatable: publish only these lenses of the
+project; the other lenses in the tree are reported `unchanged` and their files are
+left alone, so a sibling's red gate no longer holds yours back. A push that changes
+shared inputs a non-selected published lens is compiled against (a `semantic/` asset
+it reads, a connection it declares) is refused before anything lands, naming the lens
+and the two ways out: add it to `--lens`, or drop `--lens` and apply every lens).
 
 Lenses whose managed files match the server exactly report `unchanged` and skip the
 publish path (no recompile, no version bump, no eval-gate generation), so a no-op

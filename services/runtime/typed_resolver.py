@@ -351,6 +351,66 @@ def _expr_columns(metric: Metric) -> set[str]:
 _WORD = re.compile(r"[a-z0-9]+")
 
 
+def _as_words(text: str) -> str:
+    """The text as lowercased words: underscores, punctuation and runs of
+    space read as one space, so `customer_tier` and "customer tier" are the
+    same spelling."""
+    return " ".join(_WORD.findall(text.lower()))
+
+
+def named_options(question: str, options: list[Option]) -> list[str]:
+    """The declared names the question says word for word, in the order it
+    says them — the ``named_values`` discipline over an option set: a literal
+    word-boundary match of each option's name read as words (a qualified
+    `entity.metric` by its bare name), longest first, so `subscription_arr`
+    inside "subscription ARR" is named once and `arr` is not named off its
+    tail. A spelling two options share (siblings each declaring `win_rate`)
+    names neither: which one is the decider's question, not the text's."""
+    text = _as_words(question)
+    by_surface: dict[str, list[str]] = {}
+    for o in options:
+        surface = _as_words(o.name.rsplit(".", 1)[-1])
+        if surface:
+            by_surface.setdefault(surface, []).append(o.name)
+    taken: list[tuple[int, int]] = []
+    found: list[tuple[int, str]] = []
+    for surface in sorted(by_surface, key=lambda k: (-len(k), k)):
+        if surface not in text or len(by_surface[surface]) > 1:
+            continue
+        spans = [
+            m.span()
+            for m in re.finditer(rf"(?<!\w){re.escape(surface)}(?!\w)", text)
+            if not any(m.start() < end and start < m.end() for start, end in taken)
+        ]
+        if spans:
+            taken += spans
+            found.append((spans[0][0], by_surface[surface][0]))
+    return [name for _pos, name in sorted(found)]
+
+
+def by_dimension(question: str, dims: list[Option]) -> tuple[str | None, str]:
+    """A breakdown the question asks for in words — "by <dimension>" / "per
+    <dimension>" with an offered dimension's name right after — is a declared
+    fact, read deterministically. ``(the dimension, the question with that
+    phrase blanked)`` on exactly one match; ``(None, the question)`` otherwise
+    (no match, or two — which one is then the decider's question). The blanked
+    text is what the metric rounds read, so "by customer tier" cannot name the
+    `customers` metric through its first word."""
+    text = _as_words(question)
+    hits: list[tuple[str, tuple[int, int]]] = []
+    for o in dims:
+        surface = _as_words(o.name.rsplit(".", 1)[-1])
+        if not surface:
+            continue
+        m = re.search(rf"(?<!\w)(?:by|per) {re.escape(surface)}(?!\w)", text)
+        if m is not None:
+            hits.append((o.name, m.span()))
+    if len(hits) != 1:
+        return None, question
+    name, (start, end) = hits[0]
+    return name, f"{text[:start]} {text[end:]}"
+
+
 @dataclass(frozen=True)
 class _Carried:
     """What the answer's metrics already say about the rows they count, read
@@ -534,6 +594,9 @@ class TypedResolver:
                 p=d.p,
                 runner_up=d.runner_up,
                 margin=d.margin,
+                votes=d.votes,
+                k=d.k,
+                p_lower=d.p_lower,
                 verdict=verdict,
                 provider=d.provider,
                 usage=d.usage.as_dict() if d.usage is not None else None,
@@ -828,22 +891,60 @@ class TypedResolver:
             raise _Decline("not a question this lens's data answers")
 
         first_metric: str | None = None
+        # Metrics the question names word for word (named_options): when the
+        # first pick cannot settle between them, they ARE the answer's metrics.
+        named_metrics: list[str] = []
         if shape in _FIGURES:
             if not sets["metric"]:
                 raise _Decline("no governed metric of this lens answers the question")
-            first_metric = self._pick(
-                "metric",
-                question,
-                metric_ctx,
-                sets["metric"],
-                allow_none=False,
-                records=records,
-                clarify_term="metric",
-                clarify_question="Which metric does the question mean? Candidates: "
-                + ", ".join(o.name for o in sets["metric"][:6])
-                + ".",
-                key="metric:0",
-            )
+            try:
+                first_metric = self._pick(
+                    "metric",
+                    question,
+                    metric_ctx,
+                    sets["metric"],
+                    allow_none=False,
+                    records=records,
+                    clarify_term="metric",
+                    clarify_question="Which metric does the question mean? Candidates: "
+                    + ", ".join(o.name for o in sets["metric"][:6])
+                    + ".",
+                    key="metric:0",
+                )
+            except _Clarify as unsure:
+                # "The split between subscription ARR and payment ARR": the
+                # votes divide between two metrics because the question asks
+                # for BOTH. Two or more governed names said word for word are
+                # a declared fact (the named_values discipline), not a
+                # guess — they are the metrics, read off the text and recorded
+                # as such, never clarified. One QueryIntent reads one entity,
+                # so names on different entities keep the clarification, and
+                # it says why.
+                named_metrics = named_options(question, sets["metric"])[:MAX_METRICS]
+                if len(named_metrics) < 2:
+                    raise
+                owners = sorted({owner_of.get(m, "") for m in named_metrics})
+                if len(owners) > 1:
+                    raise _Clarify(
+                        ClarificationRequest(
+                            kind="unresolved_slot",
+                            term="metric",
+                            question="The question names "
+                            + ", ".join(named_metrics)
+                            + ", which live on different entities ("
+                            + ", ".join(owners)
+                            + ") — one answer reads one entity. Which metric does the "
+                            "question mean?",
+                            options=named_metrics,
+                        )
+                    ) from unsure
+                for name in named_metrics:
+                    records.append(
+                        DecisionRecord(
+                            slot="metric", chosen=name, verdict="act", provider=QUESTION_TEXT
+                        )
+                    )
+                first_metric = named_metrics[0]
             if first_metric is None:
                 raise _Decline("no governed metric of this lens answers the question")
             entity_name: str | None = owner_of.get(first_metric)
@@ -901,6 +1002,38 @@ class TypedResolver:
             if o.name in {d.name for d in entity.dimensions} and o.name not in named_columns
         ]
         dim_ctx = "Is the figure broken down by a dimension (per X / by Y)?"
+        # "by <dimension>" said in words is read, not decided (by_dimension):
+        # it is the first dimension, recorded off the text, and its words
+        # are blanked from what the metric rounds read.
+        named_dim, metric_text = (
+            by_dimension(question, dims) if shape in _FIGURES else (None, question)
+        )
+        dim_initial: list[str] = []
+        if named_dim is not None:
+            records.append(
+                DecisionRecord(
+                    slot="dimension", chosen=named_dim, verdict="act", provider=QUESTION_TEXT
+                )
+            )
+            dim_initial = [named_dim]
+        # The metrics this answer starts with: the first pick, plus every
+        # further metric the question named on this entity.
+        initial_metrics = [first_metric] if first_metric is not None else []
+        initial_metrics += [
+            m for m in named_metrics if m not in initial_metrics and owner_of.get(m) == entity.name
+        ]
+        # "Another metric?" holds a stricter bar than the first pick. The first
+        # is argmax over every metric — the question asks for SOMETHING — but
+        # a further one is offered only among metrics whose name the question
+        # says word for word, outside the "by <dimension>" phrase: "ARR by
+        # customer tier" pulled the `customers` metric through the word
+        # "customer", and a sibling of ARR then won over none. Nothing
+        # named → the round is not asked at all.
+        spoken = set(named_options(metric_text, own_metrics))
+        rest_metrics = [
+            o for o in own_metrics if o.name in spoken and o.name not in initial_metrics
+        ]
+        metric_options = [o for o in own_metrics if o.name in initial_metrics or o.name in spoken]
         grain_ctx = (
             "The question asks for the figure broken down over time. Which period is "
             "each row — hour, day, week, month, quarter or year? A stated period such "
@@ -911,19 +1044,28 @@ class TypedResolver:
         filter_candidates = self._filter_candidates(question, entity, own_members)
         round_two: dict[str, tuple[str, str, list[Option], bool]] = {}
         if shape in _FIGURES:
-            rest_metrics = [o for o in own_metrics if o.name != first_metric]
-            if rest_metrics and MAX_METRICS > 1 and first_metric is not None:
-                round_two["metric:1"] = (
+            if rest_metrics and len(initial_metrics) < MAX_METRICS and initial_metrics:
+                round_two[f"metric:{len(initial_metrics)}"] = (
                     "metric",
-                    self._another(metric_ctx, [first_metric]),
+                    self._another(metric_ctx, initial_metrics),
                     [*rest_metrics, _ANOTHER_NONE],
                     True,
                 )
-            round_two["dimension:0"] = (
-                ("dimension", dim_ctx, dims, False)
-                if shape == "ranking"
-                else ("dimension", dim_ctx, [*dims, _ANOTHER_NONE], True)
-            )
+            rest_dims = [o for o in dims if o.name not in dim_initial]
+            if dim_initial:
+                if rest_dims and MAX_DIMENSIONS > 1:
+                    round_two["dimension:1"] = (
+                        "dimension",
+                        self._another(dim_ctx, dim_initial),
+                        [*rest_dims, _ANOTHER_NONE],
+                        True,
+                    )
+            else:
+                round_two["dimension:0"] = (
+                    ("dimension", dim_ctx, dims, False)
+                    if shape == "ranking"
+                    else ("dimension", dim_ctx, [*dims, _ANOTHER_NONE], True)
+                )
             if entity.default_time_field and over_time:
                 round_two["grain"] = ("grain", grain_ctx, grain_opts, True)
         else:
@@ -955,23 +1097,25 @@ class TypedResolver:
         # second filter column — one call. A question that needs a third of
         # anything falls to the sequential steps; most never do.
         round_three: dict[str, tuple[str, str, list[Option], bool]] = {}
-        second_metric = self._peek("metric:1")
-        if first_metric is not None and second_metric is not None:
-            rest = [o for o in own_metrics if o.name not in (first_metric, second_metric)]
-            if rest and MAX_METRICS > 2:
-                round_three["metric:2"] = (
+        next_metric = self._peek(f"metric:{len(initial_metrics)}") if initial_metrics else None
+        if next_metric is not None:
+            picked = [*initial_metrics, next_metric]
+            rest = [o for o in rest_metrics if o.name != next_metric]
+            if rest and len(picked) < MAX_METRICS:
+                round_three[f"metric:{len(picked)}"] = (
                     "metric",
-                    self._another(metric_ctx, [first_metric, second_metric]),
+                    self._another(metric_ctx, picked),
                     [*rest, _ANOTHER_NONE],
                     True,
                 )
-        first_dim = self._peek("dimension:0")
-        if first_dim is not None:
-            rest = [o for o in dims if o.name != first_dim]
-            if rest and MAX_DIMENSIONS > 1:
-                round_three["dimension:1"] = (
+        next_dim = self._peek(f"dimension:{len(dim_initial)}")
+        if next_dim is not None:
+            picked = [*dim_initial, next_dim]
+            rest = [o for o in dims if o.name not in picked]
+            if rest and len(picked) < MAX_DIMENSIONS:
+                round_three[f"dimension:{len(picked)}"] = (
                     "dimension",
-                    self._another(dim_ctx, [first_dim]),
+                    self._another(dim_ctx, picked),
                     [*rest, _ANOTHER_NONE],
                     True,
                 )
@@ -1009,13 +1153,13 @@ class TypedResolver:
                     "metric",
                     question,
                     metric_ctx,
-                    own_metrics,
+                    metric_options,
                     cap=MAX_METRICS,
                     records=records,
                     clarify_term="metric",
                     first_required=True,
                     key_prefix="metric",
-                    initial=[first_metric] if first_metric is not None else None,
+                    initial=initial_metrics or None,
                 )
             ]
             if not metrics:
@@ -1048,6 +1192,7 @@ class TypedResolver:
                 # a ranking ranks SOMETHING: one figure per X needs its X
                 first_required=shape == "ranking",
                 key_prefix="dimension",
+                initial=dim_initial or None,
             )
 
         if shape == "ranking" and not dimensions:

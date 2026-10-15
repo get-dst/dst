@@ -29,6 +29,86 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.7.0] — 2026-10-15
+
+Schema change: migration 0068 adds `request_log.purpose`. Run `dst migrate`.
+
+### Added
+
+- **A question can say why.** `query`, `route_query` and `run_certified` take an optional
+  `purpose`: one sentence on what the asker is trying to accomplish ("building a
+  forecasting app"), capped at 300 characters, sent only when the agent has one. It is
+  stored on the request's log row only when the lens sets `logging.log_purpose: true`
+  (default off: it is a fragment of someone's conversation with their AI), and it changes
+  nothing about how the question is answered yet. The column exists so the next step can
+  be measured rather than assumed: how often agents send one, and whether it should pick
+  the grain and window of an answer.
+- **A metric can be a level, not a flow.** `additivity: level` on a metric declares its rows as
+  snapshots (ARR, headcount, a balance): a period's figure is the last snapshot inside the
+  window, and a monthly trend is each month's last snapshot, instead of a sum over every
+  snapshot row. The answer discloses the reading and the ledger carries it as a declared
+  window slot; a level metric without a time field is rejected at plan. The window parser now
+  reads a full ISO date ("as of 2026-08-31") as that day rather than its year.
+- **`dst apply --lens <name>` publishes a selection of the push.** Repeatable; the other lenses
+  in the tree are reported `unchanged` and left alone, so a sibling's red gate no longer holds
+  yours back. A push that changes shared inputs a non-selected published lens is compiled
+  against (a semantic asset it reads, a connection it declares) is refused before anything
+  lands, naming the lens and the two ways out: add it to `--lens`, or drop `--lens`.
+
+### Changed
+
+- **`dst test` proves certified SQL equivalent, not only identical.** The slot lane compares the
+  typed SQL to the certified text through sqlglot's optimizer, so a hand-written query with
+  its own aliases, another predicate order or a wrapping subquery is proven without the
+  warehouse and skips the rows lane; a different literal still differs. `sql_match` in the
+  JSON output is now `"identical" | "equivalent" | "differs" | null` in place of the boolean,
+  and the summary counts `sql_equivalent`.
+- **`dst test --compare-last` reports verdict flips.** Slot-lane cases are recorded on the run
+  as `slots:<answer id>`, every run carries the published lens's fingerprint, and when two
+  consecutive runs share it the compare lists each case that flipped (`compare_last[].flips`);
+  when the lens changed, it says so instead.
+
+### Fixed
+
+- **`2026-08` and `2026-Q2` in a question are the month and the quarter.** A period written
+  the way a template binding renders it parsed as the bare year, so a monthly figure asked as
+  "in 2026-08" was served over all of 2026. The ISO month and quarter forms now read like
+  "August 2026" and "Q2 2026".
+- **The probe sampling budget is a connection setting.**
+  `connections.<name>.config.sample_bytes_budget` sets the BigQuery sampling budget per
+  connection, beside `max_bytes_billed`; it was a fixed 2 GB constant no configuration could
+  reach, and the refusal that left a wide table unsampled named no way to raise it. The
+  refusal now names the key and the `--tables` alternative.
+- **`dst bootstrap` reruns keep the admin token and existing users.** A rerun reuses the
+  `DST_ADMIN_TOKEN` already in `.env` when it is live for that org, and refuses when it belongs
+  to a different org than `--org`, naming both; `--rotate-admin-token` mints and replaces. An
+  existing dashboard user's password is only reset with `--reset-password`. Previously every
+  run minted a new token, overwrote the `.env` line without revoking the old one, and `--email`
+  silently reset an existing user's password.
+- **Two metrics named in the question are the answer's metrics, not a clarification.** "The
+  split between subscription ARR and payment ARR" used to divide the metric vote and fall to
+  untyped serving; governed names said word for word are now read off the text when the first
+  pick cannot settle between them. Names on different entities still clarify, and the
+  clarification says why.
+- **"by <dimension>" is read, not decided, and a further metric must be named.** "ARR by
+  customer tier" typed as three metrics and no dimension: the word "customer" pulled the
+  `customers` metric through the "another metric?" round. The breakdown phrase now sets the
+  first dimension deterministically, and further metrics are offered only when the question
+  names them outside that phrase.
+- **A routed refusal keeps its reason.** Pinned by test: on `/v1/query` a lens's refusal
+  arrives as `answer.status: refused` with the reason in `answer.answer`, for both audiences.
+- **Slot-lane gold no longer lists a metric twice.** A definition that shares its name with a
+  metric read as a second governed slot ("expected arr, arr"), failing a typed answer that
+  resolved to the metric once. It is now one slot; a genuine duplicate prints with its kind.
+- **Templated and no-gold certified answers are no longer skipped silently by the slot lane.**
+  Templates are graded on their first sample binding; every answer not graded is listed with
+  its reason in the output and in the JSON `slot_lane.skipped`, so graded plus skipped is
+  always the corpus.
+- **A unanimous vote no longer reads as certainty.** Decisions carry `votes`, `k` and
+  `p_lower` ((votes+1)/(k+2), 0.857 for 5 of 5); p stays the vote share and the verdict is
+  unchanged. The calibration report counts n as distinct questions, drops `--repeat` re-runs,
+  and shows the unanimous bin's accuracy.
+
 ## [0.6.2] — 2026-09-28
 
 No schema change.

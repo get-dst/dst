@@ -227,6 +227,8 @@ def serialize_model(m: SemanticModel) -> str:
                 line += f" [better: {metric.better}]"
             if metric.agg_time_field:
                 line += f" [time: {metric.agg_time_field}]"
+            if metric.additivity == "level":
+                line += " [level: a snapshot — take the period's LAST snapshot, never a sum]"
             if metric.description:
                 line += f"  # {metric.description}"
             lines.append(line)

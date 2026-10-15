@@ -52,6 +52,14 @@ class DecisionRecord(BaseModel):
     p: float | None = None
     runner_up: float | None = None
     margin: float | None = None
+    # The vote behind ``p`` when the decider sampled: ``votes`` of ``k``
+    # samples chose ``chosen`` (``p`` is the share of the VALID samples, so
+    # 3 of 5 that agree still read p=1.0), and ``p_lower`` is the rule-of-
+    # succession bound (votes + 1) / (k + 2) — the honest figure for a
+    # unanimous handful. None for a decider that did not vote.
+    votes: int | None = None
+    k: int | None = None
+    p_lower: float | None = None
     verdict: str  # act | clarify | decline
     provider: str
     # calls / input_tokens / output_tokens / latency_s — the decision's share

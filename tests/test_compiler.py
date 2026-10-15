@@ -808,3 +808,156 @@ def test_an_applied_definition_edit_changes_the_served_answer(tmp_path: object) 
     stale = _serve(_crm_model("X"))
     fixed = _serve(_crm_model("C"))
     assert (stale, fixed) == (10, 44)  # the applied edit reached the served answer
+
+
+# ── level metrics: a snapshot is read, never summed ──────────────────────────
+
+
+def _snapshot_model(dialect: str = "duckdb", *, time_field: str | None = "snapshot_date"):
+    """Month-end ARR snapshots: one row per customer per snapshot date. SUM over
+    a quarter's rows is three balances added together — the silent-wrong class
+    `additivity: level` exists to kill."""
+    snapshots = Entity(
+        name="arr_snapshots",
+        source=EntitySource(connection="wh", table="arr_snapshots"),
+        default_time_field=time_field,
+        fields=[
+            Field(name="snapshot_date", type="date"),
+            Field(name="plan", type="string"),
+            Field(name="customer_id", type="integer"),
+            Field(name="arr", type="number"),
+        ],
+        metrics=[
+            Metric(name="arr", agg="sum", expr="arr_snapshots.arr", additivity="level"),
+            Metric(
+                name="customers",
+                agg="count_distinct",
+                expr="arr_snapshots.customer_id",
+                additivity="level",
+            ),
+            Metric(name="bookings", agg="sum", expr="arr_snapshots.arr"),
+        ],
+    )
+    return SemanticModel(lens="t", dialect=dialect, entities=[snapshots])
+
+
+_Q3 = [
+    IntentFilter(field="snapshot_date", op=">=", value="2026-07-01"),
+    IntentFilter(field="snapshot_date", op="<=", value="2026-09-30"),
+]
+
+
+def _snapshot_warehouse():
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE arr_snapshots AS SELECT * FROM (VALUES "
+        "(DATE '2026-07-31', 'a', 1, 100), (DATE '2026-07-31', 'b', 2, 50), "
+        "(DATE '2026-08-31', 'a', 1, 110), (DATE '2026-08-31', 'b', 2, 60), "
+        "(DATE '2026-09-30', 'a', 1, 120), (DATE '2026-09-30', 'b', 2, 70), "
+        "(DATE '2026-09-30', 'b', 3, 5), (DATE '2026-10-31', 'a', 1, 999)"
+        ") t(snapshot_date, plan, customer_id, arr)"
+    )
+    return con
+
+
+def test_a_level_metric_over_a_window_is_the_latest_snapshot_in_it() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["arr"], filters=_Q3), _snapshot_model()
+    )
+    assert "SUM(arr_snapshots.arr)" in sql
+    assert "arr_snapshots.snapshot_date = (SELECT MAX(arr_snapshots_latest.snapshot_date)" in sql
+    # the window rides into the subquery: September's snapshot, not the table's last
+    assert sql.count("'2026-09-30'") == 2 and sql.count("'2026-07-01'") == 2
+    con = _snapshot_warehouse()
+    assert con.execute(sql).fetchall() == [(195,)]  # September: 120 + 70 + 5, never 515
+    customers = compile_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["customers"], filters=_Q3), _snapshot_model()
+    )
+    assert con.execute(customers).fetchall() == [(3,)]
+
+
+def test_a_level_metric_with_no_window_is_the_latest_snapshot_of_all() -> None:
+    sql = compile_intent(QueryIntent(entity="arr_snapshots", metrics=["arr"]), _snapshot_model())
+    assert "(SELECT MAX(arr_snapshots_latest.snapshot_date) FROM arr_snapshots AS " in sql
+    assert "arr_snapshots_latest)" in sql  # no WHERE: the table's last snapshot
+    assert _snapshot_warehouse().execute(sql).fetchall() == [(999,)]
+
+
+def test_a_level_metric_by_month_is_each_months_last_snapshot() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["arr"], filters=_Q3, grain="month"),
+        _snapshot_model(),
+    )
+    assert (
+        "DATE_TRUNC('MONTH', arr_snapshots_latest.snapshot_date) = "
+        "DATE_TRUNC('MONTH', arr_snapshots.snapshot_date)"
+    ) in sql
+    rows = sorted(_snapshot_warehouse().execute(sql).fetchall())
+    assert [(r[0].month, r[1]) for r in rows] == [(7, 150), (8, 170), (9, 195)]
+
+
+def test_a_level_metric_by_dimension_reads_every_group_at_the_snapshot() -> None:
+    sql = compile_intent(
+        QueryIntent(
+            entity="arr_snapshots", metrics=["arr", "customers"], dimensions=["plan"], filters=_Q3
+        ),
+        _snapshot_model(),
+    )
+    assert sorted(_snapshot_warehouse().execute(sql).fetchall()) == [("a", 120, 1), ("b", 75, 2)]
+
+
+@pytest.mark.parametrize("dialect", ["duckdb", "postgres", "snowflake", "bigquery"])
+def test_the_snapshot_restriction_is_plain_sql_in_every_dialect(dialect: str) -> None:
+    sql = compile_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["arr"], filters=_Q3, grain="month"),
+        _snapshot_model(dialect),
+    )
+    assert "SELECT MAX(" in sql and "QUALIFY" not in sql.upper()
+
+
+def test_a_flow_metric_on_the_same_entity_is_unchanged() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["bookings"], filters=_Q3), _snapshot_model()
+    )
+    assert "SELECT MAX(" not in sql
+    assert _snapshot_warehouse().execute(sql).fetchall() == [(515,)]
+
+
+def test_a_level_beside_a_flow_is_refused_not_blended() -> None:
+    with pytest.raises(CompileError, match="disagree about additivity"):
+        compile_intent(
+            QueryIntent(entity="arr_snapshots", metrics=["arr", "bookings"], filters=_Q3),
+            _snapshot_model(),
+        )
+
+
+def test_a_level_metric_without_a_time_field_names_the_fix() -> None:
+    with pytest.raises(CompileError, match="default_time_field"):
+        compile_intent(
+            QueryIntent(entity="arr_snapshots", metrics=["arr"]), _snapshot_model(time_field=None)
+        )
+
+
+def test_an_unknown_additivity_is_rejected_where_plan_and_apply_validate() -> None:
+    """Entity files validate through the same model at plan and apply; the
+    message names the two words, like a bad field type does."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="'stock' is not one of flow, level"):
+        Entity.model_validate(
+            {
+                "name": "arr_snapshots",
+                "source": {"connection": "wh", "table": "arr_snapshots"},
+                "fields": [{"name": "arr", "type": "number"}],
+                "metrics": [
+                    {
+                        "name": "arr",
+                        "agg": "sum",
+                        "expr": "arr_snapshots.arr",
+                        "additivity": "stock",
+                    }
+                ],
+            }
+        )

@@ -109,7 +109,7 @@ connector actually reads (`services/lenses/connections.py`):
 
 | Type | Keys |
 |---|---|
-| `bigquery` | `project`, `dataset`, `datasets`, `schema`, `max_bytes_billed` |
+| `bigquery` | `project`, `dataset`, `datasets`, `schema`, `max_bytes_billed`, `sample_bytes_budget` |
 | `snowflake` | `account`, `user`, `warehouse`, `database`, `schema`, `role`, `auth`, `private_key_passphrase` |
 | `postgres` | `host`, `port`, `database`, `user`, `schema`, `sslmode`, `statement_timeout_ms` |
 | `mysql` | `host`, `port`, `database`, `user`, `statement_timeout_ms` |
@@ -120,6 +120,9 @@ default 10 GB) and `statement_timeout_ms` are per-connection, so a wide-scanning
 can be raised without loosening the cap on a connection that should never scan wide —
 and the value is reviewed in the repo instead of living in one operator's environment.
 `DST_BIGQUERY_MAX_BYTES_BILLED` still overrides globally.
+`sample_bytes_budget` (BigQuery, default 2 GB) is the separate cap on one probe sampling
+query: a table whose dry-run estimate exceeds it is left unsampled (its catalog profile
+stands) and the probe says so — raise it here, or narrow the probe with `--tables`.
 
 A wide-warehouse BigQuery connection, fully scoped:
 

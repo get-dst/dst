@@ -264,46 +264,116 @@ def _rotate_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dotenv_value(envfile: Path, name: str) -> str | None:
+    """`name=` from one .env file, shell quotes stripped — the file bootstrap
+    itself writes, read back before it is rewritten."""
+    if not envfile.exists():
+        return None
+    for line in envfile.read_text(encoding="utf-8").splitlines():
+        if line.startswith(name + "="):
+            val = line.split("=", 1)[1].strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+                val = val[1:-1]
+            return val or None
+    return None
+
+
 def _bootstrap(args: argparse.Namespace) -> int:
     from sqlalchemy import text
 
     from services.auth import tokens
+    from services.auth.deps import resolve_admin_token
     from services.db.session import admin_engine
 
-    password = args.password
-    if args.email and not password:
-        if sys.stdin.isatty():
-            import getpass
+    rotate = bool(getattr(args, "rotate_admin_token", False))
+    reset_password = bool(getattr(args, "reset_password", False))
 
-            password = getpass.getpass(f"password for {args.email}: ")
-        else:
-            print("error: --email needs --password (or an interactive terminal)", file=sys.stderr)
-            return 1
-
-    # Idempotent: rerunning bootstrap reuses the org (oldest wins if legacy duplicates
-    # exist) and the user, and only ever mints a fresh admin token — running it twice
-    # must never leave two orgs both named "default" with split credentials.
-    raw = tokens.new_admin_token()
+    # Idempotent in the strict sense: rerunning bootstrap reuses the org (oldest
+    # wins if legacy duplicates exist), keeps the admin token already saved in
+    # ./.env when it is still live for that org, and leaves an existing user
+    # alone. It used to mint a token on every run and overwrite the .env line —
+    # the earlier token was lost from the file but never revoked — and to reset
+    # an existing user's password without being asked.
+    envfile = Path(".env")
+    env_token = _dotenv_value(envfile, "DST_ADMIN_TOKEN")
+    held = resolve_admin_token(env_token) if env_token else None
     with admin_engine.begin() as c:
         org_id = c.execute(
             text("SELECT id FROM org WHERE name = :n ORDER BY created_at LIMIT 1"),
             {"n": args.org},
         ).scalar()
+        if held is not None and held[0] != org_id:
+            # The token in .env is this project's identity. Pointing .env at
+            # another org on a bare rerun is how a project silently moves —
+            # refused, naming both sides, so the switch is a decision.
+            held_name = c.execute(
+                text("SELECT name FROM org WHERE id = :i"), {"i": held[0]}
+            ).scalar()
+            print(
+                f"error: .env holds the admin token of org '{held_name}', but --org names "
+                f"'{args.org}' — not switching this project's identity. Rerun with "
+                f"--org {held_name}, or remove DST_ADMIN_TOKEN from .env first to "
+                f"bootstrap '{args.org}' here.",
+                file=sys.stderr,
+            )
+            return 1
         org_created = org_id is None
         if org_id is None:
             org_id = c.execute(
                 text("INSERT INTO org (name) VALUES (:n) RETURNING id"), {"n": args.org}
             ).scalar_one()
-        c.execute(
-            text("INSERT INTO admin_token (org_id, token_hash, label) VALUES (:o, :h, :l)"),
-            {"o": org_id, "h": hashlib.sha256(raw.encode()).hexdigest(), "l": "bootstrap"},
-        )
+        raw = None if held is not None and not rotate else tokens.new_admin_token()
+        if raw is not None:
+            c.execute(
+                text("INSERT INTO admin_token (org_id, token_hash, label) VALUES (:o, :h, :l)"),
+                {"o": org_id, "h": tokens.hash_token(raw), "l": "bootstrap"},
+            )
+    print(f"org: {args.org} ({org_id}) — " + ("created" if org_created else "reused"))
+
+    if raw is None:
+        print("admin token: kept the one in .env (--rotate-admin-token mints a new one)")
+    else:
+        if held is not None:
+            print("admin token: rotated — earlier tokens stay valid until revoked")
+        elif env_token:
+            print("admin token: the DST_ADMIN_TOKEN in .env is not live here — replaced")
+        print(f"admin token (store it now — shown once): {raw}")
+        if envfile.exists():
+            # The project's gitignored secrets file — saving the token here is what
+            # lets every later command (and the in-project agent) skip --token.
+            kept = [
+                line
+                for line in envfile.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("DST_ADMIN_TOKEN=")
+            ]
+            kept.append(f"DST_ADMIN_TOKEN={raw}")
+            envfile.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            print("saved to .env as DST_ADMIN_TOKEN — dst commands here read it automatically")
+
     if args.email:
         from services.auth import local
         from services.db.session import org_session
 
         with org_session(org_id) as session:
             uid = local.user_id_by_email(session, args.email)
+            if uid is not None and not reset_password:
+                print(
+                    f"dashboard login: {args.email} already exists — left untouched "
+                    "(--reset-password sets a new password and makes it admin)"
+                )
+                return 0
+            password = args.password
+            if not password:
+                if sys.stdin.isatty():
+                    import getpass
+
+                    password = getpass.getpass(f"password for {args.email}: ")
+                else:
+                    print(
+                        "error: --email needs --password (or an interactive terminal)",
+                        file=sys.stderr,
+                    )
+                    return 1
             if uid is None:
                 local.create_user(session, args.email, password, role="admin")
             else:
@@ -312,30 +382,6 @@ def _bootstrap(args: argparse.Namespace) -> int:
                     {"h": local.hash_password(password), "i": uid},
                 )
             session.commit()
-    print(
-        f"org: {args.org} ({org_id}) — "
-        + (
-            "created"
-            if org_created
-            # Probe finding: say what re-running actually did to credentials —
-            # a NEW token was minted into .env; previously issued ones stay valid.
-            else "reused (new admin token saved to .env; earlier tokens stay valid)"
-        )
-    )
-    print(f"admin token (store it now — shown once): {raw}")
-    envfile = Path(".env")
-    if envfile.exists():
-        # The project's gitignored secrets file — saving the token here is what
-        # lets every later command (and the in-project agent) skip --token.
-        kept = [
-            line
-            for line in envfile.read_text(encoding="utf-8").splitlines()
-            if not line.startswith("DST_ADMIN_TOKEN=")
-        ]
-        kept.append(f"DST_ADMIN_TOKEN={raw}")
-        envfile.write_text("\n".join(kept) + "\n", encoding="utf-8")
-        print("saved to .env as DST_ADMIN_TOKEN — dst commands here read it automatically")
-    if args.email:
         print(f"dashboard login: {args.email} (admin)")
     return 0
 
@@ -2872,6 +2918,8 @@ def _apply(args: argparse.Namespace) -> int:
         params["probe_certified"] = "true"
     if getattr(args, "require_gates", False):
         params["require_gates"] = "true"
+    if selected := [n for n in (getattr(args, "lens", None) or []) if n.strip()]:
+        params["lens"] = selected
     allow_cases = [c for c in (getattr(args, "allow_case", None) or []) if c.strip()]
     if getattr(args, "allow_failing_cases", False) or allow_cases:
         reason = (getattr(args, "reason", None) or "").strip()
@@ -3699,6 +3747,8 @@ def _test(args: argparse.Namespace) -> int:
     from services.certify.bindings import restamp_bindings
     from services.contracts.eval import EvalResult
     from services.db.session import org_session
+    from services.evals import compare as run_compare
+    from services.evals import slot_lane as slot_lane_mod
     from services.evals import store as eval_store
     from services.evals.certified_suite import format_result, run_certified_suite
     from services.evals.runner import run_behavioral
@@ -3722,10 +3772,9 @@ def _test(args: argparse.Namespace) -> int:
         return 1
     total = failed = 0
     cert_n = beh_n = candidates_n = ungoverned_n = untyped_n = 0
-    slot_elapsed_s = 0.0
-    slot_runs = slot_workers = slot_sql_identical = proven_n = 0
-    slot_latencies: list[float] = []
-    slot_cost: float | None = 0.0
+    proven_n = 0
+    slot_lanes: list[tuple[str, SlotLaneOutcome]] = []  # (lens label, its lane)
+    compare_last: list[dict[str, object]] = []  # one entry per lens under --compare-last
     found_lens = False
     # The calibration lane's inputs: every certified question and behavioral
     # case carries its lens as a gold label; every lens's certified corpus
@@ -3839,13 +3888,15 @@ def _test(args: argparse.Namespace) -> int:
                 say(style.dim(f"{label}: running {' + '.join(progress_bits)} …"))
                 # The slot lane runs whenever a decider resolves (typed serving):
                 # every certified question graded in seconds, and a case whose
-                # typed SQL is identical to the certified text is PROVEN there.
+                # typed SQL is identical or equivalent to the certified text is
+                # PROVEN there.
                 # The rows lane below executes only what the slot lane could not
                 # prove — the warehouse pays for the disagreements (--rows
                 # executes everything, --slots executes nothing).
                 slots_only = bool(getattr(args, "slots", False))
                 rows_all = bool(getattr(args, "rows", False))
                 proven: set[str] = set()
+                slot_results: list[EvalResult] = []
                 lane = _slot_lane_for_lens(
                     bundle,
                     oid,
@@ -3899,13 +3950,12 @@ def _test(args: argparse.Namespace) -> int:
                                 "cost_usd": slot_case.cost_usd,
                             }
                         )
-                        if slot_case.sql_match:
-                            slot_sql_identical += 1
                         why = f" ({slot_case.evidence})" if slot_case.evidence and not ok else ""
                         sql_mark = {
-                            True: " [sql identical]",
-                            False: " [sql differs from the certified text]",
-                        }.get(slot_case.sql_match, "")  # type: ignore[arg-type]
+                            "identical": " [sql identical]",
+                            "equivalent": " [sql equivalent]",
+                            "differs": " [sql differs from the certified text]",
+                        }.get(slot_case.sql_match or "", "")
                         say(
                             _ledger_line(
                                 f"{'PASS' if ok else 'FAIL'}  {label}: {slot_case.question}"
@@ -3915,19 +3965,12 @@ def _test(args: argparse.Namespace) -> int:
                             )
                         )
                         cal_records += slot_case.graded
-                    slot_elapsed_s += lane.elapsed_s
-                    slot_runs += len(lane.cases) * lane.repeat
-                    slot_workers = max(slot_workers, lane.workers)
-                    slot_latencies += lane.latencies_s
-                    slot_cost = (
-                        None
-                        if slot_cost is None or lane.cost_usd is None
-                        else slot_cost + lane.cost_usd
-                    )
-                    if lane.cases:
+                    slot_lanes.append((label, lane))
+                    if lane.cases or lane.skipped:
                         say(
                             f"{label}: slot lane — {len(lane.cases)} case(s) × {lane.repeat} "
                             f"run(s) in {lane.elapsed_s:.1f}s on {lane.workers} worker(s)"
+                            + (f"; {len(lane.skipped)} skipped" if lane.skipped else "")
                             + (
                                 f"; {lane.attributed_gold} graded against gold attributed "
                                 "from the certified SQL (certified before the ledger)"
@@ -3935,26 +3978,30 @@ def _test(args: argparse.Namespace) -> int:
                                 else ""
                             )
                         )
-                    if lane.skipped_no_gold:
-                        say(
-                            style.warn(
-                                f"{label}: {lane.skipped_no_gold} certified answer(s) carry no "
-                                "typed gold and their SQL attributes to no governed measure "
-                                "— not graded"
-                            )
-                        )
+                    # Not graded is said per answer, with the reason: graded plus
+                    # skipped is the corpus, never a count that quietly shrank.
+                    for sk in lane.skipped:
+                        say(style.warn(f"SKIP  {label}: {sk.question} — {sk.reason}"))
                     proven = {
-                        c.answer_id for c in lane.cases if c.verdict == "passed" and c.sql_match
+                        c.answer_id
+                        for c in lane.cases
+                        if c.verdict == "passed" and c.sql_match in ("identical", "equivalent")
                     }
                     proven_n += len(proven)
-                    if slots_only:
-                        continue
-                to_execute = answers if rows_all else [a for a in answers if a.id not in proven]
-                if proven and not rows_all:
+                    slot_results = slot_lane_mod.eval_results(lane.cases)
+                # --slots executes nothing: the rows lane and the behavioral
+                # pins sit out, but the slot verdicts are still RECORDED below.
+                to_execute = (
+                    []
+                    if slots_only
+                    else (answers if rows_all else [a for a in answers if a.id not in proven])
+                )
+                outcome = None
+                if proven and not rows_all and not slots_only:
                     say(
                         f"{label}: {len(proven)} certified answer(s) proven by the slot lane "
-                        "(typed SQL identical to the certified text) — not executed; "
-                        "--rows executes every case"
+                        "(typed SQL identical or equivalent to the certified text) — not "
+                        "executed; --rows executes every case"
                     )
                 if to_execute:
                     assemble_for, generators_for = assembly.eval_harness(bundle, oid, resolved)
@@ -4060,7 +4107,7 @@ def _test(args: argparse.Namespace) -> int:
                             f"{label}: stored typed gold for {gold_stored} certified answer(s) "
                             "from this green run — the slot lane grades them from now on"
                         )
-                if behavioral:
+                if behavioral and not slots_only:
                     # The slim rest of evals/cases.yaml: expect: clarify|refuse
                     # pins run alongside the corpus, as the scaffold promises.
                     assemble_q, b_generators_for = assembly.question_harness(bundle, oid, resolved)
@@ -4113,8 +4160,8 @@ def _test(args: argparse.Namespace) -> int:
                 # eval_result (mode "test"), the same tables the publish gate
                 # writes, so accuracy is a queryable trend whoever runs the
                 # sweep — CI, cron, or a laptop. Output bytes stay unchanged.
-                recorded: list[EvalResult] = []
-                if answers:
+                recorded: list[EvalResult] = list(slot_results)
+                if outcome is not None:
                     for cr in outcome.results:
                         recorded.append(
                             EvalResult(
@@ -4137,22 +4184,31 @@ def _test(args: argparse.Namespace) -> int:
                                 actual_sql=cr.generated_sql,
                             )
                         )
-                if behavioral:
+                if behavioral and not slots_only:
                     recorded.extend(b_outcome.results)
                 if recorded:
                     r_passed = sum(1 for r in recorded if r.passed)
                     r_errored = sum(1 for r in recorded if r.grade == "errored")
+                    score = r_passed / len(recorded)
+                    # The run is recorded under the published bundle's
+                    # fingerprint: two runs with the same one measured the
+                    # same lens, so their verdicts compare case by case.
+                    fingerprint = lens_store.bundle_fingerprint(bundle)
                     # Captured BEFORE create_run — afterwards "last" is this run.
-                    prev_score = (
-                        eval_store.last_run_score(session, name, "test")
+                    previous = (
+                        eval_store.last_run(session, name, "test")
                         if getattr(args, "compare_last", False)
                         else None
+                    )
+                    previous_results = (
+                        eval_store.list_results(session, previous.id) if previous else []
                     )
                     run_id = eval_store.create_run(
                         session,
                         name,
                         "test",
-                        score=r_passed / len(recorded),
+                        lens_version=fingerprint,
+                        score=score,
                         passed=r_passed,
                         failed=len(recorded) - r_passed - r_errored,
                         errored=r_errored,
@@ -4162,19 +4218,12 @@ def _test(args: argparse.Namespace) -> int:
                     eval_store.record_results(session, run_id, recorded)
                     run_ids.append((oid, run_id))
                     if getattr(args, "compare_last", False):
-                        score = r_passed / len(recorded)
-                        if prev_score is None:
-                            say(f"compare {label}: no previous test run")
-                        else:
-                            word = (
-                                "regressed"
-                                if score < prev_score
-                                else ("improved" if score > prev_score else "unchanged")
-                            )
-                            say(
-                                f"compare {label}: {prev_score:.0%} → {score:.0%} "
-                                f"vs previous run ({word})"
-                            )
+                        cmp = run_compare.compare_runs(
+                            previous, previous_results, fingerprint, recorded, score
+                        )
+                        compare_last.append({"org": org_name, "lens": name, **cmp})
+                        for line in run_compare.describe(cmp, label):
+                            say(line)
         cal_records += _calibrate_org(bundles_by_lens, answers_by_lens, labeled)
     scope = ", ".join(n for _, n in orgs)
     if args.lens and not found_lens:
@@ -4213,28 +4262,12 @@ def _test(args: argparse.Namespace) -> int:
                     "calibration": calibration,
                     "untyped_answers": untyped_n,
                     "proven_by_slots": proven_n,
-                    "slot_lane": (
-                        {
-                            "resolutions": slot_runs,
-                            "sql_identical": slot_sql_identical,
-                            "elapsed_s": round(slot_elapsed_s, 1),
-                            "cost_usd": None if slot_cost is None else round(slot_cost, 6),
-                            "latency_s": (
-                                {
-                                    "median": sorted(slot_latencies)[len(slot_latencies) // 2],
-                                    "p90": sorted(slot_latencies)[
-                                        min(len(slot_latencies) - 1, int(len(slot_latencies) * 0.9))
-                                    ],
-                                }
-                                if slot_latencies
-                                else None
-                            ),
-                            "workers": slot_workers,
-                            "repeat": getattr(args, "repeat", 1),
-                        }
-                        if slot_runs
-                        else None
+                    "slot_lane": slot_lane_mod.summary(
+                        slot_lanes, repeat=getattr(args, "repeat", 1)
                     ),
+                    # Per lens under --compare-last: the previous run, the lens
+                    # fingerprint, and the verdict flips when the lens is the same.
+                    "compare_last": compare_last if getattr(args, "compare_last", False) else None,
                     "ungoverned_passes": sum(
                         1
                         for row in rows
@@ -5510,15 +5543,28 @@ def main() -> int:
     p.set_defaults(fn=_rotate_key)
 
     p = sub.add_parser(
-        "bootstrap", help="create (or reuse) an org + mint a fresh admin token; idempotent"
+        "bootstrap",
+        help="create (or reuse) an org and its admin token, saved to ./.env; a rerun "
+        "keeps the token .env already holds and changes nothing",
     )
     p.add_argument(
         "--url",
         help="ignored — bootstrap talks to DATABASE_URL directly (no server needed)",
     )
     p.add_argument("--org", default="default")
-    p.add_argument("--email", help="create or update the first dashboard admin user")
+    p.add_argument(
+        "--rotate-admin-token",
+        action="store_true",
+        help="mint a new admin token and replace the one in .env (earlier tokens stay valid)",
+    )
+    p.add_argument("--email", help="create the first dashboard admin user")
     p.add_argument("--password", help="its password (omit to be prompted)")
+    p.add_argument(
+        "--reset-password",
+        action="store_true",
+        help="with --email: set the password of an existing user and make it admin "
+        "(without it an existing user is left untouched)",
+    )
     p.set_defaults(fn=_bootstrap)
 
     p = sub.add_parser(
@@ -5964,8 +6010,10 @@ def main() -> int:
         dest="compare_last",
         action="store_true",
         help="after recording, print each lens's score against its previous test "
-        "run (informational — the exit code stays the suite's own; `dst runs "
-        "<lens> --diff prev latest` is the comparator with exit semantics)",
+        "run and, when the published lens is unchanged between the two (same "
+        "fingerprint), every case whose verdict flipped (informational — the exit "
+        "code stays the suite's own; `dst runs <lens> --diff prev latest` is the "
+        "comparator with exit semantics)",
     )
     p.add_argument(
         "--org",
@@ -6357,6 +6405,15 @@ def main() -> int:
                 help="osi only: which dialect the emitted expressions are written in",
             )
         if name == "apply":
+            p.add_argument(
+                "--lens",
+                action="append",
+                metavar="NAME",
+                help="publish only this lens of the project (repeatable); the other "
+                "lenses in the tree are treated as unchanged — refused when the push "
+                "changes shared inputs (semantic/, connections) a non-selected "
+                "published lens is compiled against: add it to --lens, or drop --lens",
+            )
             p.add_argument(
                 "--probe-certified",
                 action="store_true",

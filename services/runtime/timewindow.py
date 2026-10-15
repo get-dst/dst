@@ -41,6 +41,11 @@ _TEMPORAL = re.compile(
     r"|(?P<word>today|yesterday|ytd|qtd|mtd)"
     r"|(?<![\w-])q(?P<qn>[1-4])(?:\s*(?:of\s*)?(?P<qyear>(?:19|20)\d{2}))?"
     rf"|(?P<month>{_MONTH_ANY})\.?\s+(?P<myear>(?:19|20)\d{{2}})"
+    # ISO-shaped periods as a binding or a person writes them: 2026-08-31,
+    # 2026-08, 2026-Q2. Before the bare year, or the year alone matches and the
+    # day or month is lost ("as of 2026-08-31" read as the whole of 2026).
+    r"|(?P<iday>(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?![\w-])"
+    r"|(?P<iyear>(?:19|20)\d{2})-(?:(?P<imonth>0[1-9]|1[0-2])|q(?P<iq>[1-4]))(?![\w-])"
     r"|(?P<year>(?:19|20)\d{2})"
     r")\b",
     re.IGNORECASE,
@@ -91,6 +96,14 @@ def temporal_terms(text: str) -> frozenset[str]:
         elif month := m.group("month"):
             out.add(_month_name(month))
             out.add(m.group("myear"))
+        elif iday := m.group("iday"):
+            out.add(iday)
+        elif iyear := m.group("iyear"):
+            out.add(iyear)
+            if iq := m.group("iq"):
+                out.add(f"q{iq}")
+            else:
+                out.add(_MONTH_BY_NUM[int(m.group("imonth"))])
         elif year := m.group("year"):
             out.add(year)
     return frozenset(out)
@@ -148,6 +161,7 @@ _MONTH_NUM = {
     "november": 11,
     "december": 12,
 }
+_MONTH_BY_NUM = {i: n for n, i in _MONTH_NUM.items()}
 
 _REL_TERM = re.compile(r"(this|last|next) (?:(\d+) )?(day|week|month|quarter|year)")
 
@@ -201,6 +215,12 @@ def window_ranges(terms: frozenset[str], today: date) -> list[tuple[date, date]]
         # a backwards span ("August through January 2026") resolves to nothing
     quarters = sorted(int(t[1]) for t in terms if re.fullmatch(r"q[1-4]", t))
     years = sorted(int(t) for t in terms if re.fullmatch(r"(?:19|20)\d{2}", t))
+    for t in sorted(t for t in terms if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)):
+        try:
+            day = date.fromisoformat(t)
+        except ValueError:
+            continue  # 2026-02-30 is not a day; unresolved, never a guess
+        ranges.append((day, day))
     for y in years:
         for m in months:
             ranges.append((date(y, m, 1), _month_end(y, m)))
