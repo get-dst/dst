@@ -44,10 +44,12 @@ from services.contracts.resolution import DecisionRecord
 from services.contracts.semantic_model import SampleQuery, SemanticModel
 from services.db.session import org_session
 from services.lenses import profile_enrich, profile_store
+from services.lenses.profile_age import ProfileAge, profile_age
 from services.lenses.store import LensBundle
 from services.llm import registry
 from services.llm.assist import assist_llm
 from services.llm.vote_decider import EQUIV_K, VoteDecider
+from services.project import probe_settings
 from services.runtime import decision_policy, value_guard
 from services.runtime.bounded import call_bounded
 from services.runtime.generator import FixedSQLGenerator, GroundedSQLGenerator
@@ -169,6 +171,10 @@ class AssembledInputs:
     # accepts raw-SQL generation when the question does not type.
     bindings: dict[str, str] = field(default_factory=dict)
     allow_untyped: bool = False
+    # How old the scope's newest profile is against probe.max_age
+    # (profile_age.ProfileAge); None when nothing is profiled. Stale, the
+    # answer says so and the profile-backed checks abstain.
+    profile_age: ProfileAge | None = None
 
 
 _EQUIV_OPTIONS = [
@@ -456,22 +462,25 @@ def certified_context(certified_dir: str | None, question: str) -> ContextChunk 
 
 def profile_facts(
     bundle: LensBundle, org_id: uuid.UUID | str
-) -> tuple[list[TableProfile], str | None]:
+) -> tuple[list[TableProfile], str | None, ProfileAge | None]:
     """Stored table profiles for the lens's connection + the scope's data_as_of
-    Best-effort: no profile, no enrichment."""
+    + how old the scope's newest profile is against the org's ``probe.max_age``.
+    Best-effort: no profile, no enrichment, no age."""
     if not bundle.config.connections:
-        return [], None
+        return [], None, None
     try:
         with org_session(org_id) as session:
             stored = profile_store.list_profiles(session, bundle.config.connections[0])
+            max_age = probe_settings.load(session).max_age_delta
         profiles = [s.profile for s in stored]
         tables = {e.source.table for e in bundle.semantic_model.entities}
         time_fields = {e.source.table: e.default_time_field for e in bundle.semantic_model.entities}
         as_of = profile_enrich.data_as_of(profiles, tables, time_fields)
-        return profiles, as_of.date().isoformat() if as_of else None
+        age = profile_age(profiles, max_age, tables=tables)
+        return profiles, as_of.date().isoformat() if as_of else None, age
     except Exception:
         log.exception("profile lookup failed for lens %s", bundle.config.name)
-        return [], None
+        return [], None, None
 
 
 # The answer contract — the output-grid default. A recurring class of misses is
@@ -513,14 +522,19 @@ def assemble(
     model = bundle.semantic_model
     # The stored table profile feeds generation — enum literals, sampled
     # descriptions, partition-pruning hints land in the (cached) system prompt.
-    profiles, as_of = profile_facts(bundle, org_id)
+    profiles, as_of, age = profile_facts(bundle, org_id)
     domains: dict[str, list[str]] = {}
     per_entity: dict[str, dict[str, list[str]]] = {}
     periods: dict[str, str] = {}
     coverage: dict[str, profile_enrich.EntityCoverage] = {}
     if profiles:
         model = profile_enrich.enrich_model(model, profiles)
-        domains = value_guard.value_domains(model, profiles)
+        # Past probe.max_age every dictionary counts as partial: it proves
+        # nothing about a literal the warehouse may have gained since, so the
+        # pre-query refusal consults none (the post-execution probe still
+        # runs). Matching dictionaries stay: a name they hold is still a name.
+        if age is None or not age.stale:
+            domains = value_guard.value_domains(model, profiles)
         per_entity = value_guard.entity_domains(model, profiles)
         periods = value_guard.period_fields(model, profiles)
         coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
@@ -552,6 +566,7 @@ def assemble(
         certified_bound=bound,
         certified_sql=csql,
         data_as_of=as_of,
+        profile_age=age,
         degraded=() if embed_failure is None else (MATCHING_DOWN.format(why=embed_failure),),
         value_domains=domains,
         entity_domains=per_entity,

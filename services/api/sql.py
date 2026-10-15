@@ -62,7 +62,7 @@ from services.governance.credentials import CallerIdentity
 from services.lenses.connections import ConnectionUnavailable, resolve_connector
 from services.observability import cost
 from services.observability.logger import log_trace
-from services.runtime import sql_guard
+from services.runtime import scope_rails, sql_guard
 from services.runtime.bounded import WarehouseTimeout, warehouse_bounded
 
 log = logging.getLogger("dst")
@@ -123,6 +123,9 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
             status_code=400, detail="pass exactly one of `connection` (authoring) or `lens`"
         )
     request_id = "req_" + uuid.uuid4().hex[:16]
+    # Set on the lens door only: a warehouse error's suggestions are then kept
+    # to that lens's scope. The admin already sees the whole connection.
+    scope_model: SemanticModel | None = None
 
     if body.connection:
         if not caller.is_admin:
@@ -150,6 +153,7 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         scope = body.lens
         wh = ", ".join(sorted({e.source.connection for e in bundle.semantic_model.entities}))
+        scope_model = bundle.semantic_model
         guard = sql_guard.check(body.sql, bundle.semantic_model)
         # Kept only when the lens sets `logging.log_purpose`, exactly as on /query:
         # the probe behind an authoring decision is the read whose "why" explains it.
@@ -193,7 +197,10 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
     except Exception as exc:  # noqa: BLE001 — a warehouse error is the answer, not a 500
         trace.status, trace.valid, trace.error = "error", True, str(exc)[:500]
         log_trace(trace)
-        raise HTTPException(status_code=400, detail=f"warehouse error: {str(exc)[:500]}") from exc
+        shown = str(exc)[:500]
+        if scope_model is not None:
+            shown = scope_rails.scoped_suggestions(shown, scope_model)
+        raise HTTPException(status_code=400, detail=f"warehouse error: {shown}") from exc
 
     truncated = len(result.rows) > body.limit
     rows = [list(r) for r in result.rows[: body.limit]]

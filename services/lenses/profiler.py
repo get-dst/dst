@@ -23,6 +23,7 @@ stored profiles back from.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -33,6 +34,7 @@ from services.contracts.profile import (
     SAMPLE_MAX_ROWS,
     ColumnProfile,
     ColumnSampleSpec,
+    SampleWindow,
     TableProfile,
     TableSampleSpec,
     is_temporal_type,
@@ -79,14 +81,19 @@ def sample_profiles(
     profiles: list[TableProfile],
     excluded: frozenset[str] = frozenset(),
     matchable: frozenset[str] = frozenset(),
+    windows: Mapping[str, SampleWindow] | None = None,
 ) -> dict[str, TableProfile]:
     """The sampling pass without the store: sample each profile's gaps, return the
     merged profiles keyed by table — only the tables the connector actually sampled.
-    ``matchable``: see build_sample_spec."""
+    ``matchable``: see build_sample_spec. ``windows``: table -> the recent slice
+    its column facts are read from (services/project/probe.py picks them)."""
     if not profiles or not isinstance(connector, SamplingProfiler):
         return {}
     specs = [
-        spec for p in profiles if (spec := build_sample_spec(p, excluded, matchable)) is not None
+        spec
+        for p in profiles
+        if (spec := build_sample_spec(p, excluded, matchable, window=(windows or {}).get(p.table)))
+        is not None
     ]
     if not specs:
         return {}
@@ -124,6 +131,7 @@ def build_sample_spec(
     profile: TableProfile,
     excluded: frozenset[str] | None = None,
     matchable: frozenset[str] = frozenset(),
+    window: SampleWindow | None = None,
 ) -> TableSampleSpec | None:
     """The sampling worklist for one stored profile: gap columns + a freshness column.
 
@@ -149,12 +157,16 @@ def build_sample_spec(
     freshness = _freshness_column(profile, excluded)
     if not columns and freshness is None:
         return None
+    by_name = {c.name: c for c in profile.columns}
+    window_type = by_name[window.column].type if window and window.column in by_name else ""
     return TableSampleSpec(
         table=profile.table,
         columns=columns,
         row_count=profile.row_count,
         freshness_column=freshness,
         is_view=profile.is_view,
+        window=window,
+        window_type=window_type,
     )
 
 
@@ -191,6 +203,7 @@ def merge_sampled(
         if sampled.top_values is not None:
             update["top_values"] = sampled.top_values
             update["values_complete"] = sampled.values_complete
+            update["values_complete_at"] = sampled.values_complete_at
         if sampled.min is not None:
             update["min"] = sampled.min
         if sampled.max is not None:
@@ -207,6 +220,7 @@ def merge_sampled(
             "columns": columns,
             "last_updated_logical": fragment.last_updated_logical or base.last_updated_logical,
             "time_coverage": coverage,
+            "sample_window": fragment.sample_window,
             "profiled_at": fragment.profiled_at,
             "sampled_rows": fragment.sampled_rows,
             "source": _merged_source(base),

@@ -547,8 +547,41 @@ def _schema_status() -> tuple[str, bool]:
     return state.summary(), state.status == "behind"
 
 
+def _profiles_status() -> dict[str, object]:
+    """Profile age across every org, against each org's probe.max_age: the
+    oldest connection and the stale ones (``org/connection``). Never a
+    readiness gate — serving works on a stale profile, degraded and saying so."""
+    from sqlalchemy import text as _text
+
+    from services.db.session import admin_engine, org_session
+    from services.lenses.profile_age import connection_ages
+
+    oldest: float | None = None
+    limit: float | None = None
+    stale: list[str] = []
+    try:
+        with admin_engine.connect() as conn:
+            orgs = list(conn.execute(_text("SELECT id, name FROM org ORDER BY created_at")))
+        for org_id, org_name in orgs:
+            with org_session(org_id) as session:
+                ages = connection_ages(session)
+            age = ages.get("oldest_age_days")
+            if isinstance(age, float | int):
+                oldest = float(age) if oldest is None else max(oldest, float(age))
+            cap = ages.get("max_age_days")
+            if isinstance(cap, float | int):
+                limit = float(cap) if limit is None else min(limit, float(cap))
+            names = ages.get("stale_connections")
+            if isinstance(names, list):
+                stale.extend(f"{org_name}/{name}" for name in names)
+    except Exception:  # readiness must never crash on a status read
+        log.exception("readiness profile-age check failed")
+        return {"oldest_age_days": None, "max_age_days": None, "stale_connections": []}
+    return {"oldest_age_days": oldest, "max_age_days": limit, "stale_connections": sorted(stale)}
+
+
 @app.get("/ready", tags=["meta"])
-async def ready() -> dict[str, str]:
+async def ready() -> dict[str, object]:
     """Readiness — dependencies reachable (DB + the MCP session manager), the schema
     caught up with this build, and the audit trail actually landing.
 
@@ -575,6 +608,7 @@ async def ready() -> dict[str, str]:
     schema, schema_blocks = await run_in_threadpool(_schema_status)
     traces = trace_logger.trace_write_status()
     typed = await run_in_threadpool(_typed_status)
+    profiles = await run_in_threadpool(_profiles_status)
     return {
         "status": (
             "ready"
@@ -603,6 +637,10 @@ async def ready() -> dict[str, str]:
         # readiness gate — a plugin is an extension, not a dependency — but an
         # operator must be able to see that `pip install` changed what the API serves.
         "plugins": plugin_status(),
+        # How old the stored profiles are against the project's probe.max_age.
+        # Serving works on a stale one, degraded and saying so on every answer;
+        # this is where the operator sees the probe job stopped.
+        "profiles": profiles,
         "environment": settings.environment,
     }
 

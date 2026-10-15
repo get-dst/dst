@@ -383,12 +383,16 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
         assert "***@" in where  # the url with its password hidden, never the password
         assert "dst runs <lens>" in out
         results = s.execute(
-            text("SELECT case_id, passed FROM eval_result WHERE run_id = :r"),
+            text("SELECT case_id, passed, actual_value, checks FROM eval_result WHERE run_id = :r"),
             {"r": str(run_id)},
         ).all()
         assert len(results) == 1
         assert results[0][0].startswith("certified:")
         assert results[0][1] is True
+        # The executed values ride the stored row, not only the verdict and SQL:
+        # a copy of eval_result elsewhere must hold the numbers.
+        assert results[0][2] == "19"
+        assert results[0][3]["certified"] == "19" and results[0][3]["generated"] == "19"
     # --json carries the same two facts structurally.
     rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG, as_json=True))
     assert rc == 0
@@ -839,11 +843,11 @@ def test_counting_every_row_computes_the_count_of_the_declared_key() -> None:
 
 def test_wrong_rows_from_the_wrong_metric_attribute_to_resolution_first() -> None:
     """Wrong meaning ⇒ wrong values: the first failed stage is resolution, so
-    the summary points at the layer/generation seam, not at 'rows'."""
-    out = _suite(
-        [_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)],
-        ["SELECT count(*) FROM customers", "SELECT count(*) FROM customers"],
-    )
+    the summary points at the layer/generation seam, not at 'rows'. The wrong
+    meaning is read from the table the question names: SQL that reads a
+    different table altogether never serves — it clarifies."""
+    wrong = "SELECT count(DISTINCT customer_id) AS order_count FROM orders"
+    out = _suite([_answer(sql=_COUNT_ORACLE, question=_COUNT_Q)], [wrong, wrong])
     r = out.results[0]
     assert not r.passed
     assert r.stages["resolution"] == "failed" and r.stages["rows"] == "failed"
@@ -930,3 +934,33 @@ def test_a_green_typed_case_carries_its_ledger_as_gold_an_untyped_one_does_not()
     assert t.passed, t.reason
     assert t.resolution is not None and t.resolution["typed"] is True
     assert t.resolution["method"] == "construction"
+
+
+def test_compare_month_grain_rows_match_on_bucket_and_say_so() -> None:
+    """A month-grain trend certified on month-end dates against generated
+    month-start labels: identical values, labels differing by day. The exact
+    set diff reads it as 3 missing / 3 extra; the comparator reads the months,
+    passes, and says it was lenient. Two rows in one month never fold."""
+    import datetime as dt
+
+    from services.evals.certified_suite import _compare
+
+    cert = [[dt.date(2026, 4, 30), 1.0], [dt.date(2026, 5, 31), 2.0], [dt.date(2026, 6, 30), 3.0]]
+    gen = [[dt.date(2026, 4, 1), 1.0], [dt.date(2026, 5, 1), 2.0], [dt.date(2026, 6, 1), 3.0]]
+    ok, reason = _compare(["month", "arr"], cert, ["month", "arr"], gen)
+    assert ok and reason and reason.startswith("month-lenient:")
+    assert "2026-04-01" in reason and "2026-04-30" in reason
+    # ISO strings (a connector that returns text) read the same way.
+    ok, reason = _compare(["m", "v"], [["2026-04-30", 5]], ["m", "v"], [["2026-04-01", 5]])
+    assert ok and reason and reason.startswith("month-lenient:")
+    # A value that differs is still a failure — the rule only rewrites labels.
+    ok, reason = _compare(["m", "v"], [["2026-04-30", 5]], ["m", "v"], [["2026-04-01", 6]])
+    assert not ok and "1 missing / 1 extra" in (reason or "")
+    # Two certified rows inside one month are two facts: no folding, no pass.
+    ok, _ = _compare(
+        ["d", "v"],
+        [["2026-04-15", 1], ["2026-04-30", 2]],
+        ["d", "v"],
+        [["2026-04-01", 1], ["2026-04-02", 2]],
+    )
+    assert not ok

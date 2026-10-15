@@ -83,6 +83,8 @@ def kpis(session: Session) -> dict[str, object]:
     # reported as `unknown`, never folded into "not governed".
     resolution_histogram = _resolution_histogram(session, f"status = 'ok' AND {governed}", {})
     basis = _basis(session)
+    from services.lenses.profile_age import connection_ages
+
     return {
         "queries": int(row[0]),
         "ai_cost_usd": round(float(row[1]), 4),
@@ -118,6 +120,10 @@ def kpis(session: Session) -> dict[str, object]:
             "warehouse_cost_usd": round(float(probe_row[2]), 4),
         },
         "basis": basis,
+        # How old the facts behind the answers are, per connection, against
+        # the project's probe.max_age: a probe job that stopped shows here
+        # before it shows as a wrong answer.
+        "profiles": connection_ages(session),
     }
 
 

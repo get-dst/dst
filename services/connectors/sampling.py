@@ -36,7 +36,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
@@ -45,6 +45,7 @@ from services.contracts.profile import (
     MATCH_DICTIONARY_MAX,
     ColumnProfile,
     ColumnSampleSpec,
+    SampleWindow,
     TableProfile,
     TableSampleSpec,
     TimeCoverage,
@@ -142,15 +143,46 @@ def sample_table(
     max_distinct_for_enum: int,
     exact_max_rows: int = EXACT_PROFILE_MAX_ROWS,
 ) -> TableProfile | None:
-    """Profile one table per its spec; None when there is nothing to do (or no budget)."""
+    """Profile one table per its spec; None when there is nothing to do (or no budget).
+
+    Logical freshness and date coverage are always whole-table. A requested
+    window (``spec.window``) anchors on the window column's newest value — the
+    latest N partitions of the data, not of the calendar, so a table whose
+    load stopped still samples its last slice instead of nothing. Everything
+    read through a window is labelled partial: a lower-bound distinct count, a
+    dictionary that is never complete, ``sampled_rows`` set.
+    """
     specs = spec.columns
     exact = counts_exactly(spec.row_count, exact_max_rows)
+    probe_time = spec.freshness_column is not None and not _freshness_blocked(
+        spec.freshness_column, specs
+    )
+    last_logical: datetime | None = None
+    coverage: TimeCoverage | None = None
+    asked = spec.window
+    windowed = bool(asked and asked.kind != "none" and asked.n > 0 and asked.column)
+    if windowed and probe_time:
+        # The window anchors on the newest value, so the whole-table probe
+        # runs first here; without a window it keeps its place at the end.
+        coverage, last_logical = _coverage(run, spec, dialect=dialect)
+    window, predicate = _resolve_window(
+        run,
+        spec,
+        dialect=dialect,
+        newest=last_logical if asked and spec.freshness_column == asked.column else None,
+    )
     columns: list[ColumnProfile] = []
     scanned = 0
     if specs:
         try:
             exact, result = _run_stats(
-                run, spec, specs, dialect=dialect, max_rows=max_rows, exact=exact
+                run,
+                spec,
+                specs,
+                dialect=dialect,
+                max_rows=max_rows,
+                exact=exact,
+                predicate=predicate,
             )
         except SampleBudgetExceeded as exc:
             # Too big to read within budget — the catalog profile stands. Said
@@ -171,20 +203,29 @@ def sample_table(
                 max_rows=max_rows,
                 limit=max_distinct_for_enum,
                 exact=exact,
+                predicate=predicate,
             )
             _collect_value_shapes(
-                run, spec, specs, columns, dialect=dialect, max_rows=max_rows, exact=exact
+                run,
+                spec,
+                specs,
+                columns,
+                dialect=dialect,
+                max_rows=max_rows,
+                exact=exact,
+                predicate=predicate,
             )
-    last_logical: datetime | None = None
-    coverage: TimeCoverage | None = None
-    if spec.freshness_column is not None and not _freshness_blocked(spec.freshness_column, specs):
-        earliest, last_logical = _probe_freshness(
-            run, spec.table, spec.freshness_column, dialect=dialect
-        )
-        if earliest is not None and last_logical is not None:
-            # Whole-table MIN/MAX, never sampled — the one source exact enough
-            # to state where the data starts and ends.
-            coverage = TimeCoverage(column=spec.freshness_column, min=earliest, max=last_logical)
+        now = datetime.now(UTC)
+        for col in columns:
+            if predicate is not None:
+                # A window is a slice: its counts bound the table's from below
+                # and its dictionary can never be the whole one.
+                col.distinct_is_exact = False
+                col.values_complete = False
+            elif col.values_complete:
+                col.values_complete_at = now
+    if probe_time and not windowed:
+        coverage, last_logical = _coverage(run, spec, dialect=dialect)
     if not columns and last_logical is None:
         return None
     return TableProfile(
@@ -192,13 +233,78 @@ def sample_table(
         table=spec.table,
         last_updated_logical=last_logical,
         time_coverage=coverage,
+        sample_window=window,
         source="sampled",
         # None means "every row was counted" and nothing else may set it — a
         # sample that happened to return 0 rows (block-level TABLESAMPLE on a
-        # tiny percent) must not read as exactness.
-        sampled_rows=None if exact else scanned,
+        # tiny percent) must not read as exactness. A window is never every row.
+        sampled_rows=None if exact and predicate is None else scanned,
         columns=columns,
     )
+
+
+def _coverage(
+    run: RunQuery, spec: TableSampleSpec, *, dialect: SamplingDialect
+) -> tuple[TimeCoverage | None, datetime | None]:
+    """Whole-table MIN/MAX of the freshness column, never sampled — the one
+    source exact enough to state where the data starts and ends."""
+    assert spec.freshness_column is not None
+    earliest, last_logical = _probe_freshness(
+        run, spec.table, spec.freshness_column, dialect=dialect
+    )
+    if earliest is None or last_logical is None:
+        return None, last_logical
+    return TimeCoverage(column=spec.freshness_column, min=earliest, max=last_logical), last_logical
+
+
+def _resolve_window(
+    run: RunQuery,
+    spec: TableSampleSpec,
+    *,
+    dialect: SamplingDialect,
+    newest: datetime | None,
+) -> tuple[SampleWindow | None, str | None]:
+    """``(window as the artifact records it, SQL predicate)`` for the spec's
+    requested window. The newest value of the window column anchors it —
+    reused from the freshness probe when that is the same column, else one
+    whole-table MAX. No rows, or an unprobeable column, and the whole table is
+    read with the reason recorded."""
+    asked = spec.window
+    if asked is None or asked.kind == "none" or asked.n <= 0 or not asked.column:
+        return asked, None
+    if newest is None:
+        try:
+            result = run(freshness_sql(spec.table, asked.column, dialect=dialect))
+        except SampleBudgetExceeded:
+            result = None
+        newest = _as_datetime(result.rows[0][1]) if result and result.rows else None
+    if newest is None:
+        return (
+            SampleWindow(
+                kind="none",
+                n=0,
+                column=asked.column,
+                reason="no newest value to anchor the window on",
+            ),
+            None,
+        )
+    since = (newest.date() - timedelta(days=asked.n - 1)).isoformat()
+    return asked, window_predicate(asked.column, spec.window_type, since, dialect=dialect)
+
+
+def window_predicate(column: str, column_type: str, since: str, *, dialect: SamplingDialect) -> str:
+    """``column >= <since>`` with a literal the dialect compares without a cast:
+    BigQuery is strict about DATE vs TIMESTAMP vs DATETIME; the others coerce
+    a DATE literal against any temporal column."""
+    qc = _quote_name(column, dialect)
+    kind = "DATE"
+    if dialect == "bigquery":
+        upper = column_type.upper()
+        if "TIMESTAMP" in upper:
+            kind = "TIMESTAMP"
+        elif "DATETIME" in upper:
+            kind = "DATETIME"
+    return f"{qc} >= {kind} '{since}'"
 
 
 def _run_stats(
@@ -209,6 +315,7 @@ def _run_stats(
     dialect: SamplingDialect,
     max_rows: int,
     exact: bool,
+    predicate: str | None = None,
 ) -> tuple[bool, QueryResult]:
     """The stats query, downgrading to a labelled sample when exactness is refused.
 
@@ -225,6 +332,7 @@ def _run_stats(
         row_count=spec.row_count,
         exact=exact,
         is_view=bool(spec.is_view),
+        predicate=predicate,
     )
     assert sql is not None  # specs is non-empty at the one call site
     if not exact:
@@ -240,6 +348,7 @@ def _run_stats(
             row_count=spec.row_count,
             exact=False,
             is_view=bool(spec.is_view),
+            predicate=predicate,
         )
         assert sampled is not None
         return False, run(sampled)
@@ -257,6 +366,7 @@ def stats_sql(
     row_count: int | None,
     exact: bool = False,
     is_view: bool = False,
+    predicate: str | None = None,
 ) -> str | None:
     """One aggregate query: per column COUNT (nulls), distinct count, and MIN/MAX
     for time + numeric columns — never MIN/MAX for a shape-only column (those are
@@ -288,6 +398,7 @@ def stats_sql(
         row_count=row_count,
         exact=exact,
         is_view=is_view,
+        predicate=predicate,
     )
     return f"SELECT {', '.join(selects)} FROM {relation}"
 
@@ -302,6 +413,7 @@ def top_values_sql(
     limit: int,
     exact: bool = False,
     is_view: bool = False,
+    predicate: str | None = None,
 ) -> str:
     """The value-dictionary query: top-k literals by frequency.
 
@@ -317,6 +429,7 @@ def top_values_sql(
         row_count=row_count,
         exact=exact,
         is_view=is_view,
+        predicate=predicate,
     )
     return (
         f"SELECT {qc} AS v, COUNT(*) AS n FROM {relation} "
@@ -342,6 +455,7 @@ def _sampled_relation(
     row_count: int | None,
     exact: bool = False,
     is_view: bool = False,
+    predicate: str | None = None,
 ) -> str:
     """The dialect's capped sample as a derived table — or the table itself.
 
@@ -356,11 +470,29 @@ def _sampled_relation(
     used to abort the whole connection's probe. A LIMIT
     read is a biased sample — everything derived from one is already labelled
     an estimate.
+
+    ``predicate`` narrows the relation to a recent window BEFORE any sampling:
+    DuckDB and Snowflake sample a filtered subquery (a trailing sample clause
+    on DuckDB samples first and filters after — measured, not assumed), and
+    the percent-based engines read ``LIMIT`` rows of the window, since a
+    percent derived from the whole table's count would thin the window to
+    nothing. On BigQuery the predicate is the partition filter.
     """
     qt = _quote_table(table, dialect)
     if exact:
-        return qt
+        if predicate is None:
+            return qt
+        return f"(SELECT {select_list} FROM {qt} WHERE {predicate}) AS _dst_sample"
     rows = int(max_rows)
+    if predicate is not None:
+        filtered = f"(SELECT {select_list} FROM {qt} WHERE {predicate}) AS _dst_window"
+        if dialect == "duckdb":
+            inner = f"SELECT {select_list} FROM {filtered} USING SAMPLE {rows} ROWS"
+        elif dialect == "snowflake":
+            inner = f"SELECT {select_list} FROM {filtered} SAMPLE ({rows} ROWS)"
+        else:  # postgres / bigquery / mysql: a LIMIT read of the window
+            inner = f"SELECT {select_list} FROM {qt} WHERE {predicate} LIMIT {rows}"
+        return f"({inner}) AS _dst_sample"
     if dialect == "duckdb":
         inner = f"SELECT {select_list} FROM {qt} USING SAMPLE {rows} ROWS"
     elif dialect == "snowflake":
@@ -525,6 +657,7 @@ def _collect_value_shapes(
     dialect: SamplingDialect,
     max_rows: int,
     exact: bool,
+    predicate: str | None = None,
 ) -> None:
     """Classify textual columns' value shapes — never for shape-only columns,
     whose literals are not read at all. Low-cardinality columns classify from
@@ -543,6 +676,7 @@ def _collect_value_shapes(
                 row_count=spec.row_count,
                 exact=exact,
                 is_view=bool(spec.is_view),
+                predicate=predicate,
             )
             try:
                 samples = [str(r[0]) for r in run(sql).rows]
@@ -562,6 +696,7 @@ def shape_probe_sql(
     row_count: int | None,
     exact: bool = False,
     is_view: bool = False,
+    predicate: str | None = None,
 ) -> str:
     """Three non-null examples from the relation — shape classification only."""
     q = _quote_name(column, dialect)
@@ -573,6 +708,7 @@ def shape_probe_sql(
         row_count=row_count,
         exact=exact,
         is_view=is_view,
+        predicate=predicate,
     )
     return f"SELECT {q} FROM {rel} WHERE {q} IS NOT NULL LIMIT 3"
 
@@ -587,6 +723,7 @@ def _collect_top_values(
     max_rows: int,
     limit: int,
     exact: bool,
+    predicate: str | None = None,
 ) -> None:
     """Fill ``top_values`` for low-cardinality columns — never for shape-only ones.
 
@@ -623,6 +760,7 @@ def _collect_top_values(
             limit=max(limit, MATCH_DICTIONARY_MAX) if matchable else limit,
             exact=exact,
             is_view=bool(spec.is_view),
+            predicate=predicate,
         )
         try:
             rows = run(sql).rows

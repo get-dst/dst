@@ -103,6 +103,36 @@ When repair can't use what the investigation learned, there is a floor:
   investigated-and-confirmed absence keeps its badge: that zero is the data's
   answer, and now there is a receipt saying so.
 
+## A named table the SQL does not read: ask
+
+A question can name a table outright — "how many events per day" — and
+generation can still answer it from a different table, because that is the
+table the lens holds. The figure then has a borrowed noun: an order count
+served as events. So a generated serve is checked, deterministically, against
+the tables the question names: a declared entity, its source table (bare or
+`schema.table`), or an exposed table — in this lens, or in another lens the
+caller may use. The match is literal and word-bounded, case-insensitive, the
+bare name and its regular plural, so a table named after a common word still
+counts; in the normal case the SQL reads it and nothing happens. A table named
+after the named one counts as read too — "staged orders" answered from
+`stg_orders` is no swap. Only the
+mismatch — a named table the served SQL does not read — becomes a
+`clarification` with `kind: named_table`: *you named `events`; this lens would
+answer from `orders` — did you mean orders, or the `events` table (lens
+`explore` holds it)?* The lens that holds the table is named when there is one,
+because an exposed table has no definitions and no router would ever send the
+question there. Typed answers are not involved (the typed path declines what
+it cannot type), and neither are certified answers.
+
+Scope also bounds what an error may suggest. A warehouse that rejects a query
+likes to help — `Did you mean "staging.orders"?` — from every table it can
+see, including ones outside the lens's grant. On the way to the caller those
+suggestions are rewritten to name only tables and columns in the lens's
+allow-list, the closest by name to what was written; a suggestion with nothing
+close in scope is removed, and the rest of the error text stays as the engine
+wrote it. The admin's own connection probe is untouched: there is no lens
+scope to keep to.
+
 ## An invented figure: withheld, never shipped
 
 The same doctrine covers the written answer itself. On a generated serve,

@@ -220,6 +220,20 @@ the slowest thing in scope, or split the slow-moving dimension into its own
 lens, and leave it unset until you have checked what `data_as_of` actually
 reports for that lens.
 
+There are two ages here, and they are not the same thing. Data freshness is
+how old the newest row is: `data_as_of`, measured by the probe. Profile age is
+how old the probe itself is: `profiled_at` in `profiles/<connection>.probe.json`,
+which `dst apply` carries into the store. A warehouse loaded this morning
+behind a profile taken three weeks ago still reports `data_as_of` as three
+weeks ago, because nothing has measured it since; and a value dictionary from
+that probe cannot prove a value loaded since then absent. So the profile has
+its own limit, `probe.max_age` in `dst.yaml` (default seven days). Past it the
+freshness and date-coverage checks skip rather than fail on a stamp that only
+dates the last probe, the value guard stops consulting dictionaries, and the
+answer carries `PROFILE: last probed N days ago (max M) — run dst probe` in
+`degraded`. The fix is the probe job, not the lens: run `dst probe`, commit
+`profiles/`, apply.
+
 ## Not everything you author reaches every prompt
 
 A lens with metrics generates in two tiers: the first pass is the compiled
@@ -313,7 +327,7 @@ untouched; `plan` diffs exactly what `apply` will do.
 ## The scaffold teaches
 
 `dst init` writes a dbt-style project: a demo DuckDB warehouse option, per-warehouse
-credential prompts, `git init`, an `AGENTS.md` guide for coding agents, and six Claude
+credential prompts, `git init`, an `AGENTS.md` guide for coding agents, and seven Claude
 Code skills: [reviewing the warehouse for answerability](answerable-tables.md) before
 building on it, authoring the semantic layer, writing curated context,
 importing verified BI queries as certified answers,

@@ -80,6 +80,22 @@ class TimeCoverage(BaseModel):
     max: datetime
 
 
+class SampleWindow(BaseModel):
+    """What slice of a table the sampling pass read for its column facts.
+
+    ``partitions``: the latest ``n`` partitions (a time-partitioned table);
+    ``days``: the last ``n`` days of the entity's declared ``default_time_field``;
+    ``none``: every row, as the catalog counted it. The window applies to the
+    column facts only — logical freshness and date coverage stay whole-table.
+    """
+
+    kind: Literal["partitions", "days", "none"] = "none"
+    n: int = 0
+    column: str | None = None
+    # Why a requested window was not applied (``kind == "none"`` with a reason).
+    reason: str | None = None
+
+
 class ColumnProfile(BaseModel):
     name: str
     type: str
@@ -102,6 +118,10 @@ class ColumnProfile(BaseModel):
     # author treats the list as complete. True only when the values were read from the
     # whole table and their count matches an exact `distinct_count`.
     values_complete: bool = False
+    # When the dictionary was last read WHOLE and proved complete. A refresh that
+    # reads through a window keeps a complete dictionary (the union, dated here)
+    # instead of silently demoting it to partial.
+    values_complete_at: datetime | None = None
     min: str | None = None
     max: str | None = None
     # The value's SHAPE when a textual column hides structure — JSON
@@ -132,6 +152,8 @@ class TableProfile(BaseModel):
     # serving rail consults so a question about a period beyond it discloses
     # "data ends <date>" instead of zero-filling. None = never probed.
     time_coverage: TimeCoverage | None = None
+    # The slice the column facts were read from; None = the pass never sampled.
+    sample_window: SampleWindow | None = None
     profiled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: Literal["catalog", "sampled", "mixed"] = "catalog"
     columns: list[ColumnProfile] = Field(default_factory=list)
@@ -170,6 +192,13 @@ class TableSampleSpec(BaseModel):
     # Views can't take block-level TABLESAMPLE on BigQuery/Postgres — the
     # builders downgrade them to a plain LIMIT sample.
     is_view: bool | None = None
+    # The recent slice to read column facts from: ``column`` is a time or
+    # partition column, ``days`` how far back from its newest value. None reads
+    # the whole relation (or the capped sample).
+    window: SampleWindow | None = None
+    # The window column's warehouse type — decides the literal's type where the
+    # engine will not coerce one (BigQuery).
+    window_type: str = ""
 
 
 class JoinCandidate(BaseModel):

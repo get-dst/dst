@@ -308,3 +308,38 @@ def test_runs_diff_other_url_requires_other_token(
     )
     assert code == 1
     assert "--other-token" in capsys.readouterr().err
+
+
+def test_runs_all_lists_every_lens_with_its_last_n(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`dst runs --all --last N --json`: one call per lens on the server, N runs
+    each, a lens with no history present with an empty list — the cross-lens
+    report that otherwise reads eval_run by hand."""
+    import json
+
+    def fake(url, headers=None, params=None, timeout=None):
+        req = httpx.Request("GET", url)
+        if url.endswith("/mgmt/lenses"):
+            return httpx.Response(200, json=[{"name": "finance"}, {"name": "funnel"}], request=req)
+        if url.endswith("/mgmt/lenses/finance/evals/runs"):
+            return httpx.Response(200, json=[RUN_B, RUN_A], request=req)
+        if url.endswith("/mgmt/lenses/funnel/evals/runs"):
+            return httpx.Response(200, json=[], request=req)
+        return httpx.Response(404, json={"detail": "not found"}, request=req)
+
+    monkeypatch.setattr(httpx, "get", fake)
+    rc = _run_cli(monkeypatch, ["runs", "--all", "--last", "1", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [(r["lens"], len(r["runs"])) for r in out["runs"]] == [("finance", 1), ("funnel", 0)]
+    assert out["runs"][0]["runs"][0]["id"] == RUN_B["id"]
+    # The table form names the lens without history too.
+    rc = _run_cli(monkeypatch, ["runs", "--all"])
+    assert rc == 0
+    text = capsys.readouterr().out
+    assert "finance" in text and "bbbb1111" in text
+    assert "funnel" in text and "no recorded runs" in text
+    # A bare `dst runs` says what it needs instead of guessing.
+    assert _run_cli(monkeypatch, ["runs"]) == 1
+    assert "name a lens, or --all" in capsys.readouterr().err

@@ -140,10 +140,46 @@ warehouse) — without it, a skipped gate publishes with a warning, which is not
 what a deploy gate wants. `--quiet` keeps a large apply to the lines that need a
 human.
 
-**On a schedule — `dst test --all`** re-runs the certified corpus as a regression
-suite, and `dst drift` compares the warehouse against the committed baseline.
-Both are cheap to run nightly and are the only things that notice a table
-changing shape under a published lens.
+**On a schedule — probe, then drift and test.** `dst probe` refreshes the
+committed warehouse profile (value dictionaries, freshness stamps, date spans),
+and the job commits the artifact so the repository stays the source of truth
+and the next apply lands it. Then `dst drift` compares the warehouse against the
+committed baseline and `dst test --all` re-runs the certified corpus as a
+regression suite. All three are cheap to run nightly and are the only things
+that notice a table changing shape, or a value appearing, under a published
+lens. The profile has an age: past `probe.max_age` in `dst.yaml` (default
+seven days) every answer says so, plan and apply warn, and `dst test --all`
+exits 4 for the lens, so a schedule that stops running shows up the next
+morning instead of as a wrong answer a month later.
+
+```yaml
+# .github/workflows/dst-nightly.yml
+name: dst-nightly
+on:
+  schedule:
+    - cron: "15 3 * * *"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      DST_URL: ${{ vars.DST_PROD_URL }}
+      DST_ADMIN_TOKEN: ${{ secrets.DST_PROD_ADMIN_TOKEN }}
+      DST_API_KEY_WAREHOUSE: ${{ secrets.DST_PROD_WAREHOUSE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx install dst-core
+      - run: dst probe --dir .
+      - run: |
+          git config user.name "dst probe"
+          git config user.email "dst-probe@users.noreply.github.com"
+          git add profiles/
+          git diff --cached --quiet || git commit -m "probe: refresh warehouse profile"
+          git push
+      - run: dst apply --dir . --quiet     # lands the refreshed profile
+      - run: dst drift --dir .
+      - run: dst test --all                # exit 4 = nothing verified: not green
+```
 
 ```yaml
 # .github/workflows/dst.yml

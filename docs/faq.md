@@ -89,6 +89,7 @@ its last lines say which, with the run id. `dst runs` and the dashboard read the
 history through the server at `DST_URL`. If the server serves another database,
 the run exists where `dst test` said and nowhere the server looks. A CI job with
 a throwaway database discards every run with the runner. See
-[Environments and CI](guides/environments-and-ci.md#which-database-did-dst-test-write-to).
+[Environments and CI](guides/environments-and-ci.md#which-database-did-dst-test-write-to)
+and the other failure modes in [Troubleshooting](guides/troubleshooting.md).
 
 *(Every answer here is covered in full on a linked page.)*

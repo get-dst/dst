@@ -18,7 +18,7 @@ WAREHOUSES = ("demo", "duckdb", "postgres", "bigquery", "snowflake", "none")
 
 
 def agent_files(root: Path, name: str, api_port: int) -> list[tuple[Path, str]]:
-    """The agent-facing scaffold — AGENTS.md and the six skills — as
+    """The agent-facing scaffold — AGENTS.md and the seven skills — as
     ``(path, content)``.
 
     Every one is a pure function of the INSTALLED dst (nothing project-specific
@@ -35,6 +35,7 @@ def agent_files(root: Path, name: str, api_port: int) -> list[tuple[Path, str]]:
         (skills / "dst-history-bootstrap" / "SKILL.md", _history_bootstrap_skill()),
         (skills / "dst-flywheel" / "SKILL.md", _flywheel_skill()),
         (skills / "dst-warehouse-review" / "SKILL.md", _warehouse_review_skill()),
+        (skills / "dst-debug" / "SKILL.md", _debug_skill()),
     ]
 
 
@@ -642,10 +643,13 @@ def run_init(args: argparse.Namespace) -> int:
         "(schema + profile facts: row counts, enum values, null rates, ranges;\n"
         "`--json` for the parseable form, no flag for schema only) or import\n"
         "one-shot from dbt artifacts (`dst import dbt`, never re-synced).\n"
-        "Run `dst probe` after authoring and nightly (cron it): it records the\n"
+        "Run `dst probe` after authoring, then on a schedule: it records the\n"
         "warehouse's full profile in `profiles/<conn>.probe.json` - value\n"
         "dictionaries, partitions, freshness - and `dst apply` lands it in the\n"
         "serving prompt, so generation filters on real literals, not guessed ones.\n"
+        "The scheduled job is `dst probe && git add profiles/ && git commit -m\n"
+        "'probe' && dst apply`; past `probe.max_age` in dst.yaml (default 7d)\n"
+        "every answer says the profile is stale and `dst test --all` exits 4.\n"
         "Bootstrap certified answers from your BI tool's verified queries\n"
         "(the `.claude/skills/dst-certify/` skill walks it), or bootstrap the\n"
         "whole layer from 30 days of query history\n"
@@ -1099,6 +1103,109 @@ writing the regression test - `dst test` runs the certified corpus.
 """
 
 
+def _debug_skill() -> str:
+    """The scaffolded diagnosis skill: the symptom table from the troubleshooting
+    guide as a procedure a coding agent runs before changing anything — gather
+    the evidence, name the owner, act only on the owner's side."""
+    return """---
+name: dst-debug
+description: Use when dst misbehaves in a way that is not a wrong answer -
+  eval runs that cannot be found, certified answers that never match,
+  slot-lane failures, "did not type", apply timeouts, routing between
+  sibling lenses, KPIs that count test traffic. Names the owner (dst, the
+  project's files, or configuration) from evidence before anything is
+  changed. A wrong ANSWER is dst-flywheel's job.
+---
+
+# Diagnosing dst
+
+Triage before fixing. One line, written down before any edit:
+
+    <symptom> - owner: dst | files | configuration
+
+dst = the machinery misbehaved (a wrong number served as right, a fact on
+one surface and not another, a pass that checked nothing). files = the lens,
+semantic layer or eval cases do not yet use a mechanism dst has.
+configuration = a provider, URL or budget unset or pointing elsewhere. A
+refusal or a clarification is an OUTCOME, not an error; the defects worth
+chasing are the silent ones. If the owner is not dst, the deliverable is a
+file or config change, never a patch to the installed package - a pip
+upgrade reinstalls the original and nothing says so.
+
+## 1. Gather, before reading anything into it
+
+    dst --version
+    curl -s $DST_URL/ready          # embeddings, certified_matching, typed_decisions, schema
+    dst test <lens> --json > run.json   # rows carry answer_id/case_id, decisions, gold, reason
+    tail -3 of the same run's text output   # the `recorded:` line: run id + database
+    dst runs <lens>                 # what the SERVER sees
+    cat .env | grep -E '^(DATABASE_URL|DST_URL)='   # passwords stay in the terminal
+
+## 2. Match the symptom
+
+Each entry: the symptom, what to read, the owner.
+
+- `dst test` recorded a run; `dst runs` and the dashboard show none.
+  Read the `recorded:` database against the server's DATABASE_URL; a CI
+  service database dies with the job. Owner: configuration.
+- Certified answers never match; "N answers have no embedding";
+  `certification: none` on every request; routing weak. Read `/ready`:
+  `embeddings: unconfigured` -> configure a provider, then `dst reindex`.
+  Owner: configuration.
+- Slot row `expected a, b, c; got c` with `"gold": "attributed"`. The gold
+  was attributed from the SQL's columns. Stored gold comes from an EXACT,
+  typed, green `dst test --rows`; lenient passes never store it. If an
+  exact typed pass leaves the gold attributed on the next run -> dst.
+  Owner: dst, after one `--rows` run.
+- `did not type: ...` while the data lane or the untyped path answers
+  correctly. Read `decisions` on the row. One word that maps to no declared
+  metric, or a label-shaped templated question -> files. Wording fine ->
+  dst, send the decisions. Owner: files, then dst.
+- A level metric clarifies "which field to restrict by". Send the row and
+  the entity file. Owner: dst.
+- A pass with a `month-lenient` or `shape-lenient` reason. The receipt of a
+  stated rewrite; no gold stored; not a failure. Owner: nobody.
+- 504 naming DST_APPLY_STEP_TIMEOUT_S. Wide connections probe longer; raise
+  it on the server. The first open of a warehouse has its own 300 s budget.
+  Owner: configuration.
+- Wrong lens chosen among siblings; some lenses never routed to. `use_when`
+  anchors copied across siblings; without embeddings the router is the
+  decider alone. Distinct anchors plus `expect: refuse` cases per sibling.
+  Owner: files, and configuration for embeddings.
+- A lens answers a sibling's question on the direct door. Scope is a
+  routing anchor, not a column check, by design; pin with `expect: refuse`
+  cases. Owner: files.
+- Serving KPIs count the suite's own questions. The `agent` column (the
+  `X-dst-Agent` header); filter on it. Owner: nobody.
+- Business questions "fail" with a clarification. The decider refused to
+  guess; declare the alias or definition. Owner: files.
+- Result rows missing from the ledger. `logging.log_samples: true` on the
+  lens. Owner: configuration.
+- Probe refuses a table over the sampling budget. `sample_bytes_budget`
+  under the connection's `config`. Owner: configuration.
+
+The full page: docs/guides/troubleshooting.md on the docs site.
+
+## 3. Act on the owner's side only
+
+- configuration: change the setting, re-run step 1, confirm the symptom is gone.
+- files: edit the lens/semantic/eval file, `dst plan`, `dst apply`, `dst test`.
+- dst: do not work around it in the files in a way that hides it (a certified
+  answer that papers over a wrong figure is fine - it serves the truth
+  verbatim and says so; deleting the failing case is not). Report with:
+  `dst --version`, `/ready`, the `recorded:` line, the failing JSON row
+  (`answer_id`/`case_id`, `decisions`, `gold`, `reason`, `certified`,
+  `generated`), the request id for a served answer, and your triage line.
+
+## 4. What not to do
+
+- Never patch files under site-packages or the venv.
+- Never delete or demote a failing case to make a run green; park it as
+  `status: candidate` with a note only when the CASE is wrong.
+- Never read a clarification count as an error rate; split the number first.
+"""
+
+
 def _flywheel_skill() -> str:
     """The scaffolded improvement-loop skill: measure with repeats, correct
     through the review API with an explicit target, gate the draft, re-measure
@@ -1468,6 +1575,10 @@ never author in a UI.
   definitions/instructions/context prose (decide, don't describe).
 - `.claude/skills/dst-flywheel/` - wrong answer -> diagnose -> correct ->
   gate the patch -> re-measure -> certify; the incident loop.
+- `.claude/skills/dst-debug/` - a symptom that is not a wrong answer (runs
+  that cannot be found, certified answers that never match, slot-lane
+  failures, timeouts, routing between siblings): name the owner - dst, your
+  files or configuration - from the evidence before changing anything.
 - `.claude/skills/dst-warehouse-review/` - review a warehouse for
   answerability BEFORE building lenses: 12 shape checks over introspect/
   probe output, each with a rail / definition / remodel remedy.

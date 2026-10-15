@@ -327,6 +327,26 @@ def exposed_tables(sql: str | None, model: SemanticModel) -> list[str]:
     return sorted(out)
 
 
+def entities_read(sql: str | None, model: SemanticModel) -> list[Entity]:
+    """The entities the SQL reads, in source order, by the guard's own
+    resolution (a reference denotes a table when it omits no more than the
+    source's leading qualifiers, or names the entity); unparseable SQL reads
+    nothing."""
+    if not sql or not sql.strip():
+        return []
+    try:
+        stmt = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001 — a read of the SQL never raises
+        return []
+    cte_names = {c.alias_or_name.lower() for c in stmt.find_all(exp.CTE)}
+    out: list[Entity] = []
+    for written in _physical_refs(stmt, cte_names):
+        for e in _owners(written, model):
+            if all(e.name != o.name for o in out):
+                out.append(e)
+    return out
+
+
 def _lens_names(model: SemanticModel) -> set[str]:
     """Every identifier the lens owns — exactly what `serialize_model` shows the
     generator and so exactly what it can copy back at us, bare."""

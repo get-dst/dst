@@ -33,6 +33,36 @@ Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.m
 
 No schema change.
 
+### Added
+
+- **Troubleshooting guide and a `dst-debug` skill.** `docs/guides/troubleshooting.md`
+  names the failure modes seen against real warehouses (runs that cannot be found,
+  certified answers that never match, slot-lane gold, `did not type`, apply timeouts,
+  routing between sibling lenses, test traffic in the KPIs) with the evidence to read and
+  the owner of each: dst, the project's files, or configuration. The scaffold ships the
+  same table as a seventh skill, `.claude/skills/dst-debug/`; `dst init --skills-only`
+  adds it to an existing project.
+- **`dst runs --all [--last N]`.** Every lens on the server with its last N recorded runs
+  (default 5), as a table or `--json` (`{"runs": [{"lens", "runs": [...]}]}`); a lens with
+  no history is listed as such. `--diff` still takes one lens.
+- **Stable ids on `dst test --json` rows.** Data-lane and slot-lane rows carry `answer_id`
+  (the certified answer's id, what `eval_result.case_id` holds as `certified:<id>`), and
+  behavioral rows carry `case_id`, so a report joins history on the id instead of the
+  question text, which a rewording breaks.
+
+### Fixed
+
+- **`eval_result.actual_value` was never written.** A certified case now stores the
+  generated value there, and `checks` carries both `certified` and `generated` as the
+  JSON output renders them, so a copy of the eval tables holds the numbers, not only
+  verdicts and SQL.
+- **Month-grain rows compared on their day label.** A trend certified on month-end dates
+  against a generation that labels each bucket by its first day carried identical values
+  and graded as every row missing and extra. When every date column on both sides names
+  the same months, the rows match within the usual tolerance, and no row folds into
+  another, the case passes with a `month-lenient:` reason; such a pass is never stored as
+  typed gold.
+
 ### Changed
 
 - **`dst test` says where the run went.** The sweep ends with a `recorded:` line per lens
@@ -42,6 +72,40 @@ No schema change.
   different databases the run existed and nothing in the output said where. The empty
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
+
+## [0.9.0] — 2026-10-15
+
+No schema change. New `dst.yaml` keys: `probe.max_age`, `probe.recent_partitions`.
+
+### Added
+
+- **Profile age on every rail.** `dst.yaml` gains `probe.max_age` (default `7d`, `0` disables).
+  Past it an answer carries `PROFILE: last probed N days ago (max M) — run dst probe` in
+  `degraded`, the freshness and date-coverage checks skip instead of failing on a stamp that
+  only dates the last probe, the value guard consults no dictionary, `dst observe` and
+  `/ready` report the oldest profile age and the stale connections, `dst plan` and
+  `dst apply` warn when the pushed artifact is older than the limit, and `dst test` skips
+  the lens and exits 4. The section is stored per org on apply.
+- **Recent-window sampling.** `probe.recent_partitions` (default 7, `0` reads whole tables)
+  narrows the sampling pass to the latest N partitions of a time-partitioned table or the
+  last N days of the entity's `default_time_field`, anchored on the data's newest value; the
+  catalog pass and the whole-table freshness and date-span probes are unchanged. The
+  artifact records the slice per table (`sample_window`), windowed facts are labelled
+  partial, the first probe of a connection reads whole tables, and a dictionary an earlier
+  probe proved complete is kept through a windowed refresh as the dated union
+  (`values_complete_at`).
+- **A question that names a table the answer does not read now clarifies.** On the
+  generation path, a named entity, source table or exposed table, in the lens or in another
+  the caller may use, that the served SQL does not read returns a `clarification` of kind
+  `named_table` naming both tables, and the lens that holds the named one, instead of a
+  figure read from a different table.
+
+### Changed
+
+- **Warehouse error suggestions name only tables and columns in the lens's scope.** On
+  `query` and the `sql` door's lens scope, an engine's "Did you mean …" is rewritten to the
+  closest in-scope name or removed; the rest of the error and the admin connection scope are
+  unchanged.
 
 ## [0.8.1] — 2026-10-15
 

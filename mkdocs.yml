@@ -63,6 +63,7 @@ nav:
       - The correction loop: guides/correction-loop.md
       - Evaluation: guides/evaluation.md
       - Environments and CI: guides/environments-and-ci.md
+      - Troubleshooting: guides/troubleshooting.md
   - Deploying: deployment.md
   - Security and data flow: security.md
   - Privacy: privacy.md

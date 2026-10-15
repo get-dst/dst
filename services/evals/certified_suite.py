@@ -28,8 +28,11 @@ with ``assembly.eval_harness(bundle, org_id, llm)``.
 
 from __future__ import annotations
 
+import calendar
+import datetime as _dt
 import json
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -197,6 +200,92 @@ def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) 
     return not remaining
 
 
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")
+
+
+def _day_of(cell: Any) -> _dt.date | None:
+    """The calendar day of a date, a datetime or an ISO day string; None otherwise."""
+    if isinstance(cell, _dt.datetime):
+        return cell.date()
+    if isinstance(cell, _dt.date):
+        return cell
+    if isinstance(cell, str) and _ISO_DAY.match(cell):
+        return _dt.date(int(cell[:4]), int(cell[5:7]), int(cell[8:10]))
+    return None
+
+
+def _month_of(cell: Any) -> tuple[int, int] | None:
+    """(year, month) for a date-like cell; None otherwise."""
+    day = _day_of(cell)
+    return (day.year, day.month) if day else None
+
+
+def _month_label(cell: Any) -> str | None:
+    """ "start" for the first day of a month, "end" for its last, None for any
+    other day: the two ways SQL labels a month bucket (DATE_TRUNC / LAST_DAY).
+    A date that is neither is a day, and days are compared as days."""
+    day = _day_of(cell)
+    if day is None:
+        return None
+    if day.day == 1:
+        return "start"
+    if day.day == calendar.monthrange(day.year, day.month)[1]:
+        return "end"
+    return None
+
+
+def _month_lenient(oracle_rows: list[list[Any]], gen_rows: list[list[Any]]) -> str | None:
+    """Same months, different day labels. A month-grain trend certified on
+    month-end dates against a generation that labels each bucket by its first
+    day (DATE_TRUNC) carries identical values under labels that differ only in
+    the day, and an exact set diff reads it as every row missing and every row
+    extra. Every column that is a date on both sides is read as (year, month);
+    the rows must then match (exactly, or within the float tolerance), the same
+    number on both sides, and no row may fold into another by the rewrite —
+    two certified rows in one month are two facts, not one. A lenient pass
+    carries its reason, never a silent green. None when the rule does not apply."""
+    if not oracle_rows or not gen_rows or len(oracle_rows) != len(gen_rows):
+        return None
+    width = len(oracle_rows[0])
+    if any(len(r) != width for r in oracle_rows + gen_rows):
+        return None
+    date_cols = [
+        i for i in range(width) if all(_month_of(r[i]) is not None for r in oracle_rows + gen_rows)
+    ]
+    if not date_cols:
+        return None
+    # Only the two canonical month labels qualify, one per side: every certified
+    # date a month end and every generated one a month start, or the reverse.
+    # Two arbitrary days in one month are two days, and stay a failure.
+    for i in date_cols:
+        o_labels = {_month_label(r[i]) for r in oracle_rows}
+        g_labels = {_month_label(r[i]) for r in gen_rows}
+        if len(o_labels) != 1 or len(g_labels) != 1 or None in o_labels | g_labels:
+            return None
+        if o_labels == g_labels:
+            return None
+
+    def bucketed(rows: list[list[Any]]) -> set[tuple[Any, ...]]:
+        return {
+            _key([_month_of(v) if i in date_cols else v for i, v in enumerate(r)]) for r in rows
+        }
+
+    want, got = bucketed(oracle_rows), bucketed(gen_rows)
+    if len(want) != len(oracle_rows) or len(got) != len(gen_rows):
+        return None
+    if want != got and not (
+        len(want - got) == len(got - want) and _tolerant_rows_match(want - got, got - want)
+    ):
+        return None
+    o_day, g_day = oracle_rows[0][date_cols[0]], gen_rows[0][date_cols[0]]
+    if _key([o_day]) == _key([g_day]):
+        return None  # same labels: the diff came from elsewhere, say nothing here
+    return (
+        f"month-lenient: generated rows label each month by {g_day!s} where certified "
+        f"uses {o_day!s}; the values match month for month"
+    )
+
+
 def gold_worthy(exact: bool, got: Resolution) -> bool:
     """May this run's typed reading be stored as the certified answer's gold?
     Only after an EXACT pass: a shape-lenient one (the certified value found
@@ -300,6 +389,8 @@ def _compare(
                 f"shape-lenient: certified count {scalar} matched by generated "
                 "row cardinality (row-shaped result)"
             )
+        if monthly := _month_lenient(oracle_rows, gen_rows):
+            return True, monthly
         story = _shape_story(oracle_cols, oracle_rows, gen_cols, gen_rows)
         return False, story or f"{missing} missing / {extra} extra row(s) vs certified"
     return True, None
@@ -507,6 +598,7 @@ def _score_one(
                 model_name=model_name,
                 data_as_of=assembled.data_as_of,
                 entity_coverage=assembled.entity_coverage,
+                profile_age=assembled.profile_age,
             )
         except ProviderError as exc:
             # A dropped provider call fails this attempt, retried like any

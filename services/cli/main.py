@@ -510,6 +510,42 @@ def _runs(args: argparse.Namespace) -> int:
             raise SystemExit(1)
         return r.json()
 
+    if args.all or not args.lens:
+        # Every lens in one call — the cross-lens report that otherwise reads
+        # eval_run by hand. Per lens, so a lens with no history shows as such.
+        if args.diff:
+            print("error: --diff compares two runs of ONE lens — name it", file=sys.stderr)
+            return 1
+        if not args.all:
+            print("error: name a lens, or --all for every lens", file=sys.stderr)
+            return 1
+        names = [lens["name"] for lens in get(url, headers, "/mgmt/lenses")]
+        by_lens = {
+            n: get(url, headers, f"/mgmt/lenses/{n}/evals/runs")[: max(args.last, 0)] for n in names
+        }
+        if args.as_json:
+            print(json.dumps({"runs": [{"lens": n, "runs": rs} for n, rs in by_lens.items()]}))
+            return 0
+        if not names:
+            print(f"no lenses on {url}")
+            return 0
+        print(
+            f"{'LENS':<28} {'ID':<10} {'MODE':<12} {'SCORE':>6} {'PASS':>5} {'FAIL':>5} "
+            f"{'ERR':>4}  STARTED"
+        )
+        for n, rs in by_lens.items():
+            if not rs:
+                print(f"{n:<28} {style.dim('no recorded runs')}")
+                continue
+            for r in rs:
+                score = "—" if r["score"] is None else f"{float(r['score']):.0%}"
+                print(
+                    f"{n:<28} {str(r['id'])[:8]:<10} {r['mode']:<12} {score:>6}"
+                    f" {r['passed']:>5} {r['failed']:>5} {r['errored']:>4}"
+                    f"  {str(r['started_at'])[:19]}"
+                )
+        return 0
+
     runs = get(url, headers, f"/mgmt/lenses/{args.lens}/evals/runs")
     if not args.diff:
         if args.as_json:
@@ -1548,14 +1584,21 @@ def _probe(args: argparse.Namespace) -> int:
     _sampling.logger.setLevel(_logging.INFO)
     _sampling.logger.addHandler(mirror)
     try:
-        return _probe_connections(args, root, wanted, entities)
+        return _probe_connections(
+            args, root, wanted, entities, recent_partitions=project.probe.recent_partitions
+        )
     finally:
         _sampling.logger.removeHandler(mirror)
         _sampling.logger.setLevel(prior_level)
 
 
 def _probe_connections(
-    args: argparse.Namespace, root: Path, wanted: list[str], entities: list[Any]
+    args: argparse.Namespace,
+    root: Path,
+    wanted: list[str],
+    entities: list[Any],
+    *,
+    recent_partitions: int = 0,
 ) -> int:
     from services.lenses.connections import build_connector
     from services.lenses.profiler import sample_profiles
@@ -1566,6 +1609,11 @@ def _probe_connections(
     worst = 0
     for name in wanted:
         type_, config, secret = _declared_connection(args, name)
+        # The artifact this run refreshes, read BEFORE the checkpoint below
+        # overwrites it: a windowed read keeps the dictionaries it proved
+        # complete, and the very first probe (no artifact yet) reads whole
+        # tables so there is something complete to keep.
+        prior = probe_artifact.read_probe(root, name)
         try:
             connector = build_connector(type_, config, secret)
             # The semantic layer's tables are guaranteed into the catalog pass
@@ -1599,10 +1647,20 @@ def _probe_connections(
                 if e.source.connection == name and e.source.table
                 for d in e.dimensions
             )
-            merged = sample_profiles(
-                connector, [p for p in profiles if p.table in scope], matchable=matchable
+            windows = (
+                probe_artifact.sample_windows(profiles, entities, name, recent_partitions)
+                if prior is not None
+                else {}
             )
-            profiles = [merged.get(p.table, p) for p in profiles]
+            merged = sample_profiles(
+                connector,
+                [p for p in profiles if p.table in scope],
+                matchable=matchable,
+                windows=windows,
+            )
+            profiles = probe_artifact.carry_complete_dictionaries(
+                [merged.get(p.table, p) for p in profiles], prior
+            )
         except Exception as exc:  # noqa: BLE001 — one dead warehouse must not stop the rest
             first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
             print(f"error: connection '{name}' did not probe ({first})", file=sys.stderr)
@@ -1638,11 +1696,16 @@ def _probe_connections(
             1 for p in artifact.tables for c in p.columns if c.top_values and not c.values_complete
         )
         partitioned = sum(1 for p in artifact.tables if p.partitioning is not None)
+        windowed = sum(
+            1 for p in artifact.tables if p.sample_window and p.sample_window.kind != "none"
+        )
         bits = [f"{complete} complete value dictionaries"]
         if partial:
             bits.append(f"{partial} partial")
         if partitioned:
             bits.append(f"{partitioned} partitioned table(s)")
+        if windowed:
+            bits.append(f"{windowed} sampled over the last {recent_partitions} partitions/days")
         rel = out.relative_to(root) if out.is_relative_to(root) else out
         print(f"probed '{name}': {len(artifact.tables)} table(s) -> {rel} ({', '.join(bits)})")
     if worst == 0:
@@ -2460,7 +2523,25 @@ def _project_files(args: argparse.Namespace, verb: str) -> dict[str, str]:
             f"in this {verb}; connections and providers are NOT part of it",
             file=sys.stderr,
         )
+    for note in _probe_age_notes(files):
+        print(f"warning: {note}", file=sys.stderr)
     return files
+
+
+def _probe_age_notes(files: dict[str, str]) -> list[str]:
+    """The push's probe artifacts past the project's ``probe.max_age`` — said on
+    plan and apply both, since serving will say it on every answer. A dst.yaml
+    that does not parse is the server's error to report, not this note's."""
+    from services.project.probe import probe_age_warnings
+    from services.project.schema import parse_project_yaml
+
+    if "dst.yaml" not in files:
+        return []
+    try:
+        project = parse_project_yaml(files["dst.yaml"])
+    except ValueError:
+        return []
+    return probe_age_warnings(files, project.probe.max_age_delta)
 
 
 def _warehouse_probe(args: argparse.Namespace, connection: str) -> dict[str, object]:
@@ -3619,6 +3700,23 @@ def _revoke_token(args: argparse.Namespace) -> int:
     return 1
 
 
+def _lens_profile_age(session: Any, bundle: Any) -> Any:
+    """The age of the lens's scope's newest profile against the org's
+    ``probe.max_age`` (services/lenses/profile_age.py)."""
+    from services.lenses import profile_store
+    from services.lenses.profile_age import profile_age
+    from services.project import probe_settings
+
+    connections = list(bundle.config.connections)
+    profiles = (
+        [s.profile for s in profile_store.list_profiles(session, connections[0])]
+        if connections
+        else []
+    )
+    tables = {e.source.table for e in bundle.semantic_model.entities}
+    return profile_age(profiles, probe_settings.load(session).max_age_delta, tables=tables)
+
+
 def _test_scope(args: argparse.Namespace) -> list[tuple[uuid.UUID, str]] | None:
     """Which orgs `dst test` sweeps — THIS project's, not every tenant in the
     database. None (after printing why) when the scope resolves to nothing.
@@ -3874,6 +3972,7 @@ def _test(args: argparse.Namespace) -> int:
         if not emit_json:
             print(text)
 
+    stale_lenses: list[str] = []  # labels whose profiles are past probe.max_age
     for oid, org_name in orgs:
         labeled: list[tuple[str, str]] = []
         bundles_by_lens: dict[str, object] = {}
@@ -3887,6 +3986,20 @@ def _test(args: argparse.Namespace) -> int:
                 # "PASS  tox: …" from a sweep that hit four identically-named
                 # lenses says nothing about whose corpus just went green.
                 label = f"{org_name}/{name}"
+                # A suite run against stale profiles verifies against facts
+                # the warehouse may have moved past: the value guard and the
+                # freshness checks abstain there, so the run could not have
+                # failed the way it is meant to. Not green — said, counted,
+                # exit 4 below.
+                if (age := _lens_profile_age(session, bundle)).stale:
+                    say(
+                        style.warn("SKIP")
+                        + f"  {label}: profiles last probed {age.age_days:g} days ago "
+                        f"(max {age.max_age_days:g}) — run `dst probe`, commit, apply, "
+                        "then test"
+                    )
+                    stale_lenses.append(label)
+                    continue
                 answers = [
                     a
                     for a in certify_store.list_for_lens(session, name)
@@ -4020,6 +4133,7 @@ def _test(args: argparse.Namespace) -> int:
                                 "org": org_name,
                                 "lens": name,
                                 "lane": "slots",
+                                "answer_id": slot_case.answer_id,
                                 "question": slot_case.question,
                                 "verdict": "pass" if ok else "fail",
                                 "typed": slot_case.typed,
@@ -4115,6 +4229,10 @@ def _test(args: argparse.Namespace) -> int:
                             {
                                 "org": org_name,
                                 "lens": name,
+                                # The certified answer's id: stable across a
+                                # rewording, and what eval_result.case_id carries
+                                # (`certified:<id>`), so a report joins on it.
+                                "answer_id": r.answer_id,
                                 "question": r.question,
                                 "verdict": "pass" if r.passed else "fail",
                                 "certified": format_result(r.oracle_result),
@@ -4217,6 +4335,7 @@ def _test(args: argparse.Namespace) -> int:
                             {
                                 "org": org_name,
                                 "lens": name,
+                                "case_id": case.id,
                                 "question": case.question,
                                 "expect": case.expect,
                                 "verdict": "pass" if res.passed else "fail",
@@ -4261,13 +4380,21 @@ def _test(args: argparse.Namespace) -> int:
                                 # The stage tag rides the eval history (SA.1):
                                 # a decomposition of the TREND is where it earns
                                 # its keep. Resolution rides even on a pass.
-                                checks=(
-                                    {"wrong_at": cr.wrong_at, "stages": cr.stages}
-                                    if cr.stages
-                                    else {}
-                                ),
+                                checks={
+                                    **(
+                                        {"wrong_at": cr.wrong_at, "stages": cr.stages}
+                                        if cr.stages
+                                        else {}
+                                    ),
+                                    # Both executed values ride the row: a copy of
+                                    # eval_result elsewhere holds the numbers, not
+                                    # only the verdict and the SQL.
+                                    "certified": format_result(cr.oracle_result),
+                                    "generated": format_result(cr.generated_result),
+                                },
                                 reason=cr.reason,
                                 actual_sql=cr.generated_sql,
+                                actual_value=format_result(cr.generated_result),
                             )
                         )
                 if behavioral and not slots_only:
@@ -4431,6 +4558,16 @@ def _test(args: argparse.Namespace) -> int:
             )
     if failed:
         return 1
+    if stale_lenses:
+        # Same outcome as an empty suite: nothing those lenses hold was
+        # verified, and a green exit would launder a probe job that stopped.
+        print(
+            f"warning: nothing was verified for {', '.join(stale_lenses)} — their profiles "
+            "are older than probe.max_age, so the value and freshness guards could not "
+            "stand behind a pass. Run `dst probe`, commit profiles/, apply, then test.",
+            file=sys.stderr,
+        )
+        return 4
     if total == 0:
         # `0/0 passed` with exit 0 is indistinguishable from `10/10 passed` to a
         # script, to CI, or to anyone skimming output — a suite that verifies
@@ -4590,6 +4727,14 @@ def _observe(args: argparse.Namespace) -> int:
             order = ("certified", "declared", "mixed", "inferred", "unknown")
             split = " · ".join(f"{hist.get(k, 0)} {k}" for k in order if hist.get(k))
             print(f"{style.accent('basis:')} {split}")
+        if isinstance(profiles := kpis.get("profiles"), dict):
+            # How old the facts behind every answer are: a probe job that
+            # stopped shows here before it shows as a wrong answer.
+            from services.lenses.profile_age import headline as profile_headline
+
+            line = profile_headline(profiles)
+            if line is not None:
+                print(style.warn(line) if profiles.get("stale_connections") else line)
         print()
     if not callers:
         # Distinguish "nobody has used it" from "the surface is broken" — the same
@@ -5718,7 +5863,19 @@ def main() -> int:
         "flips; exit 1 when B regresses A (score drop beyond the publish "
         "gate's epsilon, or any case newly failing)",
     )
-    p.add_argument("lens", help="lens whose runs to read")
+    p.add_argument("lens", nargs="?", help="lens whose runs to read (or --all)")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="every lens on the server: each one's recorded runs, newest first",
+    )
+    p.add_argument(
+        "--last",
+        type=int,
+        default=5,
+        metavar="N",
+        help="with --all: runs per lens (default 5)",
+    )
     p.add_argument(
         "--diff",
         nargs=2,

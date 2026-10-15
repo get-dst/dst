@@ -44,7 +44,7 @@ from services.evals import store as eval_store
 from services.lenses import connection_store, store
 from services.lenses.repo import render_lens_repo
 from services.project import apply as apply_engine
-from services.project import demo_page
+from services.project import demo_page, probe_settings
 from services.project import plan as plan_engine
 from services.project.compile import (
     relationship_pairs,
@@ -655,6 +655,17 @@ def _apply(
         if demo_applied:
             out.append(
                 {"scope": "demo", "applied": demo_applied, "warnings": demo_warnings, "errors": []}
+            )
+        # The probe settings serving reads (profile age against max_age).
+        probe_applied, probe_warnings = probe_settings.apply(session, project.probe)
+        if probe_applied:
+            out.append(
+                {
+                    "scope": "probe",
+                    "applied": probe_applied,
+                    "warnings": probe_warnings,
+                    "errors": [],
+                }
             )
     # Probe artifacts land after connections (the same push may declare theirs)
     # and before lenses (whose missing-table check reads the store these fill).

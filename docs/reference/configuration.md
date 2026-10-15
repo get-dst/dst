@@ -219,6 +219,27 @@ stores it per org, and a pushed `dst.yaml` without the section clears it. Only a
 deployment whose `DST_DEMO_ORG_ID` is the org being applied shows it; anywhere else
 apply says so in a warning.
 
+### Probe (`probe`)
+
+`dst probe` writes `profiles/<connection>.probe.json`, the warehouse's measured
+profile: row counts, partitions, freshness stamps, value dictionaries, date spans.
+`dst apply` lands it in the store serving reads. The user owns the probe clock (a
+scheduled job, a deploy step); this section is how dst notices when it stops.
+
+| Key | What |
+|---|---|
+| `max_age` | how old the newest profile in scope may be before every surface says so. A duration: `7d` (the default), `48h`, `30m`; `0` turns the age rails off. Past it, an answer carries `PROFILE: last probed N days ago (max M) — run dst probe` in `degraded`, the freshness and date-coverage checks skip instead of failing on a stamp that only dates the last probe, the value guard consults no dictionary (a stale one cannot prove a new value absent), `dst observe` and `/ready` carry the oldest age and the stale connections, `dst plan` and `dst apply` warn when the pushed artifact is older than this, and `dst test --all` skips the lens and exits 4 |
+| `recent_partitions` | how much of each table the sampling pass reads on a refresh: the latest `n` partitions of a time-partitioned table, or the last `n` days of the entity's `default_time_field` for an unpartitioned one. Default 7; `0` reads whole tables. The catalog pass (every table, row counts, whole-table freshness and date span) is never narrowed. The very first probe of a connection reads whole tables, so the dictionaries it proves complete are kept through every windowed refresh as the dated union; the artifact records the slice per table under `sample_window` |
+
+```yaml
+probe:
+  max_age: 7d
+  recent_partitions: 7
+```
+
+Apply stores the section per org, so a server reads the limit the project declared,
+and a pushed `dst.yaml` without the section stores the defaults.
+
 ## Entity rails (`semantic/entities/<name>.yaml`)
 
 The deterministic behaviour levers on an entity, enforced by the compiler and the

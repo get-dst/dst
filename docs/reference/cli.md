@@ -493,9 +493,10 @@ Each case prints as a ledger row (`PASS`/`FAIL`, `org/lens: question`, the diver
 when there is one, and the case's wall-clock), then a rule, the `N/M passed`
 summary, and a `recorded:` line per lens naming the run id and the database it was
 written to (`DATABASE_URL`, password hidden). `--json` emits the same rows structurally
-(org, lens, question, verdict, certified/generated result, reason, `elapsed_s`) plus the
-summary, `recorded` (org, lens, `run_id`) and `database`, for CI that wants the table
-rather than the exit code alone.
+(org, lens, question, verdict, certified/generated result, reason, `elapsed_s`, and a
+stable id: `answer_id` on certified and slot-lane rows, `case_id` on behavioral ones)
+plus the summary, `recorded` (org, lens, `run_id`) and `database`, for CI that wants the
+table rather than the exit code alone.
 
 [![dst test with nothing certified: 0/0 passed, exit 4, and the warning that this run could not have failed](../assets/term/test.svg)](../assets/term/test.svg)
 
@@ -529,6 +530,10 @@ while `dst test` writes in-process to `DATABASE_URL`: a run recorded against a
 database this server does not serve is not in this list, and the empty-list
 message says so. The `recorded:` line `dst test` prints names the database to
 compare against.
+
+`dst runs --all [--last N]` lists every lens on the server with its last N runs
+(default 5); a lens with no history is listed as such. `--json` gives
+`{"runs": [{"lens", "runs": [...]}]}`, one entry per lens.
 
 `dst runs <lens> --diff A B` compares two runs: score delta plus the per-case
 flips — newly failing (with the failure reason), newly passing, still failing,

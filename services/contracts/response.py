@@ -77,7 +77,14 @@ class ClarificationRequest(BaseModel):
     # names it (a column, 'window', 'metric'), `options` are the candidates or
     # the value grammar; re-ask with `bindings` (the caller supplies the value)
     # or with the candidate spelled out.
-    kind: Literal["ambiguous_term", "unknown_value", "unresolved_slot"] = "ambiguous_term"
+    # ``named_table``: the question names a table in scope (a declared entity,
+    # its source table, an exposed table — this lens's or another the caller may
+    # use) that the generated SQL does not read — `term` names the table as the
+    # question wrote it, `options` the tables the SQL read followed by the one
+    # named; re-ask naming the table you mean.
+    kind: Literal["ambiguous_term", "unknown_value", "unresolved_slot", "named_table"] = (
+        "ambiguous_term"
+    )
 
 
 class Receipt(BaseModel):

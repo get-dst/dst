@@ -27,6 +27,7 @@ from services.contracts.verification import (
     VerificationReport,
 )
 from services.contracts.warehouse import QueryResult
+from services.lenses.profile_age import STALE_REASON
 from services.lenses.profile_enrich import EntityCoverage
 from services.runtime import adversary, faithfulness, sql_canon
 from services.runtime.answer import grounding_notes
@@ -696,6 +697,8 @@ def date_coverage_check(
     sql: str,
     model: SemanticModel,
     coverage: Mapping[str, EntityCoverage] | None,
+    *,
+    profile_stale: bool = False,
 ) -> VerificationCheck:
     """The asked period vs the tables' MEASURED date span — `freshness_check`'s
     sibling on the same declared-clock rail. A question about a period the
@@ -706,7 +709,11 @@ def date_coverage_check(
     a time column the SQL actually filters on, and the "data begins" direction
     additionally requires the measured column to be the entity's own declared
     time field (a load stamp's MIN says when loading started, not where history
-    does). Anything unmeasurable or ambiguous is a skip with its reason."""
+    does). Anything unmeasurable or ambiguous is a skip with its reason — a
+    profile past ``probe.max_age`` included: its span may end where the
+    loading has long since moved on."""
+    if coverage and profile_stale:
+        return VerificationCheck(name="date_coverage", status="skip", reason=STALE_REASON)
     if not coverage:
         return VerificationCheck(
             name="date_coverage",
@@ -760,16 +767,21 @@ def date_coverage_check(
     return VerificationCheck(name="date_coverage", status="pass")
 
 
-def freshness_check(data_as_of: str | None, model: SemanticModel) -> VerificationCheck:
+def freshness_check(
+    data_as_of: str | None, model: SemanticModel, *, profile_stale: bool = False
+) -> VerificationCheck:
     """The declared freshness contract vs the MEASURED scope freshness — a plain
     date comparison, deterministic by construction: false positives are
     forbidden, so anything unmeasurable is a skip with its reason, never a fail
-    and never a vacuous pass."""
+    and never a vacuous pass. A measurement older than ``probe.max_age`` is
+    unmeasurable too: it dates the warehouse to the last probe, not to now."""
     days = model.stale_after_days
     if not days:
         return VerificationCheck(
             name="freshness", status="skip", reason="lens declares no stale_after_days"
         )
+    if data_as_of and profile_stale:
+        return VerificationCheck(name="freshness", status="skip", reason=STALE_REASON)
     if not data_as_of:
         return VerificationCheck(
             name="freshness",
@@ -823,6 +835,7 @@ def build_report(
     investigation: Literal["confirmed", "unresolved"] | None = None,
     data_as_of: str | None = None,
     entity_coverage: Mapping[str, EntityCoverage] | None = None,
+    profile_stale: bool = False,
 ) -> VerificationReport:
     numeric_status: CheckStatus
     if composed:
@@ -886,8 +899,10 @@ def build_report(
         _ratio_population(sql, semantic_model.dialect),
         _population_declared(sql, semantic_model),
         _aggregation_scope(sql, semantic_model),
-        freshness_check(data_as_of, semantic_model),
-        date_coverage_check(question, sql, semantic_model, entity_coverage),
+        freshness_check(data_as_of, semantic_model, profile_stale=profile_stale),
+        date_coverage_check(
+            question, sql, semantic_model, entity_coverage, profile_stale=profile_stale
+        ),
         VerificationCheck(
             name="has_rows",
             status="pass" if has_rows else "fail",

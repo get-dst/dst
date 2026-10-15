@@ -11,6 +11,8 @@ secret_env; inline secrets are a parse error, not a lint warning.
 
 from __future__ import annotations
 
+import re
+from datetime import timedelta
 from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -116,6 +118,56 @@ class DemoConfig(Authored):
         return v
 
 
+_DURATION = re.compile(r"^(\d+)([dhm])?$")
+_UNIT_SECONDS = {"d": 86_400, "h": 3_600, "m": 60}
+
+
+def parse_duration(text: str) -> timedelta:
+    """``7d`` / ``48h`` / ``30m`` / ``0`` → timedelta. Strict: a bare number other
+    than zero needs a unit, so ``max_age: 7`` cannot silently mean seven of
+    anything."""
+    match = _DURATION.match(str(text).strip())
+    if match is None:
+        raise ValueError(f"not a duration: {text!r} (use <n>d, <n>h, <n>m, or 0)")
+    n, unit = int(match.group(1)), match.group(2)
+    if unit is None and n != 0:
+        raise ValueError(f"duration {text!r} needs a unit: {n}d, {n}h or {n}m")
+    return timedelta(seconds=n * _UNIT_SECONDS.get(unit or "d", 86_400))
+
+
+class ProbeConfig(Authored):
+    """How `dst probe` samples and how old its artifact may get before serving
+    says so. The user owns the probe clock (a scheduled job, a deploy step);
+    these two knobs are how dst notices."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_age: str = Field(
+        default="7d",
+        description="how old the newest profile may be before every surface says so "
+        "(`7d`, `48h`; `0` turns the age rails off)",
+    )
+    recent_partitions: int = Field(
+        default=7,
+        ge=0,
+        description="how many latest partitions (or days of the entity's default_time_field) "
+        "the sampling pass reads on a refresh; 0 reads whole tables",
+    )
+
+    @field_validator("max_age", mode="before")
+    @classmethod
+    def _valid_duration(cls, v: object) -> str:
+        text = str(v).strip()  # YAML reads a bare `0` as an int
+        parse_duration(text)
+        return text
+
+    @property
+    def max_age_delta(self) -> timedelta | None:
+        """The age limit, or None when the rails are off (``max_age: 0``)."""
+        delta = parse_duration(self.max_age)
+        return delta if delta else None
+
+
 class ProjectConfig(Authored):
     model_config = ConfigDict(extra="forbid")
 
@@ -125,6 +177,7 @@ class ProjectConfig(Authored):
     ai_pricing: dict[str, tuple[float, float]] = Field(default_factory=dict)
     connections: dict[str, ConnectionDecl] = Field(default_factory=dict)
     demo: DemoConfig | None = None
+    probe: ProbeConfig = Field(default_factory=ProbeConfig)
 
     @field_validator("providers")
     @classmethod

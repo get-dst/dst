@@ -497,6 +497,27 @@ def exposed_tables_named(
     return sorted(set(hits))
 
 
+def tables_held_elsewhere(caller: CallerIdentity, *, exclude: str) -> dict[str, str]:
+    """name -> lens, for every entity name and source table the OTHER lenses this
+    caller may use declare or expose (*exclude* left out). What a generated
+    answer is checked against when the question names a table this lens does
+    not read: the clarification can then say which lens holds it. A failed
+    lookup just drops the hint."""
+    try:
+        bundles = list_published_for_org(caller.org_id)
+    except Exception:
+        log.exception("held-table lookup failed")
+        return {}
+    out: dict[str, str] = {}
+    for lens_name, _display, _desc, bundle in bundles:
+        if lens_name == exclude or not authorize(caller, bundle.config)[0]:
+            continue
+        for entity in bundle.semantic_model.entities:
+            for name in (entity.name, entity.source.table):
+                out.setdefault(name, lens_name)
+    return out
+
+
 def exposed_hint(hits: list[tuple[str, str]]) -> str:
     """The sentence a miss ends with when an exposed table was named."""
     return "; ".join(
@@ -740,6 +761,7 @@ def run_lens_query(
             semantic_model=assembled.model,
             value_domains=assembled.value_domains,
             entity_coverage=assembled.entity_coverage,
+            profile_age=assembled.profile_age,
             decisions=assembled.decisions,
             connector=connector,
             generator=generator,
@@ -774,6 +796,7 @@ def run_lens_query(
             data_as_of=assembled.data_as_of,
             serve_ungoverned_shapes=bundle.config.serve_ungoverned_shapes,
             metric_carriers=lambda metric: _lenses_carrying(caller.org_id, name, metric),
+            tables_elsewhere=lambda: tables_held_elsewhere(caller, exclude=name),
             # Which prompt this answer was written against (`dst lens prompt`
             # prints the same tier's prompt for a question).
             generator_tier=assembly.generator_tier(assembled),
@@ -942,7 +965,7 @@ def run_lens_metrics(
         model_name = resolved.name
         composer = AnswerComposer(resolved.llm, model=model_name)
 
-    profiles, as_of = assembly.profile_facts(bundle, caller.org_id)
+    profiles, as_of, age = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     audience = _audience(caller)
     with attributed(
@@ -973,6 +996,7 @@ def run_lens_metrics(
             certification="none",
             data_as_of=as_of,
             entity_coverage=coverage,
+            profile_age=age,
             generator_tier="metrics",
             log_samples=bundle.config.logging.log_samples,
         )
@@ -1128,7 +1152,7 @@ def run_certified_for_caller(
 
     resolved = require_llm(bundle.config.model.model_ref())
     llm, model_name = resolved.llm, resolved.name
-    profiles, as_of = assembly.profile_facts(bundle, caller.org_id)
+    profiles, as_of, age = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     fmt: AnswerFormat = body.format if body else "both"
     audience = _audience(caller)
@@ -1164,6 +1188,7 @@ def run_certified_for_caller(
             ),
             data_as_of=as_of,
             entity_coverage=coverage,
+            profile_age=age,
             generator_tier="certified",
             log_samples=bundle.config.logging.log_samples,
         )

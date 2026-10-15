@@ -154,6 +154,7 @@ def run_behavioral(
                     model_name=model_name,
                     data_as_of=assembled.data_as_of,
                     entity_coverage=assembled.entity_coverage,
+                    profile_age=assembled.profile_age,
                 )
             except ProviderError as exc:
                 # One dropped provider call is this case's errored attempt, retried
@@ -245,6 +246,7 @@ def run_health(
                 model_name=model_name,
                 data_as_of=assembled.data_as_of,
                 entity_coverage=assembled.entity_coverage,
+                profile_age=assembled.profile_age,
             )
         except ProviderError as exc:
             results.append(

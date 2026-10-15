@@ -13,7 +13,7 @@ import functools
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -40,6 +40,7 @@ from services.contracts.response import (
 )
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.trace import TraceLog
+from services.lenses.profile_age import ProfileAge
 from services.lenses.profile_enrich import EntityCoverage
 from services.observability import cost
 from services.reviews.judge import judge_trace, judge_typed
@@ -54,6 +55,7 @@ from services.runtime import (
     reading,
     receipt,
     resolution,
+    scope_rails,
     shape_guard,
     sql_guard,
     time_guard,
@@ -484,6 +486,10 @@ def run_query(
     data_as_of: str | None = None,
     serve_ungoverned_shapes: bool = False,
     metric_carriers: Callable[[str], list[str]] | None = None,
+    # name -> lens, for the tables other lenses this caller may use declare or
+    # expose (query.tables_held_elsewhere); read once, when a generated answer is
+    # checked against the tables the question names.
+    tables_elsewhere: Callable[[], Mapping[str, str]] | None = None,
     generator_tier: str | None = None,
     log_samples: bool = False,
     value_domains: dict[str, list[str]] | None = None,
@@ -491,6 +497,10 @@ def run_query(
     # they ride the resolution ledger so probabilities live in one record.
     decisions: list[DecisionRecord] | None = None,
     entity_coverage: dict[str, EntityCoverage] | None = None,
+    # How old the scope's profiles are against probe.max_age (assembly's
+    # profile_facts). Stale, the answer carries a PROFILE line and the
+    # profile-backed checks abstain; None = nothing profiled or not measured.
+    profile_age: ProfileAge | None = None,
     scan_text: str | None = None,
     untyped: tuple[str, list[DecisionRecord]] | None = None,
     # Who reads the answer (answer.Audience). `consumer` changes the register of
@@ -608,7 +618,15 @@ def run_query(
                 f"limit of your question or the lens scope ({reason}). {retry}"
             )
         else:
-            msg = f"The query could not be executed: {reason}"
+            # A warehouse error's own "Did you mean ...?" suggests from every
+            # table the engine can see; the caller is told only of tables and
+            # columns in this lens's scope. The trace keeps the engine's text.
+            shown = (
+                scope_rails.scoped_suggestions(reason, semantic_model)
+                if error_kind == "warehouse"
+                else reason
+            )
+            msg = f"The query could not be executed: {shown}"
         # A certified answer whose SQL errors at execution serves
         # `certified_failed`, never plain `certified` beside `status: error`:
         # a badge that outranks the fault tells the caller the answer is
@@ -851,6 +869,9 @@ def run_query(
     # same SQL) cannot loop the probe, and its cached findings still escalate to
     # a clarification when the repair budget runs out.
     probed_empty: dict[str, value_guard.ProbeOutcome] = {}
+    # The tables other lenses hold, looked up once and only when a generated
+    # answer is checked against the tables the question names.
+    elsewhere: Mapping[str, str] | None = None
     # What the empty-result investigation established for the SERVED result:
     # "confirmed" (literals proven present — the zero is the data's answer),
     # "unresolved" (probes taught nothing — the zero serves but never as
@@ -1037,6 +1058,22 @@ def run_query(
                     error_kind="generation",
                 )
             return _trace_failure("rejected", *(refused or (None, guard.reason)))
+
+        # A question that names a table the SQL does not read clarifies instead
+        # of serving a figure read from another table (scope_rails). The typed
+        # path declines what it cannot type and pre-approved SQL names its own
+        # tables, so the rail is the generation path's alone.
+        if certification != "certified" and getattr(active, "model", None) not in (
+            "typed",
+            "certified",
+        ):
+            if elsewhere is None:
+                elsewhere = tables_elsewhere() if tables_elsewhere is not None else {}
+            named = scope_rails.named_table_clarification(
+                rails_text, semantic_model, guard.sql, elsewhere
+            )
+            if named is not None:
+                return _clarification_result(named)
 
         # Binder guarantee (repair-only, generation path): a CTE referenced for a
         # column it never projected is definitionally invalid SQL. The dry-run gate
@@ -1546,6 +1583,7 @@ def run_query(
         investigation=investigation,
         data_as_of=data_as_of,
         entity_coverage=entity_coverage,
+        profile_stale=profile_age is not None and profile_age.stale,
     )
     # Figure gate: a composed answer whose numeric_grounding check FAILS
     # is an invented figure on its way to a caller. Retry composition ONCE with
@@ -1950,6 +1988,12 @@ def run_query(
         degraded_notes.append(
             f"EXPOSED: reads {', '.join(exposed)}, {what} with no governed definitions"
         )
+    if profile_age is not None and profile_age.stale:
+        # Same idiom again: the facts behind this answer (data_as_of, the
+        # dictionaries, the date span) are older than the project allows, and
+        # the one who can fix it is whoever owns the probe job. Certified
+        # serves carry it too — their as-of date is the same stale snapshot.
+        degraded_notes.append(profile_age.line())
     if certification != "certified" and report is not None:
         # The trigger is THE SAME line the grade draws
         # (`_semantic_abstained`): announce exactly when the badge was capped for
