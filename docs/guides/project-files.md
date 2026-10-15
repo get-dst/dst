@@ -244,28 +244,47 @@ expose:
     hide: ["*.ssn", "staging.customers.email"]
 ```
 
-Patterns are fnmatch-style on the table name exactly as `dst introspect` names it
-(`schema.table`); `hide` patterns match `table.column`, with the table bare or
-qualified. The grant is resolved at **apply**, against the connection's stored
-profiles (`dst probe` / `dst introspect` push them; a probe artifact in the same push
-counts). Each matched table becomes an entity in the compiled model: name = the bare
-table name, fields = the profile's columns minus `hide`, description = the profile's,
-and no metrics, dimensions or time field. Because it is resolved from the profile, the
-columns are the warehouse's as of the last probe; re-apply after a probe and the entity
-follows the table.
+Patterns are fnmatch globs (`*`, `?`, `[abc]`), case-insensitive, on the table name
+exactly as `dst introspect` names it (`schema.table`); regular expressions are not
+supported. `hide` patterns match `table.column`, with the table bare or qualified. The
+grant is resolved at **apply**, against the connection's stored profiles (`dst probe` /
+`dst introspect` push them; a probe artifact in the same push counts). Each matched
+table becomes an entity in the compiled model: name = the bare table name, fields = the
+profile's columns minus `hide`, description = the profile's, and no metrics, dimensions
+or time field. Because it is resolved from the profile, the columns are the warehouse's
+as of the last probe; re-apply after a probe and the entity follows the table.
 
 Apply fails loud when a pattern matches no profiled table (the error names the
 pattern: run `dst probe` or fix it) and when a matched bare name collides with an
 entity the same lens selects. `dst plan` prints `exposes N tables (M columns)` per
-lens, and warns when `expose` is set with `untyped_fallback: false`: a question about
-an exposed table never types, so `query` cannot answer from it until the lens accepts
-untyped answers (the `sql` tool reads it either way).
+lens, `(M columns, H hidden)` when `hide` withheld any, and warns when `expose` is set
+with `untyped_fallback: false`: a question about an exposed table never types, so
+`query` cannot answer from it until the lens accepts untyped answers (the `sql` tool
+reads it either way).
+
+When a table disappears upstream, the next `dst probe` no longer lists it, and the
+push that carries that artifact fails the grant: a stored profile the artifact does not
+list counts as gone, so a pattern that matched only that table fails apply with the
+same "no profiled table matches" error, naming the table as dropped upstream. The
+stored profile itself is not deleted by the push (a file's absence never deletes server
+state, so an old commit cannot downgrade a server), and for the same reason an artifact
+older than the stored profile cannot declare the table gone. A push with no artifact
+resolves from the store as before. `dst probe --tables a,b` narrows only the sampling
+pass; the artifact still lists every table the connection has.
 
 What an exposed table is, on every rail:
 
-- the SQL guard admits its tables and columns like any entity's; a hidden column is
-  simply absent, so naming it is out of scope. `SELECT *` is allowed only when every
-  table in the statement is an exposed table with no hidden column.
+- the SQL guard admits its tables and columns like any entity's. A hidden column is
+  simply absent from the lens, and the guard enforces that on every door a lens
+  serves, generated SQL and caller-written SQL alike (`query`, the `sql` tool, the
+  REST endpoints behind them), in all three ways the column could be named: qualified
+  (`c.ssn`) is out of scope, bare (`ssn`) is out of scope, and `SELECT *` (or `t.*`)
+  never carries it. A star is allowed only when every table in the statement is an
+  exposed table, and is then rewritten into the explicit columns the lens lists for
+  that table, so neither the returned SQL nor the rows include a hidden column; a
+  statement that also reads a declared entity keeps the ban. A table reference may
+  omit leading qualifiers the source has, never add one: `staging.orders` is not the
+  lens's unqualified `orders`.
 - the typed resolver never offers it; the raw-SQL prompt lists it with its columns
   and the line `no governed definitions`; the router takes no anchors from it.
 - an answer that reads one carries a line in `degraded`, in the same idiom as

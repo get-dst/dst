@@ -338,7 +338,9 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
     """Every result is recorded: a `dst test` sweep persists an eval_run
     (mode "test") with its per-case eval_result rows — the same tables the
     publish gate writes — so accuracy is a queryable trend whoever runs the
-    sweep. Output bytes are unchanged; recording is a side effect only."""
+    sweep. The run is also said out loud with the database it went to: `dst runs`
+    reads through a server, and a server on another database lists nothing —
+    the `recorded:` line is what resolves that."""
     from sqlalchemy import text
 
     from services.certify import store as certify_store
@@ -361,7 +363,8 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
         lambda _ref: ResolvedModel(ScriptedLLM([_SQL, "There are 19."]), "fake", "m"),
     )
     rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG))
-    assert rc == 0, capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert rc == 0, out
     with org_session(oid) as s:
         runs = s.execute(
             text(
@@ -373,6 +376,12 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
         run_id, mode, score, passed, failed_n = runs[0]
         assert (mode, passed, failed_n) == ("test", 1, 0)
         assert score == 1.0
+        where = next(line for line in out.splitlines() if line.startswith("recorded: run "))
+        assert where.startswith(
+            f"recorded: run {str(run_id)[:8]} ({_ORG}/customer_value) in postgresql"
+        )
+        assert "***@" in where  # the url with its password hidden, never the password
+        assert "dst runs <lens>" in out
         results = s.execute(
             text("SELECT case_id, passed FROM eval_result WHERE run_id = :r"),
             {"r": str(run_id)},
@@ -380,6 +389,13 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
         assert len(results) == 1
         assert results[0][0].startswith("certified:")
         assert results[0][1] is True
+    # --json carries the same two facts structurally.
+    rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG, as_json=True))
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["database"].startswith("postgresql") and "***@" in report["database"]
+    assert [(r["org"], r["lens"]) for r in report["recorded"]] == [(_ORG, "customer_value")]
+    assert len(report["recorded"][0]["run_id"]) == 36
 
 
 @needs_db

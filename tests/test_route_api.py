@@ -257,6 +257,55 @@ def test_decline_returns_uncovered_envelope_never_an_answer(
 
 
 @needs_db
+def test_a_decline_names_the_lens_that_exposes_the_table_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router never routes to an exposed table (it governs nothing), so a
+    question that names one word for word declines — and the envelope must say
+    which lens to ask by name, or the miss reads as "dst has no such data"."""
+    from services.db.session import org_session
+    from services.lenses import store
+    from tests.test_expose_tables import _compile, _config
+
+    org, raw = _make_org_token()
+    config = _config(["staging.customers"])
+    with org_session(org) as session:
+        store.create_lens(session, store.LensBundle(config=config, semantic_model=_compile(config)))
+        store.publish(session, "ops")
+
+    decision = RouteDecision(False, None, 0.1, [], "no governed lens covers this.")
+    monkeypatch.setattr("services.api.route._route", lambda caller, q: decision)
+    try:
+        r = client.post(
+            "/v1/query",
+            json={"q": "how many rows in staging.customers?"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["covered"] is False
+        assert body["exposed_in"] == [{"lens": "ops", "table": "staging.customers"}]
+        assert body["reason"].endswith(
+            "; lens 'ops' exposes staging.customers (no governed definitions): ask it by name"
+        )
+        # The bare name counts too; an unrelated question gets no hint.
+        r = client.post(
+            "/v1/query", json={"q": "count customers"}, headers={"Authorization": f"Bearer {raw}"}
+        )
+        assert r.json()["exposed_in"] == [{"lens": "ops", "table": "staging.customers"}]
+        r = client.post(
+            "/v1/query", json={"q": "open tickets?"}, headers={"Authorization": f"Bearer {raw}"}
+        )
+        assert r.json()["exposed_in"] == [] and r.json()["reason"] == decision.reason
+    finally:
+        eng = create_engine(settings.database_admin_url)
+        with eng.begin() as c:
+            for table in ("lens_version", "lens"):
+                c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
+        _cleanup(org)
+
+
+@needs_db
 def test_degraded_decline_carries_the_marker_to_envelope_and_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

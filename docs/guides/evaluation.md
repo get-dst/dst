@@ -63,6 +63,17 @@ Every run is recorded: `dst test` persists the run and its per-case results in
 the same tables the publish gate writes, so accuracy is a queryable trend —
 `dst runs <lens>` lists the recorded runs, and `dst runs <lens> --diff A B`
 compares two (score delta plus per-case flips; exit `1` on a regression).
+
+The run lands in the database `DATABASE_URL` names for the process running
+`dst test` (the `--dir` project's `.env`, or the process environment), and the
+last lines of the output say so: `recorded: run <id> (<org>/<lens>) in <database>`,
+password hidden. `dst runs` and the dashboard read the history through the
+server at `DST_URL`. When those two name different databases, the run was
+recorded and is not where you are looking: a laptop whose shell points at a
+local Postgres while the server runs on another, or a CI job whose throwaway
+database lives one run and keeps no history. Compare the `recorded:` line with
+the server's `DATABASE_URL`; in CI, keep the `--json` output as a build
+artifact or point the job at a durable database when the trend matters.
 Once a lens serves real traffic, `dst evals from-traffic <lens>` drafts new
 cases from the request log, with the observed outcome shape as the
 expectation.

@@ -37,6 +37,8 @@ from services.api.query import (
     PURPOSE_MAX,
     UNTYPED_HELP,
     AnswerFormat,
+    exposed_hint,
+    exposed_tables_named,
     run_lens_query,
 )
 from services.auth.deps import get_caller
@@ -230,6 +232,13 @@ class RoutedAnswer(BaseModel):
     answer: QueryResponse | ConsumerAnswer
 
 
+class ExposedIn(BaseModel):
+    """A lens that exposes a table the question named (no definitions, never routed)."""
+
+    lens: str
+    table: str
+
+
 class UncoveredEnvelope(BaseModel):
     """A declined question: the honest surface-area signal — no ungoverned answer.
 
@@ -240,6 +249,10 @@ class UncoveredEnvelope(BaseModel):
     covered: bool = False
     reason: str
     nearest_miss: RouteProvenance | None = None
+    # The lenses that expose a table the question named word for word: the router
+    # never routes to an exposed table (it governs nothing), so the envelope says
+    # which lens to ask by name instead.
+    exposed_in: list[ExposedIn] = Field(default_factory=list)
     # Set when the decline is an OUTAGE (DECIDER_DOWN / ROUTER_DOWN), not a
     # coverage signal — callers and the surface report treat the two differently.
     degraded: str | None = None
@@ -335,6 +348,14 @@ async def just_ask(
     _persist(
         caller, body.q, None, decision.score, False, degraded=decision.degraded, decision=decision
     )
+    # Off the event loop: the lookup reads the org's published lenses.
+    exposed = await asyncio.to_thread(exposed_tables_named, body.q, caller)
+    reason = decision.reason
+    if exposed:
+        reason = f"{reason.rstrip('.')}; {exposed_hint(exposed)}"
     return UncoveredEnvelope(
-        reason=decision.reason, nearest_miss=nearest, degraded=decision.degraded
+        reason=reason,
+        nearest_miss=nearest,
+        exposed_in=[ExposedIn(lens=lens, table=table) for lens, table in exposed],
+        degraded=decision.degraded,
     )

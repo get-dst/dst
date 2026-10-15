@@ -273,7 +273,10 @@ def test_the_consumer_hears_a_truncation_in_words_for_a_person() -> None:
         connector=FakeConnector(
             result=QueryResult(columns=["hero_name", "hero_win_rate"], rows=rows)
         ),
-        generator=FixedSQLGenerator("SELECT hero_name, hero_win_rate FROM hero_bracket_stats"),
+        generator=FixedSQLGenerator(
+            "SELECT hero_name, SUM(wins) * 1.0 / SUM(games) AS hero_win_rate"
+            " FROM hero_bracket_stats GROUP BY hero_name"
+        ),
         composer=None,
         max_rows=100,
         audience="consumer",

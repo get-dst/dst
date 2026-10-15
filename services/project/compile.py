@@ -107,9 +107,12 @@ def compile_lens_model(
     asset_hashes: dict[str, str] | None = None,
     default_qualifiers: Mapping[str, str] | None = None,
     profiles: Mapping[str, Sequence[TableProfile]] | None = None,
+    dropped_tables: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[SemanticModel, list[str]]:
     """``profiles`` (connection -> stored table profiles) is what the lens's
-    `expose:` grants resolve against; a lens that exposes nothing needs none."""
+    `expose:` grants resolve against; a lens that exposes nothing needs none.
+    ``dropped_tables`` names the profiled tables the push's own probe no longer
+    lists, so a grant that matches only one of them fails by name."""
     warnings: list[str] = []
     consumed: dict[str, str] = {}
     hashes = asset_hashes or {}
@@ -170,7 +173,7 @@ def compile_lens_model(
     # warehouse's as of the last probe; they qualify like a declared source.
     if config.expose:
         exposed, expose_errors = resolve_expose(
-            config, profiles or {}, declared=sorted(selected_names)
+            config, profiles or {}, declared=sorted(selected_names), dropped=dropped_tables
         )
         if expose_errors:
             raise CompileError("\n".join(expose_errors))

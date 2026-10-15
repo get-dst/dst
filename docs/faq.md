@@ -81,4 +81,14 @@ corpus; the same check gates `dst apply`, scoped to the answers a push
 actually touches. See
 [Evaluation](guides/evaluation.md) and [Certified answers](concepts/certified.md).
 
+## I ran `dst test`, so why does `dst runs` show no runs?
+
+Because the two read different things. `dst test` runs in-process and records
+the run in the database `DATABASE_URL` names for that shell or `--dir` project;
+its last lines say which, with the run id. `dst runs` and the dashboard read the
+history through the server at `DST_URL`. If the server serves another database,
+the run exists where `dst test` said and nowhere the server looks. A CI job with
+a throwaway database discards every run with the runner. See
+[Environments and CI](guides/environments-and-ci.md#which-database-did-dst-test-write-to).
+
 *(Every answer here is covered in full on a linked page.)*

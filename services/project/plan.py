@@ -238,6 +238,12 @@ def plan_lenses(
                     # diff here would promise a deletion apply won't do.
                     continue
                 old = _drop_unpushed_review_answers(old, new)
+            if path == "queries.yaml" and path not in managed_incoming:
+                # The loader reads a missing queries.yaml as an empty one (no
+                # anchors, no samples) and the DB renders that state as
+                # `use_when: []`; compared raw, the two never match and a lens
+                # that never wrote the file plans as `update` forever.
+                new = _canonical_managed(path, "")
             if path == _CASES_FILE and (path not in managed_incoming or new.strip() in ("", "[]")):
                 # Eval-case absence never deletes (_apply_eval_cases returns on
                 # an empty source), so an absent-or-empty file vs the DB's

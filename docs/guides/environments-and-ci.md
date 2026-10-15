@@ -50,6 +50,23 @@ export DST_ADMIN_TOKEN=…
 dst apply --dir .
 ```
 
+### Which database did `dst test` write to
+
+`dst migrate`, `dst bootstrap` and `dst test` do not talk to a server. They open
+`DATABASE_URL` directly, resolved with the same precedence: the process
+environment, then the `--dir` project's `.env`. `dst test` records every run in
+that database and ends with a `recorded:` line naming the run id and the database
+(password hidden). `dst runs` and the dashboard's accuracy view read the history
+through the server at `DST_URL`.
+
+So the failure mode is a run that exists and cannot be found: the shell's
+`DATABASE_URL` names one Postgres, the server serves another, and `dst runs`
+reports no runs for a lens that was just swept. A CI job whose database is a
+service container is the same thing stretched over time: every run is recorded
+and discarded with the runner. When the two must agree, give the test step the
+server's `DATABASE_URL`; when the trend matters in CI, keep `dst test --json` as
+a build artifact or run the sweep against a durable database.
+
 ## One project, many environments
 
 The project directory is the source of truth, so there is nothing to promote:

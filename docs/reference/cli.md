@@ -70,6 +70,14 @@ then tells you to run `dst migrate`; exit is 1 and no server starts. A schema
 order), and so does one whose state cannot be read, because a database still coming up is
 not a broken one. Full recovery path: [Upgrading](../upgrading.md).
 
+### `dst mcp`
+
+Run the MCP server over stdio for a local client (Claude Desktop, Cursor, `claude mcp
+add`), exactly as running the module does. The caller key comes from `DST_API_KEY` and
+the dst base URL from `DST_URL` (env or the project's `.env`). Remote clients do not need
+it: the API already serves the same tools at `/mcp` over streamable HTTP, one bearer key
+per request. See [Agents over MCP](../guides/agents-mcp.md).
+
 ### `dst migrate`
 
 Run database migrations to head against `DATABASE_ADMIN_URL`. Idempotent, and it takes a
@@ -370,8 +378,11 @@ entity-only. `--json`; `--accept` re-records the baseline once you have reviewed
 `dst plan` runs a cheap version of this every time: when the warehouse has
 changed since profiling it prints one line pointing you here, and it never
 touches the warehouse when no baseline exists or the connection is down (the
-degradation is visible only under `plan --json`). Flags: `--connection`
-(required), `--accept`, `--dir`, `--json`.
+degradation is visible only under `plan --json`). Flags: `--connection`,
+`--accept`, `--dir`, `--json`. Without `--connection` every warehouse connection
+`dst.yaml` declares runs in turn, findings under a `connection <name>:` heading, and the
+exit code is the worst of them; `--json` then prints one list with an object per
+connection.
 
 [![dst drift: orders gained a column, cross-referenced to the entity that reads the table](../assets/term/drift.svg)](../assets/term/drift.svg)
 
@@ -479,10 +490,12 @@ failed**. Treat 4 as not-green: it is the code that separates a green run over a
 empty suite from a green run over a real one.
 
 Each case prints as a ledger row (`PASS`/`FAIL`, `org/lens: question`, the divergence
-when there is one, and the case's wall-clock), then a rule and the `N/M passed`
-summary. `--json` emits the same rows structurally (org, lens, question, verdict,
-certified/generated result, reason, `elapsed_s`) plus the summary, for CI that wants
-the table rather than the exit code alone.
+when there is one, and the case's wall-clock), then a rule, the `N/M passed`
+summary, and a `recorded:` line per lens naming the run id and the database it was
+written to (`DATABASE_URL`, password hidden). `--json` emits the same rows structurally
+(org, lens, question, verdict, certified/generated result, reason, `elapsed_s`) plus the
+summary, `recorded` (org, lens, `run_id`) and `database`, for CI that wants the table
+rather than the exit code alone.
 
 [![dst test with nothing certified: 0/0 passed, exit 4, and the warning that this run could not have failed](../assets/term/test.svg)](../assets/term/test.svg)
 
@@ -511,7 +524,11 @@ server); passing them prints a note saying so.
 
 The run history `dst test` records (`eval_run`/`eval_result`), on the
 terminal: every run newest first — id, mode, score, pass/fail/error counts,
-started. `--json` for the parseable form.
+started. `--json` for the parseable form. Reads through the server at `DST_URL`,
+while `dst test` writes in-process to `DATABASE_URL`: a run recorded against a
+database this server does not serve is not in this list, and the empty-list
+message says so. The `recorded:` line `dst test` prints names the database to
+compare against.
 
 `dst runs <lens> --diff A B` compares two runs: score delta plus the per-case
 flips — newly failing (with the failure reason), newly passing, still failing,
@@ -649,7 +666,7 @@ shapes:
 dst observe                 headline + usage per caller
 dst observe callers         who, how many, how much, how many errors
 dst observe requests        what they actually asked
-dst observe show <req_id>   one request: question, SQL, confidence
+dst observe show <req_id>   one request: question, SQL, confidence, purpose when logged
 ```
 
 Flags: `--lens`, `--status ok|refused|error` (with `requests`), `--limit` (default

@@ -516,7 +516,14 @@ def _runs(args: argparse.Namespace) -> int:
             print(json.dumps(runs, indent=2))
             return 0
         if not runs:
-            print(f"no recorded runs for lens {args.lens!r} — `dst test {args.lens}` records one")
+            # Two paths, one table: `dst test` writes to DATABASE_URL's database,
+            # this command reads through the server. An empty list is as often a
+            # server on another database as a suite never run, so say both.
+            print(
+                f"no recorded runs for lens {args.lens!r} on {url} — `dst test {args.lens}` "
+                "records one in the database named by DATABASE_URL and prints which; this "
+                "list shows it only if that is the database this server serves"
+            )
             return 0
         print(f"{'ID':<10} {'MODE':<12} {'SCORE':>6} {'PASS':>5} {'FAIL':>5} {'ERR':>4}  STARTED")
         for r in runs:
@@ -1291,20 +1298,64 @@ def _drift(args: argparse.Namespace) -> int:
     Exit codes (a gate reads them): 0 clean · 2 changes, none breaking ·
     1 changes breaking declared references (entities/definitions/certified) —
     operational errors also exit 1, the act-now side · 4 not armed.
+
+    Without --connection, every warehouse connection dst.yaml declares runs in
+    turn, one section per connection, and the exit code is the worst of them
+    (`--json` then prints one list, an object per connection).
     """
+    root = Path(args.dir or ".")
+    if args.connection:
+        code, payload = _drift_one(args, root)
+        if payload is not None:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return code
+    names = _declared_warehouses(root)
+    if names is None:
+        print(
+            f"error: no dst.yaml in {root} (or it does not parse) — drift reads "
+            "connections from it; name one with --connection or declare it there",
+            file=sys.stderr,
+        )
+        return 1
+    if not names:
+        print("error: dst.yaml declares no warehouse connection to diff", file=sys.stderr)
+        return 1
+    worst, payloads = 0, []
+    for name in names:
+        args.connection = name
+        code, payload = _drift_one(args, root, section=len(names) > 1)
+        if payload is not None:
+            payloads.append(payload)
+        worst = max(worst, code, key=lambda c: _DRIFT_SEVERITY.get(c, 3))
+    if args.as_json:
+        print(json.dumps(payloads, indent=2, ensure_ascii=False))
+    return worst
+
+
+# Worst-first order of `dst drift` exit codes: clean, changes, not armed, then
+# breaking (operational errors share 1, the act-now side).
+_DRIFT_SEVERITY = {0: 0, 2: 1, 4: 2, 1: 3}
+
+
+def _drift_one(
+    args: argparse.Namespace, root: Path, *, section: bool = False
+) -> tuple[int, dict[str, object] | None]:
+    """One connection of `dst drift` (`args.connection`): prints the prose,
+    returns the exit code and — under `--json` — the object to print, so a
+    run over several connections can emit one list. *section* heads the
+    findings with the connection's name."""
     from services.lenses.connections import build_connector
     from services.lenses.profiler_catalog import catalog_profiles
     from services.project import warehouse_drift as wd
     from services.project.loader import split_semantic
 
-    root = Path(args.dir or ".")
     type_, config, secret = _declared_connection(args)
     if not type_:
         # No server fallback: the stored profile the server would diff against is
         # one generation deep and rewritten by any pass that upserts, so it cannot
         # answer "since I authored this". The declaration is what drift needs.
         print(f"error: {_undeclared_connection(args)}", file=sys.stderr)
-        return 1
+        return 1, None
     try:
         connector = build_connector(type_, config, secret)
         current = catalog_profiles(connector, args.connection)
@@ -1316,7 +1367,7 @@ def _drift(args: argparse.Namespace) -> int:
             "report on a warehouse it could not read",
             file=sys.stderr,
         )
-        return 1
+        return 1, None
 
     project_files = _read_project(root)
     entities, definitions, relationships = wd.parse_layer(split_semantic(project_files))
@@ -1332,18 +1383,17 @@ def _drift(args: argparse.Namespace) -> int:
                 "stands now; the next run reports what changed against it.",
                 file=sys.stderr,
             )
-            return 4
+            return 4, None
         path = wd.write_baseline(root, args.connection, current)
         if args.as_json:
-            print(json.dumps({"connection": args.connection, "recorded": len(current)}, indent=2))
-        else:
-            print(
-                f"note: recorded {len(current)} table(s) for '{args.connection}' in {path}. "
-                "Commit it: the next run reports what changed against it, and "
-                "`dst plan` says so on its own.",
-                file=sys.stderr,
-            )
-        return 0
+            return 0, {"connection": args.connection, "recorded": len(current)}
+        print(
+            f"note: recorded {len(current)} table(s) for '{args.connection}' in {path}. "
+            "Commit it: the next run reports what changed against it, and "
+            "`dst plan` says so on its own.",
+            file=sys.stderr,
+        )
+        return 0, None
 
     findings = wd.cross_reference(
         wd.baseline_drift(baseline.tables, current),
@@ -1353,21 +1403,18 @@ def _drift(args: argparse.Namespace) -> int:
         relationships,
         wd.parse_exposes(project_files),
     )
-    if args.as_json:
-        print(
-            json.dumps(
-                {
-                    "connection": args.connection,
-                    "baseline_recorded_at": baseline.recorded_at.isoformat(),
-                    "tables": len(current),
-                    "findings": [
-                        {**f.model_dump(), "breaking": wd.is_breaking(f)} for f in findings
-                    ],
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+    payload: dict[str, object] | None = (
+        {
+            "connection": args.connection,
+            "baseline_recorded_at": baseline.recorded_at.isoformat(),
+            "tables": len(current),
+            "findings": [{**f.model_dump(), "breaking": wd.is_breaking(f)} for f in findings],
+        }
+        if args.as_json
+        else None
+    )
+    if payload is not None:
+        pass
     elif not findings:
         # Silence on stdout is the point: this runs in a loop, and a verb that
         # prints a wall on a quiet day is one people stop reading on a loud one.
@@ -1377,6 +1424,8 @@ def _drift(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     else:
+        if section:
+            print(style.accent(f"connection {args.connection}:"))
         for finding in findings:
             for line in wd.render(finding):
                 print(line)
@@ -1393,8 +1442,8 @@ def _drift(args: argparse.Namespace) -> int:
             # Nothing changed means nothing to accept: re-recording anyway would put a
             # timestamp-only commit in the history of a file whose history IS the point.
             wd.write_baseline(root, args.connection, current)
-        return 0
-    return wd.exit_code(findings)
+        return 0, payload
+    return wd.exit_code(findings), payload
 
 
 def _sample_scope(
@@ -1802,6 +1851,17 @@ def _port_busy_message(port: int, lsof_pids: str) -> str:
     )
 
 
+def _mcp(args: argparse.Namespace) -> int:
+    """`dst mcp`: the stdio MCP server, exactly as running the module does — the
+    wheel has no module path to hand a client config, so the verb is what a
+    `claude mcp add` line names. Key and URL ride the module's env semantics
+    (DST_API_KEY, DST_URL)."""
+    from services.mcp.server import main as run_stdio
+
+    run_stdio()
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     import os
     import subprocess
@@ -1989,6 +2049,18 @@ def _adopt_project_env(args: argparse.Namespace) -> None:
     from services.config import adopt_project_env
 
     args.restore_project_env = adopt_project_env(_env_dirs(args))
+
+
+def _database_label() -> str:
+    """DATABASE_URL as the in-process verbs resolved it, password hidden — what
+    `dst test` prints beside the run it recorded, so a run that landed in a
+    different database from the one the server serves is found by reading the
+    output instead of by guessing."""
+    from sqlalchemy.engine import make_url
+
+    from services.config import settings
+
+    return make_url(settings.database_url).render_as_string(hide_password=True)
 
 
 def _envs_file(args: argparse.Namespace | None = None) -> Path:
@@ -3791,7 +3863,10 @@ def _test(args: argparse.Namespace) -> int:
     # case carries its lens as a gold label; every lens's certified corpus
     # yields equivalence pairs. Graded after each org's sweep.
     cal_records: list[object] = []
-    run_ids: list[tuple[Any, str]] = []  # (org id, eval_run id) — stamped with calibration
+    # (org id, org name, lens, eval_run id) — stamped with calibration, then said
+    # out loud: the run lands in DATABASE_URL's database, and nothing else in the
+    # output names it.
+    run_ids: list[tuple[Any, str, str, str]] = []
     emit_json = bool(getattr(args, "as_json", False))
     rows: list[dict[str, object]] = []
 
@@ -4227,7 +4302,7 @@ def _test(args: argparse.Namespace) -> int:
                     for rec in recorded:
                         rec.run_id = run_id
                     eval_store.record_results(session, run_id, recorded)
-                    run_ids.append((oid, run_id))
+                    run_ids.append((oid, org_name, name, run_id))
                     if getattr(args, "compare_last", False):
                         cmp = run_compare.compare_runs(
                             previous, previous_results, fingerprint, recorded, score
@@ -4247,9 +4322,19 @@ def _test(args: argparse.Namespace) -> int:
     if calibration and run_ids:
         # The table rides the run so the accuracy tab shows it — the same rows
         # the CLI prints, never a number derived from production traffic.
-        for run_oid, run_id in run_ids:
+        for run_oid, _org, _lens, run_id in run_ids:
             with org_session(run_oid) as session:
                 eval_store.set_calibration(session, run_id, calibration)
+    # Where the run went. `dst test` writes in-process to DATABASE_URL's database;
+    # `dst runs` and the dashboard read through the server at DST_URL. When those
+    # two name different databases the run exists and nobody can find it, so the
+    # destination is said with the run id — the one line that resolves "I ran the
+    # suite and the history is empty".
+    database = _database_label()
+    recorded_runs = [
+        {"org": org_name, "lens": lens_name, "run_id": run_id}
+        for _oid, org_name, lens_name, run_id in run_ids
+    ]
     if emit_json:
         # Computed FROM the rows, never from a parallel counter: a tally that can
         # disagree with its own results is the class the comparator ticket named.
@@ -4287,6 +4372,11 @@ def _test(args: argparse.Namespace) -> int:
                         and stages.get("resolution") == "failed"
                     ),
                     "orgs": scope,
+                    # The runs this sweep recorded and the database they went to
+                    # (password hidden) — `dst runs` lists them only through a
+                    # server that serves this same database.
+                    "recorded": recorded_runs,
+                    "database": database,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -4301,6 +4391,17 @@ def _test(args: argparse.Namespace) -> int:
         # must not print the same shape).
         composition = f"{cert_n} certified + {beh_n} behavioral"
         print(style.bold(f"{total - failed}/{total} passed") + f" ({composition}) in org {scope}")
+        for _oid, org_name, lens_name, run_id in run_ids:
+            print(f"recorded: run {run_id[:8]} ({org_name}/{lens_name}) in {database}")
+        if run_ids:
+            print(
+                style.dim(
+                    "`dst runs <lens>` and the dashboard read run history through the server "
+                    "at DST_URL — they list this run only if that server serves this database"
+                )
+            )
+        elif total:
+            print(style.dim(f"no run recorded in {database} — nothing was scored"))
         if ungoverned_n:
             print(
                 style.warn(
@@ -4399,13 +4500,17 @@ def _observe(args: argparse.Namespace) -> int:
             "status",
             "confidence",
             "resolution_tag",
+            "purpose",
         ):
             if trace.get(key) is not None:
                 print(f"{key + ':':<14}{trace[key]}")
-        if q := trace.get("question"):
+        # A probe row's `question` IS its SQL (the caller sent a statement, not a
+        # question): print it once, labelled, instead of twice.
+        probe = trace.get("kind") in ("sql_probe", "admin_sql")
+        if not probe and (q := trace.get("question")):
             print(f"\n{q}")
         if sql := trace.get("sql"):
-            print(f"\n{sql}")
+            print(f"\nsql:\n{sql}" if probe else f"\n{sql}")
         res = trace.get("resolution")
         if isinstance(res, dict) and res.get("slots"):
             # The ledger, one slot per line: what the answer resolved to and
@@ -5913,7 +6018,11 @@ def main() -> int:
         "Exit codes gate a nightly run: 0 clean, 2 changes (none breaking), 1 changes "
         "breaking declared references, 4 not armed (run `dst probe`)",
     )
-    p.add_argument("--connection", required=True)
+    p.add_argument(
+        "--connection",
+        help="one declared connection; omit to run every warehouse connection dst.yaml "
+        "declares (exit code: the worst of them)",
+    )
     p.add_argument(
         "--accept",
         action="store_true",
@@ -5979,6 +6088,14 @@ def main() -> int:
     p.add_argument("--port", type=int, help="default: the port in DST_URL (.env), else 8000")
     p.add_argument("--reload", action="store_true")
     p.set_defaults(fn=_serve)
+
+    p = sub.add_parser(
+        "mcp",
+        help="run the MCP server over stdio for a local client (Claude Desktop, Cursor): "
+        "DST_API_KEY carries the caller key, DST_URL the dst base URL (env or ./.env). "
+        "Remote clients use the API's own /mcp endpoint instead",
+    )
+    p.set_defaults(fn=_mcp)
 
     p = sub.add_parser(
         "test",

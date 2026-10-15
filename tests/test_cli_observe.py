@@ -232,6 +232,39 @@ def test_summary_against_a_pre_basis_server_prints_the_governed_histogram(_route
     assert "basis:" not in capsys.readouterr().out
 
 
+def test_show_prints_the_purpose_when_the_row_carries_one(_routes, capsys) -> None:
+    """The caller's stated purpose is a label on the row; a reader asking "what
+    for" must see it without `--json`."""
+    _routes["/requests/req_p"] = {
+        "request_id": "req_p",
+        "lens": "sales",
+        "status": "ok",
+        "question": "revenue by country?",
+        "sql": "SELECT country, SUM(amount) FROM orders GROUP BY 1",
+        "purpose": "building a forecasting app",
+    }
+    assert cli._observe(_args(action="show", request_id="req_p")) == 0
+    out = capsys.readouterr().out
+    assert "purpose:      building a forecasting app" in out
+
+
+def test_show_prints_a_probe_row_sql_once(_routes, capsys) -> None:
+    """A raw-SQL probe stores its statement as the question too: the text view
+    prints it once, under `sql:`, not as a question and again as SQL."""
+    sql = "SELECT count(*) FROM staging.customers"
+    _routes["/requests/req_s"] = {
+        "request_id": "req_s",
+        "lens": "ops",
+        "status": "rejected",
+        "question": sql,
+        "sql": sql,
+        "kind": "sql_probe",
+    }
+    assert cli._observe(_args(action="show", request_id="req_s")) == 0
+    out = capsys.readouterr().out
+    assert out.count(sql) == 1 and "sql:\n" + sql in out
+
+
 def test_show_prints_the_ledger_slots(_routes, capsys) -> None:
     _routes["/requests/req-1"] = {
         "request_id": "req-1",

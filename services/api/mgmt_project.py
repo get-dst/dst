@@ -658,6 +658,9 @@ def _apply(
             )
     # Probe artifacts land after connections (the same push may declare theirs)
     # and before lenses (whose missing-table check reads the store these fill).
+    # They are also the catalog an `expose:` grant resolves against, the same
+    # way the plan read them.
+    pushed_profiles = apply_engine.incoming_profiles(body.files)
     profile_applied, profile_warnings = apply_engine.apply_profiles(session, body.files)
     if profile_applied or profile_warnings:
         out.append(
@@ -735,9 +738,11 @@ def _apply(
     # --probe-certified is an explicit ask to (re)walk the certified surface —
     # its "probed 0 new entries" note must not be skipped away.
     inputs_touched = bool(conn_applied or profile_applied or probe_certified)
-    unchanged: set[str] = set()
-    if incoming_trees and not inputs_touched:
-        unchanged = {
+    # The lenses nothing in this push changes: managed files that match the
+    # DB (plan's own comparison), and no reason to recompile either way.
+    same_files: set[str] = set()
+    if incoming_trees:
+        same_files = {
             p.lens
             for p in plan_engine.plan_lenses(_db_trees(session), incoming_trees)
             if p.status == "unchanged"
@@ -746,11 +751,14 @@ def _apply(
         # config — identical files no longer imply an identical compile, so the
         # lens republishes (which recompiles under the new release, surfaces
         # the notice, and clears it).
-        unchanged -= set(store.upgrade_notices(session))
+        same_files -= set(store.upgrade_notices(session))
         # A lens the push itself made stale (its shared assets landed above)
         # takes the full path too, so a gate rejection stays on the LENS row —
         # not deferred to the recompile pass's rejected-recompile.
-        unchanged -= set(_stale_map(session, semantic_store.asset_hashes(session)))
+        same_files -= set(_stale_map(session, semantic_store.asset_hashes(session)))
+    # Skipped outright unless a touched input sends them through the publish
+    # path — where the row still says unchanged, as the plan did.
+    unchanged: set[str] = set(same_files) if not inputs_touched else set()
     if only is not None:
         # The lenses not selected: unchanged by decree, whatever their files
         # say — the refusals above guarantee none of them is stale.
@@ -779,7 +787,10 @@ def _apply(
             created_by=identity.actor,
             gate_override=gate_override,
             allow_cases=allow_cases,
+            incoming_profiles=pushed_profiles,
         )
+        if result.action == "updated" and lens in same_files and not result.errors:
+            result.action = "unchanged"
         out.append(_lens_row(result))
         if result.errors:
             rejected.add(lens)

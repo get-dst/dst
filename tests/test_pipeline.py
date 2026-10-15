@@ -1851,7 +1851,7 @@ def test_fallback_renders_the_rows_not_just_their_count() -> None:
             )
         ),
         generator=FixedSQLGenerator(
-            "SELECT currency, SUM(amount) AS revenue FROM orders GROUP BY currency"
+            "SELECT status AS currency, SUM(amount) AS revenue FROM orders GROUP BY status"
         ),
         composer=AnswerComposer(llm),
     )

@@ -128,26 +128,30 @@ def _basis(
     tags, `raw` for the lens-scoped SQL probe, `unknown` for served answers with
     no tag (written before the ledger). The buckets partition `n`. `where`
     narrows the rows (a time window); the read/probe/passthrough rules are fixed
-    here so every caller of the block means the same thing by it."""
+    here so every caller of the block means the same thing by it. ``raw_refused``
+    sits OUTSIDE ``n``: the caller's own SQL the guard turned away read nothing,
+    but it is the one refusal the governed ``outcomes`` never count."""
     probe = "COALESCE(generator_tier, '') = 'probe'"
+    read = "status = 'ok'"
     row = session.execute(
         text(
             "SELECT "
-            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'certified'), "
-            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'declared'), "
-            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'mixed'), "
-            f"count(*) FILTER (WHERE NOT {probe} AND resolution_tag = 'inferred'), "
-            f"count(*) FILTER (WHERE {probe}), "
-            f"count(*) FILTER (WHERE NOT {probe} AND COALESCE(resolution_tag, '') "
+            f"count(*) FILTER (WHERE {read} AND NOT {probe} AND resolution_tag = 'certified'), "
+            f"count(*) FILTER (WHERE {read} AND NOT {probe} AND resolution_tag = 'declared'), "
+            f"count(*) FILTER (WHERE {read} AND NOT {probe} AND resolution_tag = 'mixed'), "
+            f"count(*) FILTER (WHERE {read} AND NOT {probe} AND resolution_tag = 'inferred'), "
+            f"count(*) FILTER (WHERE {read} AND {probe}), "
+            f"count(*) FILTER (WHERE {read} AND NOT {probe} AND COALESCE(resolution_tag, '') "
             "NOT IN ('certified', 'declared', 'mixed', 'inferred')), "
-            "count(*) "
-            "FROM request_log WHERE status = 'ok' AND COALESCE(lens, '') NOT LIKE 'sql:%' "
+            f"count(*) FILTER (WHERE {read}), "
+            f"count(*) FILTER (WHERE status = 'rejected' AND {probe}) "
+            "FROM request_log WHERE COALESCE(lens, '') NOT LIKE 'sql:%' "
             f"AND {where}"
         ),
         params or {},
     ).first()
     assert row is not None
-    certified, declared, mixed, inferred, raw, unknown, n = (int(v) for v in row)
+    certified, declared, mixed, inferred, raw, unknown, n, raw_refused = (int(v) for v in row)
     return {
         "certified": certified,
         "declared": declared,
@@ -156,6 +160,7 @@ def _basis(
         "raw": raw,
         "unknown": unknown,
         "n": n,
+        "raw_refused": raw_refused,
         "governed_share": round((certified + declared + mixed) / n, 4) if n else None,
     }
 

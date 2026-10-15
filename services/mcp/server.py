@@ -12,8 +12,11 @@ Mirrors Omni's pickModel -> pickTopic -> getData:
 
 Every tool returns a structured envelope so agents can branch programmatically
 success is ``{"ok": true, ...payload}``; failure is ``{"ok": false,
-"code": "auth|forbidden|not_found|rate_limited|no_exact_match|upstream|unreachable",
+"code": "auth|forbidden|not_found|rate_limited|refused|invalid|no_exact_match|upstream|unreachable",
 "error": "<human-readable>"}`` — never an error disguised as a successful payload.
+``refused`` is the data plane declining the request as asked (an unknown metric, a
+fan-out over the cap, a lens that does not cover the question); ``invalid`` is a body
+that failed validation; ``upstream`` is reserved for a genuine server fault.
 
 Two transports, same tools and same governance:
 
@@ -137,7 +140,8 @@ Operating loop:
    you want dst's own wording to quote.
 
 Every tool returns an envelope: {ok:true,...payload} or {ok:false,code,error}. Branch on
-`ok`; never treat a failure as data.
+`ok`; never treat a failure as data. code 'refused' means dst declined the request as
+asked (fix the request, read `error`); 'upstream' means dst itself failed.
 """
 
 
@@ -262,7 +266,16 @@ CERTIFIED_EXACT = 0.95
 # uses that prose anyway.
 AnswerFormat = Literal["both", "structured", "prose"]
 
-_CODE_BY_STATUS = {401: "auth", 403: "forbidden", 404: "not_found", 429: "rate_limited"}
+# 400 is the data plane refusing the request as asked and 422 a body that failed
+# validation: both are the caller's to fix, so neither reads as a server fault.
+_CODE_BY_STATUS = {
+    400: "refused",
+    401: "auth",
+    403: "forbidden",
+    404: "not_found",
+    422: "invalid",
+    429: "rate_limited",
+}
 
 
 def _fail(code: str, error: str, **extra: Any) -> dict[str, Any]:

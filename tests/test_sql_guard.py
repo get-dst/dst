@@ -60,13 +60,6 @@ def _model() -> SemanticModel:
         "WITH months AS (SELECT m FROM generate_series(1, 12) AS t(m))"
         " SELECT months.m, count(o.order_id) AS n FROM months"
         " LEFT JOIN orders o ON o.order_month = months.m GROUP BY 1",
-        # A column COMPUTED in a CTE, then read back qualified by the CTE name —
-        # which here also names a physical table. It is a projection of the CTE,
-        # not a physical column (false rejection observed: "column
-        # 'customer_transactions.min_month' is out of lens scope").
-        "WITH orders AS (SELECT customer_id, min(order_month) AS min_month"
-        " FROM main.orders GROUP BY 1)"
-        " SELECT orders.customer_id, orders.min_month FROM orders",
         "SELECT s.total FROM (SELECT customer_id, sum(amount) AS total FROM orders GROUP BY 1) s",
         # A star CONFINED to a CTE/subquery reaches no caller: the outermost
         # projection names the columns, so nothing unmodeled comes back. The
@@ -85,13 +78,48 @@ def _model() -> SemanticModel:
         # allow-listed like any other.
         "WITH staged AS (SELECT o.* FROM orders o) SELECT customer_id FROM staged",
         "SELECT s.customer_id FROM (SELECT c.* FROM customers c) s",
-        "WITH staged AS (SELECT o.* FROM main.orders AS o) SELECT customer_id FROM staged",
     ],
 )
 def test_in_scope_allowed(sql: str) -> None:
     r = sql_guard.check(sql, _model())
     assert r.ok, r.reason
     assert r.sql
+
+
+def _qualified_orders_model() -> SemanticModel:
+    return SemanticModel(
+        lens="orders",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="orders",
+                source=EntitySource(connection="jaffle", table="main.orders"),
+                fields=[
+                    Field(name="customer_id", type="integer"),
+                    Field(name="order_month", type="date"),
+                ],
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A column COMPUTED in a CTE, then read back qualified by the CTE name —
+        # which here also names a physical table. It is a projection of the CTE,
+        # not a physical column (false rejection observed: "column
+        # 'customer_transactions.min_month' is out of lens scope").
+        "WITH orders AS (SELECT customer_id, min(order_month) AS min_month"
+        " FROM main.orders GROUP BY 1)"
+        " SELECT orders.customer_id, orders.min_month FROM orders",
+        # The qualified-star form of the same shadowing.
+        "WITH staged AS (SELECT o.* FROM main.orders AS o) SELECT customer_id FROM staged",
+    ],
+)
+def test_a_cte_named_like_its_physical_table_is_resolved_per_scope(sql: str) -> None:
+    r = sql_guard.check(sql, _qualified_orders_model())
+    assert r.ok, r.reason
 
 
 @pytest.mark.parametrize(
@@ -745,3 +773,123 @@ def test_certified_sql_still_reaches_its_own_physical_tables() -> None:
     not tighten that one."""
     sql = "SELECT SUM(o.amount) AS revenue FROM `other-project.marts.orders` AS o"
     assert sql_guard.check(sql, _bq_qualified_model(), trust_tables=True).ok
+
+
+# ── an unqualified column takes the same door as a qualified one ─────────────
+# `SELECT c.ssn FROM customers c` was refused while `SELECT ssn FROM customers`
+# passed: the column walk checked only qualified columns, so a hidden or
+# unmodeled column was served whenever it was named bare. A bare column now
+# resolves through the physical tables its scope can see.
+
+
+def _exposed_model() -> SemanticModel:
+    return SemanticModel(
+        lens="ops",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="customers",
+                source=EntitySource(connection="wh", table="staging.customers"),
+                fields=[
+                    Field(name="customer_id", type="integer"),
+                    Field(name="email", type="string"),
+                ],
+                exposed=True,
+            ),
+            Entity(
+                name="orders",
+                source=EntitySource(connection="wh", table="staging.orders"),
+                fields=[
+                    Field(name="order_id", type="integer"),
+                    Field(name="amount", type="number"),
+                ],
+                exposed=True,
+            ),
+        ],
+    )
+
+
+def test_a_bare_hidden_column_is_refused_on_an_exposed_table() -> None:
+    r = sql_guard.check("SELECT ssn FROM staging.customers LIMIT 1", _exposed_model())
+    assert not r.ok
+    assert r.reason == "column 'ssn' is out of lens scope"
+    r = sql_guard.check("SELECT customer_id FROM customers WHERE ssn IS NOT NULL", _exposed_model())
+    assert not r.ok
+    assert r.reason == "column 'ssn' is out of lens scope"
+
+
+def test_a_bare_unreferenced_column_is_refused_on_a_declared_entity() -> None:
+    r = sql_guard.check("SELECT first_order_date FROM customers", _model())
+    assert not r.ok
+    assert r.reason == "column 'first_order_date' is out of lens scope"
+    # ...also when the table is written bare and the column sits in a predicate.
+    r = sql_guard.check("SELECT customer_id FROM customers ORDER BY first_order_date", _model())
+    assert not r.ok
+    assert r.reason == "column 'first_order_date' is out of lens scope"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT customer_id, customer_lifetime_value FROM customers",
+        "SELECT customer_id FROM customers WHERE number_of_orders > 1",
+        # A bare column from a CTE is the CTE's projection, not a physical column.
+        "WITH t AS (SELECT customer_id AS cid FROM customers) SELECT cid FROM t",
+        "WITH t AS (SELECT customer_id, count(*) AS n FROM orders GROUP BY 1)"
+        " SELECT n FROM t WHERE n > 1",
+        # A join: the column is allowed on one side, which is enough.
+        "SELECT amount FROM customers c JOIN orders o ON c.customer_id = o.customer_id",
+        "SELECT customer_lifetime_value FROM orders o"
+        " JOIN customers c ON c.customer_id = o.customer_id",
+        # A projection alias read from outside the projection list.
+        "SELECT sum(amount) AS total, order_month FROM orders GROUP BY order_month ORDER BY total",
+        # A correlated reference to the OUTER table's column, written bare.
+        "SELECT c.customer_id FROM customers c"
+        " WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = customer_lifetime_value)",
+        # A row generator's column list names what it yields.
+        "SELECT m, count(o.order_id) AS n FROM generate_series(1, 12) AS t(m)"
+        " LEFT JOIN orders o ON o.order_month = m GROUP BY m",
+        # A CTE star over a declared entity keeps the derived names unknown.
+        "WITH staged AS (SELECT * FROM orders) SELECT order_id FROM staged",
+    ],
+)
+def test_a_bare_allowed_column_passes(sql: str) -> None:
+    r = sql_guard.check(sql, _model())
+    assert r.ok, r.reason
+
+
+# ── a written qualifier may be omitted, never added or contradicted ──────────
+# `SELECT order_id FROM staging.orders` passed a lens whose only `orders` was
+# the unqualified source `orders`: tail matching let the written reference ADD a
+# schema the source never had, so a never-exposed table was served.
+
+
+def _orders_model(source: str) -> SemanticModel:
+    return SemanticModel(
+        lens="rev",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="orders",
+                source=EntitySource(connection="wh", table=source),
+                fields=[Field(name="order_id", type="integer")],
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("written", "source", "allowed"),
+    [
+        ("staging.orders", "orders", False),  # adds a schema the source lacks
+        ("orders", "analytics.orders", True),  # omits the schema — same table
+        ("analytics.orders", "acme.analytics.orders", True),  # omits the catalog
+        ("other.analytics.orders", "acme.analytics.orders", False),  # contradicts it
+        ("orders", "orders", True),
+    ],
+)
+def test_a_written_qualifier_may_only_be_omitted(written: str, source: str, allowed: bool) -> None:
+    r = sql_guard.check(f"SELECT order_id FROM {written}", _orders_model(source))
+    assert r.ok is allowed, r.reason
+    if not allowed:
+        assert r.reason == f"table '{written}' is out of lens scope"

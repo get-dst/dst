@@ -22,6 +22,7 @@ call is monkeypatched (the test_cli_apply_legibility pattern).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import duckdb
@@ -291,6 +292,48 @@ def test_drift_arms_via_accept_then_reports_the_day_5_column(
     assert "ops.orders: gained column `discount_amount`" in out
     assert "definition `discount` (semantic/definitions/discounts.md)" in out
     assert "supersedes the derivation" in out
+
+
+def test_drift_without_a_connection_runs_every_declared_warehouse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`dst drift` with no flag is what the README says to run: every warehouse
+    connection dst.yaml declares, one section each, the worst exit code wins.
+    Here one connection gains a column (2) and the other is not armed (4)."""
+    root = _project(tmp_path)
+    (root / "dst.yaml").write_text(
+        "name: t\nconnections:\n  warehouse:\n    type: duckdb\n"
+        f"    config: {{path: {root / 'wh.duckdb'}}}\n"
+        "  second:\n    type: duckdb\n"
+        f"    config: {{path: {root / 'second.duckdb'}}}\n",
+        encoding="utf-8",
+    )
+    _warehouse(root, day5=False)
+    duckdb.connect(str(root / "second.duckdb")).close()
+    assert (
+        _cli(monkeypatch, ["drift", "--connection", "warehouse", "--accept", "--dir", str(root)])
+        == 0
+    )
+    capsys.readouterr()
+    _warehouse(root, day5=True)
+
+    assert _cli(monkeypatch, ["drift", "--dir", str(root)]) == 4
+    captured = capsys.readouterr()
+    assert "connection warehouse:" in captured.out
+    assert "ops.orders: gained column `discount_amount`" in captured.out
+    assert "not armed for 'second'" in captured.err
+
+    assert _cli(monkeypatch, ["drift", "--json", "--dir", str(root)]) == 4
+    payloads = json.loads(capsys.readouterr().out)
+    assert [p["connection"] for p in payloads] == ["warehouse"]  # unarmed prints no object
+    assert payloads[0]["findings"][0]["table"] == "ops.orders"
+
+
+def test_drift_without_a_connection_needs_a_dst_yaml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _cli(monkeypatch, ["drift", "--dir", str(tmp_path)]) == 1
+    assert "no dst.yaml" in capsys.readouterr().err
 
 
 def test_drift_names_the_warehouse_it_could_not_read(

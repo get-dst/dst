@@ -32,6 +32,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -319,6 +320,11 @@ class _BoundedConnector:
         )
 
 
+def _aware(dt: datetime) -> datetime:
+    """A naive timestamp (an older artifact's) compares as UTC."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], list[str]]:
     """Pushed probe artifacts (``profiles/<conn>.probe.json``) → table_profile upserts.
 
@@ -334,8 +340,6 @@ def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], 
     stored profile newer than the incoming table's is kept — a REST-refreshed
     server must not be downgraded by an old commit. Absence never deletes.
     """
-    from datetime import UTC
-
     from services.lenses import profile_store
     from services.project.probe import is_probe_path, parse_probe
 
@@ -355,9 +359,6 @@ def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], 
                 "(declare it in dst.yaml so the same push lands it first)"
             )
             continue
-
-        def _aware(dt: Any) -> Any:
-            return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
         landed = kept = 0
         for profile in artifact.tables:
@@ -428,7 +429,10 @@ def _reserved_name_warnings(entities: Iterable[str]) -> list[str]:
 @dataclass
 class LensApplyResult:
     lens: str
-    action: str  # created | updated | recompiled | rejected | rejected-recompile
+    # created | updated | unchanged | recompiled | rejected | rejected-recompile
+    # ("unchanged": republished through a touched input with its managed files
+    # identical to the DB's — the plan's verdict, kept on the apply row).
+    action: str
     version: int | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -572,26 +576,49 @@ def _expose_profiles(
     config: LensConfig,
     *,
     incoming: Mapping[str, Sequence[TableProfile]] | None = None,
-) -> dict[str, list[TableProfile]]:
-    """Connection -> stored table profiles, for every connection the lens's
-    `expose:` grants name. ``incoming`` is the push's own probe artifacts, for
-    the DRY RUN: apply lands them before any lens compiles, so a plan that read
-    only the store would reject a grant the same push is about to satisfy. An
-    incoming profile replaces the stored one for its table."""
+) -> tuple[dict[str, list[TableProfile]], dict[str, list[str]]]:
+    """``(profiles, dropped)`` by connection, for every connection the lens's
+    `expose:` grants name: the table profiles a grant resolves against, and the
+    tables a stored profile still describes but the push's probe says are gone.
+
+    ``incoming`` is the push's own probe artifacts. For the DRY RUN they are
+    layered over the store because apply lands them before any lens compiles,
+    so a plan that read only the store would reject a grant the same push is
+    about to satisfy. They are also the catalog: `dst probe` writes every
+    table the connection lists (`--tables` narrows the SAMPLING pass only), so
+    a stored profile absent from a NEWER artifact is a table dropped upstream
+    — withheld here, and named in ``dropped`` so the grant that matched only
+    it fails by name. The store itself is never pruned by a push (absence
+    never deletes, so an old commit cannot downgrade a server); the same
+    no-downgrade rule is why a stored profile fresher than the artifact stays."""
     from services.lenses import profile_store
 
-    out: dict[str, list[TableProfile]] = {}
+    profiles: dict[str, list[TableProfile]] = {}
+    dropped: dict[str, list[str]] = {}
     for grant in config.expose:
-        if grant.connection in out:
+        if grant.connection in profiles:
             continue
         stored = {
             p.profile.table: p.profile
             for p in profile_store.list_profiles(session, grant.connection)
         }
-        for profile in (incoming or {}).get(grant.connection, ()):
+        pushed = list((incoming or {}).get(grant.connection, ()))
+        if pushed:
+            catalog = {p.table for p in pushed}
+            probed_at = max(_aware(p.profiled_at) for p in pushed)
+            gone = sorted(
+                table
+                for table, profile in stored.items()
+                if table not in catalog and _aware(profile.profiled_at) < probed_at
+            )
+            for table in gone:
+                del stored[table]
+            if gone:
+                dropped[grant.connection] = gone
+        for profile in pushed:
             stored[profile.table] = profile
-        out[grant.connection] = list(stored.values())
-    return out
+        profiles[grant.connection] = list(stored.values())
+    return profiles, dropped
 
 
 def incoming_profiles(files: Mapping[str, str]) -> dict[str, list[TableProfile]]:
@@ -628,13 +655,15 @@ def expose_plan_notes(
 
     if not config.expose:
         return None, []
+    profiles, dropped = _expose_profiles(session, config, incoming=incoming)
     entities, errors = resolve_expose(
         config,
-        _expose_profiles(session, config, incoming=incoming),
+        profiles,
         declared=[p.name for p in config.select.entities],
+        dropped=dropped,
     )
     warnings = [UNTYPED_WARNING] if not config.untyped_fallback else []
-    return (None if errors else expose_summary(entities)), warnings
+    return (None if errors else expose_summary(entities, profiles)), warnings
 
 
 def _lens_dialect(
@@ -868,7 +897,12 @@ def apply_lens(
     created_by: str = "",
     gate_override: str | None = None,
     allow_cases: frozenset[str] | None = None,
+    incoming_profiles: Mapping[str, Sequence[TableProfile]] | None = None,
 ) -> LensApplyResult:
+    """``incoming_profiles`` is the push's own probe artifacts (already landed
+    by ``apply_profiles``): the catalog an `expose:` grant resolves against,
+    so a table the probe no longer lists fails the grant here as it does in
+    the plan."""
     config = source.config
     if config.name != name:
         return LensApplyResult(
@@ -879,6 +913,7 @@ def apply_lens(
     try:
         dialect = _lens_dialect(session, config)
         shared_entities, shared_definitions, shared_relationships = _shared_layer(session)
+        profiles, dropped = _expose_profiles(session, config, incoming=incoming_profiles)
         model, compile_warnings = compile_lens_model(
             config=config,
             shared_entities=shared_entities,
@@ -890,7 +925,8 @@ def apply_lens(
             dialect=dialect,
             asset_hashes=semantic_store.asset_hashes(session),
             default_qualifiers=_default_qualifiers(session),
-            profiles=_expose_profiles(session, config),
+            profiles=profiles,
+            dropped_tables=dropped,
         )
     except CompileError as exc:
         return LensApplyResult(lens=name, action="rejected", errors=[str(exc)])
@@ -1039,6 +1075,7 @@ def check_lens(
     shared_entities.update(incoming_entities)
     shared_definitions.update(incoming_definitions)
     shared_relationships.update(incoming_relationships)
+    profiles, dropped = _expose_profiles(session, config, incoming=incoming_profiles)
     try:
         model, _warnings = compile_lens_model(
             config=config,
@@ -1051,7 +1088,8 @@ def check_lens(
             dialect=_lens_dialect(session, config, declared=incoming_connections),
             asset_hashes=asset_hashes,
             default_qualifiers=_default_qualifiers(session, declared=incoming_connections),
-            profiles=_expose_profiles(session, config, incoming=incoming_profiles),
+            profiles=profiles,
+            dropped_tables=dropped,
         )
     except CompileError as exc:
         return [str(exc)]
@@ -1115,7 +1153,7 @@ def check_recompiles(
                 dialect=sm.dialect,
                 asset_hashes=asset_hashes,
                 default_qualifiers=_default_qualifiers(session, declared=incoming_connections),
-                profiles=_expose_profiles(session, bundle.config),
+                profiles=_expose_profiles(session, bundle.config)[0],
             )
         except CompileError as exc:
             out[name] = [str(exc)]
@@ -1166,7 +1204,7 @@ def recompile_stale(
                 dialect=sm.dialect,
                 asset_hashes=hashes,
                 default_qualifiers=qualifiers,
-                profiles=_expose_profiles(session, bundle.config),
+                profiles=_expose_profiles(session, bundle.config)[0],
             )
         except CompileError as exc:
             results.append(

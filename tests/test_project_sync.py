@@ -155,6 +155,24 @@ def test_plan_statuses_and_diffs() -> None:
     assert plan_lenses({}, {"new": db_tree})[0].status == "create"
 
 
+def test_a_missing_queries_yaml_plans_as_an_empty_one() -> None:
+    """The loader reads a lens directory without queries.yaml as having no
+    anchors and no samples, and the DB renders that state as `use_when: []`:
+    the plan must call the two the same, or every such lens is `update`
+    forever. A DB that HOLDS anchors the files no longer carry is a real change."""
+    import yaml
+
+    db_tree = dict(_render())
+    db_tree["queries.yaml"] = yaml.safe_dump(
+        {"use_when": [], "sample_queries": []}, sort_keys=False
+    )
+    incoming = {p: c for p, c in db_tree.items() if p != "queries.yaml"}
+    assert plan_lenses({"jcv": db_tree}, {"jcv": incoming})[0].status == "unchanged"
+    held = dict(_render())  # the demo lens carries anchors
+    plan = plan_lenses({"jcv": held}, {"jcv": incoming})[0]
+    assert plan.status == "update" and [d.path for d in plan.diffs] == ["queries.yaml"]
+
+
 def test_plan_semantic_statuses_and_diffs() -> None:
     entities, definitions, relationships = jaffle_shared_assets()
     db_files = render_semantic_files(entities, definitions, relationships)

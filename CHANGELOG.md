@@ -29,6 +29,79 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [Unreleased]
+
+No schema change.
+
+### Changed
+
+- **`dst test` says where the run went.** The sweep ends with a `recorded:` line per lens
+  naming the run id and the database it was written to (`DATABASE_URL`, password hidden),
+  and `--json` carries `recorded` and `database`. `dst test` writes in-process while
+  `dst runs` and the dashboard read through the server at `DST_URL`; when those name
+  different databases the run existed and nothing in the output said where. The empty
+  `dst runs` message now says the same, and the docs name the failure mode (FAQ,
+  Evaluation, Environments and CI).
+
+## [0.8.1] — 2026-10-15
+
+No schema change. A security release: upgrade if any lens exposes tables or serves
+the caller `sql` door.
+
+### Security
+
+- **Unqualified columns are scoped.** A hidden or unmodeled column named without a table
+  prefix (`SELECT ssn FROM customers`) is refused as out of lens scope, the same as the
+  qualified form; a column from a CTE, a projection alias, or a row generator still passes.
+- **A table reference may omit qualifiers, never add them.** `staging.orders` no longer
+  passes a lens whose source is the unqualified `orders`; omitting a schema or catalog the
+  source has still names the table.
+- **`SELECT *` over exposed tables is rewritten, not trusted.** When every table in a
+  statement is an exposed table, a bare or qualified star in any scope is expanded into the
+  table's allowed columns, so the returned SQL and the rows never carry a hidden column; a
+  star the guard cannot make explicit, or a statement that also reads a declared entity, is
+  still refused.
+
+### Fixed
+
+- **`SELECT *` on a whole exposed table was refused** whenever the lens hid a column on some
+  other table, or a declared entity shared its bare table name; it now passes and lists the
+  columns.
+- **A dropped table no longer keeps its grant alive.** A stored profile the push's probe
+  artifact no longer lists counts as gone at plan and apply: the pattern that matched only it
+  fails, naming the table as dropped upstream. The store is not pruned by a push, and an
+  artifact older than the stored profile cannot declare a table gone.
+- **`dst plan` counts hidden columns:** `exposes N tables (M columns, H hidden)` when `hide`
+  withheld any.
+- **An apply row says `unchanged`** for a lens whose managed files match the server when a
+  touched input republishes it, as the plan said; a lens the same push made stale still
+  reads `updated`.
+- **The `untyped_fallback` warning** on an `expose:` grant says what an answer then carries:
+  an EXPOSED line, and an UNTYPED line only when a typed reading was bypassed.
+- **`dst observe show` prints the purpose and a probe's SQL once.** The KPI basis block gains
+  `raw_refused`, the refused-probe count the governed outcomes never held.
+- **A lens without `queries.yaml` no longer plans as `update` forever.** The plan compares a
+  missing file as the empty one apply reads it as.
+
+### Added
+
+- **A miss names the lens that exposes the table.** When a question names an exposed table
+  word for word, the routed decline carries `exposed_in` and both the uncovered reason and a
+  lens refusal end with "lens '<name>' exposes <table> (no governed definitions): ask it by
+  name".
+- **`dst mcp`.** Runs the stdio MCP server from a wheel install; `DST_API_KEY` and `DST_URL`
+  as before.
+
+### Changed
+
+- **MCP failure codes name the owner.** A data-plane 400 returns `code: "refused"` and a 422
+  `code: "invalid"`; `upstream` is reserved for server faults.
+- **`dst drift` runs every declared connection.** `--connection` is optional; without it each
+  warehouse connection runs in turn, findings under a per-connection heading, exit code the
+  worst, `--json` one list.
+- **`describe_lens` note on exposed tables** says answers carry an EXPOSED line and never a
+  declared or certified tag.
+
 ## [0.8.0] — 2026-10-15
 
 No schema change.

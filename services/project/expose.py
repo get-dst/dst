@@ -65,10 +65,14 @@ def resolve_expose(
     profiles: Mapping[str, Sequence[TableProfile]],
     *,
     declared: Sequence[str] = (),
+    dropped: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[list[Entity], list[str]]:
     """``(entities, errors)`` for the lens's grants. ``profiles`` maps a connection
     name to its stored table profiles; ``declared`` names the entities the lens
-    selects, which an exposed table's bare name must not collide with."""
+    selects, which an exposed table's bare name must not collide with; ``dropped``
+    maps a connection to the tables a stored profile still describes but the
+    pushed probe no longer lists — gone upstream, so a pattern that matches only
+    one of them fails, naming the table, instead of exposing a stale profile."""
     entities: list[Entity] = []
     errors: list[str] = []
     seen: dict[str, str] = {}  # bare name -> table that claimed it
@@ -82,6 +86,7 @@ def resolve_expose(
             )
             continue
         known = list(profiles.get(grant.connection, ()))
+        gone = list((dropped or {}).get(grant.connection, ()))
         for pattern in grant.tables:
             matched = [p for p in known if _matches(pattern, p.table)]
             if not matched:
@@ -90,6 +95,11 @@ def resolve_expose(
                     if known
                     else "the connection has no stored profiles"
                 )
+                if stale := sorted(t for t in gone if _matches(pattern, t)):
+                    why += (
+                        f" — {', '.join(stale)} was dropped upstream (the pushed probe no "
+                        "longer lists it)"
+                    )
                 errors.append(
                     f"lens '{config.name}' exposes '{pattern}' on connection "
                     f"'{grant.connection}' but {why} — run `dst probe` (so the tables are "
@@ -121,21 +131,34 @@ def resolve_expose(
     return entities, errors
 
 
-def expose_summary(entities: Sequence[Entity]) -> str | None:
+def expose_summary(
+    entities: Sequence[Entity], profiles: Mapping[str, Sequence[TableProfile]] | None = None
+) -> str | None:
     """`exposes N tables (M columns)` — the plan's one-line count, or None when
-    the lens exposes nothing."""
+    the lens exposes nothing. With the ``profiles`` the entities resolved from,
+    the columns `hide` withheld are counted too: `(M columns, H hidden)`."""
     exposed = [e for e in entities if e.exposed]
     if not exposed:
         return None
     columns = sum(len(e.fields) for e in exposed)
-    return (
-        f"exposes {len(exposed)} table{'s' if len(exposed) != 1 else ''} "
-        f"({columns} column{'s' if columns != 1 else ''})"
+    profiled = {
+        (p.connection, p.table): len(p.columns)
+        for conn, rows in (profiles or {}).items()
+        for p in rows
+    }
+    hidden = sum(
+        max(profiled.get((e.source.connection, e.source.table), len(e.fields)) - len(e.fields), 0)
+        for e in exposed
     )
+    counts = f"{columns} column{'s' if columns != 1 else ''}"
+    if hidden:
+        counts += f", {hidden} hidden"
+    return f"exposes {len(exposed)} table{'s' if len(exposed) != 1 else ''} ({counts})"
 
 
 UNTYPED_WARNING = (
     "`expose` is set with untyped_fallback: false — questions about exposed tables "
     "never type, so `query` cannot answer from them (the `sql` tool still can); set "
-    "untyped_fallback: true to serve them, disclosed UNTYPED"
+    "untyped_fallback: true to serve them; answers then carry an EXPOSED line (and an "
+    "UNTYPED line only when a typed reading was bypassed)"
 )

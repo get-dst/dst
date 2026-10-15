@@ -145,6 +145,59 @@ def test_query_endpoint_e2e(monkeypatch: pytest.MonkeyPatch) -> None:
         _cleanup(settings.database_admin_url, org)
 
 
+def test_a_refusal_names_the_lens_that_exposes_the_table_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lens that declines a question naming a table ANOTHER lens exposes says
+    so on the refusal: the caller asked the wrong door, not an unanswerable
+    question. Deterministic — the match is the table's name, word for word."""
+    from services.lenses.store import LensBundle
+    from tests.test_expose_tables import _compile, _config
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    config = _config(["staging.customers"])
+    with org_session(org) as session:
+        store.create_lens(session, LensBundle(config=config, semantic_model=_compile(config)))
+        store.publish(session, "ops")
+    decline = '{"sql": "", "no_answer": "no customers table in this lens"}'
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.runtime.assembly.IntentSQLGenerator",
+        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+            llm, model=model, temperature=temperature
+        ),
+    )
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider",
+        lambda _key, **_: ScriptedLLM([decline, decline]),
+    )
+    try:
+        r = client.post(
+            "/v1/lenses/customer_value/query",
+            json={"q": "how many rows in staging.customers?"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "refused"
+        assert body["answer"].endswith(
+            "; lens 'ops' exposes staging.customers (no governed definitions): ask it by name"
+        )
+        r = client.post(
+            "/v1/lenses/customer_value/query",
+            json={"q": "how many repeat buyers?"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.json()["status"] == "refused" and "exposes" not in r.json()["answer"]
+    finally:
+        admin = create_engine(settings.database_admin_url)
+        with admin.begin() as c:
+            for table in ("lens_version", "lens"):
+                c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
+        _cleanup(settings.database_admin_url, org)
+
+
 def test_query_endpoint_does_not_block_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """The handler called the fully-blocking ``run_lens_query`` straight from an
     ``async def``, so ONE caller's question pinned the whole event loop for the entire

@@ -14,7 +14,7 @@ audit names the lens whose grant a dropped table breaks.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import yaml
@@ -36,7 +36,7 @@ from services.contracts.semantic_model import (
 )
 from services.contracts.shared_semantic import SelectEntity, SelectSpec, SharedEntity
 from services.db.session import org_session
-from services.lenses import connection_store
+from services.lenses import connection_store, profile_store
 from services.lenses.demo import (
     jaffle_customer_value,
     jaffle_customer_value_bundle,
@@ -209,6 +209,27 @@ def test_the_summary_counts_tables_and_columns() -> None:
     model = _model()
     assert expose_summary(model.entities) == "exposes 1 table (2 columns)"
     assert expose_summary([]) is None
+    # With the profiles it resolved from, the columns `hide` withheld are counted.
+    assert expose_summary(model.entities, _profiles()) == "exposes 1 table (2 columns, 1 hidden)"
+    whole = _compile(_config(["analytics.dim_*"]))
+    assert expose_summary(whole.entities, _profiles()) == "exposes 1 table (2 columns)"
+
+
+def test_a_pattern_matching_only_a_dropped_table_names_the_table() -> None:
+    # The stored profile is withheld by the caller; the error still says which
+    # table the pattern used to match and why it no longer does.
+    profiles = {WH: [_profile("staging.orders", [("order_id", "BIGINT")])]}
+    config = _config(["staging.products"], select=[])
+    _entities, errors = resolve_expose(config, profiles, dropped={WH: ["staging.products"]})
+    assert len(errors) == 1
+    assert "no profiled table matches" in errors[0]
+    assert "staging.products was dropped upstream" in errors[0]
+    assert "dst probe" in errors[0]
+    # A pattern that still matches a profiled table is untouched by the list.
+    _entities, errors = resolve_expose(
+        _config(["staging.orders"], select=[]), profiles, dropped={WH: ["staging.products"]}
+    )
+    assert not errors
 
 
 def test_the_loader_rejects_an_unknown_expose_key_by_name() -> None:
@@ -240,15 +261,65 @@ def test_star_passes_on_an_exposed_only_statement_with_nothing_hidden() -> None:
     assert by_entity.ok, by_entity.reason
 
 
-def test_star_is_refused_when_a_declared_or_partly_hidden_table_is_read() -> None:
-    model = _compile(_config(["analytics.dim_*", "staging.customers"], hide=["*.ssn"]))
-    declared = sql_guard.check(
-        "SELECT * FROM analytics.dim_region r JOIN marts.orders o ON o.order_id = r.region_id",
-        model,
+def test_star_is_rewritten_into_the_allowed_columns_of_an_exposed_table() -> None:
+    # The returned SQL names the columns, so what comes back is never more
+    # than the lens lists — a whole table lists every profiled column.
+    model = _compile(_config(["analytics.dim_*"]))
+    ok = sql_guard.check("SELECT * FROM analytics.dim_region", model)
+    assert ok.ok and ok.sql == "SELECT region_id, name FROM analytics.dim_region"
+    qualified = sql_guard.check("SELECT r.* FROM analytics.dim_region r", model)
+    assert qualified.ok and qualified.sql == (
+        "SELECT r.region_id, r.name FROM analytics.dim_region AS r"
     )
-    assert not declared.ok and "SELECT *" in str(declared.reason)
-    hidden = sql_guard.check("SELECT * FROM staging.customers", model)
-    assert not hidden.ok and "SELECT *" in str(hidden.reason)
+    # ...and a lens with a hidden column SOMEWHERE no longer bans the star on a
+    # table that hides nothing.
+    model = _compile(_config(["analytics.dim_*", "staging.customers"], hide=["*.ssn"]))
+    ok = sql_guard.check("SELECT * FROM analytics.dim_region", model)
+    assert ok.ok and ok.sql == "SELECT region_id, name FROM analytics.dim_region"
+
+
+JOINED = (
+    "SELECT * FROM staging.customers c JOIN analytics.dim_region r ON r.region_id = c.customer_id"
+)
+
+
+def test_star_on_a_partly_hidden_table_never_carries_the_hidden_column() -> None:
+    model = _compile(_config(["analytics.dim_*", "staging.customers"], hide=["*.ssn"]))
+    for sql in (
+        "SELECT * FROM staging.customers",
+        "SELECT c.* FROM staging.customers c",
+        "SELECT * FROM customers",
+        # In a CTE too: the derived projection is made explicit where it is read,
+        # and the outer star is expanded from it.
+        "WITH s AS (SELECT * FROM staging.customers) SELECT * FROM s",
+        "SELECT s.* FROM (SELECT * FROM staging.customers) s",
+        JOINED,
+    ):
+        r = sql_guard.check(sql, model)
+        assert r.ok, (sql, r.reason)
+        assert r.sql is not None and "ssn" not in r.sql, r.sql
+        assert "*" not in r.sql, r.sql
+    # A star the rewrite cannot make explicit never reaches the caller: an
+    # aggregate over a qualified star hands back every column.
+    r = sql_guard.check("SELECT array_agg(c.*) FROM staging.customers c", model)
+    assert not r.ok and "SELECT *" in str(r.reason)
+    r = sql_guard.check("SELECT * FROM staging.customers", model)
+    assert r.sql == "SELECT customer_id, email FROM staging.customers"
+    r = sql_guard.check(JOINED, model)
+    assert r.sql is not None and r.sql.startswith(
+        "SELECT c.customer_id, c.email, r.region_id, r.name FROM"
+    )
+
+
+def test_star_is_refused_when_a_declared_entity_is_read() -> None:
+    model = _compile(_config(["analytics.dim_*", "staging.customers"], hide=["*.ssn"]))
+    for sql in (
+        "SELECT * FROM analytics.dim_region r JOIN marts.orders o ON o.order_id = r.region_id",
+        "SELECT r.* FROM analytics.dim_region r JOIN marts.orders o ON o.order_id = r.region_id",
+        "SELECT o.* FROM analytics.dim_region r JOIN orders o ON o.order_id = r.region_id",
+    ):
+        r = sql_guard.check(sql, model)
+        assert not r.ok and "SELECT *" in str(r.reason), sql
 
 
 def test_both_generation_prompts_list_the_exposed_table_with_the_line() -> None:
@@ -351,7 +422,10 @@ def test_describe_lens_lists_exposed_tables_apart_from_entities() -> None:
     assert [e.name for e in described.entities] == ["orders"]
     assert [t.table for t in described.exposed_tables] == ["staging.customers"]
     assert [c.name for c in described.exposed_tables[0].columns] == ["customer_id", "email"]
-    assert described.note and "ungoverned" in described.note and "UNTYPED" in described.note
+    assert described.note and "ungoverned" in described.note
+    assert (
+        "EXPOSED line" in described.note and "never a declared or certified tag" in described.note
+    )
     plain = describe_model("plain", display_name="P", description="", model=jaffle_customer_value())
     assert plain.exposed_tables == [] and plain.note is None
 
@@ -511,7 +585,7 @@ def test_plan_counts_the_grant_warns_on_untyped_fallback_and_apply_publishes_it(
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
     row = next(e for e in plan if e.get("lens") == "customer_value")
     assert row["status"] != "invalid", row
-    assert row["exposes"] == "exposes 2 tables (5 columns)"
+    assert row["exposes"] == "exposes 2 tables (5 columns, 1 hidden)"
     assert row["warnings"] == [UNTYPED_WARNING]
 
     out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
@@ -528,4 +602,84 @@ def test_plan_counts_the_grant_warns_on_untyped_fallback_and_apply_publishes_it(
     files["profiles/jaffle.probe.json"] = _probe_artifact()
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
     row = next(e for e in plan if e.get("lens") == "customer_value")
-    assert row["exposes"] == "exposes 2 tables (5 columns)" and "warnings" not in row
+    assert row["exposes"] == "exposes 2 tables (5 columns, 1 hidden)" and "warnings" not in row
+
+
+@needs_db
+def test_a_re_pushed_artifact_republishes_an_identical_lens_as_unchanged(org) -> None:
+    # A probe artifact in the push is a touched input, so the lens takes the
+    # publish path; its managed files match the DB, which is what the plan
+    # reports — the apply row must say the same, not "updated".
+    _oid, headers = org
+    files = _project_files(["stg_*"])
+    files["profiles/jaffle.probe.json"] = _probe_artifact()
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    first = next(r for r in out if r.get("lens") == "customer_value")
+    assert first["action"] in ("created", "updated"), out
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    assert next(e for e in plan if e.get("lens") == "customer_value")["status"] == "unchanged"
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    assert any(r.get("scope") == "profiles" for r in out), out  # the input was touched
+    again = next(r for r in out if r.get("lens") == "customer_value")
+    assert again["action"] == "unchanged", out
+
+
+def _probe_without(table: str, probed_at: datetime) -> str:
+    """The same artifact re-probed later, with one table gone from the catalog."""
+    artifact = ProbeArtifact.model_validate_json(_probe_artifact())
+    kept = [p.model_copy(update={"profiled_at": probed_at}) for p in artifact.tables]
+    return ProbeArtifact(
+        connection="jaffle",
+        probed_at=probed_at,
+        tables=[p for p in kept if p.table != table],
+    ).model_dump_json()
+
+
+@needs_db
+def test_a_table_dropped_upstream_fails_the_grant_on_the_next_push(org) -> None:
+    oid, headers = org
+    files = _project_files(["stg_customers"])
+    files["profiles/jaffle.probe.json"] = _probe_artifact()
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    assert out[-1]["action"] != "aborted", out
+
+    # The next probe no longer lists the table; the stored profile is still
+    # there (absence never deletes), but the grant must not resolve from it.
+    later = NOW + timedelta(days=1)
+    files["profiles/jaffle.probe.json"] = _probe_without("stg_customers", later)
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    row = next(e for e in plan if e.get("lens") == "customer_value")
+    assert row["status"] == "invalid", row
+    assert any("stg_customers was dropped upstream" in e for e in row["errors"]), row
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    assert out[-1]["action"] == "aborted", out
+    assert any("dropped upstream" in e for r in out for e in r.get("errors", [])), out
+    with org_session(oid) as s:
+        assert profile_store.get_profile(s, "jaffle", "stg_customers") is not None
+
+    # A catalog that lists it again is fine, and a push with no artifact at all
+    # resolves from the store as before.
+    files["profiles/jaffle.probe.json"] = _probe_without("customers", later)
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    row = next(e for e in plan if e.get("lens") == "customer_value")
+    assert row["status"] != "invalid", row
+    del files["profiles/jaffle.probe.json"]
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    row = next(e for e in plan if e.get("lens") == "customer_value")
+    assert row["status"] != "invalid", row
+    assert row["exposes"] == "exposes 1 table (2 columns)"
+
+
+@needs_db
+def test_an_older_artifact_never_drops_a_fresher_stored_profile(org) -> None:
+    # The no-downgrade rule: a commit older than the server's profile cannot
+    # declare the table gone.
+    _oid, headers = org
+    files = _project_files(["stg_customers"])
+    files["profiles/jaffle.probe.json"] = _probe_artifact()
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    assert out[-1]["action"] != "aborted", out
+    files["profiles/jaffle.probe.json"] = _probe_without("stg_customers", NOW - timedelta(days=1))
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    row = next(e for e in plan if e.get("lens") == "customer_value")
+    assert row["status"] != "invalid", row

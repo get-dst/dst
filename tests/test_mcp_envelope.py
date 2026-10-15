@@ -454,3 +454,46 @@ def test_purpose_reaches_the_data_plane_only_when_sent(monkeypatch: pytest.Monke
     assert "purpose" not in sent["/v1/lenses/churn/query"]
     asyncio.run(srv.sql("churn", "SELECT 1 AS n", ctx=None))
     assert "purpose" not in sent["/v1/sql"]
+
+
+def test_data_plane_refusals_are_not_server_faults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 400 is dst declining the request as asked and a 422 a body that failed
+    validation; both are the caller's to fix, so neither may wear the `upstream`
+    code that says the server itself broke."""
+    _wire(
+        monkeypatch,
+        {
+            "POST /v1/lenses/churn/metrics": (400, {"detail": "fan-out over the cap"}),
+            "POST /v1/lenses/churn/query": (422, {"detail": "question: field required"}),
+            "GET /v1/lenses": (500, {"detail": "boom"}),
+        },
+    )
+    refused = asyncio.run(srv.query_metrics("churn", ctx=None, metrics=["x"]))
+    assert refused["ok"] is False and refused["code"] == "refused"
+    assert "fan-out over the cap" in refused["error"]
+    invalid = asyncio.run(srv.query("churn", "", ctx=None))
+    assert invalid["ok"] is False and invalid["code"] == "invalid"
+    fault = asyncio.run(srv.list_lenses(ctx=None))
+    assert fault["ok"] is False and fault["code"] == "upstream"
+
+
+def test_dst_mcp_is_the_stdio_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`dst mcp` runs the stdio server exactly as running the module does: a wheel
+    has no module path to hand a client config, so the verb is what a
+    `claude mcp add` line names. `--help` proves the subparser exists."""
+    import contextlib
+    import io
+    import sys
+
+    from services.cli import main as cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "argv", ["dst", "mcp", "--help"])
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit) as exit_:
+        cli.main()
+    assert exit_.value.code == 0 and "usage: dst mcp" in buf.getvalue()
+
+    ran: list[str] = []
+    monkeypatch.setattr(srv, "main", lambda: ran.append("stdio"))
+    monkeypatch.setattr(sys, "argv", ["dst", "mcp"])
+    assert cli.main() == 0 and ran == ["stdio"]

@@ -62,7 +62,7 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 | `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key); row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
 | `GET /v1/lenses/{name}/certified` | The lens's certified library; with `?q=` results are similarity-ranked (top 5, scored) |
 | `POST /v1/lenses/{name}/certified/{cert_id}/run` | Run an approved question→SQL pair exactly as certified; zero AI SQL generation |
-| `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope |
+| `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope; when the question names a table a lens exposes, `exposed_in` lists that lens and the reason says to ask it by name |
 | `POST /v1/verify-receipt` | Check an answer's signed receipt: signature + field-by-field cross-check against the logged trace |
 | `POST /v1/reviews` | Open a review ticket on a traced request (optionally with a correction delta); 201, and only against a request served to this caller (admins excepted) |
 | `GET /v1/reviews` | The tickets raised on this caller's own requests: the reporter's half of the queue |
@@ -181,9 +181,10 @@ a URL and a `dst_` key, or via the built-in OAuth flow. Twelve tools:
 | `verify_receipt` | Check a receipted number before repeating it: signature + trace cross-check |
 
 plus a `getting_started` prompt. Every tool returns a uniform envelope, `{"ok": true,
-…}` or `{"ok": false, "code": auth | forbidden | not_found | rate_limited |
-no_exact_match | upstream | unreachable, "error": …}`, so an agent can branch on
-`code` instead of parsing prose. See [Agents over MCP](../guides/agents-mcp.md).
+…}` or `{"ok": false, "code": auth | forbidden | not_found | rate_limited | refused |
+invalid | no_exact_match | upstream | unreachable, "error": …}`, so an agent can branch on
+`code` instead of parsing prose (`refused` and `invalid` are the caller's to fix;
+`upstream` is a server fault). See [Agents over MCP](../guides/agents-mcp.md).
 
 ## OAuth
 

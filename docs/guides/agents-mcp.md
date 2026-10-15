@@ -27,8 +27,14 @@ this name and wires both ends).
 The server is mounted at `/mcp` on the API itself (`services/mcp/server.py` builds it,
 `services/app.py` gates and serves it at that path); each request carries its own bearer
 key, so any MCP client that speaks streamable HTTP works.
-For a local stdio client, run the same module directly with the key in a `DST_API_KEY`
-env var. Revoke a key with `dst revoke-key` or from the dashboard.
+For a local stdio client, `dst mcp` runs the same server over stdio with the key in a
+`DST_API_KEY` env var and the base URL in `DST_URL` (env or the project's `.env`):
+
+```bash
+claude mcp add dst --transport stdio --env DST_API_KEY=dst_... -- dst mcp
+```
+
+Revoke a key with `dst revoke-key` or from the dashboard.
 
 ## The tools
 
@@ -49,8 +55,12 @@ Twelve tools (`services/mcp/server.py`):
 | `verify_receipt` | check a [receipted](../concepts/receipts.md) number before repeating it: signature plus trace cross-check |
 
 Plus a `getting_started` prompt. Every tool returns a uniform envelope, `{"ok": true, …}`
-or `{"ok": false, "code": auth|forbidden|not_found|rate_limited|no_exact_match|upstream|
-unreachable, "error": …}`, so agents branch on `ok` and `code`, never parse prose.
+or `{"ok": false, "code": auth|forbidden|not_found|rate_limited|refused|invalid|
+no_exact_match|upstream|unreachable, "error": …}`, so agents branch on `ok` and `code`,
+never parse prose. `refused` is dst declining the request as asked (an unknown metric, a
+fan-out over the cap, a lens that does not cover the question) and `invalid` a body that
+failed validation: both are the caller's to fix, and `error` says what. `upstream` is a
+genuine server fault.
 
 A lens can also [expose tables that have no
 definitions](project-files.md#exposing-tables-that-have-no-definitions).

@@ -466,6 +466,45 @@ def _lenses_carrying(org_id: uuid.UUID, asking_lens: str, metric: str) -> list[s
         return []
 
 
+def exposed_tables_named(
+    question: str, caller: CallerIdentity, *, exclude: str | None = None
+) -> list[tuple[str, str]]:
+    """``(lens, table)`` pairs for every exposed table the question names word for
+    word — the bare name or ``schema.table`` — across the lenses this caller may use,
+    *exclude* left out. Deterministic and model-free: an exposed table has no
+    definitions, so the router never routes to it and a lens never generates for
+    it; naming the lens that holds the grant is the only way a miss can say where
+    the data lives. A failed lookup just drops the hint."""
+    try:
+        bundles = list_published_for_org(caller.org_id)
+    except Exception:
+        log.exception("exposed-table lookup failed")
+        return []
+    hits: list[tuple[str, str]] = []
+    for lens_name, _display, _desc, bundle in bundles:
+        if lens_name == exclude or not authorize(caller, bundle.config)[0]:
+            continue
+        for entity in bundle.semantic_model.entities:
+            if not entity.exposed:
+                continue
+            table = entity.source.table
+            names = {entity.name, table, table.rsplit(".", 1)[-1]}
+            if any(
+                re.search(rf"(?<![\w.]){re.escape(n)}(?![\w.])", question, re.IGNORECASE)
+                for n in names
+            ):
+                hits.append((lens_name, table))
+    return sorted(set(hits))
+
+
+def exposed_hint(hits: list[tuple[str, str]]) -> str:
+    """The sentence a miss ends with when an exposed table was named."""
+    return "; ".join(
+        f"lens '{lens}' exposes {table} (no governed definitions): ask it by name"
+        for lens, table in hits
+    )
+
+
 def _serve_error_backstop(
     result: PipelineResult, *, org_id: uuid.UUID, lens: str, connection: str
 ) -> None:
@@ -742,6 +781,12 @@ def run_lens_query(
             log_samples=bundle.config.logging.log_samples,
         )
     _fail_on_warehouse_timeout(result, caller)
+    if result.response.status == "refused":
+        # A refusal that names a table another lens exposes says so: the caller
+        # asked the wrong door, not an unanswerable question.
+        hint = exposed_hint(exposed_tables_named(q, caller, exclude=name))
+        if hint:
+            result.response.answer = f"{result.response.answer.rstrip('.')}; {hint}"
     # Degradation rides on EVERY outcome, not just the ok ones — stamped here,
     # once, because run_query builds a response and a trace on each of its five
     # exits. A serve whose certified matching could not run says so on the wire

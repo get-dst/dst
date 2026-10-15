@@ -41,9 +41,9 @@ class ExposedTableInfo(BaseModel):
 
 
 EXPOSED_NOTE = (
-    "exposed_tables are read without governed definitions: answers from them are "
-    "ungoverned, carry an EXPOSED line, and serve as UNTYPED (raw SQL) — the sql "
-    "tool reads them directly"
+    "exposed_tables are read without governed definitions: answers from these tables "
+    "are ungoverned: they carry an EXPOSED line and never a declared or certified tag "
+    "— the sql tool reads them directly"
 )
 
 

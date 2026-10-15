@@ -402,9 +402,9 @@ class Entity(Authored):
     # no meaning. The runtime treats it as ungoverned on every rail — never
     # offered to a typed decision, no router anchors, never a declared source
     # in the ledger, and every answer that reads it says EXPOSED. `exposed_whole`
-    # is True when no `hide` pattern withheld a column, which is the one case
-    # the SQL guard lets `SELECT *` through: a star over it reveals nothing the
-    # lens withholds.
+    # is True when no `hide` pattern withheld a column; describe and compile read
+    # it. The SQL guard does not key on it: a star over exposed tables is
+    # rewritten into the allowed columns, hidden ones absent, whole or not.
     exposed: bool = False
     exposed_whole: bool = False
 
