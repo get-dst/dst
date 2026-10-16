@@ -73,6 +73,118 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.10.0] — 2026-10-16
+
+No schema change. Behaviour changes: explicit date ranges are inclusive; an exposed read
+grades at most partial; the inline judge is advisory; `dst probe` no longer overwrites the drift
+baseline; `dst test` exits non-zero on any failing case. New `dst.yaml` key: `probe.drift_tolerance`.
+
+### Added
+
+- **A ratio pinned to 1 on every row fails verification.** The `all_ones_ratio` check fails a
+  rate or ratio result that is exactly 1 (or 100) across more than one row; a single-row
+  result skips and says so.
+- **`partial` always names its cause.** `verification.partial_reason` on every response and
+  trace carries the check that capped the grade, or the abstention that kept it short of
+  verified.
+- **Plan rejects a definition whose `sql:` cannot filter.** A `sql:` that is not a boolean
+  predicate (`definition_not_predicate`) or that sits on a ratio metric
+  (`definition_filters_ratio`) fails plan and apply with the fix named.
+- **Plan warns on a status column with several done states.** When a status-like column's
+  complete value dictionary holds more than one done-family value and no definition is about
+  the column, plan and apply emit `status_done_ambiguous` naming the values.
+- **Plan fails when two certified answers would answer each other's question.** Every
+  certified question is embedded and compared with the corpus; a pair inside the paraphrase
+  band with different SQL is a plan/apply error naming both.
+- **A lexical veto on certified matches.** An exact or equivalent hit whose approved question
+  names a different governed metric or definition than the asked one drops to assisted.
+- **`dst doctor` fails when a certified corpus exists without an embedder**, and `dst init`
+  says whether certified matching is on.
+- **`probe.drift_tolerance`** in `dst.yaml` (`time_shift`, default `1h`; `numeric_shift`,
+  default `0.2`).
+- **Warehouse bytes in `dst observe`**: the KPI block carries `wh_bytes` in total and per
+  lens, and the headline shows bytes scanned.
+- **`dst serve --daemon` and `dst serve --stop`.** The server can run detached, with its pid
+  in `.dst/serve.pid` and its output in `.dst/serve.log`; `--stop` ends it. `dst dev --daemon`
+  does the same. On any signal the server logs which one arrived and that it is shutting
+  down.
+- **A decline from `route_query` carries a `request_id`.** The recorded routing decision's
+  id, so a caller can quote a decline the way it quotes an answer.
+- **A missing column no longer refuses the whole question.** When generated SQL is rejected
+  for one column outside the lens and the question asked for other things too, one repair
+  leaves that column out and the rest is served. The response carries a `declined` list
+  (`"<column>: not in this lens"`), a `degraded` line reading
+  `answered the rest: <column> is not in this lens`, the same note in the answer prose, and
+  the trace records it. A repair that still fails refuses as before, with no further
+  generation. Typed listings do the same for a further field the resolver cannot place.
+
+### Changed
+
+- **An exposed read grades at most partial.** Any answer whose SQL reads an exposed table
+  carries the `governed_read` check ("ungoverned read") and never grades verified, on
+  certified serves too.
+- **The inline judge is advisory.** It reads the governed context the composer had
+  (definitions, data notes, population scope), runs at temperature 0, and its verdict lands as
+  the `judge` check without changing the grade.
+- **A count in prose is graded against the column it counts.** "7 contracts" is checked
+  against the `contracts` column's cells and sum (or its distinct values and the row count),
+  not against any cell holding a 7; distinct counts per column are now groundable.
+- **Explicit date ranges are inclusive.** A behaviour change: a template slot bound as
+  `YYYY-MM-DD/YYYY-MM-DD` now covers both dates; the second date was previously an exclusive
+  end, so `2026-01-01/2026-09-30` dropped 30 September. Rendered `{slot.end}` is the day
+  after the last day, as for months and quarters. Stored bindings written under the old
+  reading cannot be told apart and now cover one more day; re-check any explicit-range sample
+  binding.
+- **The certified suite compares on the certified projection.** Columns match by name and
+  extra generated columns are ignored; numbers compare as values (a percentage against its
+  fraction, rounding at the certified value's printed precision), each lenient pass saying
+  why. `dst test` exits non-zero on any failing case, `--json` included.
+- **`--allow-failing-cases` takes case ids** and covers exactly what it names, a certified
+  divergence (`certified:<answer id>`) included; bare it stays blanket. A covered divergence
+  is recorded on the apply row and in the version summary.
+- **Drift sees meaning, not only shape.** The baseline records column comments, each numeric
+  column's mean, each time column's median offset from the entity's `default_time_field`,
+  and complete enum dictionaries; `dst drift` compares it against the live catalog and the
+  newest probe artifact, and a changed comment, a shift past `probe.drift_tolerance`, or a
+  dictionary member gone is a breaking finding that names the entities, definitions and
+  certified answers reading the column.
+- **A probe never erases the drift baseline.** The first `dst probe` arms drift; later probes
+  write beside it. The baseline advances by `dst drift --accept` or by `dst apply`, and only
+  when the recorded facts differ.
+- **Answers are dated from the tables they read.** `data_as_of` is the oldest of the tables
+  the served SQL resolves to, not the slowest table in the lens; the stamp names the table
+  (`data as of 2026-10-14, orders`); a dimension without a `default_time_field` dates an
+  answer only when it is all that was read. The freshness check uses the same date.
+- **Probe cost.** The sampling pass issues at most three statements per table, and
+  `dst probe` ends with statements, bytes billed and the estimated cost per connection.
+- **`dst import dbt` no longer needs MetricFlow.** A project with no semantic manifest imports
+  its models as entities: table, columns with descriptions, types from `catalog.json`, and a
+  `unique` + `not_null` tested column as the key. The summary says metrics and dimensions
+  still need authoring.
+- **A question naming one governed metric and nothing else is served by the compiler.** On
+  the direct and routed query doors the compiled intent serves before any generated SQL, the
+  way the structured door does; typed serving is unchanged.
+
+### Fixed
+
+- **A certified answer whose stored prose is a decline now refuses** instead of grading
+  verified.
+- **An adversary reply that cannot be parsed folds as a skip**, no longer as a note on a
+  passing check.
+- **A prose-only correction never auto-approves.** A review carrying correction text lands
+  `needs_human` unless the correction includes SQL the judge verified.
+- **Apply no longer 500s on a bare YAML date in `sample_bindings`.** Dates load as ISO text;
+  a list or mapping value is a plan error.
+- **A filter value was refused against another table's dictionary.** Value dictionaries are
+  now kept per table and a literal is checked against the table the SQL reads; a column name
+  shared by two entities no longer borrows one table's values for the other.
+- **Filter literals are checked against the dictionary of the table the SQL reads.** A column
+  name shared by two entities with different value dictionaries was skipped by the pre-query
+  check; a value valid on the table the query reads serves, and one absent from it clarifies
+  with that table's values.
+- **The freshness check names the table it measured.** The fail reason reads
+  `data in <table> is as of …`, the same table the answer's as-of stamp names.
+
 ## [0.9.0] — 2026-10-15
 
 No schema change. New `dst.yaml` keys: `probe.max_age`, `probe.recent_partitions`.

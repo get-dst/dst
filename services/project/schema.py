@@ -135,6 +135,37 @@ def parse_duration(text: str) -> timedelta:
     return timedelta(seconds=n * _UNIT_SECONDS.get(unit or "d", 86_400))
 
 
+class DriftTolerance(Authored):
+    """How much a column's measured distribution may move before `dst drift`
+    calls it a change. A column's comment or type changing is never within
+    tolerance; these bound the deltas the probe measures."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    time_shift: str = Field(
+        default="1h",
+        description="how far a time column's median offset from the entity's "
+        "default_time_field may move (`1h`, `30m`, `1d`; `0` reports any move)",
+    )
+    numeric_shift: float = Field(
+        default=0.2,
+        ge=0,
+        description="how far a numeric column's mean may move, relative to the baseline "
+        "(0.2 = twenty percent; 0 reports any move)",
+    )
+
+    @field_validator("time_shift", mode="before")
+    @classmethod
+    def _valid_duration(cls, v: object) -> str:
+        text = str(v).strip()
+        parse_duration(text)
+        return text
+
+    @property
+    def time_shift_seconds(self) -> float:
+        return parse_duration(self.time_shift).total_seconds()
+
+
 class ProbeConfig(Authored):
     """How `dst probe` samples and how old its artifact may get before serving
     says so. The user owns the probe clock (a scheduled job, a deploy step);
@@ -152,6 +183,11 @@ class ProbeConfig(Authored):
         ge=0,
         description="how many latest partitions (or days of the entity's default_time_field) "
         "the sampling pass reads on a refresh; 0 reads whole tables",
+    )
+    drift_tolerance: DriftTolerance = Field(
+        default_factory=lambda: DriftTolerance(),
+        description="how far a column's measured distribution may move between the drift "
+        "baseline and the newest probe before `dst drift` reports it as breaking",
     )
 
     @field_validator("max_age", mode="before")

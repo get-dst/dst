@@ -242,3 +242,41 @@ def test_template_candidates_skip_templates_and_stable_repeats() -> None:
     twin_a = CertifiedAnswer("b1", "t", "q one?", "SELECT count(*) FROM t", "m", "2026-08-01")
     twin_b = CertifiedAnswer("b2", "t", "q two?", "SELECT count(*) FROM t", "m", "2026-08-01")
     assert template_candidates([already, twin_a, twin_b], "t", "duckdb") == []
+
+
+def test_a_bare_yaml_date_in_sample_bindings_loads_as_iso_text() -> None:
+    """YAML reads `asof: 2026-01-31` as a date object; the loader hands apply
+    its ISO text so the row stores (json) and the grammar reads the same value
+    plan validated — no 500 at apply after a clean plan."""
+    import json
+
+    from services.project.loader import load_lens_source
+
+    bundle = jaffle_customer_value_bundle()
+    files = render_lens_repo(bundle)
+    files["certified_answers.yaml"] = (
+        "- question: orders as of {asof}\n"
+        "  sql: SELECT count(*) FROM orders WHERE ordered_at <= {asof}\n"
+        "  slots: {asof: {type: date}}\n"
+        "  sample_bindings:\n"
+        "    - asof: 2026-01-31\n"
+        "    - asof: 2026-02-28T00:00:00\n"
+    )
+    source = load_lens_source(files)
+    assert source.certified_answers is not None
+    samples = source.certified_answers[0]["sample_bindings"]
+    assert samples == [{"asof": "2026-01-31"}, {"asof": "2026-02-28T00:00:00"}]
+    json.dumps(samples)  # what the store does with it
+
+
+def test_a_structured_sample_binding_value_is_rejected_at_plan_not_apply() -> None:
+    from services.project.apply import _certified_entry_errors
+
+    entry = {
+        "question": "orders as of {asof}",
+        "sql": "SELECT count(*) FROM orders WHERE ordered_at <= {asof}",
+        "slots": {"asof": {"type": "date"}},
+        "sample_bindings": [{"asof": {"year": 2026}}],
+    }
+    errors = _certified_entry_errors(entry, jaffle_customer_value_bundle().semantic_model)
+    assert len(errors) == 1 and "not a scalar value" in errors[0]

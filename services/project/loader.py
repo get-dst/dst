@@ -14,6 +14,7 @@ when the lens's ``select`` compiles against the shared layer
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -212,6 +213,14 @@ def load_lens_source(files: dict[str, str]) -> LensSource:
         )
         if error:
             raise ValueError(error)
+        if isinstance(entry.get("sample_bindings"), list):
+            # YAML reads a bare `day: 2026-01-01` as a date object; the
+            # binding grammar and the stored row both want its ISO text.
+            # Coerced here, at parse, so plan and apply see the same value.
+            entry["sample_bindings"] = [
+                {k: _iso_text(v) for k, v in b.items()} if isinstance(b, dict) else b
+                for b in entry["sample_bindings"]
+            ]
     return LensSource(
         config=config,
         local_definitions=local_definitions,
@@ -285,6 +294,13 @@ def _parse_queries(text: str | None) -> tuple[list[str], list[SampleQuery]]:
         for i, q in enumerate(raw_samples)
     ]
     return use_when, sample_queries
+
+
+def _iso_text(value: Any) -> Any:
+    """A YAML date or datetime as its ISO string; anything else unchanged."""
+    if isinstance(value, datetime.date | datetime.datetime):
+        return value.isoformat()
+    return value
 
 
 def _yaml_list(text: str | None, path: str = "file") -> list[dict[str, Any]]:

@@ -239,7 +239,9 @@ def test_a_stale_dictionary_is_not_consulted_but_a_fresh_one_is(
     )
     profiles = [_profile(days_ago=12)]
     for age, consulted in ((STALE, False), (FRESH, True), (None, True)):
-        monkeypatch.setattr(assembly, "profile_facts", lambda b, o, _a=age: (profiles, None, _a))
+        monkeypatch.setattr(
+            assembly, "profile_facts", lambda b, o, _a=age: (profiles, None, _a, {})
+        )
         got = assembly.assemble(_bundle(), "sales in Finland", "org")
         assert got.profile_age is age
         assert bool(got.value_domains) is consulted, age
@@ -297,11 +299,11 @@ def test_profile_facts_measures_the_age_against_the_org_setting(org: uuid.UUID) 
     with org_session(org) as session:
         connection_store.create_connection(session, "warehouse", "duckdb", {}, None)
         profile_store.upsert_profile(session, _profile(days_ago=12))
-    _profiles, _as_of, age = assembly.profile_facts(_bundle(), org)
+    _profiles, _as_of, age, _stamps = assembly.profile_facts(_bundle(), org)
     assert age is not None and age.stale and age.max_age == timedelta(days=7)
     with org_session(org) as session:
         probe_settings.apply(session, ProbeConfig(max_age="30d"))
-    _profiles, _as_of, age = assembly.profile_facts(_bundle(), org)
+    _profiles, _as_of, age, _stamps = assembly.profile_facts(_bundle(), org)
     assert age is not None and not age.stale
 
 

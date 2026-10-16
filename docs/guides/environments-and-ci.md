@@ -140,14 +140,24 @@ warehouse) — without it, a skipped gate publishes with a warning, which is not
 what a deploy gate wants. `--quiet` keeps a large apply to the lines that need a
 human.
 
-**On a schedule — probe, then drift and test.** `dst probe` refreshes the
-committed warehouse profile (value dictionaries, freshness stamps, date spans),
-and the job commits the artifact so the repository stays the source of truth
-and the next apply lands it. Then `dst drift` compares the warehouse against the
-committed baseline and `dst test --all` re-runs the certified corpus as a
-regression suite. All three are cheap to run nightly and are the only things
-that notice a table changing shape, or a value appearing, under a published
-lens. The profile has an age: past `probe.max_age` in `dst.yaml` (default
+**On a schedule — probe, then drift, then apply when green, then test.** `dst
+probe` refreshes the committed warehouse profile (value dictionaries, freshness
+stamps, date spans, the measured distributions), and the job commits the artifact
+so the repository stays the source of truth. The probe writes beside the drift
+baseline (`profiles/<connection>.json`) and never over it: the baseline is the
+evidence, and it advances only when a person runs `dst drift --accept` after
+reading the findings, or when `dst apply` deploys the layer against the artifact.
+Then `dst drift` compares the baseline against the live catalog (schema, column
+comments) and against the newest artifact (a time column's offset from the entity
+clock, a numeric mean, a value dictionary, within `probe.drift_tolerance`); only
+when it is green does `dst apply` land the refreshed profile; last, `dst test
+--all` re-runs the certified corpus as a regression suite against what was
+applied. The order is the point: applying before reviewing drift accepts a changed
+warehouse without anyone having looked at it. All of these are cheap to run
+nightly and are the only things that notice a table changing shape, a column
+changing meaning, or a value appearing, under a published lens. The probe prints
+what the sampling cost per connection (statements, bytes billed, the estimate
+where the engine prices bytes). The profile has an age: past `probe.max_age` in `dst.yaml` (default
 seven days) every answer says so, plan and apply warn, and `dst test --all`
 exits 4 for the lens, so a schedule that stops running shows up the next
 morning instead of as a wrong answer a month later.
@@ -176,8 +186,8 @@ jobs:
           git add profiles/
           git diff --cached --quiet || git commit -m "probe: refresh warehouse profile"
           git push
-      - run: dst apply --dir . --quiet     # lands the refreshed profile
-      - run: dst drift --dir .
+      - run: dst drift --dir .             # exit 1 = a declared reference broke
+      - run: dst apply --dir . --quiet     # lands the refreshed profile, advances the baseline
       - run: dst test --all                # exit 4 = nothing verified: not green
 ```
 

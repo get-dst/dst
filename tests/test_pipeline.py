@@ -1928,3 +1928,101 @@ def test_certified_prose_is_exempt_from_the_figure_gate() -> None:
     assert res.response.composition is None
     assert "Revenue was 99." in res.response.answer
     assert res.response.confidence == "partial"
+
+
+def test_the_warehouse_bytes_billed_land_on_the_request_row() -> None:
+    """`request_log.wh_bytes` is the warehouse half of the bill, per request:
+    a connector that reports what the engine billed must see it stored."""
+    res = run_query(
+        question="how many customers?",
+        lens_name="customer_value",
+        org_id="o",
+        caller="a",
+        semantic_model=jaffle_customer_value(),
+        connector=FakeConnector(
+            result=QueryResult(columns=["n"], rows=[[42]], bytes_scanned=10_485_760)
+        ),
+        generator=FixedSQLGenerator("SELECT count(*) AS n FROM customers"),
+        composer=None,
+    )
+    assert res.trace.wh_bytes == 10_485_760
+
+
+# ── a missing column does not refuse the whole question ──────────────────────
+
+_TWO_ASKS = (
+    '{"sql": "SELECT customer_name, loyalty_tier FROM customers LIMIT 5", "definition_used": null}'
+)
+_THE_REST = '{"sql": "SELECT customer_name FROM customers LIMIT 5", "definition_used": null}'
+_ONE_ASK = '{"sql": "SELECT loyalty_tier FROM customers LIMIT 5", "definition_used": null}'
+
+
+def _ask(llm: ScriptedLLM, question: str, **kw: object) -> PipelineResult:
+    return run_query(
+        question=question,
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=GroundedSQLGenerator(llm),
+        composer=None,
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+def test_one_missing_column_of_several_serves_the_rest_and_says_so() -> None:
+    """'names and loyalty tier': the lens has no tier. One repair is told to
+    leave it out; the rest serves, with the omission on the envelope
+    (`declined`), in `degraded`, in the prose and on the trace."""
+    res = _ask(ScriptedLLM([_TWO_ASKS, _THE_REST]), "customer names and their loyalty tier")
+    assert res.trace.status == "ok" and res.trace.repairs == 1
+    assert res.response.sql and "loyalty_tier" not in res.response.sql
+    assert res.response.declined == ["loyalty_tier: not in this lens"]
+    line = "answered the rest: loyalty_tier is not in this lens"
+    assert line in res.response.degraded and line in res.trace.degraded
+    assert "Note: answered the rest: loyalty_tier is not in this lens." in res.response.answer
+
+
+def test_the_consumer_reads_the_omission_in_plain_words() -> None:
+    res = _ask(
+        ScriptedLLM([_TWO_ASKS, _THE_REST]),
+        "customer names and their loyalty tier",
+        audience="consumer",
+    )
+    assert res.trace.status == "ok"
+    assert "Loyalty_tier is left out: it is not in this data." in res.response.answer
+
+
+def test_a_drop_repair_that_still_fails_refuses_without_more_generation() -> None:
+    """The generator ignores the instruction: refused as before, and the one
+    drop repair is the only extra generation however large the repair budget."""
+    res = _ask(
+        ScriptedLLM([_TWO_ASKS, _TWO_ASKS, _THE_REST]),
+        "customer names and their loyalty tier",
+        max_repairs=3,
+    )
+    assert res.trace.status == "rejected" and res.response.data is None
+    assert res.trace.ai_input_tokens == 2
+    assert not res.response.declined
+
+
+def test_a_question_that_only_asks_for_the_missing_column_refuses() -> None:
+    """Nothing is left to answer once the one column is dropped: the ordinary
+    repair runs and, failing, the question is refused whole."""
+    res = _ask(ScriptedLLM([_ONE_ASK, _ONE_ASK]), "customer loyalty tiers")
+    assert res.trace.status == "rejected"
+    assert res.trace.error and "loyalty_tier" in res.trace.error
+    assert not res.response.declined
+
+
+def test_a_missing_column_in_a_filter_is_never_dropped() -> None:
+    """The column shapes every other figure: dropping it would answer a
+    different question, so the ordinary repair runs and the refusal stands."""
+    where = (
+        '{"sql": "SELECT customer_name FROM customers WHERE loyalty_tier = \'gold\'", '
+        '"definition_used": null}'
+    )
+    res = _ask(ScriptedLLM([where, where]), "gold customers")
+    assert res.trace.status == "rejected"
+    assert not res.response.declined

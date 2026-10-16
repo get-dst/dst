@@ -209,16 +209,17 @@ the question, not the data: the same `orders` table is fresh enough for a
 finance close and too stale for an ops board, and only the use case knows which.
 
 Know how `data_as_of` is measured before setting it: it is the **oldest**
-last-update across every entity in the lens's scope, not the tables an answer
-actually touched, and profiles are read from the lens's **first declared
-connection only** (`services/runtime/assembly.py`). Two consequences. A single
-slow-moving table in scope (a country lookup that legitimately hasn't changed
-in months) drags `data_as_of` down and can mark every answer from the lens
-stale, including questions that never read it. And on a multi-connection lens,
-freshness on the second connection is not measured at all. So set it against
-the slowest thing in scope, or split the slow-moving dimension into its own
-lens, and leave it unset until you have checked what `data_as_of` actually
-reports for that lens.
+last-update among the tables the answer's SQL actually read, resolved the way
+the SQL guard resolves them, and the stamp names the table (`data as of
+2026-10-14, orders`; several tables, the oldest of them). Only an entity with
+a `default_time_field` dates an answer; a dimension (a country lookup that
+legitimately hasn't changed in months) dates one only when it is the only
+table read, so a join to it never marks an orders question stale. Profiles
+are read from the lens's **first declared connection only**
+(`services/runtime/assembly.py`), so on a multi-connection lens freshness on
+the second connection is not measured at all. Set it against the tables your
+questions read, and leave it unset until you have checked what `data_as_of`
+actually reports for that lens.
 
 There are two ages here, and they are not the same thing. Data freshness is
 how old the newest row is: `data_as_of`, measured by the probe. Profile age is
@@ -259,8 +260,10 @@ expose:
 ```
 
 Patterns are fnmatch globs (`*`, `?`, `[abc]`), case-insensitive, on the table name
-exactly as `dst introspect` names it (`schema.table`); regular expressions are not
-supported. `hide` patterns match `table.column`, with the table bare or qualified. The
+exactly as `dst introspect` names it: `schema.table` on most warehouses, and on
+BigQuery `project.dataset.table`, so a BigQuery grant reads `*.analytics.dim_*` (or
+spells the project); a bare `analytics.dim_*` matches nothing there and apply says so.
+Regular expressions are not supported. `hide` patterns match `table.column`, with the table bare or qualified. The
 grant is resolved at **apply**, against the connection's stored profiles (`dst probe` /
 `dst introspect` push them; a probe artifact in the same push counts). Each matched
 table becomes an entity in the compiled model: name = the bare table name, fields = the
@@ -269,8 +272,15 @@ or time field. Because it is resolved from the profile, the columns are the ware
 as of the last probe; re-apply after a probe and the entity follows the table.
 
 Apply fails loud when a pattern matches no profiled table (the error names the
-pattern: run `dst probe` or fix it) and when a matched bare name collides with an
-entity the same lens selects. `dst plan` prints `exposes N tables (M columns)` per
+pattern: run `dst probe` or fix it). It also fails on a name collision, because an
+exposed table is addressed by its bare name and two things cannot answer to one:
+a matched table whose bare name is an entity the same lens selects
+(`staging.orders` beside a selected `orders`) fails, naming both and asking you to
+exclude it from the pattern or drop the entity from `select`; and two exposed
+tables that share a bare name (`staging.customers` and `analytics.customers` under
+one lens) fail, asking you to narrow the patterns so one lens exposes one table
+under that name. Two patterns matching the same table is not a collision: it
+becomes one entity. `dst plan` prints `exposes N tables (M columns)` per
 lens, `(M columns, H hidden)` when `hide` withheld any, and warns when `expose` is set
 with `untyped_fallback: false`: a question about an exposed table never types, so
 `query` cannot answer from it until the lens accepts untyped answers (the `sql` tool
@@ -302,9 +312,10 @@ What an exposed table is, on every rail:
 - the typed resolver never offers it; the raw-SQL prompt lists it with its columns
   and the line `no governed definitions`; the router takes no anchors from it.
 - an answer that reads one carries a line in `degraded`, in the same idiom as
-  `UNTYPED`: `EXPOSED: reads staging.orders, a table with no governed definitions`.
-  Its columns never count as declared sources in the resolution ledger, so a measure
-  read from it is `inferred`, never `declared` or `certified`.
+  `UNTYPED`: `EXPOSED: reads staging.orders, a table with no governed definitions`,
+  and grades at most `partial` — the `governed_read` check names the ungoverned
+  read. Its columns never count as declared sources in the resolution ledger, so a
+  measure read from it is `inferred`, never `declared` or `certified`.
 - `describe_lens` lists it under `exposed_tables`, apart from `entities`, with a note
   that answers from it are ungoverned.
 

@@ -203,10 +203,12 @@ def test_the_baseline_file_carries_schema_and_no_literals(tmp_path: Path) -> Non
     """`_BASELINE_INCLUDE` is a whitelist, and this is what it buys: the file is
     committed, so a value that moves every pass would put a hundred-line diff
     under every `--accept` and bury the schema change that is the whole point.
-    The probe artifact is where literals belong, on purpose and by itself."""
+    A sampled range or a partial dictionary never reaches it; only a complete
+    enum-sized dictionary does (tests/test_drift_semantic.py), because a
+    member of one going away is a change the layer filters on."""
     wd.write_baseline(tmp_path, "warehouse", _customers(["ada@corp.example"]))
     written = wd.baseline_path(tmp_path, "warehouse").read_text(encoding="utf-8")
-    assert "corp.example" not in written and '"FI"' not in written
+    assert "corp.example" not in written and '"FI"' not in written  # partial lists, a range
     assert '"email"' in written and '"country"' in written  # names and types survive
 
 
@@ -353,9 +355,9 @@ def test_drift_names_the_warehouse_it_could_not_read(
 def test_probe_arms_drift_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """One artifact family: `dst probe` — the documented first step — writes the
-    drift baseline alongside the probe artifact, so a project that probed never
-    sits in the silent unarmed state."""
+    """One artifact family: the first `dst probe` — the documented first step —
+    writes the drift baseline alongside the probe artifact, so a project that
+    probed never sits in the silent unarmed state."""
     root = _project(tmp_path)
     _warehouse(root, day5=False)
     assert _cli(monkeypatch, ["probe", "--connection", "warehouse", "--dir", str(root)]) == 0
@@ -364,12 +366,12 @@ def test_probe_arms_drift_too(
     # …and drift reads that baseline as armed: unchanged warehouse, exit 0.
     assert _cli(monkeypatch, ["drift", "--connection", "warehouse", "--dir", str(root)]) == 0
 
-    # A re-probe UPDATES the baseline: after it, the day-5 column is the new
-    # recorded truth and drift reports clean against it.
+    # A re-probe does NOT touch the baseline: the day-5 column is reported
+    # against the recorded truth until somebody accepts it (exit 2).
     _warehouse(root, day5=True)
     assert _cli(monkeypatch, ["probe", "--connection", "warehouse", "--dir", str(root)]) == 0
     capsys.readouterr()
-    assert _cli(monkeypatch, ["drift", "--connection", "warehouse", "--dir", str(root)]) == 0
+    assert _cli(monkeypatch, ["drift", "--connection", "warehouse", "--dir", str(root)]) == 2
 
 
 def test_drift_exit_1_when_a_dropped_column_breaks_declared_references(

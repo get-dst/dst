@@ -28,31 +28,52 @@ a dashboard poll and useless for "since I authored this".
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from services.contracts.profile import TableProfile
+from services.contracts.profile import LOW_CARDINALITY_MAX, ColumnProfile, TableProfile
 from services.contracts.semantic_model import Definition
 from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.lenses.profile_drift import DriftKind, ProfileDrift, diff_profiles
+
+if TYPE_CHECKING:
+    from services.project.schema import DriftTolerance
 
 # Committed, not hidden: the point is that a teammate who pulls the project gets
 # the warning too. `init` writes `.env` into .gitignore and nothing else, so this
 # lands in version control by default, which is the intent.
 BASELINE_DIR = "profiles"
 
-# Schema deltas only, and the exclusions are deliberate. `enum_value_added` is
-# the one literal-bearing kind (a catalog pass collects no literals at all);
-# `stale_table` and `partition_changed` are real signals
-# but a different finding — a table that stopped updating, or got cheaper to
-# scan, is not a layer that stopped matching its warehouse. They stay on the
-# REST surface, which reports every kind.
+# What the live catalog can show: schema deltas plus a changed column comment
+# (the catalog carries comments where the engine exposes them). The exclusions
+# are deliberate: `stale_table` and `partition_changed` are real signals but a
+# different finding — a table that stopped updating, or got cheaper to scan,
+# is not a layer that stopped matching its warehouse. They stay on the REST
+# surface, which reports every kind.
 SCHEMA_KINDS: frozenset[str] = frozenset(
-    {"column_added", "column_dropped", "column_retyped", "table_added", "table_dropped"}
+    {
+        "column_added",
+        "column_dropped",
+        "column_retyped",
+        "column_recommented",
+        "table_added",
+        "table_dropped",
+    }
+)
+
+# What only the probe artifact can show: the measured distribution moved past
+# the project's tolerance, or a complete value dictionary changed. A column
+# whose comment went from "UTC" to "local time" and whose values shifted by
+# hours has the same name, type and nullability on both days — the catalog
+# diff is clean, and the duration the layer derives from it is wrong on every
+# answer. These are the deltas that catch that.
+PROFILE_KINDS: frozenset[str] = frozenset(
+    {"column_shifted", "dictionary_changed", "enum_value_added"}
 )
 
 
@@ -92,11 +113,13 @@ class Baseline(BaseModel):
 # schema actually changing, which is the entire reason the baseline lives in git.
 #
 # A whitelist, not a blacklist, because this file is committed: a field added to
-# `ColumnProfile` later is excluded until somebody decides otherwise. The value
-# fields (`top_values`, `min`, `max`) are the ones that decision is about, and
-# leaving them out here means no sampled literal reaches the repository through
-# the baseline at all — the probe artifact is the file that carries those, on
-# purpose and by itself.
+# `ColumnProfile` later is excluded until somebody decides otherwise. What is
+# in: the schema, the column comment (its meaning, as the warehouse states
+# it), the two distribution numbers drift compares against a tolerance, and
+# the value dictionary of an enum-like column that was read whole — the
+# values a definition or a certified answer filters on, which the artifact
+# carries anyway. A longer complete dictionary (names, teams) reaches the file
+# only as a digest; `min`/`max` and partial lists never do.
 _BASELINE_INCLUDE: Any = {  # pydantic's IncEx, which is not exported for annotating
     "connection": True,
     "recorded_at": True,
@@ -104,7 +127,20 @@ _BASELINE_INCLUDE: Any = {  # pydantic's IncEx, which is not exported for annota
         "__all__": {
             "connection": True,
             "table": True,
-            "columns": {"__all__": {"name": True, "type": True, "nullable": True}},
+            "columns": {
+                "__all__": {
+                    "name": True,
+                    "type": True,
+                    "nullable": True,
+                    "description": True,
+                    "mean": True,
+                    "time_offset_seconds": True,
+                    "top_values": True,
+                    "values_complete": True,
+                    "distinct_count": True,
+                    "values_digest": True,
+                }
+            },
         }
     },
 }
@@ -152,6 +188,52 @@ def baseline_connections(root: Path) -> list[str]:
     return out
 
 
+def _digest(values: list[str]) -> str:
+    return hashlib.sha256("\x1f".join(sorted(values)).encode("utf-8")).hexdigest()[:16]
+
+
+def _enum_dictionary(column: ColumnProfile) -> list[str] | None:
+    """The values the baseline carries verbatim: a complete, enum-sized list."""
+    if (
+        column.values_complete
+        and column.top_values
+        and len(column.top_values) <= LOW_CARDINALITY_MAX
+    ):
+        return column.top_values
+    return None
+
+
+def _baseline_column(column: ColumnProfile) -> ColumnProfile:
+    """A column as the baseline records it: enum dictionaries verbatim, longer
+    complete ones as a digest, partial ones not at all."""
+    if _enum_dictionary(column) is not None:
+        return column.model_copy(update={"values_digest": None})
+    digest = _digest(column.top_values) if column.values_complete and column.top_values else None
+    return column.model_copy(update={"top_values": None, "values_digest": digest})
+
+
+def baseline_tables(profiles: list[TableProfile]) -> list[TableProfile]:
+    """Profiles reduced to what the baseline records, sorted for a quiet diff."""
+    return [
+        p.model_copy(update={"columns": [_baseline_column(c) for c in p.columns]})
+        for p in sorted(profiles, key=lambda p: p.table)
+    ]
+
+
+def baseline_changed(root: Path, connection: str, profiles: list[TableProfile]) -> bool:
+    """Whether recording *profiles* would change the committed file beyond its
+    timestamp — `dst apply` advances the baseline only then, so a deploy that
+    moved nothing leaves no timestamp-only commit in a file whose history is
+    the point."""
+    recorded = read_baseline(root, connection)
+    if recorded is None:
+        return True
+    include = _BASELINE_INCLUDE["tables"]
+    before = [t.model_dump(include=include["__all__"]) for t in recorded.tables]
+    after = [t.model_dump(include=include["__all__"]) for t in baseline_tables(profiles)]
+    return before != after
+
+
 def write_baseline(root: Path, connection: str, profiles: list[TableProfile]) -> Path:
     path = baseline_path(root, connection)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,12 +241,49 @@ def write_baseline(root: Path, connection: str, profiles: list[TableProfile]) ->
         connection=connection,
         recorded_at=datetime.now(UTC),
         # Sorted so re-recording an unchanged warehouse is a one-line git diff.
-        tables=sorted(profiles, key=lambda p: p.table),
+        tables=baseline_tables(profiles),
     )
     path.write_text(
         baseline.model_dump_json(indent=2, include=_BASELINE_INCLUDE) + "\n", encoding="utf-8"
     )
     return path
+
+
+def accepted_tables(
+    live: list[TableProfile], probed: list[TableProfile] | None
+) -> list[TableProfile]:
+    """What `--accept` records: the live catalog's schema and comments, with
+    the newest probe artifact's measured facts (means, offsets, dictionaries)
+    laid over the columns it measured. The catalog is the schema's truth
+    today; the artifact is the distribution's truth as of the last probe."""
+    if not probed:
+        return live
+    measured = {p.table: {c.name: c for c in p.columns} for p in probed}
+    out: list[TableProfile] = []
+    for table in live:
+        facts = measured.get(table.table)
+        if facts is None:
+            out.append(table)
+            continue
+        columns = []
+        for column in table.columns:
+            seen = facts.get(column.name)
+            if seen is None:
+                columns.append(column)
+                continue
+            columns.append(
+                column.model_copy(
+                    update={
+                        "mean": seen.mean,
+                        "time_offset_seconds": seen.time_offset_seconds,
+                        "top_values": seen.top_values,
+                        "values_complete": seen.values_complete,
+                        "distinct_count": seen.distinct_count,
+                    }
+                )
+            )
+        out.append(table.model_copy(update={"columns": columns}))
+    return out
 
 
 # ── the diff ─────────────────────────────────────────────────────────────────
@@ -185,7 +304,154 @@ def baseline_drift(previous: list[TableProfile], current: list[TableProfile]) ->
         out.append(ProfileDrift(table=name, kind="table_dropped", detail=name))
     for name in sorted(prev.keys() & cur.keys()):
         out.extend(diff_profiles(prev[name], cur[name]))
+        out.extend(_comment_drift(prev[name], cur[name]))
     return [d for d in out if d.kind in SCHEMA_KINDS]
+
+
+def _comment_drift(previous: TableProfile, current: TableProfile) -> list[ProfileDrift]:
+    """A column whose warehouse comment changed — the meaning moved while the
+    column list stayed put. Only a comment that WAS there counts: a comment
+    appearing on an undocumented column is documentation, not a change."""
+    cur = {c.name: c for c in current.columns}
+    out: list[ProfileDrift] = []
+    for prev_c in previous.columns:
+        cur_c = cur.get(prev_c.name)
+        if cur_c is None or not prev_c.description:
+            continue
+        before, after = prev_c.description.strip(), (cur_c.description or "").strip()
+        if before != after:
+            out.append(
+                ProfileDrift(
+                    table=current.table,
+                    kind="column_recommented",
+                    detail=f"{prev_c.name}: '{before}' -> '{after or '(removed)'}'",
+                )
+            )
+    return out
+
+
+def _hms(seconds: float) -> str:
+    """`-5400` -> `-1h30m`; whole days say so."""
+    sign = "-" if seconds < 0 else ""
+    total = int(round(abs(seconds)))
+    days, rem = divmod(total, 86_400)
+    hours, rem = divmod(rem, 3_600)
+    minutes, secs = divmod(rem, 60)
+    parts = [f"{n}{u}" for n, u in ((days, "d"), (hours, "h"), (minutes, "m")) if n]
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return sign + "".join(parts)
+
+
+def profile_drift(
+    previous: list[TableProfile], current: list[TableProfile], tolerance: DriftTolerance
+) -> list[ProfileDrift]:
+    """Semantic deltas between the baseline and the newest probe artifact:
+    a time column's median offset from the entity clock that moved more than
+    ``tolerance.time_shift``, a numeric mean that moved more than
+    ``tolerance.numeric_shift`` of itself, a complete value dictionary that
+    lost or renamed a member (``dictionary_changed``) or gained one
+    (``enum_value_added``). A fact measured on one side only is no delta: a
+    baseline recorded before the probe measured means has nothing to compare."""
+    cur_tables = {p.table: p for p in current}
+    out: list[ProfileDrift] = []
+    for prev_t in sorted(previous, key=lambda p: p.table):
+        cur_t = cur_tables.get(prev_t.table)
+        if cur_t is None:
+            continue
+        cur_cols = {c.name: c for c in cur_t.columns}
+        for prev_c in prev_t.columns:
+            cur_c = cur_cols.get(prev_c.name)
+            if cur_c is None:
+                continue
+            out.extend(_column_shift(prev_t.table, prev_c, cur_c, tolerance))
+            out.extend(_dictionary_drift(prev_t.table, prev_c, cur_c))
+    return out
+
+
+def _column_shift(
+    table: str, prev: ColumnProfile, cur: ColumnProfile, tolerance: DriftTolerance
+) -> list[ProfileDrift]:
+    out: list[ProfileDrift] = []
+    if prev.time_offset_seconds is not None and cur.time_offset_seconds is not None:
+        delta = cur.time_offset_seconds - prev.time_offset_seconds
+        if abs(delta) > tolerance.time_shift_seconds:
+            out.append(
+                ProfileDrift(
+                    table=table,
+                    kind="column_shifted",
+                    detail=(
+                        f"{prev.name}: median offset from the entity clock "
+                        f"{_hms(prev.time_offset_seconds)} -> {_hms(cur.time_offset_seconds)} "
+                        f"({_hms(delta) if delta < 0 else '+' + _hms(delta)}, "
+                        f"tolerance {tolerance.time_shift})"
+                    ),
+                )
+            )
+    if prev.mean is not None and cur.mean is not None:
+        base = abs(prev.mean)
+        moved = abs(cur.mean - prev.mean)
+        beyond = moved > tolerance.numeric_shift * base if base else moved > 0
+        if beyond and moved > 0:
+            pct = f"{100 * (cur.mean - prev.mean) / base:+.0f}%" if base else "from zero"
+            out.append(
+                ProfileDrift(
+                    table=table,
+                    kind="column_shifted",
+                    detail=(
+                        f"{prev.name}: mean {prev.mean:g} -> {cur.mean:g} ({pct}, "
+                        f"tolerance {tolerance.numeric_shift:g})"
+                    ),
+                )
+            )
+    return out
+
+
+def _dictionary_drift(table: str, prev: ColumnProfile, cur: ColumnProfile) -> list[ProfileDrift]:
+    """Enum dictionaries compare as sets and name the values; longer complete
+    dictionaries compare by digest and count — a member gone or renamed is
+    ``dictionary_changed``, a member gained is ``enum_value_added``."""
+    before = _enum_dictionary(prev)
+    after = _enum_dictionary(cur)
+    if before is not None and after is not None:
+        gone = sorted(set(before) - set(after))
+        new = sorted(set(after) - set(before))
+        out: list[ProfileDrift] = []
+        if gone:
+            out.append(
+                ProfileDrift(
+                    table=table,
+                    kind="dictionary_changed",
+                    detail=f"{prev.name}: values gone: {', '.join(gone)}",
+                )
+            )
+        if new:
+            out.append(
+                ProfileDrift(
+                    table=table, kind="enum_value_added", detail=f"{prev.name}: {', '.join(new)}"
+                )
+            )
+        return out
+    if prev.values_digest and cur.values_complete and cur.top_values:
+        if _digest(cur.top_values) == prev.values_digest:
+            return []
+        n_before, n_after = prev.distinct_count or 0, len(cur.top_values)
+        if n_after > n_before:
+            return [
+                ProfileDrift(
+                    table=table,
+                    kind="enum_value_added",
+                    detail=f"{prev.name}: {n_after - n_before} new value(s) ({n_after} now)",
+                )
+            ]
+        return [
+            ProfileDrift(
+                table=table,
+                kind="dictionary_changed",
+                detail=f"{prev.name}: complete dictionary changed ({n_before} -> {n_after} values)",
+            )
+        ]
+    return []
 
 
 def schema_delta_count(previous: list[TableProfile], current: list[TableProfile]) -> int:
@@ -469,7 +735,7 @@ def _certified_refs(
     The blast-radius rule requires the SQL to name BOTH the bare table and (for
     column deltas) the column as words — `amount` alone matches half a corpus,
     and a false 'breaking' here turns exit 1 into noise a gate stops trusting."""
-    if kind not in ("column_dropped", "column_retyped", "table_dropped"):
+    if kind not in _BREAKING_KINDS:
         return []
     out: list[LayerRef] = []
     for ref in certified:
@@ -540,9 +806,20 @@ def _column_of(drift: ProfileDrift) -> str | None:
 
 
 # The kinds that can BREAK a declared reference: something the layer reads went
-# away or changed type under it. A gained column/table is real signal (the
-# supersession finding) but nothing that referenced it can be broken by it.
-_BREAKING_KINDS: frozenset[str] = frozenset({"column_dropped", "column_retyped", "table_dropped"})
+# away, changed type, changed MEANING (its comment, its measured distribution
+# past tolerance, a dictionary member it filters on) under it. A gained
+# column/table/value is real signal (the supersession finding) but nothing that
+# referenced it can be broken by it.
+_BREAKING_KINDS: frozenset[str] = frozenset(
+    {
+        "column_dropped",
+        "column_retyped",
+        "column_recommented",
+        "column_shifted",
+        "dictionary_changed",
+        "table_dropped",
+    }
+)
 
 
 def is_breaking(finding: Finding) -> bool:
@@ -550,7 +827,9 @@ def is_breaking(finding: Finding) -> bool:
 
     Both halves required: a destructive kind AND an asset that reads it. A
     dropped column nothing declares is drift worth a look (exit 2), not a
-    broken layer (exit 1)."""
+    broken layer (exit 1). A semantic delta (comment, shift, dictionary) on a
+    referenced column is a break exactly like a drop: the answers it feeds
+    went on serving as verified."""
     return finding.kind in _BREAKING_KINDS and finding.referenced
 
 
@@ -570,9 +849,25 @@ _VERB = {
     "column_added": "gained column",
     "column_dropped": "DROPPED column",
     "column_retyped": "retyped",
+    "column_recommented": "RECOMMENTED",
+    "column_shifted": "SHIFTED",
+    "dictionary_changed": "DICTIONARY CHANGED",
+    "enum_value_added": "new value(s) in",
     "table_added": "new table",
     "table_dropped": "DROPPED table",
 }
+
+# Deltas whose detail reads `column: what changed` — the name goes in
+# backticks, the change outside them.
+_DETAILED_KINDS: frozenset[str] = frozenset(
+    {
+        "column_retyped",
+        "column_recommented",
+        "column_shifted",
+        "dictionary_changed",
+        "enum_value_added",
+    }
+)
 
 
 def _consequence(finding: Finding, ref: LayerRef) -> str:
@@ -598,6 +893,19 @@ def _consequence(finding: Finding, ref: LayerRef) -> str:
         return f"{ref.why} — that reference is now broken"
     if finding.kind == "column_retyped":
         return f"{ref.why} — review casts, rounding and comparisons"
+    if finding.kind == "column_recommented":
+        return (
+            f"{ref.why} — the column's stated meaning changed; what this reads may no longer hold"
+        )
+    if finding.kind == "column_shifted":
+        return (
+            f"{ref.why} — the values moved past tolerance; a figure or duration "
+            "derived here is not what was verified"
+        )
+    if finding.kind == "dictionary_changed":
+        return f"{ref.why} — a value this may filter on is gone or renamed"
+    if finding.kind == "enum_value_added":
+        return f"{ref.why} — a filter on the old values now misses rows"
     return ref.why
 
 
@@ -606,7 +914,7 @@ def _headline(finding: Finding) -> str:
     backticks, the change outside them, because `amount: DOUBLE -> DECIMAL` all
     inside one pair of ticks reads as a column called that."""
     verb = _VERB.get(finding.kind, finding.kind)
-    if finding.kind == "column_retyped" and ": " in finding.detail:
+    if finding.kind in _DETAILED_KINDS and ": " in finding.detail:
         column, change = finding.detail.split(": ", 1)
         return f"{finding.table}: {verb} `{column}` {change}"
     return f"{finding.table}: {verb} `{finding.detail}`"

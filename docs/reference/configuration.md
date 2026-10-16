@@ -230,11 +230,15 @@ scheduled job, a deploy step); this section is how dst notices when it stops.
 |---|---|
 | `max_age` | how old the newest profile in scope may be before every surface says so. A duration: `7d` (the default), `48h`, `30m`; `0` turns the age rails off. Past it, an answer carries `PROFILE: last probed N days ago (max M) — run dst probe` in `degraded`, the freshness and date-coverage checks skip instead of failing on a stamp that only dates the last probe, the value guard consults no dictionary (a stale one cannot prove a new value absent), `dst observe` and `/ready` carry the oldest age and the stale connections, `dst plan` and `dst apply` warn when the pushed artifact is older than this, and `dst test --all` skips the lens and exits 4 |
 | `recent_partitions` | how much of each table the sampling pass reads on a refresh: the latest `n` partitions of a time-partitioned table, or the last `n` days of the entity's `default_time_field` for an unpartitioned one. Default 7; `0` reads whole tables. The catalog pass (every table, row counts, whole-table freshness and date span) is never narrowed. The very first probe of a connection reads whole tables, so the dictionaries it proves complete are kept through every windowed refresh as the dated union; the artifact records the slice per table under `sample_window` |
+| `drift_tolerance` | how far a column's measured distribution may move between the drift baseline (`profiles/<connection>.json`) and the newest probe artifact before `dst drift` reports it as breaking. `time_shift` bounds a time column's median offset from the entity's `default_time_field` (default `1h`; `30m`, `1d`; `0` reports any move). `numeric_shift` bounds a numeric column's mean, relative to the baseline (default `0.2`, twenty percent; `0` reports any move). A changed column comment and a complete dictionary losing a member are never within tolerance |
 
 ```yaml
 probe:
   max_age: 7d
   recent_partitions: 7
+  drift_tolerance:
+    time_shift: 1h
+    numeric_shift: 0.2
 ```
 
 Apply stores the section per org, so a server reads the limit the project declared,
@@ -275,7 +279,7 @@ stored profiles:
 | Key | Type | What it declares |
 |---|---|---|
 | `expose[].connection` | string | the dst.yaml connection whose profiled tables the patterns match; must be in the lens's `connections` |
-| `expose[].tables` | list of patterns | fnmatch-style on `schema.table` as introspect names it (`staging.*`, `analytics.dim_*`); a pattern matching no profiled table fails apply |
+| `expose[].tables` | list of patterns | fnmatch-style on the table name as introspect names it: `schema.table` (`staging.*`, `analytics.dim_*`), `project.dataset.table` on BigQuery (`*.analytics.dim_*`); a pattern matching no profiled table fails apply, as does a bare name shared with a selected entity or with another exposed table |
 | `expose[].hide` | list of patterns | columns withheld, matched as `table.column` bare or qualified (`*.ssn`, `staging.customers.email`); a hidden column is out of scope |
 
 Each matched table compiles to an entity with the profile's columns and nothing

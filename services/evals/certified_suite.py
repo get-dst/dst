@@ -169,17 +169,54 @@ def _shape_story(
     )
 
 
-def _cells_close(a: Any, b: Any) -> bool:
-    """Exact equality except float↔numeric pairs, which get _SCALAR_RTOL."""
-    if isinstance(a, float) or isinstance(b, float):
-        if (
-            isinstance(a, int | float)
-            and isinstance(b, int | float)
-            and not isinstance(a, bool)
-            and not isinstance(b, bool)
-        ):
-            return abs(a - b) <= _SCALAR_RTOL * max(abs(a), abs(b), 1)
-    return bool(a == b)
+def _numeric(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool)
+
+
+def _printed_decimals(want: Any) -> int:
+    """How many decimals the certified value prints with: 82.59 -> 2, 7 -> 0.
+    The certified value is the stated precision; a generated value that
+    rounds to it at that precision is the same number."""
+    if isinstance(want, int):
+        return 0
+    text = repr(float(want))
+    if "e" in text or "." not in text:
+        return 0
+    return len(text.split(".")[1].rstrip("0"))
+
+
+def _within(a: float, b: float) -> bool:
+    return abs(a - b) <= _SCALAR_RTOL * max(abs(a), abs(b), 1)
+
+
+def _cells_close(want: Any, got: Any) -> bool:
+    """Value equivalence for one cell. Two numbers are the same value when they
+    sit within the scalar tolerance, when the generated one rounds to the
+    certified one at the certified value's printed precision (82.59 against
+    82.5912), or when one is the other as a percentage (82.59 against 0.8259,
+    either way round). Everything else compares exactly."""
+    if _numeric(want) and _numeric(got):
+        if _within(float(want), float(got)):
+            return True
+        decimals = _printed_decimals(want)
+        if round(float(got), decimals) == float(want):
+            return True
+        return any(
+            _within(float(want), scaled) or round(scaled, decimals) == float(want)
+            for scaled in (float(got) * 100, float(got) / 100)
+        )
+    return bool(want == got)
+
+
+def _equivalence_note(want: Any, got: Any) -> str | None:
+    """Why two unequal numbers passed — never a silent green."""
+    if want == got or not (_numeric(want) and _numeric(got)):
+        return None
+    if _within(float(want), float(got)):
+        return None  # last-bits wobble, the long-standing tolerance
+    if round(float(got), _printed_decimals(want)) == float(want):
+        return f"value-equivalent: generated {got!r} rounds to certified {want!r}"
+    return f"value-equivalent: generated {got!r} is certified {want!r} as a fraction/percentage"
 
 
 def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) -> bool:
@@ -306,13 +343,38 @@ def expected_resolution(
 
 
 def _same(want: Any, got: Any) -> bool:
-    """One cell equal to the certified scalar: floats within the scalar tolerance,
-    everything else exact (a bool is never a number here)."""
+    """One cell equal to the certified scalar: numbers value-equivalent (see
+    ``_cells_close``), everything else exact (a bool is never a number here)."""
     if isinstance(want, bool) or isinstance(got, bool):
         return want is got
-    if isinstance(want, int | float) and isinstance(got, int | float):
-        return abs(got - want) <= _SCALAR_RTOL * max(abs(want), 1)
+    if _numeric(want) and _numeric(got):
+        return _cells_close(want, got)
     return str(want) == str(got)
+
+
+def _projection(
+    oracle_cols: list[str], gen_cols: list[str], gen_rows: list[list[Any]]
+) -> tuple[list[str], list[list[Any]], str | None]:
+    """The generated result on the CERTIFIED projection: when every certified
+    column is present by name and generation carried more, the extra columns
+    are dropped before comparing — a label or a helper measure beside the
+    certified value is not a divergence. The pass says which columns were
+    ignored. Untouched when a certified column is missing or names repeat."""
+    oc = [c.lower() for c in oracle_cols]
+    gc = [c.lower() for c in gen_cols]
+    if len(set(gc)) != len(gc) or not set(oc) <= set(gc) or len(oc) >= len(gc):
+        return gen_cols, gen_rows, None
+    keep = [gc.index(c) for c in oc]
+    extra = [c for c in gc if c not in oc]
+    projected = [[r[i] for i in keep] for r in gen_rows]
+    return (
+        oracle_cols,
+        projected,
+        (
+            f"projection: generated column(s) {extra} ignored — the certified "
+            f"column(s) {oc} compared"
+        ),
+    )
 
 
 def _compare(
@@ -321,7 +383,15 @@ def _compare(
     gen_cols: list[str],
     gen_rows: list[list[Any]],
 ) -> tuple[bool, str | None]:
-    """Executed-result equality: set diff, column-order-insensitive, scalar-tolerant."""
+    """Executed-result equality on the certified projection: columns matched
+    by name (extra generated columns ignored), set diff, column-order-
+    insensitive, and numbers value-equivalent — the scalar tolerance, a
+    percentage against its fraction, and a value rounded to the precision the
+    certified value prints with (``_cells_close``)."""
+    gen_cols, gen_rows, projected = _projection(oracle_cols, gen_cols, gen_rows)
+    if projected is not None:
+        ok, reason = _compare(oracle_cols, oracle_rows, gen_cols, gen_rows)
+        return ok, (f"{projected}; {reason}" if reason else projected) if ok else reason
     if len(oracle_cols) == 1 and len(oracle_rows) == 1 and len(gen_rows) == 1 and len(gen_cols) > 1:
         # The certified answer is one value; the generated one is a single row
         # carrying it beside label columns ('7.41', True for "the current patch").
@@ -344,15 +414,9 @@ def _compare(
     # DOUBLE's last bits; the tolerance constant is the runner's, not a copy.
     if len(oracle_cols) == 1 and len(oracle_rows) == 1 and len(gen_rows) == 1:
         want, got = oracle_rows[0][0], gen_rows[0][0]
-        numeric = (
-            isinstance(want, int | float)
-            and isinstance(got, int | float)
-            and not isinstance(want, bool)
-            and not isinstance(got, bool)
-        )
-        if numeric:
-            if abs(got - want) <= _SCALAR_RTOL * max(abs(want), 1):
-                return True, None
+        if _numeric(want) and _numeric(got):
+            if _cells_close(want, got):
+                return True, _equivalence_note(want, got)
             return False, f"generated {got!r} vs certified {want!r}"
     # Column-order-insensitive when both sides name the same columns.
     oc, gc = [c.lower() for c in oracle_cols], [c.lower() for c in gen_cols]
@@ -589,6 +653,7 @@ def _score_one(
                 caller="certified-suite",
                 semantic_model=assembled.model,
                 value_domains=assembled.value_domains,
+                table_domains=assembled.table_domains,
                 connector=connector,
                 generator=generator,
                 composer=composer,
@@ -597,6 +662,7 @@ def _score_one(
                 max_rows=_ROW_CAP,
                 model_name=model_name,
                 data_as_of=assembled.data_as_of,
+                table_as_of=assembled.table_as_of,
                 entity_coverage=assembled.entity_coverage,
                 profile_age=assembled.profile_age,
             )

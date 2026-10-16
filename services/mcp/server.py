@@ -680,8 +680,9 @@ async def route_query(
 
     On a route: {ok: true, covered: true, routed_to: {lens, score}, answer: {...}} —
     present answer.answer to the user and note it came from routed_to.lens.
-    On a decline: {ok: true, covered: false, reason, nearest_miss} — there is NO
-    governed answer; tell the user the question is uncovered (do not fabricate one).
+    On a decline: {ok: true, covered: false, request_id, reason, nearest_miss} — there
+    is NO governed answer; tell the user the question is uncovered (do not fabricate
+    one). request_id is the recorded decision's id, the handle to quote about it.
     A routed lens that REFUSES (answer.status == "refused") is an outcome, not an
     error: the reason is inside answer.answer — relay it.
 

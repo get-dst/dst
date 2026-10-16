@@ -526,3 +526,148 @@ def test_a_period_field_is_read_off_any_profiled_sample() -> None:
     ]
     assert value_guard.entity_domains(model, profiles) == {}
     assert value_guard.period_fields(model, profiles) == {"monthly_revenue": "month"}
+
+
+def _two_tables_with_status() -> tuple[SemanticModel, list[TableProfile]]:
+    orders = Entity(
+        name="orders",
+        source=EntitySource(connection="warehouse", table="shop.orders"),
+        fields=[Field(name="status", type="string")],
+    )
+    tickets = Entity(
+        name="tickets",
+        source=EntitySource(connection="warehouse", table="shop.tickets"),
+        fields=[Field(name="status", type="string")],
+    )
+    model = SemanticModel(lens="t", dialect="duckdb", entities=[orders, tickets])
+    profiles = [
+        TableProfile(
+            connection="warehouse",
+            table="shop.orders",
+            columns=[
+                ColumnProfile(
+                    name="status", type="VARCHAR", top_values=["paid", "open"], values_complete=True
+                )
+            ],
+        ),
+        TableProfile(
+            connection="warehouse",
+            table="shop.tickets",
+            columns=[
+                ColumnProfile(
+                    name="status", type="VARCHAR", top_values=["new"], values_complete=False
+                )
+            ],
+        ),
+    ]
+    return model, profiles
+
+
+def test_a_dictionary_is_resolved_through_the_sql_table_not_the_bare_name() -> None:
+    """`status` complete on orders, sampled on tickets: a ticket literal must
+    never be refused against the orders dictionary. The bare-name map drops
+    the shared name; the per-table map checks each table against its own."""
+    model, profiles = _two_tables_with_status()
+    assert value_guard.value_domains(model, profiles) == {}
+    tables = value_guard.table_domains(model, profiles)
+    assert tables == {"shop.orders": {"status": ["paid", "open"]}}
+
+    bare = value_guard.value_domains(model, profiles)
+    tickets = "SELECT COUNT(*) FROM shop.tickets WHERE status = 'closed'"
+    assert value_guard.unknown_literals(tickets, "duckdb", bare, tables) == []
+    orders = "SELECT COUNT(*) FROM shop.orders AS o WHERE o.status = 'closed'"
+    hit = value_guard.unknown_literals(orders, "duckdb", bare, tables)
+    assert [(m.column, m.literal) for m in hit] == [("status", "closed")]
+    # the SQL may omit the schema the source declares, never add one
+    short = "SELECT COUNT(*) FROM orders WHERE status = 'closed'"
+    assert [(m.literal) for m in value_guard.unknown_literals(short, "duckdb", bare, tables)] == [
+        "closed"
+    ]
+    # a bare column in a two-table statement resolves to no table: nothing
+    joined = (
+        "SELECT COUNT(*) FROM shop.orders o JOIN shop.tickets t ON o.id = t.order_id "
+        "WHERE status = 'closed'"
+    )
+    assert value_guard.unknown_literals(joined, "duckdb", bare, tables) == []
+    qualified = (
+        "SELECT COUNT(*) FROM shop.orders o JOIN shop.tickets t ON o.id = t.order_id "
+        "WHERE t.status = 'closed'"
+    )
+    assert value_guard.unknown_literals(qualified, "duckdb", bare, tables) == []
+
+
+def _two_warehouses(tmp_path: Path) -> DuckDBConnector:
+    con = duckdb.connect(str(tmp_path / "two.duckdb"))
+    con.execute("CREATE TABLE customers (country VARCHAR, amount DECIMAL(10,2))")
+    con.execute("INSERT INTO customers VALUES ('FI', 100.0), ('DK', 250.0)")
+    con.execute("CREATE TABLE suppliers (country VARCHAR, amount DECIMAL(10,2))")
+    con.execute("INSERT INTO suppliers VALUES ('SE', 10.0), ('NO', 20.0)")
+    con.close()
+    return DuckDBConnector(str(tmp_path / "two.duckdb"))
+
+
+def _shared_country_model() -> SemanticModel:
+    fields = [Field(name="country", type="string"), Field(name="amount", type="number")]
+    return SemanticModel(
+        lens="sales",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="customers",
+                source=EntitySource(connection="warehouse", table="customers"),
+                fields=fields,
+            ),
+            Entity(
+                name="suppliers",
+                source=EntitySource(connection="warehouse", table="suppliers"),
+                fields=fields,
+            ),
+        ],
+    )
+
+
+_SHARED_TABLE_DOMAINS = {
+    "customers": {"country": ["FI", "DK"]},
+    "suppliers": {"country": ["SE", "NO"]},
+}
+
+
+def test_a_literal_the_read_table_holds_serves_despite_a_namesake(tmp_path: Path) -> None:
+    """`country` on two tables with different dictionaries: 'SE' is absent from
+    the customers dictionary and present on suppliers, the table the SQL
+    reads — served, no repair, no clarification."""
+    res = run_query(
+        question="supplier spend in Sweden",
+        lens_name="sales",
+        org_id="org",
+        caller="t",
+        semantic_model=_shared_country_model(),
+        connector=_two_warehouses(tmp_path),
+        generator=_gen("SELECT country, amount FROM suppliers WHERE country = 'SE'"),
+        composer=None,
+        value_domains={},
+        table_domains=_SHARED_TABLE_DOMAINS,
+    )
+    assert res.trace.status == "ok" and res.trace.repairs == 0
+    assert res.response.data is not None and len(res.response.data.rows) == 1
+
+
+def test_a_literal_the_read_table_lacks_clarifies_against_that_table(tmp_path: Path) -> None:
+    """'FI' is a customers value; against suppliers it is outside the complete
+    dictionary and clarifies naming the supplier countries, never the namesake's."""
+    sql = "SELECT country, amount FROM suppliers WHERE country = 'FI'"
+    res = run_query(
+        question="supplier spend in Finland",
+        lens_name="sales",
+        org_id="org",
+        caller="t",
+        semantic_model=_shared_country_model(),
+        connector=_two_warehouses(tmp_path),
+        generator=_gen(sql, sql),
+        composer=None,
+        value_domains={},
+        table_domains=_SHARED_TABLE_DOMAINS,
+    )
+    assert res.response.status == "clarification"
+    clar = res.response.clarification
+    assert clar is not None and clar.kind == "unknown_value" and clar.options == ["SE", "NO"]

@@ -52,11 +52,24 @@ def kpis(session: Session) -> dict[str, object]:
             "count(*) FILTER (WHERE status = 'refused') AS refused, "
             "count(*) FILTER (WHERE status = 'clarification') AS clarification, "
             "count(*) FILTER (WHERE status = 'rejected') AS rejected, "
-            "count(*) FILTER (WHERE wh_cost_usd IS NULL AND status = 'ok') AS wh_unpriced "
+            "count(*) FILTER (WHERE wh_cost_usd IS NULL AND status = 'ok') AS wh_unpriced, "
+            "COALESCE(SUM(wh_bytes), 0) AS wh_bytes "
             f"FROM request_log WHERE {governed}"
         )
     ).first()
     assert row is not None
+    # Bytes the warehouse billed, per lens: the unit every engine that bills
+    # scans shares, priced or not. A lens that reads a wide fact table on
+    # every question shows here before it shows on the invoice.
+    bytes_by_lens = {
+        str(r[0]): int(r[1])
+        for r in session.execute(
+            text(
+                "SELECT lens, COALESCE(SUM(wh_bytes), 0) FROM request_log "
+                f"WHERE {governed} GROUP BY lens ORDER BY 2 DESC, 1"
+            )
+        )
+    }
     probe_row = session.execute(
         text(
             "SELECT count(*), "
@@ -100,6 +113,8 @@ def kpis(session: Session) -> dict[str, object]:
         # credit-seconds the cursor can't see): the wh_cost sum above EXCLUDES
         # them, and this count is what keeps that exclusion legible.
         "wh_unpriced": int(row[12]),
+        "wh_bytes": int(row[13]),
+        "wh_bytes_by_lens": bytes_by_lens,
         "outcomes": {
             "ok": int(row[8]),
             "refused": int(row[9]),

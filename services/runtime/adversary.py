@@ -6,7 +6,8 @@ qualified" use the right definition? were internal/test accounts excluded? is th
 grain/time window what the question implied? is there a more defensible reading?
 Opt-in per lens; the raised challenges fold into the verification report
 (`verification.fold_challenges`), where an unresolved blocking challenge caps the
-grade — a raised challenge means "not verified", never silence.
+grade — a raised challenge means "not verified", never silence — and a reply that
+could not be parsed folds as a skip, never as a pass.
 """
 
 from __future__ import annotations
@@ -64,12 +65,14 @@ def challenge(
     answer: str,
     semantic_model: SemanticModel,
     model: str = "claude-sonnet-4-6",
-) -> list[Challenge]:
-    """One adversarial round-trip → the list of challenged assumptions.
+) -> list[Challenge] | None:
+    """One adversarial round-trip → the list of challenged assumptions, or
+    ``None`` when the reply could not be parsed.
 
-    Fails open to a non-demoting `note` on unparseable output: a broken reviewer
-    response carries no signal about the answer, so it must be visible without
-    vetoing it (the judge's parse-failure escalation covers the rubric tier).
+    A broken reviewer reply carries no signal about the answer, so it is
+    neither a veto nor a pass: the caller folds ``None`` as a SKIP that says
+    the reviewer did not rule (``verification.fold_challenges``). It used to
+    come back as a `note`, which read as "reviewed, nothing found".
     """
     user = (
         f"Question: {question}\n"
@@ -90,13 +93,7 @@ def challenge(
         if not isinstance(raw, list):
             raise ValueError("challenges is not a list")
     except (json.JSONDecodeError, AttributeError, ValueError):
-        return [
-            Challenge(
-                assumption="adversary_output",
-                severity="note",
-                reason="Adversary response could not be parsed; no challenges extracted.",
-            )
-        ]
+        return None
     out: list[Challenge] = []
     for item in raw:
         if not isinstance(item, dict):

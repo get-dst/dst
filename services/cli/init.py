@@ -665,9 +665,27 @@ def run_init(args: argparse.Namespace) -> int:
         subprocess.run(["git", "init", "-q"], cwd=root, check=False)
     print(f"initialized dst project '{name}' in {root}/")
     print(f"  warehouse: {warehouse}")
+    print(f"  embeddings: {_embeddings_summary(warehouse)}")
     cd = f"cd {root.name} && " if args.dir is None else ""
     print(f"  next: {cd}fill the DST_API_KEY_* lines in .env, then `dst dev`")
     return 0
+
+
+def _embeddings_summary(warehouse: str) -> str:
+    """What certified matching will do on this install. The demo ships
+    certified answers; without an embedder they store unembedded and never
+    serve, and nothing else in the scaffold says so out loud."""
+    from importlib.util import find_spec
+
+    if find_spec("fastembed") is not None:
+        return "local, in-process (certified matching on)"
+    hint = "pip install 'dst-core[local-embed]'"
+    if warehouse == "demo":
+        return (
+            f"none — certified matching is OFF (the demo's certified answers will not "
+            f"serve) until {hint} or an embedding provider is declared in dst.yaml"
+        )
+    return f"none — certified matching off until {hint} or a provider declares embedding_model"
 
 
 def _semantic_skill() -> str:

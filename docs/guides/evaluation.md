@@ -19,13 +19,20 @@ known-good reference the test compares against:
    trivially pass), and the answer under test is excluded from its own
    examples — with them, it would match itself almost perfectly and the suite
    would be grading copying.
-3. Execute what generation produced and compare the two **executed results**:
-   a set difference, ignoring column order when both sides name the same
-   columns, with a 1e-9 relative tolerance on single scalars (the order of an
-   aggregation alone can wiggle a floating-point number's last bits). One
-   deliberate leniency: when the oracle is a single count of 2 or more, a
+3. Execute what generation produced and compare the two **executed results**
+   on the certified projection. Columns match by name: when every certified
+   column is present and generation carried more (a label, a helper measure),
+   the extras are dropped and the pass says which. Then a set difference,
+   ignoring column order, with numbers compared as values: a 1e-9 relative
+   tolerance (the order of an aggregation alone can wiggle a floating-point
+   number's last bits), a percentage against its fraction (`82.59` and
+   `0.8259`), and a generated value that rounds to the certified one at the
+   precision the certified value prints with (`82.5912` against `82.59`). A
+   pass that needed any of these says so in its reason. One deliberate
+   leniency beyond that: when the oracle is a single count of 2 or more, a
    generated result carrying that many rows passes — "how many X" and "which
-   X" are the same answer at two grains.
+   X" are the same answer at two grains. Any real failure exits `dst test`
+   non-zero.
 
 Both sides run back-to-back against the live warehouse, so there is no
 snapshot to drift from: the oracle is the certified SQL run *now*. A diverging
@@ -140,7 +147,12 @@ loudly and publish proceeds.
 On apply, staleness picks what to test: only active answers whose stored
 bindings disagree with the push's asset hashes run, which keeps it cheap by
 construction. A certified divergence under `block` is an error in its own
-right, not merely a score change. And the abort is blue/green and atomic: the
+right, not merely a score change. The audited override covers it like any
+failing case: `dst apply --allow-failing-cases certified:<answer id> --reason
+'…'` (or `--allow-case`) names the cases it covers and applies only when every
+failing case is named; bare `--allow-failing-cases` is blanket. Either way the
+apply row and the version summary record the divergence that was published
+past. And the abort is blue/green and atomic: the
 whole apply rolls back, the prior versions keep serving, and the staged eval
 run and binding re-stamps roll back with it. A rejected apply can never lower
 the gate's baseline for the next one.

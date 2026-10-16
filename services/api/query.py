@@ -47,6 +47,7 @@ from services.runtime.compiler import CompileError, compile_intent
 from services.runtime.generator import FixedSQLGenerator
 from services.runtime.intent_generator import intent_term
 from services.runtime.pipeline import PipelineResult, run_query
+from services.runtime.typed_resolver import TypedIntentGenerator, sole_metric_intent
 
 log = logging.getLogger("dst")
 
@@ -734,6 +735,24 @@ def run_lens_query(
     generator, escalate, certification, certified_match = assembly.select_generators(
         assembled, resolved, config=bundle.config
     )
+    generator_tier: str = assembly.generator_tier(assembled)
+    if generator_tier == "intent" and not isinstance(generator, TypedIntentGenerator):
+        # A question that names one governed metric and nothing else is the
+        # structured door's case: the compiler computes it, deterministically,
+        # before any model writes a reading of it. Typed serving already does
+        # this through its decisions; without a decider the text decides, and
+        # only when the text leaves nothing open.
+        intent = sole_metric_intent(q, assembled.model)
+        if intent is not None:
+            try:
+                sql = compile_intent(intent, assembled.model)
+            except CompileError:
+                log.exception("sole-metric intent did not compile; generating instead")
+            else:
+                generator = FixedSQLGenerator(
+                    sql, definition_used=intent_term(intent), intent=intent
+                )
+                generator_tier = "metrics"
 
     provenance = (
         CertifiedProvenance(
@@ -760,6 +779,7 @@ def run_lens_query(
             audience=audience,
             semantic_model=assembled.model,
             value_domains=assembled.value_domains,
+            table_domains=assembled.table_domains,
             entity_coverage=assembled.entity_coverage,
             profile_age=assembled.profile_age,
             decisions=assembled.decisions,
@@ -794,12 +814,13 @@ def run_lens_query(
             adversary_llm=llm if bundle.config.model.answer_mode == "strict" else None,
             adversary_model=model_name,
             data_as_of=assembled.data_as_of,
+            table_as_of=assembled.table_as_of,
             serve_ungoverned_shapes=bundle.config.serve_ungoverned_shapes,
             metric_carriers=lambda metric: _lenses_carrying(caller.org_id, name, metric),
             tables_elsewhere=lambda: tables_held_elsewhere(caller, exclude=name),
             # Which prompt this answer was written against (`dst lens prompt`
             # prints the same tier's prompt for a question).
-            generator_tier=assembly.generator_tier(assembled),
+            generator_tier=generator_tier,
             # The per-lens switch the pipeline cannot see from the semantic model.
             log_samples=bundle.config.logging.log_samples,
         )
@@ -965,7 +986,7 @@ def run_lens_metrics(
         model_name = resolved.name
         composer = AnswerComposer(resolved.llm, model=model_name)
 
-    profiles, as_of, age = assembly.profile_facts(bundle, caller.org_id)
+    profiles, as_of, age, stamps = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     audience = _audience(caller)
     with attributed(
@@ -995,6 +1016,7 @@ def run_lens_metrics(
             # either — every name came from the model and the SQL was built by code.
             certification="none",
             data_as_of=as_of,
+            table_as_of=stamps,
             entity_coverage=coverage,
             profile_age=age,
             generator_tier="metrics",
@@ -1152,7 +1174,7 @@ def run_certified_for_caller(
 
     resolved = require_llm(bundle.config.model.model_ref())
     llm, model_name = resolved.llm, resolved.name
-    profiles, as_of, age = assembly.profile_facts(bundle, caller.org_id)
+    profiles, as_of, age, stamps = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     fmt: AnswerFormat = body.format if body else "both"
     audience = _audience(caller)
@@ -1187,6 +1209,7 @@ def run_certified_for_caller(
                 bound_values=bound,
             ),
             data_as_of=as_of,
+            table_as_of=stamps,
             entity_coverage=coverage,
             profile_age=age,
             generator_tier="certified",

@@ -549,3 +549,26 @@ def test_an_ambient_dst_url_does_not_fake_a_stale_scaffold(tmp_path: Path, monke
     root = _init(tmp_path)
     monkeypatch.setenv("DST_URL", "http://127.0.0.1:8077")
     assert stale_agent_note(root) is None
+
+
+def test_demo_init_says_whether_certified_matching_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The demo ships certified answers; the summary says whether they will
+    serve, and names the extra that turns matching on when they will not."""
+    from importlib import util as importlib_util
+
+    real = importlib_util.find_spec
+    monkeypatch.setattr(
+        importlib_util, "find_spec", lambda n: None if n == "fastembed" else real(n)
+    )
+    _init(tmp_path, warehouse="demo")
+    out = capsys.readouterr().out
+    assert "embeddings: none — certified matching is OFF" in out
+    assert "dst-core[local-embed]" in out
+
+    monkeypatch.setattr(
+        importlib_util, "find_spec", lambda n: object() if n == "fastembed" else real(n)
+    )
+    _init(tmp_path / "second", warehouse="demo")
+    assert "embeddings: local, in-process (certified matching on)" in capsys.readouterr().out

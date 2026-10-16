@@ -81,6 +81,11 @@ class GeneratedQuery:
     supplied: list[str] = field(default_factory=list)
     # True iff the typed resolver produced this SQL (no escalation).
     typed: bool | None = None
+    # Parts of the question this SQL does not answer, each "<what>: <why>":
+    # the typed resolver served a listing without a field it could not place
+    # rather than clarify the whole question. The pipeline relays them on
+    # the response's `declined` list.
+    declined: list[str] = field(default_factory=list)
 
 
 # ── Protocols ────────────────────────────────────────────────────────────────

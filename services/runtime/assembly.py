@@ -27,6 +27,7 @@ from services.benchmark.contamination import normalize
 from services.certdefs import load_certified_defs, select_context
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
+from services.certify.lexical import governed_names, lexical_mismatch
 from services.context import store as ctx_store
 from services.contracts.lens_config import LensConfig
 from services.contracts.profile import TableProfile
@@ -118,7 +119,9 @@ _BIND_SYSTEM = (
     'or {"match": false, "bindings": {}}\n'
     "Slot value grammar (canonical, exact — no other forms):\n"
     "- date_range: YYYY | YYYY-Qn | YYYY-MM | YYYY-MM-DD/YYYY-MM-DD "
-    "(e.g. Q3 2026 -> 2026-Q3, July 2026 -> 2026-07)\n"
+    "(e.g. Q3 2026 -> 2026-Q3, July 2026 -> 2026-07; the explicit form is "
+    "INCLUSIVE on both ends — the second date is the last day covered, so "
+    "January-September 2026 -> 2026-01-01/2026-09-30)\n"
     "- date: YYYY-MM-DD\n"
     "- number: plain digits\n"
     "- enum: exactly one of the values listed for that slot\n"
@@ -154,6 +157,10 @@ class AssembledInputs:
     # column name -> its complete value dictionary (value_guard.value_domains):
     # the pipeline's deterministic check that a filter literal exists at all.
     value_domains: dict[str, list[str]] = field(default_factory=dict)
+    # source table -> column -> dictionary (value_guard.table_domains): the same
+    # check resolved through the table the SQL reads, so a column name two
+    # entities share with different values is still checked against its own.
+    table_domains: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     # entity name -> column -> dictionary (value_guard.entity_domains): the
     # typed resolver's own view, one entity at a time, so a column name shared
     # across entities with different values still has a dictionary.
@@ -175,6 +182,10 @@ class AssembledInputs:
     # (profile_age.ProfileAge); None when nothing is profiled. Stale, the
     # answer says so and the profile-backed checks abstain.
     profile_age: ProfileAge | None = None
+    # table -> its own as-of date: the pipeline dates an answer from the tables
+    # the served SQL read (profile_enrich.scope_as_of), `data_as_of` above is
+    # the lens-wide floor it falls back to when the SQL resolves no table.
+    table_as_of: dict[str, str] = field(default_factory=dict)
 
 
 _EQUIV_OPTIONS = [
@@ -362,6 +373,7 @@ def certified_lookup(
     serve: bool = True,
     exclude_id: str | None = None,
     record_to: list[DecisionRecord] | None = None,
+    governed: frozenset[str] = frozenset(),
 ) -> tuple[
     certify_store.CertifiedAnswer | None,
     list[SampleQuery],
@@ -381,7 +393,11 @@ def certified_lookup(
     (placeholder SQL would teach placeholder syntax). With ``serve=False`` the
     serve branches are skipped and only exemplars fold (the eval suites test
     generation, not the bypass); ``exclude_id`` keeps an answer under test out
-    of its own exemplars.
+    of its own exemplars. ``governed`` is the lens's metric and definition
+    names: a plain hit whose approved question names a different governed
+    name than the asked one is vetoed before the exact/equivalent bands
+    (the collections template must never serve an invoicing question), and
+    folds as an exemplar instead.
     """
     if qvec is None:
         return None, [], "none", None, None
@@ -402,9 +418,12 @@ def certified_lookup(
                 bound = certified_bind(pair.llm, pair.name, question, top)
                 if bound is not None:
                     return top, [], "certified", "parameterized", bound
-        elif temporal_mismatch(question, top.question):
-            # A "this quarter" answer must never serve a "last quarter" ask —
-            # cosine cannot see the qualifier. Fall through: the pair still
+        elif temporal_mismatch(question, top.question) or lexical_mismatch(
+            question, top.question, governed
+        ):
+            # A "this quarter" answer must never serve a "last quarter" ask,
+            # and a collections answer never an invoicing ask — cosine cannot
+            # see the qualifier or the name. Fall through: the pair still
             # folds as an exemplar below, and generation handles the asked
             # window (the matcher is the wrong path here, not generation).
             pass
@@ -462,12 +481,14 @@ def certified_context(certified_dir: str | None, question: str) -> ContextChunk 
 
 def profile_facts(
     bundle: LensBundle, org_id: uuid.UUID | str
-) -> tuple[list[TableProfile], str | None, ProfileAge | None]:
+) -> tuple[list[TableProfile], str | None, ProfileAge | None, dict[str, str]]:
     """Stored table profiles for the lens's connection + the scope's data_as_of
-    + how old the scope's newest profile is against the org's ``probe.max_age``.
-    Best-effort: no profile, no enrichment, no age."""
+    + how old the scope's newest profile is against the org's ``probe.max_age``
+    + each table's own as-of date (the pipeline dates an answer from the
+    tables its SQL read, not from the whole scope). Best-effort: no profile,
+    no enrichment, no age."""
     if not bundle.config.connections:
-        return [], None, None
+        return [], None, None, {}
     try:
         with org_session(org_id) as session:
             stored = profile_store.list_profiles(session, bundle.config.connections[0])
@@ -477,10 +498,11 @@ def profile_facts(
         time_fields = {e.source.table: e.default_time_field for e in bundle.semantic_model.entities}
         as_of = profile_enrich.data_as_of(profiles, tables, time_fields)
         age = profile_age(profiles, max_age, tables=tables)
-        return profiles, as_of.date().isoformat() if as_of else None, age
+        stamps = profile_enrich.table_as_of(profiles, time_fields)
+        return profiles, as_of.date().isoformat() if as_of else None, age, stamps
     except Exception:
         log.exception("profile lookup failed for lens %s", bundle.config.name)
-        return [], None, None
+        return [], None, None, {}
 
 
 # The answer contract — the output-grid default. A recurring class of misses is
@@ -522,8 +544,9 @@ def assemble(
     model = bundle.semantic_model
     # The stored table profile feeds generation — enum literals, sampled
     # descriptions, partition-pruning hints land in the (cached) system prompt.
-    profiles, as_of, age = profile_facts(bundle, org_id)
+    profiles, as_of, age, stamps = profile_facts(bundle, org_id)
     domains: dict[str, list[str]] = {}
+    per_table: dict[str, dict[str, list[str]]] = {}
     per_entity: dict[str, dict[str, list[str]]] = {}
     periods: dict[str, str] = {}
     coverage: dict[str, profile_enrich.EntityCoverage] = {}
@@ -535,6 +558,7 @@ def assemble(
         # runs). Matching dictionaries stay: a name they hold is still a name.
         if age is None or not age.stale:
             domains = value_guard.value_domains(model, profiles)
+            per_table = value_guard.table_domains(model, profiles)
         per_entity = value_guard.entity_domains(model, profiles)
         periods = value_guard.period_fields(model, profiles)
         coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
@@ -550,6 +574,7 @@ def assemble(
         serve=serve_certified,
         exclude_id=exclude_certified_id,
         record_to=decisions,
+        governed=governed_names(bundle.semantic_model),
     )
     if exemplars:
         model = model.model_copy(update={"sample_queries": list(model.sample_queries) + exemplars})
@@ -566,9 +591,11 @@ def assemble(
         certified_bound=bound,
         certified_sql=csql,
         data_as_of=as_of,
+        table_as_of=stamps,
         profile_age=age,
         degraded=() if embed_failure is None else (MATCHING_DOWN.format(why=embed_failure),),
         value_domains=domains,
+        table_domains=per_table,
         entity_domains=per_entity,
         period_fields=periods,
         entity_coverage=coverage,

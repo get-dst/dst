@@ -53,13 +53,22 @@ where you would review it anyway. Run it after every upgrade.
 Postgres up + migrate + serve with auto-reload, one command. A reachable database is
 used as-is; otherwise the project's `docker-compose.yml` is brought up and waited on by
 connecting. Flags: `--host` (default 127.0.0.1), `--port` (default: the port in
-`DST_URL`, else 8000).
+`DST_URL`, else 8000), `--daemon` (background mode, as for `dst serve`).
 
 ### `dst serve`
 
 Run the API via uvicorn; serves the built dashboard same-origin when present (source
 checkout's `apps/web/dist` or the wheel's bundled copy). Without one it says so and
-serves the API only. Flags: `--host`, `--port`, `--reload`.
+serves the API only. Flags: `--host`, `--port`, `--reload`, `--daemon`, `--stop`.
+
+**Background mode.** `dst serve --daemon` (and `dst dev --daemon`) starts the same
+server detached from the terminal, writes its pid to `.dst/serve.pid` and its output
+to `.dst/serve.log` in the current project, and returns once `/health` answers; if
+the server dies before that, the exit code and the last lines of the log are printed
+instead. `dst serve --stop` sends SIGTERM to the recorded pid, waits for it to exit
+and removes the pidfile; a stale pidfile (the process is gone) is cleared, not obeyed.
+Whichever way it runs, the server logs the signal that ends it (`received SIGTERM;
+shutting down`), so a server that disappeared says why in `serve.log`.
 
 **Refuses to start on a schema behind this build**, before it even probes the port: a
 server on an out-of-date schema serves answers correctly and loses every trace in
@@ -350,30 +359,49 @@ field's `description` does the same job for facts you know; `probe` is for the
 ones the warehouse knows and you have not written down.
 
 Sampling covers the tables the semantic layer reads: everything, while the
-layer is still empty. `--sample-all` samples every table (one capped read each:
-the expensive form on a wide warehouse) and `--tables` pins an exact list; the
-catalog pass records every table either way. Re-run it whenever the warehouse
-moves (a nightly cron is the intended cadence), because a value dictionary is
-only as true as its last pass.
+layer is still empty. `--sample-all` samples every table and `--tables` pins an
+exact list; the catalog pass records every table either way. Each sampled
+table costs at most three statements (one aggregate carrying counts, ranges,
+means, the time columns' offsets from the entity's `default_time_field` and
+the whole-table freshness; one for every value dictionary; one for the shape
+probes), and the run ends with what it cost per connection: statements, bytes
+billed, and the estimate where the engine prices bytes (BigQuery); an engine
+that reports no bytes says so rather than printing $0. Re-run it whenever the
+warehouse moves (a nightly cron is the intended cadence), because a value
+dictionary is only as true as its last pass.
 
 Ingestion is advisory, never governance state: a malformed or connection-less
 artifact warns and skips, a stored profile newer than the incoming one is kept
 per table (a server refreshed over REST outranks an old commit), and absence
-never deletes. The `drift` baseline lives in the same directory and is never
-swallowed.
+never deletes. The `drift` baseline lives in the same directory: the first
+probe records it (arming `drift`), and no later probe touches it, so the
+evidence drift compares against survives the nightly refresh.
 
 ### `dst drift`
 
 What has the warehouse done since you profiled it, and does the semantic layer
-still match. `introspect` is a snapshot; this is the diff: new, dropped, and
-retyped columns since the profile committed at `profiles/<connection>.json`, and
-crucially the **cross-reference**: a new column on a table a definition or entity
-reads is flagged with the asset that reads it. This is how the layer avoids
-silently serving a stale derivation after the warehouse grew the real column,
-e.g. *"`orders` gained `discount_amount`; definition `discount` derives it from
-`list_price − unit_price` — review whether the new column supersedes the
-derivation."* Findings the layer reads sort first, definition-backed ahead of
-entity-only. `--json`; `--accept` re-records the baseline once you have reviewed.
+still match. `introspect` is a snapshot; this is the diff against the baseline
+committed at `profiles/<connection>.json`, on two rails. Against the live
+catalog: new, dropped and retyped columns, and a column whose **comment**
+changed. Against the newest probe artifact: a time column whose median offset
+from the entity's `default_time_field` moved past `probe.drift_tolerance`, a
+numeric column whose mean did, a complete value dictionary that lost or renamed
+a member (a member gained is reported, not breaking). The second rail is what
+catches a column whose comment went from "UTC" to "local time" while its name
+and type stayed put: the schema diff is clean, and every duration derived from
+it is wrong, verified. Crucially the **cross-reference**: a change on a table a
+definition, entity, relationship or certified answer reads is flagged with the
+asset that reads it. This is how the layer avoids silently serving a stale
+derivation after the warehouse grew the real column, e.g. *"`orders` gained
+`discount_amount`; definition `discount` derives it from `list_price −
+unit_price` — review whether the new column supersedes the derivation."*
+Findings the layer reads sort first, definition-backed ahead of entity-only.
+Exit 0 clean, 2 changes none breaking, 1 a declared reference broke (a drop, a
+retype, a comment change, a shift past tolerance, a dictionary member gone), 4
+not armed. `--json`; `--accept` re-records the baseline once you have reviewed
+(the catalog's schema and comments, the artifact's measured facts), and
+`dst apply` advances it the same way at deploy. `dst probe` arms it on the
+first run and never rewrites it afterwards.
 
 `dst plan` runs a cheap version of this every time: when the warehouse has
 changed since profiling it prints one line pointing you here, and it never
@@ -679,7 +707,9 @@ Flags: `--lens`, `--status ok|refused|error` (with `requests`), `--limit` (defau
 `--json`, `--timeout`, `--dir`, `--url`/`--token`.
 
 The bare form is the answer to "the CFO wants to know who has been using the
-reporting tool": one line of totals, then a row per caller. `requests --status
+reporting tool": one line of totals (queries, AI spend, warehouse bytes
+scanned; the KPI payload carries the bytes per lens too), then a row per
+caller. `requests --status
 error` is the fastest way to find a metric that is failing repeatedly: a caller
 retrying the same question three times in two minutes is visible here and
 nowhere else.

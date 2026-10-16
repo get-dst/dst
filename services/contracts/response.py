@@ -190,6 +190,11 @@ class QueryResponse(BaseModel):
     # that quotes `certification: "none"` as "no approved answer covers this"
     # MUST read this first: it may mean "nothing was checked".
     degraded: list[str] = Field(default_factory=list)
+    # Parts of the question this answer leaves out, each "<what>: <why>" — a
+    # column the lens does not hold, dropped so the rest of the question could
+    # be answered instead of refusing it whole. Empty when the answer covers
+    # the whole question. `degraded` carries the same fact as a line.
+    declined: list[str] = Field(default_factory=list)
     # Signed record of this serve (see Receipt) — present on data answers; a
     # refusal or clarification makes no data claim to attest.
     receipt: Receipt | None = None

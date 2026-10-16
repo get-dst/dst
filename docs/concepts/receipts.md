@@ -26,9 +26,18 @@ answer came from is not a log you dig up afterwards. It is part of the output.
   (`verified | partial | unverified`) rests on deterministic checks — the same
   input always grades the same: every number in the answer traceable to the
   rows, the definition applied, the SQL matching the question's intent, the
-  result not cut short, the data fresh enough. A lens that opts into the LLM
-  judge or the adversarial reviewer folds their verdicts onto the same report,
-  and those can demote the grade — visibly, as their own named checks.
+  result not cut short, the data fresh enough, a ratio not pinned to 1 on
+  every row. An answer read from an exposed table (one with no governed
+  definitions) grades at most `partial`, with the check `governed_read` naming
+  the ungoverned read. A `partial` grade always says why: `partial_reason` on
+  the report names the check that capped it, or the abstention that kept it
+  short of `verified`. The adversarial reviewer, when a lens opts in, folds its
+  challenges onto the same report and a blocking challenge caps the grade; a
+  reply it could not parse is a skip, never a pass. The inline LLM judge is
+  **advisory**: it reads the same governed context the composer had
+  (definitions, data notes, population scope), runs at temperature 0, and its
+  verdict lands as the `judge` check — a note on the report that never moves
+  the grade, which stays with the deterministic checks.
 - **The SQL.** Always attached to a served answer. A *rejected* response never
   includes the SQL it refused to run; the trace keeps it for review.
 
@@ -80,17 +89,17 @@ contract is still stale. If you never declare `stale_after_days`, the check
 reports `skip` — never a pass it didn't earn.
 
 Know how `data_as_of` is measured before you set the contract. It is the
-**oldest last-update across every entity in the lens's scope** — not just the
-tables the answer actually touched — and it reads profiles from the lens's
-first declared connection only. Two consequences. A single rarely-updated
-table in scope (a country lookup that legitimately hasn't changed in months)
-drags `data_as_of` down and can mark every answer from that lens stale, even
-answers that never read that table. And on a lens with two connections,
-freshness on the second connection is not measured at all. So set
-`stale_after_days` against the slowest thing in scope, not against the table
-you have in mind — or split the slow-moving table into its own lens. Leaving
-it unset is a reasonable default until you have checked what `data_as_of`
-actually reports for that lens.
+**oldest last-update among the tables the answer's SQL actually read**, and
+the answer names that table on its stamp (`data as of 2026-10-14, orders`):
+one table read, that table; several, the oldest of them. Only tables whose
+entity declares a `default_time_field` date an answer; a dimension or
+reference table (a country lookup that legitimately has not changed in
+months) dates one only when it is the only table read, so a join to it never
+marks an orders question stale. Profiles are read from the lens's first
+declared connection only, so on a lens with two connections freshness on the
+second is not measured at all. Set `stale_after_days` against the tables your
+questions read; leaving it unset is a reasonable default until you have
+checked what `data_as_of` actually reports.
 
 ## The receipt is the platform engineer's audit log
 

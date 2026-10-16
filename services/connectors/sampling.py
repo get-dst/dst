@@ -1,12 +1,15 @@
 """Shared machinery for the guarded profiling pass.
 
 Every `SamplingProfiler` connector delegates here: `sample_tables` runs, per
-table, a two-phase read — one aggregate query for null rates / cardinality /
-min-max, then one top-k query per low-cardinality column (and per counted text
-column small enough to hold whole, `MATCH_DICTIONARY_MAX`) — plus a
-full-table ``MIN/MAX(time column)`` probe for logical freshness and date
-coverage, all through the
-connector's own read-only query path. Only the FROM clause differs per dialect
+table, at most three statements — one aggregate for null rates / cardinality /
+min-max / means / time offsets (carrying the whole-table ``MIN/MAX(time
+column)`` for logical freshness and date coverage when the read is whole-table),
+one UNION ALL of the top-k queries of every low-cardinality column (and every
+counted text column small enough to hold whole, `MATCH_DICTIONARY_MAX`), and
+one UNION ALL of the shape probes — all through the connector's own read-only
+query path. Few statements is the cost model: an engine that bills a minimum
+per job (BigQuery, 10 MB) charged seven jobs per table for one table's facts.
+Only the FROM clause differs per dialect
 (``USING SAMPLE`` / ``TABLESAMPLE SYSTEM`` / ``SAMPLE (n ROWS)`` / plain
 ``LIMIT``) — see `_sampled_relation`.
 
@@ -35,7 +38,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -73,6 +79,50 @@ class SampleBudgetExceeded(RuntimeError):
     """A runner refused a sampling query whose estimated cost exceeds its bytes budget."""
 
 
+@dataclass
+class SampleMeter:
+    """What a sampling pass cost: statements issued and the bytes the engine
+    billed for them. ``priced`` turns False the moment one statement reported
+    no byte count, so a partial sum is never printed as the whole bill."""
+
+    statements: int = 0
+    bytes_scanned: int = 0
+    priced: bool = True
+
+
+_METER: ContextVar[SampleMeter | None] = ContextVar("sample_meter", default=None)
+
+
+@contextmanager
+def metered() -> Iterator[SampleMeter]:
+    """Count every sampling statement run inside the block, with its bytes.
+
+    A context, not a parameter: the connectors' ``sample_profile`` signature is
+    a protocol every engine implements, and the bill is the caller's concern
+    (`dst probe` prints it per connection), not the connector's."""
+    meter = SampleMeter()
+    token = _METER.set(meter)
+    try:
+        yield meter
+    finally:
+        _METER.reset(token)
+
+
+def _metered(run: RunQuery) -> RunQuery:
+    def inner(sql: str) -> QueryResult:
+        result = run(sql)
+        meter = _METER.get()
+        if meter is not None:
+            meter.statements += 1
+            if result.bytes_scanned is None:
+                meter.priced = False
+            else:
+                meter.bytes_scanned += result.bytes_scanned
+        return result
+
+    return inner
+
+
 # The per-table skip channel. `dst probe` mirrors this logger to stderr so a
 # skipped table is visible where the operator is, not only in a server log.
 logger = logging.getLogger(__name__)
@@ -96,6 +146,7 @@ def sample_tables(
     it. The catalog profile stands for a skipped table.
     """
     profiles: list[TableProfile] = []
+    run = _metered(run)
     for i, spec in enumerate(tables, start=1):
         # Progress at INFO, per table: a silent `dst probe` makes "profiling 70
         # entities, this takes a while" indistinguishable from "hung an hour
@@ -183,6 +234,11 @@ def sample_table(
                 max_rows=max_rows,
                 exact=exact,
                 predicate=predicate,
+                # Whole-table MIN/MAX of the time column rides the one aggregate
+                # the pass already pays for, when that aggregate reads the whole
+                # table — a separate statement is a separate job on an engine
+                # that bills a minimum per job.
+                freshness_column=spec.freshness_column if probe_time and not windowed else None,
             )
         except SampleBudgetExceeded as exc:
             # Too big to read within budget — the catalog profile stands. Said
@@ -193,6 +249,14 @@ def sample_table(
             specs, result, exact=exact, max_distinct_for_enum=max_distinct_for_enum
         )
         scanned = _scanned_rows(result)
+        folded = _fold_freshness(result)
+        if folded is not None and spec.freshness_column is not None:
+            earliest, last_logical = folded
+            if earliest is not None and last_logical is not None:
+                coverage = TimeCoverage(
+                    column=spec.freshness_column, min=earliest, max=last_logical
+                )
+            probe_time = False  # measured already
         if columns:
             _collect_top_values(
                 run,
@@ -316,6 +380,7 @@ def _run_stats(
     max_rows: int,
     exact: bool,
     predicate: str | None = None,
+    freshness_column: str | None = None,
 ) -> tuple[bool, QueryResult]:
     """The stats query, downgrading to a labelled sample when exactness is refused.
 
@@ -333,6 +398,10 @@ def _run_stats(
         exact=exact,
         is_view=bool(spec.is_view),
         predicate=predicate,
+        time_field=spec.time_field,
+        # Freshness and coverage are whole-table facts: only an exact,
+        # unwindowed read may carry them (the sampled fallback below never does).
+        freshness_column=freshness_column if exact and predicate is None else None,
     )
     assert sql is not None  # specs is non-empty at the one call site
     if not exact:
@@ -349,6 +418,7 @@ def _run_stats(
             exact=False,
             is_view=bool(spec.is_view),
             predicate=predicate,
+            time_field=spec.time_field,
         )
         assert sampled is not None
         return False, run(sampled)
@@ -367,18 +437,25 @@ def stats_sql(
     exact: bool = False,
     is_view: bool = False,
     predicate: str | None = None,
+    time_field: str | None = None,
+    freshness_column: str | None = None,
 ) -> str | None:
     """One aggregate query: per column COUNT (nulls), distinct count, and MIN/MAX
     for time + numeric columns — never MIN/MAX for a shape-only column (those are
     literals too), and never for a compound type (MIN over a STRUCT is not a range).
+    Numeric columns add their mean; time columns their median offset from the
+    entity's ``time_field`` — the distribution facts the drift baseline compares.
 
     ``exact`` reads the whole table with `COUNT(DISTINCT …)`; otherwise the read
     is a capped sample and the dialect's approximate aggregate is used where it
-    has one."""
+    has one. ``freshness_column`` folds the whole-table MIN/MAX of the time
+    column into the same statement — the caller passes it only for a read that
+    IS whole-table."""
     if not columns:
         return None
     approx = None if exact else _APPROX_DISTINCT.get(dialect)
     selects = ["COUNT(*) AS n_rows"]
+    anchor = _quote_name(time_field, dialect) if time_field else None
     for i, col in enumerate(columns):
         qc = _quote_name(col.name, dialect)
         selects.append(f"COUNT({qc}) AS nn_{i}")
@@ -386,10 +463,24 @@ def stats_sql(
             selects.append(f"{approx}({qc}) AS dc_{i}")
         else:
             selects.append(f"COUNT(DISTINCT {qc}) AS dc_{i}")
-        if not col.shape_only and (is_numeric_type(col.type) or is_temporal_type(col.type)):
+        if col.shape_only:
+            continue
+        numeric, temporal = is_numeric_type(col.type), is_temporal_type(col.type)
+        if numeric or temporal:
             selects.append(f"MIN({qc}) AS mn_{i}")
             selects.append(f"MAX({qc}) AS mx_{i}")
-    select_list = ", ".join(_quote_name(c.name, dialect) for c in columns)
+        if numeric:
+            selects.append(f"AVG({qc}) AS av_{i}")
+        if temporal and anchor is not None and col.name != time_field:
+            selects.append(f"{_median_offset(qc, anchor, dialect)} AS md_{i}")
+    if freshness_column is not None:
+        qf = _quote_name(freshness_column, dialect)
+        selects.append(f"MIN({qf}) AS fresh_mn")
+        selects.append(f"MAX({qf}) AS fresh_mx")
+    names = [c.name for c in columns]
+    if time_field and time_field not in names:
+        names.append(time_field)  # the anchor must survive a windowed derived table
+    select_list = ", ".join(_quote_name(n, dialect) for n in names)
     relation = _sampled_relation(
         table,
         select_list,
@@ -401,6 +492,113 @@ def stats_sql(
         predicate=predicate,
     )
     return f"SELECT {', '.join(selects)} FROM {relation}"
+
+
+def _epoch(expr: str, dialect: SamplingDialect) -> str:
+    """Seconds since the epoch, for a DATE or TIMESTAMP column alike."""
+    if dialect == "duckdb":
+        return f"epoch({expr})"
+    if dialect == "postgres":
+        return f"EXTRACT(EPOCH FROM {expr})"
+    if dialect == "bigquery":
+        return f"UNIX_SECONDS(TIMESTAMP({expr}))"
+    if dialect == "snowflake":
+        return f"DATE_PART(EPOCH_SECOND, {expr})"
+    return f"UNIX_TIMESTAMP({expr})"  # mysql
+
+
+def _median_offset(column: str, anchor: str, dialect: SamplingDialect) -> str:
+    """Median of ``column - anchor`` in seconds — the derived duration a
+    semantic change in the column shifts. MySQL has no median aggregate and
+    gets the mean, which moves by the same hours under the same change."""
+    diff = f"{_epoch(column, dialect)} - {_epoch(anchor, dialect)}"
+    if dialect == "duckdb":
+        return f"median({diff})"
+    if dialect == "postgres":
+        return f"percentile_cont(0.5) WITHIN GROUP (ORDER BY ({diff}))"
+    if dialect == "bigquery":
+        return f"APPROX_QUANTILES({diff}, 2)[OFFSET(1)]"
+    if dialect == "snowflake":
+        return f"MEDIAN({diff})"
+    return f"AVG({diff})"
+
+
+_TEXT_CAST = {
+    "duckdb": "VARCHAR",
+    "postgres": "TEXT",
+    "bigquery": "STRING",
+    "snowflake": "VARCHAR",
+    "mysql": "CHAR",
+}
+
+
+def top_values_batch_sql(
+    table: str,
+    columns: list[tuple[int, str, int]],
+    *,
+    dialect: SamplingDialect,
+    max_rows: int,
+    row_count: int | None,
+    exact: bool = False,
+    is_view: bool = False,
+    predicate: str | None = None,
+) -> str:
+    """Every column's value dictionary in ONE statement: the per-column top-k
+    queries as UNION ALL members, each tagged with its column index and cast to
+    text so the members' types agree. ``columns``: (index, name, limit). Rows
+    come back ordered by column, then frequency, exactly as the single-column
+    query orders them."""
+    text = _TEXT_CAST[dialect]
+    members = [
+        f"SELECT {i} AS c, CAST(t_{i}.v AS {text}) AS v, t_{i}.n FROM ("
+        + top_values_sql(
+            table,
+            name,
+            dialect=dialect,
+            max_rows=max_rows,
+            row_count=row_count,
+            limit=limit,
+            exact=exact,
+            is_view=is_view,
+            predicate=predicate,
+        )
+        + f") AS t_{i}"
+        for i, name, limit in columns
+    ]
+    return " UNION ALL ".join(members) + " ORDER BY c, n DESC, v"
+
+
+def shape_probe_batch_sql(
+    table: str,
+    columns: list[tuple[int, str]],
+    *,
+    dialect: SamplingDialect,
+    max_rows: int,
+    row_count: int | None,
+    exact: bool = False,
+    is_view: bool = False,
+    predicate: str | None = None,
+) -> str:
+    """Every text column's three example values in ONE statement — the
+    per-column probes as tagged UNION ALL members, same shape as the
+    dictionary batch."""
+    text = _TEXT_CAST[dialect]
+    members = [
+        f"SELECT {i} AS c, CAST(s_{i}.v AS {text}) AS v FROM ("
+        + shape_probe_sql(
+            table,
+            name,
+            dialect=dialect,
+            max_rows=max_rows,
+            row_count=row_count,
+            exact=exact,
+            is_view=is_view,
+            predicate=predicate,
+        )
+        + f") AS s_{i}"
+        for i, name in columns
+    ]
+    return " UNION ALL ".join(members) + " ORDER BY c"
 
 
 def top_values_sql(
@@ -572,6 +770,8 @@ def _fold_stats(
             null_rate = round(1.0 - (non_null / scanned), 6)
         minimum = row[idx[f"mn_{i}"]] if f"mn_{i}" in idx else None
         maximum = row[idx[f"mx_{i}"]] if f"mx_{i}" in idx else None
+        mean = _as_float(row[idx[f"av_{i}"]]) if f"av_{i}" in idx else None
+        offset = _as_float(row[idx[f"md_{i}"]]) if f"md_{i}" in idx else None
         profiles.append(
             ColumnProfile(
                 name=spec.name,
@@ -582,9 +782,21 @@ def _fold_stats(
                 is_low_cardinality=distinct is not None and 0 < distinct <= max_distinct_for_enum,
                 min=_literal(minimum) if minimum is not None else None,
                 max=_literal(maximum) if maximum is not None else None,
+                mean=mean,
+                time_offset_seconds=offset,
             )
         )
     return profiles
+
+
+def _fold_freshness(result: QueryResult) -> tuple[datetime | None, datetime | None] | None:
+    """The folded whole-table MIN/MAX of the time column — None when the
+    statement did not carry them (a sampled read never does)."""
+    idx = {str(name).lower(): i for i, name in enumerate(result.columns)}
+    if "fresh_mx" not in idx or not result.rows:
+        return None
+    row = result.rows[0]
+    return _as_datetime(row[idx["fresh_mn"]]), _as_datetime(row[idx["fresh_mx"]])
 
 
 def _literal(value: object) -> str:
@@ -661,30 +873,40 @@ def _collect_value_shapes(
 ) -> None:
     """Classify textual columns' value shapes — never for shape-only columns,
     whose literals are not read at all. Low-cardinality columns classify from
-    already-collected top_values (no extra query); the rest get one 3-row probe
-    each."""
-    for col_spec, col in zip(specs, columns, strict=True):
+    already-collected top_values (no extra query); the rest share ONE 3-row
+    probe statement."""
+    wanted: list[tuple[int, str]] = []
+    samples_by: dict[int, list[str]] = {}
+    for i, (col_spec, col) in enumerate(zip(specs, columns, strict=True)):
         if col_spec.shape_only or not is_text_type(col_spec.type):
             continue
-        samples = list(col.top_values or [])
-        if not samples:
-            sql = shape_probe_sql(
-                spec.table,
-                col_spec.name,
-                dialect=dialect,
-                max_rows=max_rows,
-                row_count=spec.row_count,
-                exact=exact,
-                is_view=bool(spec.is_view),
-                predicate=predicate,
-            )
-            try:
-                samples = [str(r[0]) for r in run(sql).rows]
-            except SampleBudgetExceeded:
-                continue
-        shape = classify_value_shape(col_spec.name, samples)
+        samples_by[i] = list(col.top_values or [])
+        if not samples_by[i]:
+            wanted.append((i, col_spec.name))
+    if wanted:
+        sql = shape_probe_batch_sql(
+            spec.table,
+            wanted,
+            dialect=dialect,
+            max_rows=max_rows,
+            row_count=spec.row_count,
+            exact=exact,
+            is_view=bool(spec.is_view),
+            predicate=predicate,
+        )
+        try:
+            asked = {i for i, _ in wanted}
+            for r in run(sql).rows:
+                c = _as_int(r[0])
+                if c in asked:
+                    samples_by[c].append(str(r[1]))
+        except SampleBudgetExceeded:
+            for i, _ in wanted:
+                samples_by.pop(i, None)
+    for i, samples in samples_by.items():
+        shape = classify_value_shape(specs[i].name, samples)
         if shape is not None:
-            col.value_shape, col.access_hint = shape  # type: ignore[assignment]
+            columns[i].value_shape, columns[i].access_hint = shape  # type: ignore[assignment]
 
 
 def shape_probe_sql(
@@ -710,7 +932,7 @@ def shape_probe_sql(
         is_view=is_view,
         predicate=predicate,
     )
-    return f"SELECT {q} FROM {rel} WHERE {q} IS NOT NULL LIMIT 3"
+    return f"SELECT {q} AS v FROM {rel} WHERE {q} IS NOT NULL LIMIT 3"
 
 
 def _collect_top_values(
@@ -739,7 +961,8 @@ def _collect_top_values(
     list is ordered by frequency like any other. Only when counted: a sampled
     list that long could never be complete, and nothing would read it.
     """
-    for col_spec, col in zip(specs, columns, strict=True):
+    wanted: list[tuple[int, str, int]] = []
+    for i, (col_spec, col) in enumerate(zip(specs, columns, strict=True)):
         if col_spec.shape_only:
             continue
         matchable = (
@@ -751,22 +974,32 @@ def _collect_top_values(
         )
         if not (col.is_low_cardinality or matchable):
             continue
-        sql = top_values_sql(
-            spec.table,
-            col_spec.name,
-            dialect=dialect,
-            max_rows=max_rows,
-            row_count=spec.row_count,
-            limit=max(limit, MATCH_DICTIONARY_MAX) if matchable else limit,
-            exact=exact,
-            is_view=bool(spec.is_view),
-            predicate=predicate,
-        )
-        try:
-            rows = run(sql).rows
-        except SampleBudgetExceeded:
-            continue
-        values = [_literal(r[0]) for r in rows]
+        wanted.append((i, col_spec.name, max(limit, MATCH_DICTIONARY_MAX) if matchable else limit))
+    if not wanted:
+        return
+    # One statement for every dictionary of the table: on an engine that
+    # bills a minimum per job, a statement per column was most of the bill.
+    sql = top_values_batch_sql(
+        spec.table,
+        wanted,
+        dialect=dialect,
+        max_rows=max_rows,
+        row_count=spec.row_count,
+        exact=exact,
+        is_view=bool(spec.is_view),
+        predicate=predicate,
+    )
+    try:
+        rows = run(sql).rows
+    except SampleBudgetExceeded:
+        return
+    values_by: dict[int, list[str]] = {i: [] for i, _, _ in wanted}
+    for r in rows:
+        c = _as_int(r[0])
+        if c in values_by:
+            values_by[c].append(str(r[1]))
+    for i, values in values_by.items():
+        col = columns[i]
         col.top_values = values or None
         if not values:
             continue
@@ -799,6 +1032,12 @@ def _freshness_blocked(column: str, specs: list[ColumnSampleSpec]) -> bool:
 def _as_int(value: object) -> int | None:
     # Drivers disagree on aggregate types: int (most), float, Decimal (Snowflake).
     return int(value) if isinstance(value, int | float | Decimal) else None
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+        return None
+    return float(value)
 
 
 def _as_datetime(value: object) -> datetime | None:

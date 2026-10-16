@@ -533,6 +533,66 @@ def _zero_ratio_plausibility(sql: str, result: QueryResult) -> VerificationCheck
     )
 
 
+_PCT_COLUMN = re.compile(r"(^|_)(rate|pct|percent|percentage|ratio|share)(_|$)", re.IGNORECASE)
+
+
+def _all_ones_ratio(sql: str, result: QueryResult) -> VerificationCheck:
+    """A ratio that is exactly 1.0 (or 100.0) on EVERY row is a predicate
+    pinning both sides of the division to the same population, not a finding.
+
+    The observed shape: a definition's predicate ("on time" = delivered on or
+    before due) ANDed into the WHERE of an on-time RATE — the denominator is
+    then only the on-time rows too, and the rate reads 100% for every carrier,
+    served verified. Plan rejects the authoring shape; this is the serve-time
+    tripwire for whatever reaches the warehouse anyway. Candidates are the
+    rate/pct-named columns; with none named and SQL that divides, every
+    numeric column. Fails only when every candidate value across more than
+    one row is exactly 1 or 100 — a single row cannot show the pattern and is
+    a skip, never a vacuous pass. A genuine all-perfect result keeps its
+    answer and loses only the top badge, with the reason naming what to check."""
+    divides = bool(re.search(r"SAFE_DIVIDE|[\w)\s]/\s*[\w(]", sql, re.IGNORECASE))
+    named = [i for i, c in enumerate(result.columns) if _PCT_COLUMN.search(c)]
+    if not named and not divides:
+        return VerificationCheck(name="all_ones_ratio", status="skip", reason="not a ratio result")
+    if len(result.rows) < 2:
+        return VerificationCheck(
+            name="all_ones_ratio",
+            status="skip",
+            reason="a single-row result cannot show a ratio pinned to 1 on every row",
+        )
+    candidates = named or [
+        i
+        for i in range(len(result.columns))
+        if any(
+            isinstance(row[i], int | float | decimal.Decimal) and not isinstance(row[i], bool)
+            for row in result.rows
+            if i < len(row)
+        )
+    ]
+    values = [
+        row[i] for row in result.rows for i in candidates if i < len(row) and row[i] is not None
+    ]
+    numeric = [
+        float(v)
+        for v in values
+        if isinstance(v, int | float | decimal.Decimal) and not isinstance(v, bool)
+    ]
+    if not numeric or len(numeric) != len(values) or any(v not in (1.0, 100.0) for v in numeric):
+        return VerificationCheck(name="all_ones_ratio", status="pass")
+    cols = ", ".join(result.columns[i] for i in candidates)
+    return VerificationCheck(
+        name="all_ones_ratio",
+        status="fail",
+        reason=(
+            f"{cols} is exactly {'100' if 100.0 in numeric else '1'} on every one of "
+            f"{len(result.rows)} rows — a ratio whose numerator and denominator were "
+            "filtered to the same population (a definition's predicate ANDed under the "
+            "division), not a result; check the WHERE clause against the ratio's "
+            "denominator"
+        ),
+    )
+
+
 def _strip_refs(node: exp.Expression) -> exp.Expression:
     """Qualifiers and identifier quoting off a parsed expression, in place —
     the canonical treatment for predicate comparison."""
@@ -768,13 +828,21 @@ def date_coverage_check(
 
 
 def freshness_check(
-    data_as_of: str | None, model: SemanticModel, *, profile_stale: bool = False
+    data_as_of: str | None,
+    model: SemanticModel,
+    *,
+    profile_stale: bool = False,
+    table: str | None = None,
 ) -> VerificationCheck:
-    """The declared freshness contract vs the MEASURED scope freshness — a plain
-    date comparison, deterministic by construction: false positives are
-    forbidden, so anything unmeasurable is a skip with its reason, never a fail
-    and never a vacuous pass. A measurement older than ``probe.max_age`` is
-    unmeasurable too: it dates the warehouse to the last probe, not to now."""
+    """The declared freshness contract vs the MEASURED freshness of what the
+    SQL read — a plain date comparison, deterministic by construction: false
+    positives are forbidden, so anything unmeasurable is a skip with its
+    reason, never a fail and never a vacuous pass. ``data_as_of`` is the
+    pipeline's read-set date (the oldest time-series table the SQL read, a
+    dimension only when nothing else was), never the lens-wide floor; ``table``
+    names it in the reason when known. A measurement older than
+    ``probe.max_age`` is unmeasurable too: it dates the warehouse to the last
+    probe, not to now."""
     days = model.stale_after_days
     if not days:
         return VerificationCheck(
@@ -802,8 +870,8 @@ def freshness_check(
             name="freshness",
             status="fail",
             reason=(
-                f"data is as of {data_as_of} ({age} days old) — this lens declares "
-                f"data stale after {days} days"
+                f"data{f' in {table}' if table else ''} is as of {data_as_of} ({age} days old)"
+                f" — this lens declares data stale after {days} days"
             ),
         )
     return VerificationCheck(name="freshness", status="pass", reason=None)
@@ -834,6 +902,9 @@ def build_report(
     uncomposed_reason: str | None = None,
     investigation: Literal["confirmed", "unresolved"] | None = None,
     data_as_of: str | None = None,
+    # The table ``data_as_of`` dates (the pipeline's scope_as_of), named in
+    # the freshness reason so the check and the answer stamp agree.
+    as_of_table: str | None = None,
     entity_coverage: Mapping[str, EntityCoverage] | None = None,
     profile_stale: bool = False,
 ) -> VerificationReport:
@@ -896,10 +967,11 @@ def build_report(
         _intent_alignment(question, sql, semantic_model.dialect),
         _window_applied(question, sql, semantic_model),
         _zero_ratio_plausibility(sql, result),
+        _all_ones_ratio(sql, result),
         _ratio_population(sql, semantic_model.dialect),
         _population_declared(sql, semantic_model),
         _aggregation_scope(sql, semantic_model),
-        freshness_check(data_as_of, semantic_model, profile_stale=profile_stale),
+        freshness_check(data_as_of, semantic_model, profile_stale=profile_stale, table=as_of_table),
         date_coverage_check(
             question, sql, semantic_model, entity_coverage, profile_stale=profile_stale
         ),
@@ -948,6 +1020,40 @@ def build_report(
     return _with_grade(checks, certification, numeric_status, composed=composed)
 
 
+# Checks whose fail is an opinion, never the cause of a grade: the judge is
+# advisory (fold_judge), so partial_reason never names it.
+_ADVISORY = frozenset({"judge"})
+
+
+def partial_reason(grade: Grade, checks: list[VerificationCheck]) -> str | None:
+    """Why the grade is `partial`, named — never a bare word. The first
+    deterministic fail, else the numeric skip, else the semantic abstention;
+    None for any other grade (unverified names its fail on the check; verified
+    needs no excuse)."""
+    if grade != "partial":
+        return None
+    for c in checks:
+        if c.status == "fail" and c.name not in _ADVISORY:
+            return f"{c.name}: {c.reason}" if c.reason else c.name
+    numeric = next((c for c in checks if c.name == "numeric_grounding"), None)
+    if numeric is not None and numeric.status == "skip":
+        return f"numeric_grounding skipped: {numeric.reason or 'no numeric claims to ground'}"
+    if _semantic_abstained(checks):
+        reasons = "; ".join(
+            f"{c.name}: {c.reason}"
+            for c in checks
+            if c.name in ("definition_applied", "intent_alignment") and c.reason
+        )
+        return f"no semantic check confirmed the answer{f' ({reasons})' if reasons else ''}"
+    return "graded on partial evidence"
+
+
+def _report(grade: Grade, checks: list[VerificationCheck]) -> VerificationReport:
+    return VerificationReport(
+        grade=grade, checks=checks, partial_reason=partial_reason(grade, checks)
+    )
+
+
 def fold_ungoverned(report: VerificationReport, reason: str) -> VerificationReport:
     """The serve_ungoverned_shapes knob's promise, enforced: a serve that only
     happened because the knob bypassed the selection boundary grades unverified,
@@ -958,7 +1064,28 @@ def fold_ungoverned(report: VerificationReport, reason: str) -> VerificationRepo
         *report.checks,
         VerificationCheck(name="governed_shape", status="fail", reason=reason),
     ]
-    return VerificationReport(grade="unverified", checks=checks)
+    return _report("unverified", checks)
+
+
+def fold_exposed(report: VerificationReport, tables: list[str]) -> VerificationReport:
+    """An answer read from a table the lens exposes without governed
+    definitions caps at partial, deterministically. The EXPOSED disclosure
+    line said so on the surface while the grade still read verified — a
+    badge vouching for columns nobody defined. The failing check names the
+    forcing reason, so `partial` is never a bare word."""
+    if not tables:
+        return report
+    what = "a table" if len(tables) == 1 else "tables"
+    checks = [
+        *report.checks,
+        VerificationCheck(
+            name="governed_read",
+            status="fail",
+            reason=f"ungoverned read: {', '.join(tables)}, {what} with no governed definitions",
+        ),
+    ]
+    grade: Grade = "partial" if report.grade == "verified" else report.grade
+    return _report(grade, checks)
 
 
 def fold_metric_filter_waived(report: VerificationReport, reason: str) -> VerificationReport:
@@ -977,7 +1104,7 @@ def fold_metric_filter_waived(report: VerificationReport, reason: str) -> Verifi
         VerificationCheck(name="metric_filter_waived", status="fail", reason=reason),
     ]
     grade: Grade = "partial" if report.grade == "verified" else report.grade
-    return VerificationReport(grade=grade, checks=checks)
+    return _report(grade, checks)
 
 
 def fold_low_confidence(
@@ -996,29 +1123,31 @@ def fold_low_confidence(
         ),
     ]
     grade: Grade = "partial" if report.grade == "verified" else report.grade
-    return VerificationReport(grade=grade, checks=checks)
+    return _report(grade, checks)
 
 
 def fold_judge(report: VerificationReport, verdict: str, reasoning: str) -> VerificationReport:
-    """Fold an inline judge verdict into the report as one more check.
+    """Fold an inline judge verdict into the report as one more check — ADVISORY.
 
-    approve → pass (the grade never upgrades past what the deterministic checks
-    earned); reject → unverified; changes → capped at partial."""
+    The grade comes from the deterministic checks and the judge never moves
+    it: the same SQL graded three ways across repeats when a model's opinion
+    could demote, and a lens's own declared population read as "unsupported"
+    to a judge that had not been shown it. approve → pass; changes/reject →
+    fail, visible as the judge's note on the report, with the grade untouched."""
     status: CheckStatus = "pass" if verdict == "approve" else "fail"
     checks = [
         *report.checks,
-        VerificationCheck(name="judge", status=status, reason=reasoning or verdict),
+        VerificationCheck(
+            name="judge",
+            status=status,
+            reason=f"advisory ({verdict}): {reasoning}" if reasoning else f"advisory ({verdict})",
+        ),
     ]
-    grade: Grade = report.grade
-    if verdict == "reject":
-        grade = "unverified"
-    elif verdict == "changes" and grade == "verified":
-        grade = "partial"
-    return VerificationReport(grade=grade, checks=checks)
+    return _report(report.grade, checks)
 
 
 def fold_challenges(
-    report: VerificationReport, challenges: list[adversary.Challenge]
+    report: VerificationReport, challenges: list[adversary.Challenge] | None
 ) -> VerificationReport:
     """Fold the adversarial reviewer's challenges into the report as one
     more check.
@@ -1026,7 +1155,20 @@ def fold_challenges(
     A blocking challenge fails the check and caps the grade at partial — a raised,
     unresolved challenge means "not verified", but the adversary's opinion alone
     never destroys deterministic evidence (mirror of fold_judge's 'changes').
-    Notes are surfaced in the reason without demoting; the grade never upgrades."""
+    Notes are surfaced in the reason without demoting; the grade never upgrades.
+    ``None`` is a reviewer whose reply could not be parsed: that carries no
+    signal about the answer, so the check is a SKIP that says so — never a
+    pass dressed as a note."""
+    if challenges is None:
+        checks = [
+            *report.checks,
+            VerificationCheck(
+                name="adversary",
+                status="skip",
+                reason="the adversary's reply could not be parsed; no challenges extracted",
+            ),
+        ]
+        return _report(report.grade, checks)
     blocking = [c for c in challenges if c.severity == "blocking"]
     detail = "; ".join(f"{c.assumption}: {c.reason}" for c in challenges)
     status: CheckStatus = "fail" if blocking else "pass"
@@ -1041,7 +1183,7 @@ def fold_challenges(
     grade: Grade = report.grade
     if blocking and grade == "verified":
         grade = "partial"
-    return VerificationReport(grade=grade, checks=checks)
+    return _report(grade, checks)
 
 
 def _with_grade(
@@ -1077,7 +1219,7 @@ def _with_grade(
         grade = "partial"
     else:
         grade = "verified"
-    return VerificationReport(grade=grade, checks=checks)
+    return _report(grade, checks)
 
 
 def _semantic_abstained(checks: list[VerificationCheck]) -> bool:

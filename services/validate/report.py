@@ -8,8 +8,8 @@ model's table/column scope (via sql_guard).
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Literal
 
 import sqlglot
 from pydantic import BaseModel
@@ -21,6 +21,9 @@ from services.definitions.standards import OrgStandard
 from services.lenses.store import LensBundle
 from services.llm import registry
 from services.runtime import ambiguity, sql_guard
+
+if TYPE_CHECKING:
+    from services.contracts.profile import TableProfile
 
 Severity = Literal["error", "warning"]
 
@@ -442,6 +445,155 @@ def definition_double_truth(d: Definition, entities: Sequence[Entity]) -> Issue 
     )
 
 
+def _is_ratio_metric(m: Metric) -> bool:
+    """A metric whose value is a quotient: declared `type: ratio`, a derived
+    expression that divides, or one rendered as a percent."""
+    if m.type == "ratio" or m.format == "percent":
+        return True
+    return m.type == "derived" and "/" in (m.expr or "")
+
+
+def _predicate_shape(expr: exp.Expression) -> str | None:
+    """Why a parsed expression is NOT a boolean predicate, or None when it is
+    (or might be). Conservative on purpose: a bare column may be a boolean
+    column and a function may return one, so only the shapes that can never
+    be a predicate are named — a literal, arithmetic, a non-boolean cast, an
+    aggregate, or a CASE whose every branch yields a non-boolean literal."""
+    while isinstance(expr, exp.Paren):
+        expr = expr.this
+    if isinstance(expr, exp.Literal | exp.Null):
+        return "a literal"
+    if isinstance(expr, exp.Add | exp.Sub | exp.Mul | exp.Div | exp.Mod):
+        return "arithmetic"
+    if isinstance(expr, exp.Cast) and not isinstance(expr.to.this, str):
+        if expr.to.this != exp.DataType.Type.BOOLEAN:
+            return f"a cast to {expr.to.sql()}"
+    if isinstance(expr, exp.AggFunc):
+        return "an aggregate"
+    if isinstance(expr, exp.Case):
+        branches = [i.args.get("true") for i in expr.args.get("ifs", [])]
+        branches.append(expr.args.get("default"))
+        present = [b for b in branches if b is not None]
+        if present and all(
+            isinstance(b, exp.Literal | exp.Null) and not isinstance(b, exp.Boolean)
+            for b in present
+        ):
+            return "a CASE that yields numbers or strings, not true/false"
+    return None
+
+
+def definition_sql_shape(
+    d: Definition, entities: Sequence[Entity], dialect: str | None
+) -> Issue | None:
+    """A definition's sql_expr is ANDed verbatim into WHERE whenever a question
+    names the term — so it must be a predicate, and it must not be `about` a
+    ratio metric. Both shapes compile and run; neither filters anything a
+    reader would expect: a non-boolean expression is coerced or errors per
+    warehouse, and a predicate ANDed under a ratio pins every row to the
+    numerator's population, serving 100% on every row. Static, so it dies at
+    plan with the fix named — never at the served answer."""
+    sql_expr = (d.sql_expr or "").strip()
+    if not sql_expr:
+        return None
+    entity_name, _, member = (d.about or "").partition(".")
+    entity = next((e for e in entities if e.name == entity_name), None)
+    metric = (
+        next((m for m in entity.metrics if m.name == member), None)
+        if entity is not None and member
+        else None
+    )
+    if metric is not None and _is_ratio_metric(metric):
+        return Issue(
+            severity="error",
+            code="definition_filters_ratio",
+            message=f"definition '{d.term}' is about ratio metric '{d.about}' and carries a "
+            f"`sql:` predicate ({sql_expr!r}) — a question naming the term ANDs that "
+            "predicate into WHERE, which pins the ratio's numerator and denominator to the "
+            "same filtered rows and serves 1.0 on every row. Drop the `sql:` and keep the "
+            "about binding (the metric owns its SQL), or make the predicate a metric "
+            "`filters:` entry on the numerator only.",
+            subject=d.term,
+        )
+    try:
+        tree = sqlglot.parse_one(f"SELECT 1 WHERE {sql_expr}", read=dialect)
+    except Exception:  # noqa: BLE001 — an unparseable predicate is its own lint
+        return None
+    where = tree.args.get("where")
+    if where is None:
+        return None
+    shape = _predicate_shape(where.this)
+    if shape is None:
+        return None
+    return Issue(
+        severity="error",
+        code="definition_not_predicate",
+        message=f"definition '{d.term}': `sql:` expression {sql_expr!r} is {shape}, not a "
+        "boolean predicate — it is ANDed into WHERE whenever a question names the term, "
+        "so it must be something that is true or false per row (a comparison, IN, IS, "
+        "a boolean column). Move a value expression into a metric or dimension and keep "
+        "the definition's `sql:` as the condition that selects the rows.",
+        subject=d.term,
+    )
+
+
+_DONE_FAMILY = frozenset(
+    {
+        "completed",
+        "complete",
+        "done",
+        "closed",
+        "invoiced",
+        "finished",
+        "paid",
+        "fulfilled",
+        "shipped",
+        "delivered",
+    }
+)
+_STATUS_COLUMN = re.compile(r"(^|_)(status|state)(_|$)", re.IGNORECASE)
+
+
+def status_done_family_warnings(
+    sm: SemanticModel, profiles: Mapping[str, TableProfile]
+) -> list[Issue]:
+    """A status column whose complete dictionary holds MORE THAN ONE 'done'
+    value, with no definition about it. The shape: done jobs are `Invoiced`,
+    but the model, asked for completed jobs, writes `status = 'Completed'` —
+    a plausible value the dictionary also holds — and serves a verified
+    undercount. Nothing deterministic can pick which values count as done;
+    the author can, in a definition about the column. Fires only on a
+    COMPLETE dictionary (a partial one proves nothing) and only when no
+    definition is about that column. No model is consulted."""
+    issues: list[Issue] = []
+    about = {(d.about or "").lower() for d in sm.definitions}
+    for e in sm.entities:
+        profile = profiles.get(e.source.table) or profiles.get(e.source.table.lower())
+        if profile is None:
+            continue
+        for col in profile.columns:
+            if not _STATUS_COLUMN.search(col.name) or not col.values_complete:
+                continue
+            if f"{e.name}.{col.name}".lower() in about:
+                continue
+            done = [v for v in (col.top_values or []) if v.strip().lower() in _DONE_FAMILY]
+            if len(done) < 2:
+                continue
+            values = ", ".join(f"'{v}'" for v in done)
+            issues.append(
+                Issue(
+                    severity="warning",
+                    code="status_done_ambiguous",
+                    message=f"entity '{e.name}': column '{col.name}' holds several values that "
+                    f"read as done ({values}) and no definition says which count — a question "
+                    f"about completed {e.name} filters on whichever one the model picks. Add a "
+                    f"definition with `about: {e.name}.{col.name}` and a `sql:` naming the "
+                    "values that mean done.",
+                    subject=f"{e.name}.{col.name}",
+                )
+            )
+    return issues
+
+
 def _check_bundle(
     bundle: LensBundle,
     standards: list[OrgStandard],
@@ -587,6 +739,9 @@ def _check_bundle(
         double_truth = definition_double_truth(d, sm.entities)
         if double_truth is not None:
             issues.append(double_truth)
+        shape = definition_sql_shape(d, sm.entities, sm.dialect)
+        if shape is not None:
+            issues.append(shape)
         if not (d.sql_expr or "").strip() and d.status != "ambiguous":
             # Ambiguous glossary terms are exempt: refusing to compile to SQL is
             # their job, not a gap.

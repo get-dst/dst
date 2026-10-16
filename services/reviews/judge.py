@@ -27,6 +27,9 @@ _SYSTEM = (
     "numbers? A number explicitly attributed to a declared source ('per the table "
     "profile', 'per the <term> definition') is grounded, not invented.\n"
     "3. Scope — does it stay within the question (no overreach)?\n"
+    "A GOVERNED CONTEXT block, when given, is what the analyst was shown and told to "
+    "state: the lens's definitions, its declared data notes and the population its "
+    "tables cover. Prose that restates it is supported, never invented or overreach.\n"
     "If an APPROVED REFERENCE query is given, the SQL should be equivalent to it; material "
     "divergence is a problem. Output ONLY a JSON object, no prose and no markdown fences: "
     '{"verdict": "approve" | "changes" | "reject", "reasoning": "<one or two sentences naming '
@@ -90,6 +93,7 @@ def judge_typed(
     *,
     reference_sql: str | None = None,
     policies: dict[str, decision_policy.Policy] | None = None,
+    governed_context: str | None = None,
 ) -> tuple[str, str, list[DecisionRecord]]:
     """The judge as a composition of checks — deterministic where it can be,
     one typed decision where judgment is needed — instead of a free-text rubric.
@@ -139,6 +143,12 @@ def judge_typed(
         "Review whether an analytics answer stays within the question. "
         f"Definition applied: {trace.definition_used or '(none)'}. "
         + (f"Approved reference SQL: {reference_sql}. " if reference_sql else "")
+        + (
+            "Governed context the analyst was shown and told to state (restating it "
+            f"is within scope): {governed_context} "
+            if governed_context
+            else ""
+        )
     )
     question = (
         f"Question: {trace.question}\nSQL: {sql}\nAnswer: {prose or '(structured, no prose)'}"
@@ -175,8 +185,15 @@ def judge_trace(
     model: str = "claude-sonnet-4-6",
     *,
     reference_sql: str | None = None,
+    governed_context: str | None = None,
 ) -> tuple[str, str]:
+    """The rubric judge, at temperature 0. ``governed_context`` is the same
+    governed text the composer had — definitions, data notes, population scope
+    — so prose that restates a declared fact is graded supported, not
+    invented. The verdict is advisory: the serving report records it and the
+    deterministic checks keep the grade (``verification.fold_judge``)."""
     reference = f"\nApproved reference SQL: {reference_sql}" if reference_sql else ""
+    governed = f"\nGoverned context:\n{governed_context}" if governed_context else ""
     user = (
         f"Question: {trace.question}\n"
         f"Definition applied: {trace.definition_used or '(none)'}\n"
@@ -184,7 +201,7 @@ def judge_trace(
         f"Rows returned: {trace.row_count if trace.row_count is not None else '(unknown)'}\n"
         f"Answer: {trace.answer or '(none)'}\n"
         f"Stated confidence: {trace.confidence or '(none)'}"
-        f"{reference}"
+        f"{reference}{governed}"
     )
     res = llm.complete(
         system=[CacheableBlock(_SYSTEM)],

@@ -146,6 +146,7 @@ def run_behavioral(
                     caller="eval",
                     semantic_model=assembled.model,
                     value_domains=assembled.value_domains,
+                    table_domains=assembled.table_domains,
                     connector=connector,
                     generator=generator,
                     escalate_generator=escalate,
@@ -153,6 +154,7 @@ def run_behavioral(
                     prose_context=assembled.prose,
                     model_name=model_name,
                     data_as_of=assembled.data_as_of,
+                    table_as_of=assembled.table_as_of,
                     entity_coverage=assembled.entity_coverage,
                     profile_age=assembled.profile_age,
                 )
@@ -238,6 +240,7 @@ def run_health(
                 caller="eval",
                 semantic_model=assembled.model,
                 value_domains=assembled.value_domains,
+                table_domains=assembled.table_domains,
                 connector=connector,
                 generator=generator,
                 escalate_generator=escalate,
@@ -245,6 +248,7 @@ def run_health(
                 prose_context=assembled.prose,
                 model_name=model_name,
                 data_as_of=assembled.data_as_of,
+                table_as_of=assembled.table_as_of,
                 entity_coverage=assembled.entity_coverage,
                 profile_age=assembled.profile_age,
             )

@@ -140,3 +140,45 @@ def test_render_question_uses_raw_values() -> None:
 def test_slotspec_is_frozen_metadata() -> None:
     with pytest.raises(AttributeError):
         SlotSpec(type="date").type = "enum"  # type: ignore[misc]
+
+
+# ── inclusive explicit ranges ────────────────────────────────────────────────
+
+
+def test_explicit_range_is_inclusive_on_both_ends() -> None:
+    """``2026-01-01/2026-09-30`` covers 30 September: the rendered end is the
+    day after the second date, the same shape a month renders to."""
+    specs, _ = parse_slots(_SLOTS)
+    sql = render_sql(_SQL, specs, {"period": "2026-01-01/2026-09-30", "segment": "SMB"}, "postgres")
+    assert "o.closed_at >= '2026-01-01'" in sql
+    assert "o.closed_at < '2026-10-01'" in sql
+    # The month form of the same window renders the same end.
+    by_month = render_sql(_SQL, specs, {"period": "2026-09", "segment": "SMB"}, "postgres")
+    assert "o.closed_at < '2026-10-01'" in by_month
+
+
+def test_a_single_day_range_is_valid() -> None:
+    specs, _ = parse_slots({"p": {"type": "date_range"}})
+    _, errors = validate_binding(specs, {"p": "2026-03-15/2026-03-15"})
+    assert errors == []
+    sql = render_sql(
+        "SELECT 1 WHERE d >= {p.start} AND d < {p.end}",
+        specs,
+        {"p": "2026-03-15/2026-03-15"},
+        "postgres",
+    )
+    assert "'2026-03-15'" in sql and "'2026-03-16'" in sql
+
+
+def test_yaml_dates_bind_as_iso_text_and_structures_are_named() -> None:
+    """A bare YAML date arrives as a date object; it binds as its ISO text.
+    A list or mapping is not a value and is named, never a 500 downstream."""
+    import datetime
+
+    specs, _ = parse_slots({"asof": {"type": "date"}, "p": {"type": "date_range"}})
+    canonical, errors = validate_binding(
+        specs, {"asof": datetime.date(2026, 1, 31), "p": "2026-Q1"}
+    )
+    assert errors == [] and canonical["asof"] == "2026-01-31"
+    _, errors = validate_binding(specs, {"asof": ["2026-01-31"], "p": {"from": "x"}})
+    assert len(errors) == 2 and all("not a scalar value" in e for e in errors)

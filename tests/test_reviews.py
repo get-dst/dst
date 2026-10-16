@@ -713,3 +713,59 @@ def test_mcp_send_for_review_is_caller_scoped_too() -> None:
         assert client.post("/v1/reviews", headers=h, json={"request_id": theirs}).status_code == 403
     finally:
         _cleanup(org)
+
+
+@needs_db
+def test_a_prose_only_correction_never_auto_approves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A correction without SQL is a claim the judge cannot verify: grading the
+    original answer against the question approved it on "the SQL matches the
+    question", and the correction never reached a human. Now it always does."""
+    org, raw = _make_org_token()
+    rid = f"req-{uuid.uuid4()}"
+    _seed_trace(org, rid)
+    h = {"Authorization": f"Bearer {raw}"}
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider",
+        lambda _k, **_: ScriptedLLM(['{"verdict": "approve", "reasoning": "sound"}']),
+    )
+    correction = {"kind": "definition", "note": "repeat should mean 2+ orders in 12 months"}
+    try:
+        r = client.post(
+            "/v1/reviews", headers=h, json={"request_id": rid, "correction": correction}
+        )
+        assert r.status_code == 201, r.text
+        ticket = r.json()
+        assert ticket["state"] == "needs_human"
+        assert ticket["ai_verdict"] == "approve"  # the judge's reading is kept, not the ruling
+        assert "A human must rule" in ticket["ai_reasoning"]
+    finally:
+        _cleanup(org)
+
+
+@needs_db
+def test_a_correction_with_sql_the_judge_verifies_can_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    org, raw = _make_org_token()
+    rid = f"req-{uuid.uuid4()}"
+    _seed_trace(org, rid)
+    h = {"Authorization": f"Bearer {raw}"}
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider",
+        lambda _k, **_: ScriptedLLM(['{"verdict": "approve", "reasoning": "corrected SQL holds"}']),
+    )
+    correction = {
+        "kind": "definition",
+        "note": "repeat should mean 2+ orders",
+        "corrected_sql": "SELECT count(*) FROM customers WHERE number_of_orders >= 2",
+    }
+    try:
+        r = client.post(
+            "/v1/reviews", headers=h, json={"request_id": rid, "correction": correction}
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["state"] == "approved"
+    finally:
+        _cleanup(org)

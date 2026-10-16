@@ -100,7 +100,7 @@ def _scripted(newest: date, log: list[str]):  # noqa: ANN202
         if sql.startswith("SELECT MIN("):
             return QueryResult(columns=["mn", "mx"], rows=[[date(2024, 1, 1), newest]])
         if " AS v, COUNT(*) AS n FROM" in sql:
-            return QueryResult(columns=["v", "n"], rows=[["click", 3], ["view", 2]])
+            return QueryResult(columns=["c", "v", "n"], rows=[[0, "click", 3], [0, "view", 2]])
         return QueryResult(columns=["n_rows", "nn_0", "dc_0"], rows=[[5, 5, 2]])
 
     return run

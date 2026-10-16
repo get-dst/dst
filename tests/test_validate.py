@@ -304,3 +304,168 @@ def test_validate_api_and_standards_crud() -> None:
             c.execute(text("DELETE FROM lens WHERE org_id = :o"), {"o": org})
             c.execute(text("DELETE FROM admin_token WHERE org_id = :o"), {"o": org})
             c.execute(text("DELETE FROM org WHERE id = :o"), {"o": org})
+
+
+# ---- definition shapes that compile and serve wrong (pure) ----
+
+
+def _codes(report: object) -> dict[str, str]:
+    return {i.code: i.severity for i in report.issues}  # type: ignore[attr-defined]
+
+
+def test_validate_rejects_a_definition_whose_sql_is_not_a_predicate() -> None:
+    """A `sql:` that is arithmetic is ANDed into WHERE and serves nonsense; a
+    plan error names the shape and the fix."""
+    bundle = jaffle_customer_value_bundle()
+    bundle.semantic_model.definitions.append(
+        Definition(term="order_share", body="orders over all", sql_expr="orders.amount / 100")
+    )
+    report = validate_bundle(bundle, [], [])
+    assert not report.ok
+    assert _codes(report).get("definition_not_predicate") == "error"
+    msg = next(i.message for i in report.issues if i.code == "definition_not_predicate")
+    assert "order_share" in msg and "arithmetic" in msg
+
+
+def test_validate_rejects_a_literal_and_a_numeric_case_as_predicates() -> None:
+    bundle = jaffle_customer_value_bundle()
+    bundle.semantic_model.definitions += [
+        Definition(term="one", body="x", sql_expr="1"),
+        Definition(term="flag", body="x", sql_expr="CASE WHEN orders.amount > 1 THEN 1 ELSE 0 END"),
+    ]
+    report = validate_bundle(bundle, [], [])
+    terms = {i.subject for i in report.issues if i.code == "definition_not_predicate"}
+    assert terms == {"one", "flag"}
+
+
+def test_validate_accepts_real_predicates() -> None:
+    bundle = jaffle_customer_value_bundle()
+    bundle.semantic_model.definitions += [
+        Definition(term="big", body="x", sql_expr="orders.amount > 100"),
+        Definition(term="done", body="x", sql_expr="orders.status IN ('completed', 'shipped')"),
+        Definition(term="recent", body="x", sql_expr="NOT orders.order_date IS NULL"),
+        Definition(term="paid", body="x", sql_expr="COALESCE(orders.is_paid, false)"),
+    ]
+    report = validate_bundle(bundle, [], [])
+    assert "definition_not_predicate" not in _codes(report)
+
+
+def test_validate_rejects_a_predicate_on_a_ratio_metric() -> None:
+    """The on-time-rate shape: a definition about a ratio metric carrying the
+    predicate the ratio already encodes — ANDed under the division it pins
+    every row to 100%."""
+    from services.contracts.semantic_model import Metric
+
+    bundle = jaffle_customer_value_bundle()
+    orders = next(e for e in bundle.semantic_model.entities if e.name == "orders")
+    orders.metrics.append(
+        Metric(name="completed_orders", agg="count", filters=["orders.status = 'completed'"])
+    )
+    orders.metrics.append(
+        Metric(
+            name="completion_rate",
+            type="ratio",
+            numerator="completed_orders",
+            denominator="order_count",
+        )
+    )
+    bundle.semantic_model.definitions.append(
+        Definition(
+            term="completion rate",
+            body="completed over all",
+            about="orders.completion_rate",
+            sql_expr="orders.status = 'completed'",
+        )
+    )
+    report = validate_bundle(bundle, [], [])
+    assert not report.ok
+    assert _codes(report).get("definition_filters_ratio") == "error"
+    msg = next(i.message for i in report.issues if i.code == "definition_filters_ratio")
+    assert "completion_rate" in msg and "numerator" in msg
+    # The same binding WITHOUT a predicate is the sanctioned shape.
+    bundle.semantic_model.definitions[-1].sql_expr = None
+    assert "definition_filters_ratio" not in _codes(validate_bundle(bundle, [], []))
+
+
+def test_validate_also_treats_a_percent_metric_and_a_dividing_derived_as_ratios() -> None:
+    from services.contracts.semantic_model import Metric
+
+    bundle = jaffle_customer_value_bundle()
+    orders = next(e for e in bundle.semantic_model.entities if e.name == "orders")
+    orders.metrics.append(
+        Metric(name="aov_share", type="derived", expr="{average_order_value} / {revenue}")
+    )
+    bundle.semantic_model.definitions.append(
+        Definition(term="share", body="x", about="orders.aov_share", sql_expr="orders.amount > 0")
+    )
+    report = validate_bundle(bundle, [], [])
+    assert _codes(report).get("definition_filters_ratio") == "error"
+
+
+# ---- a status column with several done states (pure) ----
+
+
+def _status_profile(values: list[str], *, complete: bool = True) -> dict[str, object]:
+    from services.contracts.profile import ColumnProfile, TableProfile
+
+    return {
+        "orders": TableProfile(
+            connection="duck",
+            table="orders",
+            columns=[
+                ColumnProfile(name="order_id", type="VARCHAR"),
+                ColumnProfile(
+                    name="status",
+                    type="VARCHAR",
+                    is_low_cardinality=True,
+                    top_values=values,
+                    values_complete=complete,
+                ),
+            ],
+        )
+    }
+
+
+def test_status_column_with_several_done_values_warns_and_names_them() -> None:
+    from services.validate.report import status_done_family_warnings
+
+    sm = jaffle_customer_value_bundle().semantic_model
+    issues = status_done_family_warnings(
+        sm,
+        _status_profile(["Open", "Completed", "Invoiced", "Cancelled"]),  # type: ignore[arg-type]
+    )
+    assert [i.code for i in issues] == ["status_done_ambiguous"]
+    assert [i.severity for i in issues] == ["warning"]
+    msg = issues[0].message
+    assert "'Completed'" in msg and "'Invoiced'" in msg and "'Open'" not in msg
+    assert "about: orders.status" in msg
+
+
+def test_status_warning_is_silent_when_a_definition_owns_the_column() -> None:
+    from services.validate.report import status_done_family_warnings
+
+    sm = jaffle_customer_value_bundle().semantic_model
+    sm.definitions.append(
+        Definition(
+            term="done order",
+            body="an order that is invoiced",
+            about="orders.status",
+            sql_expr="orders.status = 'Invoiced'",
+        )
+    )
+    profiles = _status_profile(["Open", "Completed", "Invoiced"])
+    assert status_done_family_warnings(sm, profiles) == []  # type: ignore[arg-type]
+
+
+def test_status_warning_is_silent_on_one_done_value_or_a_partial_dictionary() -> None:
+    from services.validate.report import status_done_family_warnings
+
+    sm = jaffle_customer_value_bundle().semantic_model
+    one = _status_profile(["Open", "Completed", "Cancelled"])
+    assert status_done_family_warnings(sm, one) == []  # type: ignore[arg-type]
+    partial = _status_profile(["Open", "Completed", "Invoiced"], complete=False)
+    assert status_done_family_warnings(sm, partial) == []  # type: ignore[arg-type]
+    # A non-status column holding the same words is not a status column.
+    other = _status_profile(["Completed", "Invoiced"])
+    other["orders"].columns[1].name = "notes"  # type: ignore[attr-defined]
+    assert status_done_family_warnings(sm, other) == []  # type: ignore[arg-type]

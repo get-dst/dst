@@ -289,3 +289,10 @@ def test_show_prints_the_ledger_slots(_routes, capsys) -> None:
     assert "resolution_tag:" in out and "mixed" in out
     assert "revenue  [declared]" in out
     assert "SUM(amount * 2)  [inferred]" in out
+
+
+def test_summary_headline_carries_the_bytes_scanned(_routes, capsys) -> None:
+    _routes["/kpis"] = {"queries": 3, "ai_cost_usd": 0.1, "errors": 0, "wh_bytes": 16_000_000}
+    _routes["/callers"] = []
+    assert cli._observe(_args()) == 0
+    assert "16.00 MB scanned" in capsys.readouterr().out

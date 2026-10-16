@@ -137,6 +137,17 @@ _CONSUMER_NOTES_HEADER = (
 )
 
 
+def decline_reason(text: str) -> str | None:
+    """The composer's decline, if ``text`` is one: a reply whose own leading
+    marker is NO_ANSWER. One parser for every prose that can carry the marker
+    — a fresh composition and a certified answer's stored prose alike — so a
+    decline never serves as an answer on any path."""
+    text = text.strip()
+    if not text.upper().startswith(_NO_ANSWER):
+        return None
+    return text[len(_NO_ANSWER) :].strip() or "the result does not answer the question"
+
+
 @dataclass
 class AnswerResult:
     text: str
@@ -629,14 +640,9 @@ class AnswerComposer:
             "low" if (truncated or not result.rows or not generated.definition_used) else "high"
         )
         text = res.text.strip()
-        no_answer = (
-            text[len(_NO_ANSWER) :].strip() or "the result does not answer the question"
-            if text.upper().startswith(_NO_ANSWER)
-            else None
-        )
         return AnswerResult(
             text=text,
-            no_answer_reason=no_answer,
+            no_answer_reason=decline_reason(text),
             citations=citations_for(generated, prose_context),
             confidence=confidence,
             input_tokens=res.input_tokens,

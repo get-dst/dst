@@ -33,6 +33,15 @@ DriftKind = Literal[
     # differ — where the previous catalog is a whole snapshot, not a row.
     "table_added",
     "table_dropped",
+    # Semantic drift — nothing in the column list moved, the MEANING did. A
+    # changed column comment, a measured distribution past the project's
+    # tolerance (a time column's offset from the entity clock, a numeric
+    # mean), a complete value dictionary that lost or renamed a member. Emitted
+    # by the file-first baseline differ only; the stored profile is one
+    # generation deep and never carries a declared tolerance.
+    "column_recommented",
+    "column_shifted",
+    "dictionary_changed",
 ]
 
 # A table whose freshest known update is older than this is "stalled".

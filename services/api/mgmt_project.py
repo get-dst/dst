@@ -408,10 +408,12 @@ def plan_project(
                     incoming_connections=incoming_connections,
                     asset_hashes=effective,
                     incoming_profiles=pushed_profiles,
+                    warnings_out=expose_warnings,
                 )
-            exposes, expose_warnings = apply_engine.expose_plan_notes(
+            exposes, expose_notes = apply_engine.expose_plan_notes(
                 session, source.config, incoming=pushed_profiles
             )
+            expose_warnings += expose_notes
         except (ValueError, KeyError) as exc:
             parse_error = str(exc)
         errors = [parse_error] if parse_error else gate_errors

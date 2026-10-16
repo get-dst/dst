@@ -82,17 +82,28 @@ def sample_profiles(
     excluded: frozenset[str] = frozenset(),
     matchable: frozenset[str] = frozenset(),
     windows: Mapping[str, SampleWindow] | None = None,
+    time_fields: Mapping[str, str] | None = None,
 ) -> dict[str, TableProfile]:
     """The sampling pass without the store: sample each profile's gaps, return the
     merged profiles keyed by table — only the tables the connector actually sampled.
     ``matchable``: see build_sample_spec. ``windows``: table -> the recent slice
-    its column facts are read from (services/project/probe.py picks them)."""
+    its column facts are read from (services/project/probe.py picks them).
+    ``time_fields``: table -> the entity's declared ``default_time_field``, the
+    anchor every other time column's offset is measured against."""
     if not profiles or not isinstance(connector, SamplingProfiler):
         return {}
     specs = [
         spec
         for p in profiles
-        if (spec := build_sample_spec(p, excluded, matchable, window=(windows or {}).get(p.table)))
+        if (
+            spec := build_sample_spec(
+                p,
+                excluded,
+                matchable,
+                window=(windows or {}).get(p.table),
+                time_field=(time_fields or {}).get(p.table),
+            )
+        )
         is not None
     ]
     if not specs:
@@ -132,6 +143,7 @@ def build_sample_spec(
     excluded: frozenset[str] | None = None,
     matchable: frozenset[str] = frozenset(),
     window: SampleWindow | None = None,
+    time_field: str | None = None,
 ) -> TableSampleSpec | None:
     """The sampling worklist for one stored profile: gap columns + a freshness column.
 
@@ -159,6 +171,16 @@ def build_sample_spec(
         return None
     by_name = {c.name: c for c in profile.columns}
     window_type = by_name[window.column].type if window and window.column in by_name else ""
+    # The offset anchor must be a real time column of this table that is not
+    # excluded: a declared field the catalog never saw is no anchor at all.
+    anchor = (
+        time_field
+        if time_field
+        and time_field in by_name
+        and is_temporal_type(by_name[time_field].type)
+        and not _shape_only(profile.table, time_field, excluded)
+        else None
+    )
     return TableSampleSpec(
         table=profile.table,
         columns=columns,
@@ -167,6 +189,7 @@ def build_sample_spec(
         is_view=profile.is_view,
         window=window,
         window_type=window_type,
+        time_field=anchor,
     )
 
 
@@ -208,6 +231,10 @@ def merge_sampled(
             update["min"] = sampled.min
         if sampled.max is not None:
             update["max"] = sampled.max
+        if sampled.mean is not None:
+            update["mean"] = sampled.mean
+        if sampled.time_offset_seconds is not None:
+            update["time_offset_seconds"] = sampled.time_offset_seconds
         merged = column.model_copy(update=update)
         if _shape_only(base.table, merged.name, excluded):  # the last gate before persistence
             merged = merged.model_copy(update={"top_values": None, "min": None, "max": None})

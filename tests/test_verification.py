@@ -473,16 +473,19 @@ def test_inline_judge_folds_into_the_report() -> None:
     assert res.response.verification is not None
     judge = res.response.verification.check("judge")
     assert judge is not None and judge.status == "fail" and "wrong cohort" in (judge.reason or "")
-    assert res.response.confidence == "unverified"
+    assert "advisory" in (judge.reason or "")
+    # Advisory: the note is on the report, the grade stays with the
+    # deterministic checks (a clean grounded answer is verified).
+    assert res.response.confidence == "verified"
     assert "judge" in res.trace.latency_ms  # the cost of the tier is measured
 
 
-def test_fuzzy_certified_serve_is_judged_and_demotable() -> None:
+def test_fuzzy_certified_serve_is_judged_and_noted() -> None:
     """Fuzzy matching serves a certified answer for a question nobody approved —
-    the highest trust tier had the thinnest verification, so wrong certified
-    serves were the least likely to be demoted. A serve
-    whose asked question is not the certified question gets the judge, and a
-    reject demotes it."""
+    the highest trust tier had the thinnest verification. A serve whose asked
+    question is not the certified question gets the judge, and its reject is
+    recorded as the judge check; the grade is the deterministic checks' own
+    (the judge is advisory)."""
     judge_llm = ScriptedLLM(['{"verdict": "reject", "reasoning": "SQL window != asked window"}'])
     res = run_query(
         question="How many leads did we generate last quarter?",
@@ -501,7 +504,38 @@ def test_fuzzy_certified_serve_is_judged_and_demotable() -> None:
     assert res.response.verification is not None
     judge = res.response.verification.check("judge")
     assert judge is not None and judge.status == "fail"
-    assert res.response.confidence == "unverified"
+    assert "SQL window" in (judge.reason or "")
+    assert res.response.confidence == "verified"
+
+
+def test_judge_reads_the_governed_context_the_composer_had() -> None:
+    """The judge graded a lens's own declared population as 'unsupported'
+    because it never saw it. It now gets the same governed text the composer
+    had — definitions, data notes, population scope — in its prompt."""
+    seen: list[str] = []
+
+    class _Capture:
+        def complete(self, *, system: object, messages: object, **_kw: object) -> object:
+            seen.append(messages[0].content)  # type: ignore[index]
+            return type("R", (), {"text": '{"verdict": "approve", "reasoning": "ok"}'})()
+
+    sm = jaffle_customer_value()
+    sm.entities[0].population = "paying customers only"
+    gen_json = '{"sql": "SELECT count(*) AS n FROM customers", "definition_used": null}'
+    llm = ScriptedLLM([gen_json, "There are 100 paying customers."])
+    run_query(
+        question="how many customers?",
+        lens_name="customer_value",
+        org_id="o",
+        caller="a",
+        semantic_model=sm,
+        connector=_conn(),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+        inline_judge_llm=_Capture(),  # type: ignore[arg-type]
+    )
+    assert seen and "Governed context" in seen[0]
+    assert "paying customers only" in seen[0]
 
 
 def test_verbatim_certified_serve_still_skips_the_judge() -> None:
@@ -1053,7 +1087,9 @@ def test_adversary_notes_surface_without_demoting() -> None:
     assert "time window" in (adv.reason or "")
 
 
-def test_adversary_parse_failure_is_a_note_not_a_veto() -> None:
+def test_adversary_parse_failure_is_a_skip_not_a_pass() -> None:
+    """A reviewer reply that cannot be parsed carries no signal: it used to fold
+    as a `note` on a passing check, which read as "reviewed, nothing found"."""
     challenges = adversary.challenge(
         ScriptedLLM(["not json at all"]),
         question="q",
@@ -1061,8 +1097,22 @@ def test_adversary_parse_failure_is_a_note_not_a_veto() -> None:
         answer="a",
         semantic_model=jaffle_customer_value(),
     )
-    assert [c.severity for c in challenges] == ["note"]
-    assert "could not be parsed" in challenges[0].reason
+    assert challenges is None
+    report = build_report(
+        question="how many repeat customers?",
+        sql="SELECT count(*) AS n FROM customers WHERE number_of_orders > 1",
+        answer_text="There are 19 repeat customers.",
+        result=QueryResult(columns=["n"], rows=[[19]]),
+        semantic_model=jaffle_customer_value(),
+        definition_used="repeat_customer",
+        truncated=False,
+        certification="none",
+    )
+    folded = fold_challenges(report, challenges)
+    adv = folded.check("adversary")
+    assert adv is not None and adv.status == "skip"
+    assert "could not be parsed" in (adv.reason or "")
+    assert folded.grade == report.grade
 
 
 # ── judge rubric + reference ─────────────────────────────────────────────────
@@ -1403,3 +1453,253 @@ def test_fold_low_confidence_names_the_decision_and_caps_at_partial() -> None:
     assert folded.grade == "partial"
     kept = fold_low_confidence(VerificationReport(grade="unverified", checks=[]), [(rec, 0.9)])
     assert kept.grade == "unverified"
+
+
+# ── grade rails: ratio pinned to 1, exposed reads, partial names its cause ───
+
+
+def _ratio_report(rows: list[list[object]], columns: list[str] | None = None) -> VerificationReport:
+    cols = columns or ["carrier", "on_time_rate"]
+    sql = (
+        "SELECT carrier, SUM(CASE WHEN delivered_at <= due_at THEN 1 ELSE 0 END) * 1.0 "
+        "/ COUNT(*) AS on_time_rate FROM shipments WHERE delivered_at <= due_at GROUP BY carrier"
+    )
+    return build_report(
+        question="on-time rate by carrier",
+        sql=sql,
+        answer_text="",
+        result=QueryResult(columns=cols, rows=rows),
+        semantic_model=jaffle_customer_value(),
+        definition_used=None,
+        truncated=False,
+        certification="none",
+        composed=False,
+    )
+
+
+def test_a_ratio_that_is_one_on_every_row_fails() -> None:
+    report = _ratio_report([["dhl", 1.0], ["ups", 1.0], ["fedex", 1.0]])
+    check = report.check("all_ones_ratio")
+    assert check is not None and check.status == "fail"
+    assert "on_time_rate" in (check.reason or "") and "3 rows" in (check.reason or "")
+    assert report.grade != "verified"
+    assert report.partial_reason is not None and report.partial_reason.startswith("all_ones_ratio")
+
+
+def test_a_ratio_rendered_as_100_on_every_row_fails_too() -> None:
+    report = _ratio_report([["dhl", 100], ["ups", 100.0]], ["carrier", "on_time_pct"])
+    check = report.check("all_ones_ratio")
+    assert check is not None and check.status == "fail"
+
+
+def test_a_ratio_with_one_row_skips_with_a_reason_never_a_pass() -> None:
+    report = _ratio_report([["dhl", 1.0]])
+    check = report.check("all_ones_ratio")
+    assert check is not None and check.status == "skip"
+    assert "single-row" in (check.reason or "")
+
+
+def test_a_ratio_that_varies_passes() -> None:
+    report = _ratio_report([["dhl", 1.0], ["ups", 0.93], ["fedex", 1.0]])
+    check = report.check("all_ones_ratio")
+    assert check is not None and check.status == "pass"
+
+
+def test_a_count_column_of_ones_is_not_a_ratio() -> None:
+    # No rate-named column and no division in the SQL: nothing to judge.
+    report = build_report(
+        question="orders per customer",
+        sql="SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id",
+        answer_text="",
+        result=QueryResult(columns=["customer_id", "n"], rows=[[1, 1], [2, 1], [3, 1]]),
+        semantic_model=jaffle_customer_value(),
+        definition_used=None,
+        truncated=False,
+        certification="none",
+        composed=False,
+    )
+    check = report.check("all_ones_ratio")
+    assert check is not None and check.status == "skip"
+
+
+def _exposed_model() -> SemanticModel:
+    from services.contracts.semantic_model import Entity, EntitySource, Field
+
+    return SemanticModel(
+        lens="raw",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="customers",
+                source=EntitySource(connection="duck", table="customers"),
+                fields=[Field(name="customer_id", type="string")],
+                exposed=True,
+            )
+        ],
+    )
+
+
+def test_an_exposed_read_grades_at_most_partial_and_names_the_read() -> None:
+    """The EXPOSED line disclosed the read while the badge still said verified."""
+    res = run_query(
+        question="how many customers?",
+        lens_name="raw",
+        org_id="o",
+        caller="a",
+        semantic_model=_exposed_model(),
+        connector=FakeConnector(result=QueryResult(columns=["n"], rows=[[100]])),
+        generator=FixedSQLGenerator("SELECT count(*) AS n FROM customers"),
+        composer=AnswerComposer(ScriptedLLM(["There are 100 customers."])),
+    )
+    assert res.trace.status == "ok"
+    assert res.response.verification is not None
+    assert res.response.confidence in ("partial", "unverified")
+    read = res.response.verification.check("governed_read")
+    assert read is not None and read.status == "fail"
+    assert "ungoverned read" in (read.reason or "") and "customers" in (read.reason or "")
+    assert any(n.startswith("EXPOSED") for n in res.response.degraded or [])
+
+
+def test_an_exposed_read_caps_a_certified_serve_too() -> None:
+    res = run_query(
+        question="how many customers?",
+        lens_name="raw",
+        org_id="o",
+        caller="a",
+        semantic_model=_exposed_model(),
+        connector=FakeConnector(result=QueryResult(columns=["n"], rows=[[100]])),
+        generator=FixedSQLGenerator("SELECT count(*) AS n FROM customers"),
+        composer=AnswerComposer(ScriptedLLM(["There are 100 customers."])),
+        certification="certified",
+    )
+    assert res.response.confidence == "partial"
+    assert res.response.verification is not None
+    assert res.response.verification.partial_reason is not None
+    assert "ungoverned read" in res.response.verification.partial_reason
+
+
+def test_partial_always_names_its_reason() -> None:
+    from services.runtime.verification import _with_grade
+
+    # A fail names the check and its reason.
+    checks = [
+        _check("numeric_grounding", "pass"),
+        _check("definition_applied", "pass"),
+        _check("intent_alignment", "pass"),
+        _check("not_truncated", "fail", "the response carries fewer rows"),
+    ]
+    report = _with_grade(checks, "none", "pass")
+    assert report.grade == "partial"
+    assert report.partial_reason == "not_truncated: the response carries fewer rows"
+    # Every skip with no fail still says WHY the grade stopped short.
+    checks = [
+        _check("numeric_grounding", "skip", "no numerals"),
+        _check("definition_applied", "skip", "the lens has no enforceable definitions"),
+        _check("intent_alignment", "skip", "intent not determinable"),
+        _check("has_rows", "pass"),
+    ]
+    report = _with_grade(checks, "none", "skip")
+    assert report.grade == "partial"
+    assert report.partial_reason is not None and "no numerals" in report.partial_reason
+    # The abstention case names the abstaining checks.
+    checks = [
+        _check("numeric_grounding", "pass"),
+        _check("definition_applied", "skip", "no governed term in the question"),
+        _check("intent_alignment", "skip", "intent not determinable"),
+        _check("has_rows", "pass"),
+    ]
+    report = _with_grade(checks, "none", "pass")
+    assert report.grade == "partial"
+    assert report.partial_reason is not None
+    assert "no semantic check confirmed" in report.partial_reason
+    assert "intent not determinable" in report.partial_reason
+    # And a verified grade carries no excuse.
+    checks = [
+        _check("numeric_grounding", "pass"),
+        _check("definition_applied", "pass"),
+        _check("intent_alignment", "pass"),
+    ]
+    assert _with_grade(checks, "none", "pass").partial_reason is None
+
+
+def test_the_judge_never_moves_the_grade_and_is_never_a_partial_reason() -> None:
+    from services.runtime.verification import fold_judge
+
+    base = VerificationReport(
+        grade="verified",
+        checks=[_check("numeric_grounding", "pass"), _check("intent_alignment", "pass")],
+    )
+    for verdict in ("approve", "changes", "reject"):
+        folded = fold_judge(base, verdict, "an opinion")
+        assert folded.grade == "verified"
+        judge = folded.check("judge")
+        assert judge is not None and "advisory" in (judge.reason or "")
+        assert folded.partial_reason is None
+
+
+def test_a_certified_no_answer_refuses_instead_of_grading_verified() -> None:
+    """A certified answer whose stored prose is the composer's decline marker
+    served as a verified answer. A decline is a refusal on every path."""
+    res = run_query(
+        question="which products should a new customer buy first?",
+        lens_name="customer_value",
+        org_id="o",
+        caller="a",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=FixedSQLGenerator("SELECT count(*) AS n FROM customers"),
+        composer=AnswerComposer(ScriptedLLM(["never called"])),
+        certification="certified",
+        verified_prose="NO_ANSWER: the rows count customers and carry no order items",
+    )
+    assert res.trace.status == "refused"
+    assert res.response.status == "refused"
+    assert res.response.confidence != "verified"
+    assert "carry no order items" in res.response.answer
+
+
+# ── count claims ground against what the result can count ────────────────────
+
+
+def test_a_count_claim_is_graded_against_the_column_it_counts() -> None:
+    """ "7 contracts" over per-status rows whose `contracts` sum to 6 served
+    grounded, because a 7 sat elsewhere in the result."""
+    result = QueryResult(
+        columns=["status", "contracts", "days_open"], rows=[["a", 2, 7], ["b", 3, 7], ["c", 1, 7]]
+    )
+    status, reason = numeric_check("There are 7 contracts across 3 statuses.", result)
+    assert status == "fail"
+    assert (
+        reason == "the answer states 7 contracts, but the result holds 6 (the sum of `contracts`)"
+    )
+    assert numeric_check("There are 6 contracts across 3 statuses.", result) == ("pass", None)
+    assert numeric_check("Status b has 3 contracts.", result) == ("pass", None)
+
+
+def test_a_count_of_listed_things_grounds_on_distinct_values_and_rows() -> None:
+    result = QueryResult(
+        columns=["contract_id", "amount"],
+        rows=[["c1", 7], ["c2", 7], ["c3", 7], ["c4", 7], ["c5", 7], ["c6", 7]],
+    )
+    assert numeric_check("6 contracts were found.", result) == ("pass", None)
+    status, reason = numeric_check("7 contracts were found.", result)
+    assert status == "fail" and reason is not None and "6 distinct `contract_id`" in reason
+
+
+def test_distinct_counts_ground_a_group_count() -> None:
+    result = QueryResult(columns=["region", "revenue"], rows=[["n", 10], ["s", 20], ["n", 5]])
+    assert numeric_check("Revenue is 35 across 2 regions.", result) == ("pass", None)
+
+
+def test_count_claims_keep_hyphen_and_timestamp_tokens_out() -> None:
+    result = QueryResult(columns=["contracts"], rows=[[4]])
+    # The -08/-15 of a date and the 5 of a range are not claims; the 4 is.
+    assert numeric_check(
+        "4 contracts on 2026-08-15, rated 4-5.", result, sql_text="SELECT 1 WHERE d >= '2026-08-15'"
+    ) == ("pass", None)
+    # A question echo stays an echo.
+    assert numeric_check(
+        "No customers with 9 contracts: 0 contracts.",
+        QueryResult(columns=["contracts"], rows=[]),
+        question_text="customers with 9 contracts",
+    ) == ("pass", None)

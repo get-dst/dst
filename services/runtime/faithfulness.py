@@ -33,7 +33,7 @@ from __future__ import annotations
 import decimal
 import math
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import sqlglot
 from sqlglot import exp
@@ -357,6 +357,69 @@ def _column_totals(result: QueryResult) -> list[float]:
     return totals
 
 
+# A count claim: an integer followed by the noun it counts ("7 contracts").
+# Only the word directly after the number, letters only — "7 active contracts"
+# is not bound (conservative: a count the result cannot be asked about is
+# graded as any other figure).
+_COUNT_NOUN = re.compile(r"^\s+([A-Za-z][A-Za-z_-]{1,40})\b")
+_COUNT_PREFIXES = ("n", "num", "number", "count", "cnt", "total")
+
+
+def _singular(word: str) -> str:
+    w = word.lower()
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("ses") or w.endswith("xes") or w.endswith("ches") or w.endswith("shes"):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss") and len(w) > 2:
+        return w[:-1]
+    return w
+
+
+def _count_column(noun: str, columns: Sequence[str]) -> int | None:
+    """The result column the counted noun names, by its tokens: `contracts`,
+    `contract_id`, `n_contracts`, `contract_count` all bind "contracts"."""
+    target = _singular(noun)
+    for i, col in enumerate(columns):
+        tokens = [_singular(t) for t in re.split(r"[^A-Za-z0-9]+", col) if t]
+        if target in tokens:
+            return i
+    return None
+
+
+def _count_grounds(result: QueryResult, col: int) -> tuple[list[float], str]:
+    """What a count of the things in column ``col`` can honestly be, and a
+    rendering of it for the failure reason. An integer column is per-group
+    counts: its cells and its sum. Any other column lists the things
+    themselves: its distinct non-null values, and the row count."""
+    cells = [row[col] for row in result.rows[:_TOTAL_ROW_CAP] if col < len(row)]
+    present = [c for c in cells if c is not None]
+    numeric = [_numeric_cell(c) for c in present]
+    if present and all(v is not None and v == int(v) for v in numeric):
+        ints = [v for v in numeric if v is not None]
+        total = sum(ints)
+        return [*ints, total], f"{int(total):,} (the sum of `{result.columns[col]}`)"
+    distinct = len({str(c) for c in present})
+    return [float(distinct), float(len(result.rows))], (
+        f"{distinct:,} distinct `{result.columns[col]}` over {len(result.rows):,} rows"
+    )
+
+
+def _distinct_counts(result: QueryResult) -> list[float]:
+    """The number of distinct non-null values in each column — a count the
+    prose may honestly state about the result ("across 4 regions")."""
+    out: list[float] = []
+    for i in range(len(result.columns)):
+        seen = {
+            str(row[i])
+            for row in result.rows[:_TOTAL_ROW_CAP]
+            if i < len(row) and row[i] is not None
+        }
+        if seen:
+            out.append(float(len(seen)))
+    return out
+
+
 def _significant(value: float, digits: int = 4) -> str:
     """*digits* significant figures in fixed notation, trailing zeros dropped:
     13.666441 → 13.67, 0.47085 → 0.4709, 0.000012 → 0.000012 — never the
@@ -577,6 +640,9 @@ def numeric_check(
         # stays ungroundable, so the guard keeps its teeth.
         *_column_totals(result),
         float(len(result.rows)),
+        # Group counts: the distinct values per column are a count the prose
+        # may state about the result ("over 4 carriers").
+        *_distinct_counts(result),
         *_numbers(definition_text),
         *_numbers(question_text),
         *_numbers(notes_text),
@@ -596,6 +662,28 @@ def numeric_check(
         seen_claims = True
         if kind == "derived":
             continue  # a multiple or comparison — not a claim about a result value
+        # A count of a thing the result has a column for ("7 contracts" over a
+        # `contracts` column) is graded against what that column can count —
+        # its cells and sum, or its distinct values and the row count — never
+        # against an unrelated cell that happens to hold the same number. The
+        # shape this closes: "7 contracts" served over rows whose counts sum
+        # to 6, grounded by a 7 elsewhere in the result.
+        noun = _COUNT_NOUN.match(answer_text[m.end() : m.end() + 48])
+        if (
+            kind == "plain"
+            and value == int(value)
+            and value >= 0
+            and noun is not None
+            and (col := _count_column(noun.group(1), result.columns)) is not None
+            and not _numbers(question_text).count(value)
+        ):
+            grounds, holds = _count_grounds(result, col)
+            if any(_matches(value, g) for g in grounds):
+                grounded_any = True
+                continue
+            return "fail", (
+                f"the answer states {m.group(1)} {noun.group(1)}, but the result holds {holds}"
+            )
         # Accounting-style negatives: "(1,234)" states -1234.
         neg_paren = (
             m.start() > 0

@@ -29,8 +29,9 @@ nothing serves the zero too, but graded below `verified` — nobody checked it.
 Bias, by filter_guard's explicit contract: UNDER-detection is acceptable, FALSE
 POSITIVES ARE NOT. Hence string literals only (a numeric miss is rarely a
 vocabulary problem), complete dictionaries only (a partial one proves nothing),
-exact comparison only (the repair model handles case), and a column name whose
-domains conflict across entities contributes nothing.
+exact comparison only (the repair model handles case), and a dictionary is
+the one measured on the table the SQL reads — a column name declared on more
+than one entity contributes nothing unless its table resolves.
 
 A probed value lands in LLM feedback, which is a prompt, which leaves the
 building — so the probe reads only columns the lens itself exposes, and only
@@ -113,30 +114,50 @@ def entity_domains(
 
 
 def value_domains(model: SemanticModel, profiles: list[TableProfile]) -> dict[str, list[str]]:
-    """column name (lowercased) -> its COMPLETE value dictionary.
+    """column name (lowercased) -> its COMPLETE value dictionary, for SQL whose
+    table the caller cannot resolve.
 
     Only columns that are FIELDS on a modeled entity (generated SQL can only
-    reference those) and only ``values_complete`` dictionaries. A name mapped to
-    two DIFFERENT dictionaries across entities is dropped: qualifying which
-    table's domain applies would need the SQL, and a wrong domain in feedback is
-    worse than none.
+    reference those) and only ``values_complete`` dictionaries. A bare name is
+    kept only when ONE entity declares the field at all: a `status` complete on
+    one table and merely sampled on another would otherwise refuse the second
+    table's literals against the first table's dictionary — a false
+    clarification, which this guard forbids. ``table_domains`` keeps every
+    dictionary under its own table for a check that can resolve the table.
     """
     by_table = {p.table: {c.name: c for c in p.columns} for p in profiles}
     out: dict[str, list[str]] = {}
-    conflicted: set[str] = set()
+    declared_on: dict[str, int] = {}
     for entity in model.entities:
         columns = by_table.get(entity.source.table, {})
         for field in entity.fields:
             name = field.name.lower()
+            declared_on[name] = declared_on.get(name, 0) + 1
             cp = columns.get(field.name)
             if cp is None or not cp.top_values or not cp.values_complete:
                 continue
-            if name in out and out[name] != cp.top_values:
-                conflicted.add(name)
+            out.setdefault(name, list(cp.top_values))
+    return {name: values for name, values in out.items() if declared_on[name] == 1}
+
+
+def table_domains(
+    model: SemanticModel, profiles: list[TableProfile]
+) -> dict[str, dict[str, list[str]]]:
+    """source table (lowercased) -> column name (lowercased) -> its COMPLETE value
+    dictionary: the same dictionaries as ``value_domains``, keyed by the table
+    they were measured on, so a literal is checked against the dictionary of
+    the table the SQL reads and never against a namesake's."""
+    by_table = {p.table: {c.name: c for c in p.columns} for p in profiles}
+    out: dict[str, dict[str, list[str]]] = {}
+    for entity in model.entities:
+        columns = by_table.get(entity.source.table, {})
+        for field in entity.fields:
+            cp = columns.get(field.name)
+            if cp is None or not cp.top_values or not cp.values_complete:
                 continue
-            out[name] = list(cp.top_values)
-    for name in conflicted:
-        out.pop(name, None)
+            out.setdefault(entity.source.table.lower(), {})[field.name.lower()] = list(
+                cp.top_values
+            )
     return out
 
 
@@ -171,16 +192,66 @@ def _string_filters(sql: str, dialect: str) -> list[tuple[exp.Column, list[str]]
     return out
 
 
-def unknown_literals(sql: str, dialect: str, domains: dict[str, list[str]]) -> list[UnknownLiteral]:
-    """Every ``=``/``IN`` string literal that misses its column's complete domain."""
+def _table_map(stmt: exp.Expr) -> dict[str, str]:
+    """alias or bare table name (lowercased) -> the table as the SQL spells it."""
+    tables: dict[str, str] = {}
+    for tbl in stmt.find_all(exp.Table):
+        full = ".".join(p for p in (tbl.catalog, tbl.db, tbl.name) if p)
+        tables[tbl.name.lower()] = full
+        if tbl.alias:
+            tables[tbl.alias.lower()] = full
+    return tables
+
+
+def _table_domain(
+    table: str, column: str, table_domains: dict[str, dict[str, list[str]]]
+) -> list[str] | None:
+    """The dictionary of *column* on *table*, matching the modeled source
+    table by its spelling or by its trailing qualifiers (SQL may omit a
+    leading catalog or schema the source declares, never add one)."""
+    table = table.lower()
+    for source, columns in table_domains.items():
+        if source == table or source.endswith("." + table):
+            return columns.get(column)
+    return None
+
+
+def unknown_literals(
+    sql: str,
+    dialect: str,
+    domains: dict[str, list[str]],
+    table_domains: dict[str, dict[str, list[str]]] | None = None,
+) -> list[UnknownLiteral]:
+    """Every ``=``/``IN`` string literal that misses its column's complete domain.
+
+    With ``table_domains`` the column's dictionary is the one measured on the
+    table the SQL reads for that column: a qualified column through its alias,
+    a bare column through the statement's sole table. A bare column in a
+    multi-table statement cannot be resolved and contributes nothing — a
+    namesake's dictionary is never consulted. ``domains`` (bare names, each
+    declared by one entity only) serves SQL with no table to resolve.
+    """
     out: list[UnknownLiteral] = []
     seen: set[tuple[str, str]] = set()
+    tables: dict[str, str] | None = None
+    sole_table: str | None = None
+    if table_domains:
+        try:
+            tables = _table_map(sqlglot.parse_one(sql, read=dialect))
+        except Exception:  # noqa: BLE001 — unparseable SQL is not this guard's business
+            return []
+        sole_table = next(iter(tables.values())) if len(set(tables.values())) == 1 else None
     for column, literals in _string_filters(sql, dialect):
-        domain = domains.get(column.name.lower())
+        name = column.name.lower()
+        if tables is not None and table_domains:
+            table = tables.get(column.table.lower()) if column.table else sole_table
+            domain = _table_domain(table, name, table_domains) if table else None
+        else:
+            domain = domains.get(name)
         if domain is None:
             continue
         for literal in literals:
-            key = (column.name.lower(), literal)
+            key = (name, literal)
             if literal not in domain and key not in seen:
                 seen.add(key)
                 out.append(
@@ -303,12 +374,7 @@ def empty_result_probe(sql: str, model: SemanticModel, connector: Connector) -> 
         stmt = sqlglot.parse_one(sql, read=dialect)
     except Exception:  # noqa: BLE001 — unparseable SQL is not this guard's business
         return ProbeOutcome()
-    tables: dict[str, str] = {}
-    for tbl in stmt.find_all(exp.Table):
-        full = ".".join(p for p in (tbl.catalog, tbl.db, tbl.name) if p)
-        tables[tbl.name.lower()] = full
-        if tbl.alias:
-            tables[tbl.alias.lower()] = full
+    tables = _table_map(stmt)
     sole_table = next(iter(tables.values())) if len(set(tables.values())) == 1 else None
 
     probed = 0

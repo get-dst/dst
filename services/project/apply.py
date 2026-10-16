@@ -78,7 +78,12 @@ from services.runtime.identifiers import reserved_in
 from services.security.crypto import CryptoNotConfigured
 from services.semantic import store as semantic_store
 from services.semantic.files import parse_semantic_files
-from services.validate.report import ValidationReport, collapse_warnings, validate_bundle
+from services.validate.report import (
+    ValidationReport,
+    collapse_warnings,
+    status_done_family_warnings,
+    validate_bundle,
+)
 
 if TYPE_CHECKING:
     from services.lenses.connection_eval import EvalResult
@@ -519,6 +524,35 @@ def _missing_warehouse_tables(session: Session, bundle: store.LensBundle) -> lis
     return out
 
 
+def _dictionary_warnings(
+    session: Session,
+    sm: SemanticModel,
+    *,
+    incoming: Mapping[str, Sequence[TableProfile]] | None = None,
+) -> list[str]:
+    """Value-dictionary lints over each entity's source table, read from the
+    connection's STORED profiles with the push's own artifacts overlaid (the
+    layering ``_expose_profiles`` uses, for the same reason: plan must see
+    what apply will land). No profile for a table → nothing to lint."""
+    from services.lenses import profile_store
+
+    profiles: dict[str, TableProfile] = {}
+    for entity in sm.entities:
+        conn = entity.source.connection
+        if any(k.startswith(f"{conn}:") for k in profiles):
+            continue
+        for stored in profile_store.list_profiles(session, conn):
+            profiles[f"{conn}:{stored.profile.table}"] = stored.profile
+        for pushed in (incoming or {}).get(conn, []):
+            profiles[f"{conn}:{pushed.table}"] = pushed
+    by_table = {
+        key.partition(":")[2]: profile
+        for key, profile in profiles.items()
+        if key.partition(":")[0] in {e.source.connection for e in sm.entities}
+    }
+    return [i.message for i in status_done_family_warnings(sm, by_table)]
+
+
 def _embedder() -> Embedder | None:
     from services.llm import registry
 
@@ -741,13 +775,15 @@ def override_applies(
 ) -> bool:
     """May a reasoned override carry a blocked publish past the gate?
 
-    Never past a certified divergence (a served-answer contradiction is fixed or
-    re-certified in the same push). A per-case override (``--allow-case``)
-    applies only when it names EVERY failing case — an override for yesterday's
-    red case cannot silently cover today's new one, which is how the blanket
-    flag became standing policy. The blanket form (no cases named) still works
-    for now and is reported as blanket, so its use is visible in review."""
-    if not (decision.blocked and gate_override) or decision.certified_failures:
+    A per-case override (``--allow-case`` / ``--allow-failing-cases <id>``)
+    applies only when it names EVERY failing case, certified divergences
+    included (their ids are ``certified:<answer id>``) — an override for
+    yesterday's red case cannot silently cover today's new one, which is how
+    the blanket flag became standing policy. The blanket form (no cases named)
+    still works and is reported as blanket, so its use is visible in review.
+    Whatever the override covers is recorded on the apply row and in the
+    version history."""
+    if not (decision.blocked and gate_override):
         return False
     if allow_cases is None:
         return True
@@ -788,6 +824,7 @@ def _publish_bundle(
     # definitions, each of which would otherwise warn on its own identical line.
     warnings = collapse_warnings([i for i in report.issues if i.severity == "warning"])
     warnings += _missing_warehouse_tables(session, bundle)
+    warnings += _dictionary_warnings(session, bundle.semantic_model)
     decision = eval_service.publish_gate(session=session, org_id=org_id, lens=name, bundle=bundle)
     gate = eval_service.gate_label(decision)
     detail = eval_service.gate_decision_dict(decision)
@@ -827,6 +864,12 @@ def _publish_bundle(
                     f"{by}: {gate_override}"
                 )
             )
+            # A certified divergence the override covered is said in its own
+            # words: the served answer now contradicts generation, by decision.
+            warnings += [
+                _degraded(f"{message} — published anyway by {by}")
+                for message in decision.certified_failures
+            ]
             summary = f"{summary} [gate override: {gate_override}{cases}]"
         elif decision.blocked:
             # Certified divergences are errors in their own right (reported
@@ -1052,8 +1095,13 @@ def check_lens(
     incoming_connections: dict[str, ConnectionDecl],
     asset_hashes: dict[str, str],
     incoming_profiles: Mapping[str, Sequence[TableProfile]] | None = None,
+    warnings_out: list[str] | None = None,
 ) -> list[str]:
     """Every gate ``apply_lens`` would REJECT this lens on that a dry run can run.
+
+    ``warnings_out``, when given, collects the deterministic WARNINGS apply
+    would print that need the compiled model (the value-dictionary lints) —
+    plan shows them on the lens row, so an author sees them before applying.
 
     Plan's whole job is to predict apply, and without these it runs none of them:
     a cross-entity metric and an unservable ``model:`` each plan clean and then
@@ -1103,10 +1151,13 @@ def check_lens(
         if str(answer.get("question", "")).strip()
         for e in _certified_entry_errors(answer, model)
     ]
+    errors += _cross_match_errors(session, name, source, model)
     errors += _starvation_errors(session, name, source)
     gate_errors, _report = _deterministic_gates(
         session, name, store.LensBundle(config=config, semantic_model=model)
     )
+    if warnings_out is not None:
+        warnings_out.extend(_dictionary_warnings(session, model, incoming=incoming_profiles))
     return errors + gate_errors
 
 
@@ -1829,6 +1880,95 @@ def _certified_entry_errors(answer: dict[str, Any], model: SemanticModel) -> lis
     return []
 
 
+def _sql_text(sql: object) -> str:
+    return " ".join(str(sql or "").split()).lower()
+
+
+def _cross_match_errors(
+    session: Session, name: str, source: LensSource, model: SemanticModel
+) -> list[str]:
+    """Two certified answers that would answer each other's question.
+
+    Serving matches by meaning, so a corpus holding two questions inside the
+    paraphrase band with DIFFERENT SQL is a corpus where one answer serves the
+    other's question as ``certified``. That is a static inconsistency, so it
+    dies here, at plan and apply alike: every incoming question's anchor is
+    embedded once and compared against the other incoming anchors and against
+    the stored corpus (rows the file does not carry). A pair above the
+    equivalence band whose SQL differs is an error naming both questions; the
+    author rewords one or merges them. Same SQL is one answer under two
+    phrasings, which is fine. Without an embedder nothing can be measured and
+    nothing is reported (the unembedded-corpus warning already says matching
+    is off)."""
+    entries = [
+        a
+        for a in source.certified_answers or []
+        if str(a.get("question", "")).strip()
+        and str(a.get("status") or "active") != "retired"
+        and not _certified_entry_errors(a, model)
+    ]
+    if not entries:
+        return []
+    try:
+        embedder = _embedder()
+    except Exception:  # noqa: BLE001 — a broken embedder is reported where rows store
+        return []
+    if embedder is None:
+        return []
+    from services.runtime.assembly import certified_bands
+
+    anchors = [_anchor_question(a) for a in entries]
+    try:
+        vectors = [list(v) for v in embedder.embed(anchors)]
+    except Exception:  # noqa: BLE001 — same: the store path names a failing embedder
+        return []
+    equiv = certified_bands().equiv
+    incoming = {str(a.get("question", "")).strip().lower() for a in entries}
+    seen: set[frozenset[str]] = set()
+    errors: list[str] = []
+
+    def _report(q1: str, sql1: object, q2: str, sql2: object, score: float) -> None:
+        pair = frozenset({q1.lower(), q2.lower()})
+        if pair in seen or len(pair) < 2 or _sql_text(sql1) == _sql_text(sql2):
+            return
+        seen.add(pair)
+        errors.append(
+            f"certified answers '{q1}' and '{q2}' would answer each other's question "
+            f"(similarity {score:.2f}) with different SQL — one would serve the other's "
+            "question as certified; reword one so the questions differ, or merge them"
+        )
+
+    def _cosine(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b, strict=True))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(y * y for y in b) ** 0.5
+        return dot / (na * nb) if na and nb else 0.0
+
+    for i, a in enumerate(entries):
+        for j in range(i + 1, len(entries)):
+            score = _cosine(vectors[i], vectors[j])
+            if score >= equiv:
+                b = entries[j]
+                _report(
+                    str(a["question"]).strip(),
+                    a.get("sql"),
+                    str(b["question"]).strip(),
+                    b.get("sql"),
+                    score,
+                )
+        try:
+            hits = certify_store.search(session, name, vectors[i], k=5)
+        except Exception:  # noqa: BLE001 — a corpus embedded by another model cannot be compared
+            break
+        for h in hits:
+            if h.answer.question.strip().lower() in incoming or h.score < equiv:
+                continue
+            _report(
+                str(a["question"]).strip(), a.get("sql"), h.answer.question, h.answer.sql, h.score
+            )
+    return errors
+
+
 def _anchor_question(answer: dict[str, Any]) -> str:
     """A template's match anchor is its first sample-bound
     question — an ordinary concrete question, embedded like every other."""
@@ -1966,6 +2106,7 @@ def _apply_certified_answers(
     fresh: list[dict[str, Any]] = []
     changed: list[tuple[certify_store.CertifiedAnswer, dict[str, Any]]] = []
     unchanged = 0
+    result.errors.extend(_cross_match_errors(session, name, source, model))
     for answer in source.certified_answers:
         question = str(answer.get("question", "")).strip()
         if not question:

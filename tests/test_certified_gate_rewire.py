@@ -1009,23 +1009,36 @@ def test_the_override_without_a_reason_is_refused(org) -> None:
 
 
 @needs_db
-def test_the_override_never_covers_a_certified_divergence(org, monkeypatch) -> None:
-    """A certified divergence is a served-answer contradiction — the override
-    must not launder it; re-certify in the same push instead."""
+def test_the_override_covers_a_certified_divergence_and_says_so(org, monkeypatch) -> None:
+    """A certified divergence fails like any case (id ``certified:<answer id>``):
+    the blanket override publishes past it and the apply row records the
+    divergence it covered; a named override that does not name it still blocks."""
     oid, headers = org
     _gate_llm(monkeypatch, [_SQL, "There are that many."])
     out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
     assert not any(e.get("errors") for e in out), out
 
-    # Break the definition the certified answer binds — divergence blocks…
+    # A named override for some other case does not cover the divergence.
+    _gate_llm(monkeypatch, [_BROKEN_SQL, "There are fewer."])
+    r = client.post(
+        "/mgmt/project/apply",
+        headers=headers,
+        params={"allow_case": ["c-other"], "override_reason": "unrelated"},
+        json={"files": _files([{"question": _Q, "sql": _SQL}], broken_definition=True)},
+    )
+    row = next(e for e in r.json() if e.get("lens") == "customer_value")
+    assert row["action"] == "rejected" and any("diverged" in e for e in row["errors"])
+
+    # The blanket override publishes, and the covered divergence is on the row.
     _gate_llm(monkeypatch, [_BROKEN_SQL, "There are fewer."])
     r = _apply_override(
         headers,
         _files([{"question": _Q, "sql": _SQL}], broken_definition=True),
-        "trying to force it through",
+        "intended behaviour change: the definition moved",
     )
-    out = r.json()  # type: ignore[union-attr]
-    # …override or not: the apply aborts on the divergence.
-    assert any(e.get("action") == "aborted" for e in out) or any(
-        e.get("errors") for e in out if e.get("lens") == "customer_value"
-    ), out
+    row = next(e for e in r.json() if e.get("lens") == "customer_value")  # type: ignore[union-attr]
+    assert row["action"] != "rejected", row
+    assert any(
+        "diverged" in w and "published anyway by --allow-failing-cases" in w
+        for w in row.get("warnings", [])
+    ), row

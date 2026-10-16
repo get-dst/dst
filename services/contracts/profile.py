@@ -124,6 +124,17 @@ class ColumnProfile(BaseModel):
     values_complete_at: datetime | None = None
     min: str | None = None
     max: str | None = None
+    # Distribution facts the drift baseline compares against the next probe: a
+    # numeric column's mean, and a time column's median offset in seconds from
+    # the entity's declared ``default_time_field`` (shipped_at - ordered_at).
+    # A column whose COMMENT changed from UTC to local time moves this number
+    # by hours while its name, type and nullability stay identical.
+    mean: float | None = None
+    time_offset_seconds: float | None = None
+    # A fingerprint of a COMPLETE value dictionary, written by the drift
+    # baseline in place of the literals it refuses to carry: a value that
+    # vanished or was renamed changes it; the probe artifact names the values.
+    values_digest: str | None = None
     # The value's SHAPE when a textual column hides structure — JSON
     # objects, '(lon,lat)' points, numbers-as-text — plus the access pattern a
     # query needs. Without it a lens compares raw JSON to a plain string and
@@ -199,6 +210,10 @@ class TableSampleSpec(BaseModel):
     # The window column's warehouse type — decides the literal's type where the
     # engine will not coerce one (BigQuery).
     window_type: str = ""
+    # The entity's declared ``default_time_field``: every other time column's
+    # median offset from it is measured, so a clock that silently moved (a
+    # comment edit, a timezone change upstream) is a number drift can compare.
+    time_field: str | None = None
 
 
 class JoinCandidate(BaseModel):

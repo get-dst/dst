@@ -246,12 +246,14 @@ def test_decline_returns_uncovered_envelope_never_an_answer(
         with eng.connect() as c:
             row = c.execute(
                 text(
-                    "SELECT routed_lens, covered FROM routing_decision "
+                    "SELECT routed_lens, covered, id FROM routing_decision "
                     "WHERE org_id = :o ORDER BY created_at DESC LIMIT 1"
                 ),
                 {"o": org},
             ).first()
         assert row is not None and row[0] is None and row[1] is False
+        # the decline carries a handle: the persisted decision's own id
+        assert body["request_id"] == str(row[2])
     finally:
         _cleanup(org)
 

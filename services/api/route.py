@@ -25,6 +25,7 @@ import hashlib
 import logging
 import math
 import re
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
@@ -247,6 +248,9 @@ class UncoveredEnvelope(BaseModel):
     """
 
     covered: bool = False
+    # The routing decision's own id: the handle a caller quotes when it asks
+    # about a decline, as `request_id` is for a served answer.
+    request_id: str
     reason: str
     nearest_miss: RouteProvenance | None = None
     # The lenses that expose a table the question named word for word: the router
@@ -266,11 +270,13 @@ def _persist(
     covered: bool,
     degraded: str | None = None,
     decision: RouteDecision | None = None,
-) -> None:
-    """Record the routing decision off the deny/error paths (best-effort)."""
+) -> str:
+    """Record the routing decision off the deny/error paths (best-effort) and
+    return its id — a generated one when the row could not be written, so the
+    caller always has a handle."""
     try:
         with org_session(caller.org_id) as session:
-            route_store.record(
+            return route_store.record(
                 session,
                 question,
                 lens,
@@ -278,9 +284,10 @@ def _persist(
                 covered,
                 degraded=degraded,
                 decision=_decision_record(decision),
-            )
+            ).id
     except Exception:
         log.exception("routing-decision persist failed")
+        return "rtd_" + uuid.uuid4().hex[:16]
 
 
 def _decision_record(d: RouteDecision | None) -> dict[str, object] | None:
@@ -345,7 +352,7 @@ async def just_ask(
         if decision.alternatives
         else None
     )
-    _persist(
+    decision_id = _persist(
         caller, body.q, None, decision.score, False, degraded=decision.degraded, decision=decision
     )
     # Off the event loop: the lookup reads the org's published lenses.
@@ -354,6 +361,7 @@ async def just_ask(
     if exposed:
         reason = f"{reason.rstrip('.')}; {exposed_hint(exposed)}"
     return UncoveredEnvelope(
+        request_id=decision_id,
         reason=reason,
         nearest_miss=nearest,
         exposed_in=[ExposedIn(lens=lens, table=table) for lens, table in exposed],

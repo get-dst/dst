@@ -1726,3 +1726,33 @@ def test_by_month_is_a_time_breakdown_and_the_dimension_is_still_decided() -> No
     assert res.intent.dimensions == []
     grouping = next(d for d in res.decisions if d.slot == "dimension")
     assert grouping.chosen is None and grouping.provider == "scripted"
+
+
+def test_a_listing_with_a_further_field_it_cannot_place_serves_the_rest() -> None:
+    """The first field settles; "another?" cannot be placed. The listing
+    serves without it and names the omission — no clarification that refuses
+    every part, and no further decision taken for it."""
+    decisions = [
+        _sure("listing"),
+        _sure("customer_name"),
+        _unsure("amount", "none"),
+        _sure(None),  # no filter
+    ]
+    res = _resolver(decisions).resolve("list customers with their amounts and shoe size", _model())
+    assert res.intent is not None and res.clarification is None
+    assert res.intent.fields == ["customer_name"]
+    assert res.declined == ["a further field: not in this lens"]
+    gen = TypedIntentGenerator(_resolver(decisions)).generate(
+        question="list customers with their amounts and shoe size",
+        semantic_model=_model(),
+        prose_context=[],
+        dialect="duckdb",
+    )
+    assert gen.sql and gen.declined == ["a further field: not in this lens"]
+
+
+def test_the_first_field_of_a_listing_still_clarifies() -> None:
+    decisions = [_sure("listing"), _unsure("customer_name", "status")]
+    res = _resolver(decisions).resolve("list the things", _model())
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "field" and res.declined == []

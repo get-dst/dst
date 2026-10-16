@@ -99,10 +99,18 @@ def open_review(
         return ticket
 
     reference_sql = _certified_reference(session, trace)
-    if correction is not None and (correction.corrected_sql or "").strip():
-        # The correction is the thing under review: grading the original
-        # answer auto-approved corrections on "the SQL matches the question".
-        trace = trace.model_copy(update={"correction_sql": correction.corrected_sql})
+    # A correction is a claim that the answer was wrong. One that carries SQL
+    # is the thing under review — the judge grades the corrected SQL and can
+    # resolve the ticket on it. One that carries only prose has nothing the
+    # judge can verify: grading the ORIGINAL answer against the question would
+    # auto-approve it on "the SQL matches the question", and the correction
+    # would never reach a human. So a prose-only correction always lands
+    # needs_human; the auto verdict can only resolve a flag-only review or a
+    # correction whose SQL the judge verified.
+    corrected_sql = (correction.corrected_sql or "").strip() if correction is not None else ""
+    prose_only = correction is not None and not corrected_sql
+    if corrected_sql:
+        trace = trace.model_copy(update={"correction_sql": corrected_sql})
     decider = typed_decider()
     if decider is not None:
         try:
@@ -118,7 +126,12 @@ def open_review(
     # judge reply arrives as NO_VERDICT ("") and lands here UNRULED — same shape as
     # the no-LLM branch above: the queue shows no ai_verdict, so nobody mistakes a
     # provider outage for the judge having found fault.
-    state = "approved" if verdict == "approve" else "needs_human"
+    state = "approved" if verdict == "approve" and not prose_only else "needs_human"
+    if prose_only and verdict == "approve":
+        reasoning = (
+            f"{reasoning}\n\nA human must rule: the review carries a correction "
+            "without SQL, which the judge cannot verify against the answer."
+        ).strip()
     # The judge's resolved model name is the machine actor behind this verdict —
     # blank when the judge returned NO_VERDICT, so an outage never claims a ruling.
     judged_by = model if verdict else ""

@@ -48,13 +48,26 @@ models spread cosines where hosted ones compress them, so an embedder dst pins
 gets a calibrated preset instead (`BAAI/bge-small-en-v1.5`: 0.93 / 0.80 / 0.78).
 The numbers above are the defaults every other embedder gets.
 
-One veto sits above the bands: when the question and the approved question
-disagree on a temporal qualifier — "this quarter" against "last quarter",
-which cosine cannot see — the pair never serves. It folds in as an exemplar
-instead and generation handles the asked window.
+Two vetoes sit above the bands, both deterministic. When the question and the
+approved question disagree on a temporal qualifier — "this quarter" against
+"last quarter", which cosine cannot see — the pair never serves. And when each
+of them names a governed metric or definition (whole words; `invoiced_revenue`
+matches "invoiced revenue") and the names differ, the pair never serves either:
+an invoicing question does not take a collections answer because the sentences
+around the name agree. A vetoed pair folds in as an exemplar instead and
+generation handles the asked question.
+
+The same inconsistency is caught before it can serve: `dst plan` and `dst apply`
+embed every certified question and compare it with the rest of the corpus. Two
+answers inside the paraphrase band with different SQL fail the plan, naming the
+pair — one would serve the other's question as certified. Reword one so the
+questions differ, or merge them. Two phrasings over the same SQL are one answer
+and pass.
 
 The caller always sees which band applied. A certified response also names who
-certified the pair, and when.
+certified the pair, and when. Never improve a verified query unless it is wrong,
+and then certify the correction and say why: an approved pair is a promise about a
+number, and a silent rewrite breaks the promise whether or not it changes the number.
 
 ## Templates: one entry for a question family
 
@@ -79,8 +92,11 @@ Everything about a template is deterministic: same input, same output, no
 model judgment on the serving path. Slots are typed (`date_range`, `date`,
 `enum`, `number`; an enum's values go inline under `values:`). The `date_range`
 grammar is tiny and fixed — one canonical string, never a mapping: `YYYY`,
-`YYYY-Qn`, `YYYY-MM`, or `YYYY-MM-DD/YYYY-MM-DD`.
-Ranges are half-open: `{slot.start}` is included, `{slot.end}` is not. An LLM
+`YYYY-Qn`, `YYYY-MM`, or `YYYY-MM-DD/YYYY-MM-DD`. Every form names the days it
+covers inclusively: `2026-01-01/2026-09-30` covers 30 September, like `2026-09`
+does. The rendered range is half-open — `{slot.start}` is the first day,
+`{slot.end}` the day after the last — so `>= {slot.start} AND < {slot.end}` is
+the shape to write, whichever form bound the value. An LLM
 does *propose* slot values for a matched question, but nothing it says reaches
 the SQL except through a validator, and the value is rendered as a proper SQL
 literal for your warehouse's dialect — never pasted in as a string. A template
@@ -114,8 +130,12 @@ output as a draft to review and retire, not as certification.
 `dst test` treats every active certified answer as a test with a known-good
 result. For each one it runs the stored SQL, asks the question again through
 generation (with certified matching switched off, so the test cannot pass by
-copying), runs the generated SQL, and compares the two **executed results** —
-as sets, ignoring column order. A divergence names both sides and the choice
+copying), runs the generated SQL, and compares the two **executed results** on the
+certified projection: columns matched by name (a label or helper column
+generation adds beside the certified ones is ignored, and the pass says so),
+as sets, ignoring column order, with numbers compared as values — a percentage
+against its fraction, and a value rounded to the precision the certified value
+prints with, are the same number. A divergence names both sides and the choice
 it forces: fix the definition, or re-certify/retire the answer.
 
 Each pair also records `bindings`: content hashes of the shared assets its SQL
@@ -166,4 +186,14 @@ only do anything on a certified-definitions page; on a `semantic/definitions/`
 or lens-local page they parse and are ignored, and `dst apply` says so. One
 rule: a page carrying both a canonical `sql:` and an `about:` pointing at
 something that is not a metric warns in lint (`definition_double_truth`) —
-enforceable SQL belongs on the entity.
+enforceable SQL belongs on the entity. Two shapes are errors, because the
+`sql:` is ANDed into WHERE whenever a question names the term: a `sql:` that
+is not a boolean predicate (a literal, arithmetic, an aggregate, a CASE that
+yields numbers) fails plan as `definition_not_predicate`, and a `sql:` on a
+page `about:` a ratio metric fails as `definition_filters_ratio` — the
+predicate would pin both sides of the division to the same rows and serve
+100% everywhere. Plan also warns when a status-like column's complete value
+dictionary holds more than one value that reads as done (`Completed` beside
+`Invoiced`) and no definition is `about:` that column
+(`status_done_ambiguous`): the model will filter on whichever it picks, so a
+definition has to say which values count.

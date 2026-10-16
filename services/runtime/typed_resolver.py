@@ -287,6 +287,9 @@ class TypedResolution:
     supplied: list[str] = field(default_factory=list)
     # Filter columns whose value the question named verbatim (named_values).
     matched: list[str] = field(default_factory=list)
+    # Asks the resolution left out instead of clarifying: a further field or
+    # dimension the decider could not place once the first was settled.
+    declined: list[str] = field(default_factory=list)
 
     @property
     def typed(self) -> bool:
@@ -386,6 +389,51 @@ def named_options(question: str, options: list[Option]) -> list[str]:
             taken += spans
             found.append((spans[0][0], by_surface[surface][0]))
     return [name for _pos, name in sorted(found)]
+
+
+# The words a question may add around a metric's name and still ask for
+# nothing but that figure: interrogative frame, politeness, "total". Any other
+# word — a period, a place, a dimension, a limit — is a slot, and the question
+# leaves this path for a decision.
+_FRAME_WORDS = frozenset(
+    "what is the our total overall how much many show me give tell please number figure "
+    "value of all and whats s were are was do we have i want need know can you it".split()
+)
+
+
+def sole_metric_intent(question: str, model: SemanticModel) -> QueryIntent | None:
+    """The structured intent for a question that names exactly one governed
+    metric word for word and asks for nothing else: no breakdown, no filter,
+    no period, no limit. Read off the text alone (``named_options``), with
+    the rest of the question held to a frame vocabulary, so a question that
+    does carry a slot never lands here — it goes to a decision, or to
+    generation. None otherwise.
+
+    A question this plain is the structured door's own case: the compiler
+    computes it deterministically, and a generated reading of it can only be
+    equal or wrong."""
+    governed = model.model_copy(update={"entities": [e for e in model.entities if not e.exposed]})
+    if not governed.entities:
+        return None
+    sets = option_sets(governed, [], domains={})
+    metrics = sets["metric"]
+    named = named_options(question, metrics)
+    if len(named) != 1:
+        return None
+    name = named[0]
+    if asks_breakdown_over_time(question):
+        return None
+    surface = _as_words(name.rsplit(".", 1)[-1])
+    text = _as_words(question)
+    residue = re.sub(rf"(?<!\w){re.escape(surface)}(?!\w)", " ", text, count=1)
+    if any(word not in _FRAME_WORDS for word in residue.split()):
+        return None
+    bare = name.rsplit(".", 1)[-1]
+    owners = [e.name for e in governed.entities if any(m.name == bare for m in e.metrics)]
+    entity = name.rsplit(".", 1)[0] if "." in name else (owners[0] if len(owners) == 1 else None)
+    if entity is None:
+        return None
+    return QueryIntent(entity=entity, metrics=[name])
 
 
 def by_dimension(question: str, dims: list[Option]) -> tuple[str | None, str]:
@@ -731,20 +779,30 @@ class TypedResolver:
             first = not chosen
             opts = remaining if (first and first_required) else [*remaining, _ANOTHER_NONE]
             ctx = context if first else self._another(context, chosen)
-            pick = self._pick(
-                slot,
-                question,
-                ctx,
-                opts,
-                allow_none=not (first and first_required),
-                records=records,
-                clarify_term=clarify_term,
-                clarify_question=(
-                    f"Which {clarify_term} does the question mean? "
-                    f"Candidates: {', '.join(o.name for o in remaining[:6])}."
-                ),
-                key=f"{key_prefix}:{len(chosen)}" if key_prefix else None,
-            )
+            try:
+                pick = self._pick(
+                    slot,
+                    question,
+                    ctx,
+                    opts,
+                    allow_none=not (first and first_required),
+                    records=records,
+                    clarify_term=clarify_term,
+                    clarify_question=(
+                        f"Which {clarify_term} does the question mean? "
+                        f"Candidates: {', '.join(o.name for o in remaining[:6])}."
+                    ),
+                    key=f"{key_prefix}:{len(chosen)}" if key_prefix else None,
+                )
+            except _Clarify:
+                # A further field or dimension the decider cannot place, once
+                # the first is settled, is not the whole question: the rest
+                # serves and the answer says what it leaves out, instead of a
+                # clarification that refuses every part. No further decision.
+                if first or clarify_term not in ("field", "dimension"):
+                    raise
+                self._declined.append(f"a further {clarify_term}: not in this lens")
+                break
             if pick is None:
                 break
             chosen.append(pick)
@@ -762,6 +820,7 @@ class TypedResolver:
         records: list[DecisionRecord] = []
         self._prefetched: dict[str, tuple[Decision, str, int]] = {}
         self._matched: list[str] = []
+        self._declined: list[str] = []
         self._notes = " ".join(notes or [])
         self._value_aliases = _value_aliases(model)
         # An exposed table is never a typed option: it declares no metric, no
@@ -788,6 +847,7 @@ class TypedResolver:
             decisions=self._consumed(records),
             supplied=supplied,
             matched=list(self._matched),
+            declined=list(self._declined),
         )
 
     def _consumed(self, records: list[DecisionRecord]) -> list[DecisionRecord]:
@@ -2017,4 +2077,5 @@ class TypedIntentGenerator:
             decisions=res.decisions,
             supplied=res.supplied,
             typed=True,
+            declined=res.declined,
         )

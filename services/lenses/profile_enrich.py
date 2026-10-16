@@ -20,6 +20,7 @@ caller's model is sent.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -196,3 +197,50 @@ def data_as_of(
 
     stamps = [s for p in profiles if p.table in tables and (s := stamp(p)) is not None]
     return min(stamps) if stamps else None
+
+
+def table_as_of(
+    profiles: list[TableProfile], time_fields: Mapping[str, str | None]
+) -> dict[str, str]:
+    """table -> its own as-of date (ISO), by `data_as_of`'s rule per table —
+    the stamps the serving path dates an answer from, once it knows which
+    tables the served SQL read."""
+    out: dict[str, str] = {}
+    for p in profiles:
+        if p.table not in time_fields:
+            continue
+        stamp = data_as_of([p], {p.table}, dict(time_fields))
+        if stamp is not None:
+            out[p.table] = stamp.date().isoformat()
+    return out
+
+
+@dataclass(frozen=True)
+class ReadTable:
+    """One table the served SQL reads, as the guard resolved it: its source
+    name, the name the answer may call it by, and whether its entity declares
+    a clock (``default_time_field``) — a time series dates an answer, a
+    dimension or reference table only when nothing else was read."""
+
+    table: str
+    name: str
+    dated: bool
+
+
+def scope_as_of(
+    stamps: Mapping[str, str], read: Iterable[ReadTable]
+) -> tuple[str | None, str | None]:
+    """``(as-of date, the table it names)`` over the tables the SQL actually
+    read — the oldest of them, never the oldest in the lens. A lens-wide floor
+    dated every answer to its slowest table; a question over orders alone is
+    as fresh as orders. Time-series tables decide; a dimension (no declared
+    clock) dates the answer only when the read set holds nothing else. The
+    named table is always given, so the caller can say "orders" when one
+    table was read and name the oldest when several were."""
+    tables = list(read)
+    dated = [t for t in tables if t.dated and t.table in stamps]
+    pool = dated or [t for t in tables if t.table in stamps]
+    if not pool:
+        return None, None
+    oldest = min(pool, key=lambda t: (stamps[t.table], t.name))
+    return stamps[oldest.table], oldest.name

@@ -41,7 +41,7 @@ from services.contracts.response import (
 from services.contracts.semantic_model import SemanticModel
 from services.contracts.trace import TraceLog
 from services.lenses.profile_age import ProfileAge
-from services.lenses.profile_enrich import EntityCoverage
+from services.lenses.profile_enrich import EntityCoverage, ReadTable, scope_as_of
 from services.observability import cost
 from services.reviews.judge import judge_trace, judge_typed
 from services.reviews.store import Trace as ReviewTrace
@@ -69,6 +69,8 @@ from services.runtime.answer import (
     Audience,
     certified_frame,
     citations_for,
+    decline_reason,
+    governing_definitions,
     grounding_notes,
     population_scopes,
     spoken_date,
@@ -112,6 +114,51 @@ class PipelineResult:
     # warehouse's (provider outage, compose timeout), where a drift check would be
     # noise.
     error_kind: str | None = None
+
+
+_SCOPE_COLUMN = re.compile(r"^column '([^']+)' is out of lens scope$")
+
+
+def droppable_column(reason: str | None, sql: str, dialect: str) -> str | None:
+    """The one out-of-scope column the guard named, when the SQL asks for
+    other things too: it reads the column only as a projection (and the GROUP
+    BY that goes with it) and at least one projection does not read it. Then
+    "drop it, answer the rest" keeps the question's meaning; a column in a
+    WHERE, HAVING, ORDER BY or JOIN shapes every other figure, and a lone
+    projection leaves nothing to answer — both refuse as before. None when
+    the reason is any other rejection or the SQL does not parse."""
+    m = _SCOPE_COLUMN.match(reason or "")
+    if m is None:
+        return None
+    name = m.group(1).rsplit(".", 1)[-1].lower()
+    if not name or name == "*":
+        return None
+    try:
+        stmt = sqlglot.parse_one(sql, read=dialect)
+    except Exception:  # noqa: BLE001 — unparseable SQL is the syntax guard's business
+        return None
+    if not isinstance(stmt, exp.Select):
+        return None
+    group = stmt.args.get("group")
+    allowed: list[exp.Expression] = list(stmt.expressions)
+    if isinstance(group, exp.Group):
+        allowed += list(group.expressions)
+    for col in stmt.find_all(exp.Column):
+        if col.name.lower() != name:
+            continue
+        if not any(_within(col, node) for node in allowed):
+            return None
+    reads = [any(c.name.lower() == name for c in e.find_all(exp.Column)) for e in stmt.expressions]
+    if not any(reads) or all(reads):
+        return None
+    return name
+
+
+def _within(node: exp.Expression, root: exp.Expression) -> bool:
+    cur: exp.Expression | None = node
+    while cur is not None and cur is not root:
+        cur = cur.parent  # type: ignore[assignment]
+    return cur is root
 
 
 def deterministic_exclusion(question: str, model: SemanticModel) -> str | None:
@@ -493,6 +540,9 @@ def run_query(
     generator_tier: str | None = None,
     log_samples: bool = False,
     value_domains: dict[str, list[str]] | None = None,
+    # source table -> column -> complete dictionary (value_guard.table_domains):
+    # the same literal check, resolved through the table the SQL reads.
+    table_domains: dict[str, dict[str, list[str]]] | None = None,
     # Measured decisions assembly made for this question (AssembledInputs.decisions);
     # they ride the resolution ledger so probabilities live in one record.
     decisions: list[DecisionRecord] | None = None,
@@ -501,6 +551,11 @@ def run_query(
     # profile_facts). Stale, the answer carries a PROFILE line and the
     # profile-backed checks abstain; None = nothing profiled or not measured.
     profile_age: ProfileAge | None = None,
+    # table -> its own as-of date (assembly.profile_facts). With it, `data_as_of`
+    # is recomputed over the tables the served SQL actually reads: the answer
+    # is as fresh as what it read, and names that table. Without it, the
+    # lens-wide `data_as_of` stands.
+    table_as_of: Mapping[str, str] | None = None,
     scan_text: str | None = None,
     untyped: tuple[str, list[DecisionRecord]] | None = None,
     # Who reads the answer (answer.Audience). `consumer` changes the register of
@@ -864,6 +919,9 @@ def run_query(
     # request_log ended up holding status='rejected' rows with a blank sql.
     refused: tuple[str, str | None] | None = None
     refused_kind = "policy"
+    # The out-of-scope column one repair was told to drop so the rest of the
+    # question could be answered; set once, and the served answer names it.
+    left_out: str | None = None
     # Each candidate SQL's zero-evidence investigation, memoized — a generator
     # that repeats itself (FixedSQLGenerator, or an escalation that lands on the
     # same SQL) cannot loop the probe, and its cached findings still escalate to
@@ -1021,6 +1079,26 @@ def run_query(
             if gen.sql.strip():
                 refused = (gen.sql, guard.reason)
                 refused_kind = guard.kind
+            if left_out is not None:
+                # The one "drop it, answer the rest" repair did not land:
+                # refuse as any exhausted repair does, below.
+                attempt = max(attempt, max_repairs)
+            elif attempt < max_repairs:
+                droppable = droppable_column(guard.reason, gen.sql, semantic_model.dialect)
+                if droppable is not None:
+                    # One column of several is outside the lens: the question
+                    # still has an answer without it. One generation, told
+                    # exactly what to leave out; the served answer says so.
+                    left_out = droppable
+                    feedback = (
+                        f"The previous SQL was rejected by the guard: {guard.reason}. "
+                        f"That column is not in this lens. Leave '{droppable}' out "
+                        "entirely and answer the rest of the question with the columns "
+                        "that are in scope; do not substitute another column for it. "
+                        f"Previous SQL: {gen.sql}"
+                    )
+                    attempt += 1
+                    continue
             if attempt < max_repairs:
                 # The repair must name what actually failed: for a SYNTAX fault,
                 # "rejected by the guard" tells the model it broke a POLICY, so
@@ -1210,8 +1288,15 @@ def run_query(
         enum_domains = {
             k: v for k, v in (value_domains or {}).items() if len(v) <= LOW_CARDINALITY_MAX
         }
-        if certification != "certified" and enum_domains:
-            misses = value_guard.unknown_literals(guard.sql, semantic_model.dialect, enum_domains)
+        enum_table_domains = {
+            t: {k: v for k, v in cols.items() if len(v) <= LOW_CARDINALITY_MAX}
+            for t, cols in (table_domains or {}).items()
+        }
+        enum_table_domains = {t: c for t, c in enum_table_domains.items() if c}
+        if certification != "certified" and (enum_domains or enum_table_domains):
+            misses = value_guard.unknown_literals(
+                guard.sql, semantic_model.dialect, enum_domains, enum_table_domains
+            )
             if misses:
                 if attempt < max_repairs:
                     feedback = value_guard.repair_feedback(misses, guard.sql)
@@ -1437,7 +1522,11 @@ def run_query(
         # certified it, and re-composing per request is where the ~6s and the
         # badge wobble lived. No composer call, no reconcile —
         # the stored prose already went through both at certify time.
-        ans = AnswerResult(text=verified_prose, citations=citations_for(gen, prose))
+        ans = AnswerResult(
+            text=verified_prose,
+            no_answer_reason=decline_reason(verified_prose),
+            citations=citations_for(gen, prose),
+        )
         static_prose = (
             "certified prose served verbatim — composed and grounded once at "
             "certify time, no prose was composed for this request"
@@ -1504,10 +1593,14 @@ def run_query(
 
     # The composer's decline: it saw the rows beside the question and they do
     # not answer it (a list of hero names for "what should I build"). Served,
-    # that is a non-answer labelled ok; the verdict belongs in the status.
-    if certification != "certified" and ans.no_answer_reason:
+    # that is a non-answer labelled ok; the verdict belongs in the status. A
+    # certified serve is no exception: approval vouches for the SQL, and a
+    # NO_ANSWER over its rows is still a non-answer — it refuses, it never
+    # grades verified.
+    if ans.no_answer_reason:
         if (
-            getattr(active, "model", None) == "typed"
+            certification != "certified"
+            and getattr(active, "model", None) == "typed"
             and escalate_generator is not None
             and untyped_reason is None
         ):
@@ -1568,6 +1661,21 @@ def run_query(
         else None
     )
 
+    # The data's age is the age of what THIS answer read. The guard's own
+    # resolution of the SQL's tables decides: a time-series table dates the
+    # answer, a dimension only when nothing else was read, and the lens-wide
+    # floor stands only when no table resolves (the as-of stamp and the
+    # freshness check below read the same date).
+    as_of_table: str | None = None
+    if table_as_of:
+        read = [
+            ReadTable(table=e.source.table, name=e.name, dated=bool(e.default_time_field))
+            for e in sql_guard.entities_read(guard.sql, semantic_model)
+        ]
+        scoped, as_of_table = scope_as_of(table_as_of, read)
+        if scoped is not None:
+            data_as_of = scoped
+
     report = verification.build_report(
         question=question,
         sql=guard.sql,
@@ -1582,6 +1690,7 @@ def run_query(
         uncomposed_reason=static_prose,
         investigation=investigation,
         data_as_of=data_as_of,
+        as_of_table=as_of_table,
         entity_coverage=entity_coverage,
         profile_stale=profile_age is not None and profile_age.stale,
     )
@@ -1744,13 +1853,38 @@ def run_query(
             columns=list(served.columns),
             rows=[list(row) for row in served.rows],
         )
+        # The judge reads what the composer read — the governing definitions,
+        # the data notes and the declared population scope — or it grades the
+        # lens's own population statement as unsupported. Advisory: the
+        # verdict lands as a named check and the deterministic grade stands.
+        governed_context = "\n".join(
+            filter(
+                None,
+                [
+                    *(
+                        f"{d.term}: {d.body}"
+                        for d in governing_definitions(
+                            semantic_model, served.columns, definition_used
+                        )
+                    ),
+                    grounding_notes(semantic_model, served.columns, guard.sql),
+                ],
+            )
+        )
         typed_judge = typed_decider()
         try:
             if typed_judge is None:
                 raise LookupError("no typed decider")
-            verdict, reasoning, _judge_decisions = judge_typed(review_trace, typed_judge)
+            verdict, reasoning, _judge_decisions = judge_typed(
+                review_trace, typed_judge, governed_context=governed_context or None
+            )
         except Exception:  # noqa: BLE001 — the rubric judge is the fallback, never a 500
-            verdict, reasoning = judge_trace(inline_judge_llm, review_trace, judge_model)
+            verdict, reasoning = judge_trace(
+                inline_judge_llm,
+                review_trace,
+                judge_model,
+                governed_context=governed_context or None,
+            )
         _mark("judge", judge_started)
         report = verification.fold_judge(report, verdict, reasoning)
     # Opt-in adversarial reviewer — a second opinion that challenges the
@@ -1790,6 +1924,12 @@ def run_query(
     )
     if low_confidence:
         report = verification.fold_low_confidence(report, low_confidence)
+    # A read from a table the lens exposes without governed definitions caps
+    # at partial, on every path including certified: the EXPOSED line below
+    # discloses it, and the grade must not say otherwise above it.
+    exposed = sql_guard.exposed_tables(guard.sql, semantic_model)
+    if exposed:
+        report = verification.fold_exposed(report, exposed)
     # Folded LAST so nothing upgrades past it: a serve that exists only because
     # serve_ungoverned_shapes bypassed the selection boundary grades unverified.
     if ungoverned_reason is not None:
@@ -1853,6 +1993,21 @@ def run_query(
             "enumerates is incomplete, and the full result is in the data payload."
         )
 
+    # What the answer leaves out is said in-band too: a column the lens does
+    # not hold, dropped so the rest could be answered (the repair above), or a
+    # further field the typed resolver could not place. The caller reading
+    # only the prose must not take the answer for the whole question.
+    declined = list(gen.declined)
+    if left_out is not None:
+        declined.append(f"{left_out}: not in this lens")
+    for item in declined:
+        what, _, why = item.partition(": ")
+        answer_text += (
+            f" {what[0].upper()}{what[1:]} is left out: it is {why.replace('lens', 'data')}."
+            if consumer
+            else f" Note: answered the rest: {what} is {why}."
+        )
+
     # A departure from a governed definition is said OUT LOUD, in the same
     # deterministic-append idiom as the truncation notes above and for the same
     # reason: a composer hint is advisory, this is not. Attribution, not
@@ -1911,11 +2066,18 @@ def run_query(
     # already carries the date, and on windowless envelopes (no text).
     # The consumer reads the date as a person writes it ("as of 26 September");
     # the stale line above already carries it in that form when it fired.
+    # The stamp names the table it dates from — one table read, that table;
+    # several, the oldest — so "as of the 14th" is attributable at a glance.
     if data_as_of and answer_text:
         as_of_day = str(data_as_of)[:10]
         stamp = spoken_date(as_of_day) if consumer else as_of_day
         if stamp not in answer_text:
-            answer_text += f" (as of {stamp})" if consumer else f" (data as of {as_of_day})"
+            of_table = f", {as_of_table}" if as_of_table else ""
+            answer_text += (
+                f" (as of {stamp}{of_table})"
+                if consumer
+                else f" (data as of {as_of_day}{of_table})"
+            )
 
     data = DataPayload(
         columns=served.columns,
@@ -1978,9 +2140,7 @@ def run_query(
         degraded_notes.append(f"UNTYPED: served by raw-SQL generation — {untyped_reason}")
         ledger.decisions = [*untyped_decisions, *ledger.decisions]
         ledger.typed = False
-    if certification != "certified" and (
-        exposed := sql_guard.exposed_tables(guard.sql, semantic_model)
-    ):
+    if certification != "certified" and exposed:
         # Same idiom as UNTYPED: an answer read from a table the lens exposes
         # without definitions says so on its face, on every surface. The
         # ledger already reads such columns as inferred (resolution._governed).
@@ -1988,6 +2148,9 @@ def run_query(
         degraded_notes.append(
             f"EXPOSED: reads {', '.join(exposed)}, {what} with no governed definitions"
         )
+    for item in declined:
+        what, _, why = item.partition(": ")
+        degraded_notes.append(f"answered the rest: {what} is {why}")
     if profile_age is not None and profile_age.stale:
         # Same idiom again: the facts behind this answer (data_as_of, the
         # dictionaries, the date span) are older than the project allows, and
@@ -2025,6 +2188,7 @@ def run_query(
             confidence=confidence,
             verification=report,
             degraded=degraded_notes,
+            declined=declined,
             certification=certification,
             certified_match=certified_match,
             certified_provenance=certified_provenance,
@@ -2083,6 +2247,7 @@ def run_query(
             repairs=attempt,
             resolution=ledger,
             resolution_tag=ledger.tag,
+            degraded=degraded_notes,
             latency_ms=latency_ms,
             status="ok",
             ai_input_tokens=ai_in,

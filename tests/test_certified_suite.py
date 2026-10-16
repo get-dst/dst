@@ -964,3 +964,85 @@ def test_compare_month_grain_rows_match_on_bucket_and_say_so() -> None:
         [["2026-04-01", 1], ["2026-04-02", 2]],
     )
     assert not ok
+
+
+# ── the certified projection and value equivalence ───────────────────────────
+
+
+def test_compare_runs_on_the_certified_projection() -> None:
+    """Every certified column present by name, generation carrying more: the
+    extras are ignored and the pass says which."""
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["month", "revenue"],
+        [["2026-01", 10.0], ["2026-02", 12.0]],
+        ["revenue", "month", "orders"],
+        [[12.0, "2026-02", 4], [10.0, "2026-01", 3]],
+    )
+    assert ok and reason is not None and "projection" in reason and "orders" in reason
+    # A certified column generation does not carry is still a divergence.
+    ok, reason = _compare(["month", "revenue"], [["2026-01", 10.0]], ["month"], [["2026-01"]])
+    assert not ok
+
+
+def test_compare_treats_a_percentage_and_its_fraction_as_one_value() -> None:
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(["pct"], [[82.59]], ["pct"], [[0.8259]])
+    assert ok and reason is not None and "value-equivalent" in reason
+    ok, _ = _compare(["pct"], [[0.8259]], ["share"], [[82.59]])
+    assert ok
+    ok, _ = _compare(["pct"], [[82.59]], ["pct"], [[0.8359]])
+    assert not ok
+
+
+def test_compare_rounds_at_the_certified_values_printed_precision() -> None:
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(["r"], [[82.59]], ["r"], [[82.5912]])
+    assert ok and reason is not None and "rounds to" in reason
+    ok, _ = _compare(["r"], [[82.59]], ["r"], [[82.61]])
+    assert not ok
+    ok, _ = _compare(["n"], [[19]], ["n"], [[19.4]])
+    assert ok  # an integer certified value: generation's 19.4 prints as 19
+    ok, _ = _compare(["n"], [[19]], ["n"], [[19.6]])
+    assert not ok
+    # Row sets: the same physics per cell.
+    ok, _ = _compare(
+        ["seg", "pct"],
+        [["a", 82.59], ["b", 17.41]],
+        ["seg", "pct"],
+        [["a", 0.825912], ["b", 0.174088]],
+    )
+    assert ok
+
+
+@needs_db
+def test_dst_test_exits_one_on_a_divergence_under_json_too(org, monkeypatch, capsys) -> None:
+    """The exit code is the gate: a run with any failing case exits 1 whether
+    it prints prose or the --json object, and the object's tally agrees."""
+    from services.certify import store as certify_store
+    from services.cli.main import _test
+    from services.db.session import org_session
+
+    with org_session(org) as s:
+        certify_store.create(s, "customer_value", _Q, _SQL, None, "t")
+        s.commit()
+    monkeypatch.setattr(
+        "services.runtime.assembly.IntentSQLGenerator",
+        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+            llm, model=model, temperature=temperature
+        ),
+    )
+    monkeypatch.setattr("services.llm.registry.resolve_embedder", lambda: None)
+    wrong = "SELECT count(*) AS n FROM customers"
+    monkeypatch.setattr(
+        "services.llm.registry.resolve",
+        lambda _ref: ResolvedModel(ScriptedLLM([wrong, "compose", wrong, "compose"]), "fake", "m"),
+    )
+    rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG, as_json=True))
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["total"] == 1 and report["passed"] == 0
+    assert [r["verdict"] for r in report["results"]] == ["fail"]

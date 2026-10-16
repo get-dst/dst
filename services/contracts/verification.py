@@ -23,6 +23,10 @@ class VerificationCheck(BaseModel):
 class VerificationReport(BaseModel):
     grade: Grade
     checks: list[VerificationCheck] = Field(default_factory=list)
+    # Set iff grade == "partial": the check that capped it (name and reason),
+    # or the abstention that kept it short of verified. `partial` is never a
+    # bare word a caller has to reverse-engineer from the checks.
+    partial_reason: str | None = None
 
     def check(self, name: str) -> VerificationCheck | None:
         return next((c for c in self.checks if c.name == name), None)

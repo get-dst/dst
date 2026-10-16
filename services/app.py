@@ -82,9 +82,37 @@ log = logging.getLogger("dst")
 validate_production_contract()
 
 
+def log_shutdown_signals() -> None:
+    """Name the signal that ends the server. A stray SIGTERM or SIGHUP used to
+    kill a server with nothing in the log; now the lifespan records which one
+    arrived and that it is shutting down, then hands the signal on to whatever
+    handler was installed (uvicorn's graceful exit, or the default action).
+    Signal handlers are a main-thread affair; off it (a test client) this is a
+    no-op."""
+    import os
+    import signal
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        previous = signal.getsignal(sig)
+
+        def handler(signum: int, frame: object, _previous: object = previous) -> None:
+            log.warning("received %s; shutting down", signal.Signals(signum).name)
+            if callable(_previous):
+                _previous(signum, frame)
+                return
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        try:
+            signal.signal(sig, handler)
+        except ValueError:  # not the main thread
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run the MCP session manager for the app's lifetime."""
+    log_shutdown_signals()
     # The other half of the startup contract, and the half that needs a database:
     # a DST_SECRET_KEY that cannot decrypt this install's sentinel means every
     # stored warehouse credential is unreadable. Fail here, not on whichever

@@ -473,11 +473,11 @@ class _FakeBQSamplingClient:
                     "mx_1": _BQ_FRESH,
                 }
             ]
-        if "GROUP BY" in sql:  # top values for the low-cardinality column
+        if "GROUP BY" in sql:  # the batched dictionary: (column index, value, count)
             return [
-                {"v": "active", "n": 6000},
-                {"v": "churned", "n": 3000},
-                {"v": "trial", "n": 900},
+                {"c": 0, "v": "active", "n": 6000},
+                {"c": 0, "v": "churned", "n": 3000},
+                {"c": 0, "v": "trial", "n": 900},
             ]
         if sql.startswith("SELECT MIN("):  # the freshness/coverage probe
             return [{"mn": datetime(2024, 1, 1, tzinfo=UTC), "mx": _BQ_FRESH}]
@@ -647,15 +647,18 @@ class _FakeMySQLSamplingCursor:
                     "dc_2": 250,
                     "mn_2": date(2026, 1, 2),
                     "mx_2": date(2026, 6, 8),
+                    # the whole-table read carries freshness in the same statement
+                    "fresh_mn": datetime(2026, 1, 2, 8, 0),
+                    "fresh_mx": _MY_FRESH,
                 }
             ]
         elif "GROUP BY" in sql:
             assert "`status`" in sql, f"top-values SQL for an unexpected column: {sql}"
             self._rows = [
-                {"v": "paid", "n": 400},
-                {"v": "open", "n": 250},
-                {"v": "void", "n": 100},
-                {"v": "draft", "n": 42},
+                {"c": 0, "v": "paid", "n": 400},
+                {"c": 0, "v": "open", "n": 250},
+                {"c": 0, "v": "void", "n": 100},
+                {"c": 0, "v": "draft", "n": 42},
             ]
         elif sql.startswith("SELECT MIN("):
             self._rows = [{"mn": datetime(2026, 1, 2, 8, 0), "mx": _MY_FRESH}]
@@ -1050,3 +1053,91 @@ def test_one_failing_table_does_not_abort_the_pass(
         )
     assert [p.table for p in profiles] == ["d.healthy"]
     assert any("d.broken_view not sampled" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Cost — statements per table, and the bill the pass reports
+# ---------------------------------------------------------------------------
+
+
+def test_duckdb_issues_at_most_three_statements_per_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One aggregate (freshness folded in), one UNION ALL for every value
+    dictionary, one for the shape probes. Seven statements per table is seven
+    jobs on a warehouse that bills a minimum per job."""
+    from services.connectors.sampling import metered
+
+    conn = DuckDBConnector(settings.duckdb_jaffle_path)
+    recorded: list[str] = []
+    _record_duckdb(conn, monkeypatch, recorded)
+    spec = TableSampleSpec(
+        table="orders",
+        row_count=99,
+        freshness_column="order_date",
+        time_field="order_date",
+        columns=[
+            ColumnSampleSpec(name="status", type="VARCHAR"),
+            ColumnSampleSpec(name="order_date", type="DATE"),
+            ColumnSampleSpec(name="amount", type="DOUBLE"),
+            ColumnSampleSpec(name="customer_id", type="INTEGER"),
+        ],
+    )
+    with metered() as meter:
+        [orders] = conn.sample_profile([spec])
+    statements = [q for q in recorded if q.startswith("SELECT")]
+    assert len(statements) <= 3, statements
+    assert meter.statements == len(statements)
+    assert meter.priced is False  # DuckDB reports no bytes; never printed as $0
+    # Freshness and coverage rode the aggregate: no separate MIN/MAX statement.
+    assert not any(q.startswith("SELECT MIN(") for q in statements)
+    assert orders.last_updated_logical == datetime(2018, 3, 27, tzinfo=UTC)
+    assert orders.time_coverage is not None and orders.time_coverage.column == "order_date"
+    # The distribution facts the drift baseline compares.
+    assert _col(orders, "amount").mean is not None
+    assert _col(orders, "order_date").time_offset_seconds is None  # the anchor itself
+    # The dictionary came through the batch intact, complete and ordered by frequency.
+    status = _col(orders, "status")
+    assert status.values_complete and status.top_values is not None
+    assert status.top_values[0] == "completed"
+
+
+def test_the_meter_sums_the_bytes_an_engine_bills() -> None:
+    from services.connectors.sampling import metered
+
+    client = _FakeBQSamplingClient(dry_run_bytes=50_000_000)
+    conn = _bq_connector(client)
+    with metered() as meter:
+        conn.sample_profile([_BQ_SPEC])
+    assert meter.statements == len(client.executed) == 3
+    assert meter.priced and meter.bytes_scanned == 7 * 3  # the fake bills 7 per statement
+
+
+def test_stats_sql_carries_mean_offset_and_folded_freshness() -> None:
+    sql = stats_sql(
+        "ops.orders",
+        [
+            ColumnSampleSpec(name="amount", type="DECIMAL"),
+            ColumnSampleSpec(name="shipped_at", type="TIMESTAMP"),
+            ColumnSampleSpec(name="ordered_at", type="TIMESTAMP"),
+        ],
+        dialect="postgres",
+        max_rows=100,
+        row_count=10,
+        exact=True,
+        time_field="ordered_at",
+        freshness_column="ordered_at",
+    )
+    assert sql is not None
+    assert 'AVG("amount") AS av_0' in sql
+    assert "percentile_cont(0.5) WITHIN GROUP" in sql and "AS md_1" in sql
+    assert "md_2" not in sql  # the anchor's offset from itself is not a fact
+    assert 'MIN("ordered_at") AS fresh_mn, MAX("ordered_at") AS fresh_mx' in sql
+    bq = stats_sql(
+        "p.d.t",
+        [ColumnSampleSpec(name="shipped_at", type="TIMESTAMP")],
+        dialect="bigquery",
+        max_rows=100,
+        row_count=10,
+        exact=True,
+        time_field="ordered_at",
+    )
+    assert bq is not None and "APPROX_QUANTILES(" in bq and "UNIX_SECONDS(TIMESTAMP(" in bq

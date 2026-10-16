@@ -112,13 +112,15 @@ def test_entity_map_annotates_mapped_tables_only(tmp_path: Path) -> None:
 def test_the_two_profile_files_never_read_as_each_other(tmp_path: Path) -> None:
     """`profiles/` holds both files. The baseline reader must not swallow the
     probe artifact (its `--accept` history would drown in nightly rewrites) and
-    the probe reader must not swallow a baseline (schema-only, it would blank
-    every value dictionary). Disjoint shapes, pinned."""
+    the probe reader must not swallow a baseline (a whitelist: no row counts,
+    no partitioning, it would blank the facts serving reads). Disjoint shapes,
+    pinned."""
     probe.write_probe(tmp_path, "warehouse", _customers(), _entities())
     wd.write_baseline(tmp_path, "warehouse", _customers())
     assert wd.baseline_connections(tmp_path) == ["warehouse"]  # probe file skipped
     baseline = wd.read_baseline(tmp_path, "warehouse")
-    assert baseline is not None and baseline.tables[0].columns[0].top_values is None
+    assert baseline is not None and baseline.tables[0].row_count is None
+    assert baseline.tables[0].partitioning is None
     read = probe.read_probe(tmp_path, "warehouse")
     assert read is not None and read.entities  # the probe file, not the baseline
 

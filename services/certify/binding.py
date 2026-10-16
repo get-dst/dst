@@ -10,9 +10,11 @@ it says reaches SQL except through ``validate_binding`` + ``render_sql``.
 Slot types v1: ``date_range``, ``date``, ``enum``, ``number``.
 Enum values are declared inline (column-referenced enums are v2). The
 ``date_range`` grammar is deliberately tiny and canonical — ``YYYY``,
-``YYYY-Qn``, ``YYYY-MM``, or ``YYYY-MM-DD/YYYY-MM-DD`` — and ranges are
-half-open: ``{slot.start}`` inclusive, ``{slot.end}`` exclusive. The bind gate
-prompt teaches this grammar; the validator enforces it.
+``YYYY-Qn``, ``YYYY-MM``, or ``YYYY-MM-DD/YYYY-MM-DD`` — every form names the
+days it covers INCLUSIVELY (the explicit form's second date is the last day
+covered, like the month and quarter forms), and renders half-open:
+``{slot.start}`` is the first day, ``{slot.end}`` the day AFTER the last. The
+bind gate prompt teaches this grammar; the validator enforces it.
 """
 
 from __future__ import annotations
@@ -124,7 +126,11 @@ def validate_template(
 
 
 def _date_range(raw: str) -> tuple[datetime.date, datetime.date] | None:
-    """Canonical range grammar -> (start_inclusive, end_exclusive), or None."""
+    """Canonical range grammar -> (start_inclusive, end_exclusive), or None.
+    The explicit ``YYYY-MM-DD/YYYY-MM-DD`` form is inclusive on BOTH ends as
+    written — ``2026-01-01/2026-09-30`` covers 30 September — so its rendered
+    end is the day after the second date, the same shape a month or quarter
+    renders to."""
     if m := _QUARTER.match(raw):
         year, quarter = int(m.group(1)), int(m.group(2))
         start = datetime.date(year, 3 * (quarter - 1) + 1, 1)
@@ -144,7 +150,7 @@ def _date_range(raw: str) -> tuple[datetime.date, datetime.date] | None:
             end = datetime.date.fromisoformat(m.group(2))
         except ValueError:
             return None
-        return (start, end) if start < end else None
+        return (start, end + datetime.timedelta(days=1)) if start <= end else None
     return None
 
 
@@ -167,6 +173,13 @@ def validate_binding(
         spec = specs.get(str(name))
         if spec is None:
             errors.append(f"'{name}' is not a declared slot")
+            continue
+        if isinstance(value, datetime.date | datetime.datetime):
+            # A bare YAML date is a date object by the time it gets here; its
+            # ISO text is what the grammar reads and what the row stores.
+            value = value.isoformat()
+        if value is None or isinstance(value, list | dict):
+            errors.append(f"slot '{name}': {value!r} is not a scalar value")
             continue
         raw = str(value).strip()
         if spec.type == "date_range":

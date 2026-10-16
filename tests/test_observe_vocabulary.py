@@ -544,3 +544,28 @@ def test_audit_statement_carries_the_basis_over_the_window(org: object) -> None:
     }
     # Unwindowed, the same block sees the older certified read too.
     assert k["basis"]["certified"] == 2 and k["basis"]["n"] == 7
+
+
+@needs_db
+def test_warehouse_bytes_are_totalled_and_split_per_lens(org: object) -> None:
+    """Bytes are the unit every scan-billed engine shares, priced or not: the
+    KPI block carries the total and the per-lens split, probe rows excluded."""
+    with org_session(org) as session:
+        for lens, tier, wh_bytes in [
+            ("reporting", None, 10_000_000),
+            ("reporting", "grounded", 5_000_000),
+            ("finance", "grounded", 1_000_000),
+            ("sql:bigquery", "probe", 900_000_000),
+        ]:
+            session.execute(
+                text(
+                    "INSERT INTO request_log (org_id, request_id, lens, caller, "
+                    "question, status, generator_tier, wh_bytes) "
+                    "VALUES (:o, :r, :l, 'admin', 'q', 'ok', :t, :b)"
+                ),
+                {"o": org, "r": f"req-{uuid.uuid4()}", "l": lens, "t": tier, "b": wh_bytes},
+            )
+    with org_session(org) as session:
+        k = observe.kpis(session)
+    assert k["wh_bytes"] == 16_000_000
+    assert k["wh_bytes_by_lens"] == {"reporting": 15_000_000, "finance": 1_000_000}

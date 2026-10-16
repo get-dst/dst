@@ -54,6 +54,28 @@ Twelve tools (`services/mcp/server.py`):
 | `review_status` | poll a ticket |
 | `verify_receipt` | check a [receipted](../concepts/receipts.md) number before repeating it: signature plus trace cross-check |
 
+The argument names, as the tools declare them (required first; `format` is
+`both` | `structured` | `prose` everywhere it appears):
+
+| Tool | Arguments |
+|---|---|
+| `route_query` | `question`; `format`, `bindings`, `allow_untyped`, `purpose` |
+| `query` | `name`, `question`; `format`, `bindings`, `allow_untyped`, `purpose` |
+| `query_metrics` | `lens`; `metrics`, `dimensions`, `filters`, `order_by`, `limit`, `entity`, `grain`, `format` |
+| `sql` | `lens`, `sql`; `limit`, `purpose` |
+| `list_lenses` | none |
+| `describe_lens` | `name` |
+| `lookup_definition` | `term` |
+| `search_certified` | `lens`, `question` |
+| `run_certified` | `lens`; `cert_id` or `question`, `bindings`, `format`, `purpose` |
+| `send_for_review` | `request_id`; `note`, `kind`, `target`, `corrected_sql` |
+| `review_status` | `ticket_id` |
+| `verify_receipt` | `receipt` |
+
+A decline from `route_query` (`covered: false`) carries a `request_id` too: the
+recorded routing decision's id, the handle to quote about that decline the way an
+answer's `request_id` is quoted to `send_for_review`.
+
 Plus a `getting_started` prompt. Every tool returns a uniform envelope, `{"ok": true, …}`
 or `{"ok": false, "code": auth|forbidden|not_found|rate_limited|refused|invalid|
 no_exact_match|upstream|unreachable, "error": …}`, so agents branch on `ok` and `code`,

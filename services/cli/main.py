@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # httpx is imported per-verb (CLI startup cost) — types onl
 
     from services.certify.store import CertifiedAnswer
     from services.db.schema_state import SchemaState
+    from services.dbt import DbtArtifacts, ImportResult
     from services.evals.slot_lane import SlotLaneOutcome
 
 # How long `plan` will wait on the warehouse before it drops the staleness check
@@ -60,6 +61,22 @@ def _migrate_result(before: SchemaState) -> str:
     return f"migrated to {head} (was {before.current})"
 
 
+def _certified_corpus_files(root: Path) -> list[str]:
+    """The project's certified_answers.yaml files that hold at least one
+    entry (a comment-only scaffold file is not a corpus)."""
+    import yaml
+
+    found: list[str] = []
+    for path in sorted(root.glob("lenses/*/certified_answers.yaml")):
+        try:
+            entries = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — plan reports malformed YAML; doctor only counts
+            continue
+        if isinstance(entries, list) and entries:
+            found.append(path.relative_to(root).as_posix())
+    return found
+
+
 def _doctor(args: argparse.Namespace) -> int:
     """Callability, not configuration: /ready reports what is
     CONFIGURED and is deliberately never a readiness gate, so a fully-configured
@@ -82,13 +99,26 @@ def _doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 — every probe reports, none aborts the report
         print(f"db            FAIL — {exc}")
         failures += 1
+    root = Path(getattr(args, "dir", ".") or ".")
     try:
         embedder = registry.resolve_embedder()
-        print(
-            "embeddings    ok"
-            if embedder is not None
-            else "embeddings    not configured — certified matching off"
-        )
+        if embedder is not None:
+            print("embeddings    ok")
+        elif corpus := _certified_corpus_files(root):
+            # A corpus with no embedder is a corpus that never serves: every
+            # certified answer stores unembedded and matching is silently off.
+            # That is a failure of this install, in red, not a note.
+            print(
+                style.bad(
+                    "embeddings    FAIL — not configured, and this project certifies "
+                    f"answers ({', '.join(corpus)}): certified matching is OFF, nothing "
+                    "certified will serve. Add an embedding provider "
+                    "(`pip install 'dst-core[local-embed]'` for the in-process one)"
+                )
+            )
+            failures += 1
+        else:
+            print("embeddings    not configured — certified matching off")
     except Exception as exc:  # noqa: BLE001
         print(f"embeddings    FAIL — {exc}")
         failures += 1
@@ -123,7 +153,6 @@ def _doctor(args: argparse.Namespace) -> int:
     # release had no reader at all (#51).
     from services.cli.init import stale_agent_files
 
-    root = Path(getattr(args, "dir", ".") or ".")
     if (root / "dst.yaml").exists():
         stale = stale_agent_files(root)
         print(
@@ -1382,6 +1411,7 @@ def _drift_one(
     findings with the connection's name."""
     from services.lenses.connections import build_connector
     from services.lenses.profiler_catalog import catalog_profiles
+    from services.project import probe as probe_artifact
     from services.project import warehouse_drift as wd
     from services.project.loader import split_semantic
 
@@ -1407,6 +1437,11 @@ def _drift_one(
 
     project_files = _read_project(root)
     entities, definitions, relationships = wd.parse_layer(split_semantic(project_files))
+    # The newest probe artifact carries what the catalog cannot: the measured
+    # distributions and dictionaries. Drift diffs the baseline against BOTH —
+    # the live catalog for schema and comments, the artifact for the rest.
+    artifact = probe_artifact.read_probe(root, args.connection)
+    tolerance = _drift_tolerance(root)
     baseline = wd.read_baseline(root, args.connection)
     if baseline is None:
         if not args.accept:
@@ -1420,7 +1455,8 @@ def _drift_one(
                 file=sys.stderr,
             )
             return 4, None
-        path = wd.write_baseline(root, args.connection, current)
+        recorded = wd.accepted_tables(current, artifact.tables if artifact else None)
+        path = wd.write_baseline(root, args.connection, recorded)
         if args.as_json:
             return 0, {"connection": args.connection, "recorded": len(current)}
         print(
@@ -1431,8 +1467,11 @@ def _drift_one(
         )
         return 0, None
 
+    deltas = wd.baseline_drift(baseline.tables, current)
+    if artifact is not None:
+        deltas += wd.profile_drift(baseline.tables, artifact.tables, tolerance)
     findings = wd.cross_reference(
-        wd.baseline_drift(baseline.tables, current),
+        deltas,
         entities,
         definitions,
         wd.parse_certified(project_files),
@@ -1443,19 +1482,28 @@ def _drift_one(
         {
             "connection": args.connection,
             "baseline_recorded_at": baseline.recorded_at.isoformat(),
+            "probed_at": artifact.probed_at.isoformat() if artifact else None,
             "tables": len(current),
             "findings": [{**f.model_dump(), "breaking": wd.is_breaking(f)} for f in findings],
         }
         if args.as_json
         else None
     )
+    if artifact is None and not args.as_json:
+        # Said once, on stderr: without an artifact the measured half of the
+        # diff is not running, and a clean line must not read as "nothing moved".
+        print(
+            f"note: no probe artifact for '{args.connection}' — schema and comments "
+            "compared, measured distributions and dictionaries not; `dst probe` records them",
+            file=sys.stderr,
+        )
     if payload is not None:
         pass
     elif not findings:
         # Silence on stdout is the point: this runs in a loop, and a verb that
         # prints a wall on a quiet day is one people stop reading on a loud one.
         print(
-            f"note: no schema change in '{args.connection}' since "
+            f"note: no change in '{args.connection}' since "
             f"{baseline.recorded_at.date().isoformat()} ({len(current)} tables)",
             file=sys.stderr,
         )
@@ -1469,7 +1517,7 @@ def _drift_one(
         broken = sum(1 for f in findings if wd.is_breaking(f))
         verdict = f", {broken} BREAKING declared references" if broken else ""
         print(
-            f"\n{len(findings)} schema change(s) since "
+            f"\n{len(findings)} change(s) since "
             f"{baseline.recorded_at.date().isoformat()}, {read} on tables the semantic "
             f"layer reads{verdict}. Re-record with `dst drift --accept` once reviewed."
         )
@@ -1477,9 +1525,27 @@ def _drift_one(
         if findings:
             # Nothing changed means nothing to accept: re-recording anyway would put a
             # timestamp-only commit in the history of a file whose history IS the point.
-            wd.write_baseline(root, args.connection, current)
+            wd.write_baseline(
+                root,
+                args.connection,
+                wd.accepted_tables(current, artifact.tables if artifact else None),
+            )
         return 0, payload
     return wd.exit_code(findings), payload
+
+
+def _drift_tolerance(root: Path) -> Any:
+    """`probe.drift_tolerance` from dst.yaml, or the defaults when the file is
+    absent or does not parse (plan reports that; drift must still run)."""
+    from services.project.schema import DriftTolerance, parse_project_yaml
+
+    path = root / "dst.yaml"
+    if path.exists():
+        try:
+            return parse_project_yaml(path.read_text(encoding="utf-8")).probe.drift_tolerance
+        except ValueError:
+            pass
+    return DriftTolerance()
 
 
 def _sample_scope(
@@ -1600,9 +1666,11 @@ def _probe_connections(
     *,
     recent_partitions: int = 0,
 ) -> int:
+    from services.connectors import sampling
     from services.lenses.connections import build_connector
     from services.lenses.profiler import sample_profiles
     from services.lenses.profiler_catalog import catalog_profiles
+    from services.observability import cost
     from services.project import probe as probe_artifact
     from services.project import warehouse_drift as wd
 
@@ -1652,12 +1720,24 @@ def _probe_connections(
                 if prior is not None
                 else {}
             )
-            merged = sample_profiles(
-                connector,
-                [p for p in profiles if p.table in scope],
-                matchable=matchable,
-                windows=windows,
-            )
+            # Every other time column's offset is measured from the entity's
+            # declared clock — the number drift compares a semantic change by.
+            time_fields = {
+                p.table: e.default_time_field
+                for p in profiles
+                for e in entities
+                if e.source.connection == name
+                and e.default_time_field
+                and wd.same_table(e.source.table, p.table)
+            }
+            with sampling.metered() as meter:
+                merged = sample_profiles(
+                    connector,
+                    [p for p in profiles if p.table in scope],
+                    matchable=matchable,
+                    windows=windows,
+                    time_fields=time_fields,
+                )
             profiles = probe_artifact.carry_complete_dictionaries(
                 [merged.get(p.table, p) for p in profiles], prior
             )
@@ -1683,11 +1763,16 @@ def _probe_connections(
                 file=sys.stderr,
             )
         out, artifact = probe_artifact.write_probe(root, name, profiles, entities)
-        # One artifact family: probing ARMS drift too. The baseline is the
-        # schema-only whitelist over the same tables the artifact holds, so a
-        # project that ran `dst probe` — the documented first step — never sits in
-        # the silent unarmed state `dst drift` now refuses (exit 4).
-        wd.write_baseline(root, name, artifact.tables)
+        # One artifact family: the FIRST probe arms drift too, so a project that
+        # ran `dst probe` — the documented first step — never sits in the silent
+        # unarmed state `dst drift` refuses (exit 4). Never again after that: the
+        # baseline is the evidence drift diffs the artifact against, and a
+        # nightly probe that rewrote it erased every change before anyone read
+        # it. It advances by `dst drift --accept` or `dst apply` only.
+        if wd.read_baseline(root, name) is None:
+            wd.write_baseline(root, name, artifact.tables)
+            print(f"'{name}': drift baseline recorded (first probe)", file=sys.stderr)
+        _print_probe_bill(name, type_, meter, cost.warehouse_cost_usd)
         # Counted off the artifact, so the summary describes the file on disk.
         complete = sum(
             1 for p in artifact.tables for c in p.columns if c.top_values and c.values_complete
@@ -1714,6 +1799,34 @@ def _probe_connections(
             file=sys.stderr,
         )
     return worst
+
+
+def _print_probe_bill(
+    name: str, type_: str, meter: Any, price: Callable[[int | None, str], float | None]
+) -> None:
+    """What the sampling pass cost, on stderr: statements, bytes billed and the
+    estimate where the engine prices bytes. An engine that reports no bytes
+    gets the statement count and says the bytes are unreported, never $0."""
+    if not meter.priced:
+        print(
+            f"'{name}': {meter.statements} sampling statement(s); bytes not reported by {type_}",
+            file=sys.stderr,
+        )
+        return
+    usd = price(meter.bytes_scanned, type_)
+    line = (
+        f"'{name}': {meter.statements} sampling statement(s), {_bytes(meter.bytes_scanned)} billed"
+    )
+    if usd is not None:
+        line += f", about ${usd:.4f}"
+    print(line, file=sys.stderr)
+
+
+def _bytes(n: int) -> str:
+    for div, unit in ((1e12, "TB"), (1e9, "GB"), (1e6, "MB"), (1e3, "kB")):
+        if n >= div:
+            return f"{n / div:.2f} {unit}"
+    return f"{n} B"
 
 
 def _import_metric_layer(args: argparse.Namespace) -> int:
@@ -1848,9 +1961,30 @@ def _import_dbt(args: argparse.Namespace) -> int:
         if path.endswith((".yaml", ".yml")):
             content = header + content
         out.write_text(content, encoding="utf-8")
-    print(render_text(coverage_report(artifacts, result)))
+    if artifacts.manifest_only:
+        print(_manifest_only_summary(artifacts, result))
+    else:
+        print(render_text(coverage_report(artifacts, result)))
     print(f"wrote {len(files)} files under {root}/semantic/ - review, then `dst apply`")
     return 0
+
+
+def _manifest_only_summary(artifacts: DbtArtifacts, result: ImportResult) -> str:
+    """What a semantic-layer-less import produced: one entity per model with
+    its table, fields and key, and the plain statement that metrics and
+    dimensions still need authoring — nothing was invented for them."""
+    lines = [
+        f"dbt import - {artifacts.project}: no semantic layer found "
+        "(semantic_manifest.json missing or empty); imported the manifest's models",
+    ]
+    for e in result.entities:
+        key = f"key {', '.join(e.primary_key)}" if e.primary_key else "no key inferred"
+        lines.append(f"  entity {e.name}: {e.source.table}, {len(e.fields)} fields, {key}")
+    lines.append(
+        f"  {len(result.entities)} entities, 0 metrics, 0 dimensions - metrics and "
+        "dimensions still need authoring in semantic/ (dbt declares none without MetricFlow)"
+    )
+    return "\n".join(lines)
 
 
 def _wait_for_health(url: str, *, tries: int = 240, delay: float = 0.5) -> bool:
@@ -1925,6 +2059,99 @@ def _mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve_state_dir() -> Path:
+    """Where a background server leaves its pidfile and log: .dst/ in the
+    current project, the per-machine state directory `dst init` gitignores."""
+    return Path.cwd() / ".dst"
+
+
+def _daemon_pid(pidfile: Path) -> int | None:
+    """The pid in *pidfile* when that process is still alive, else None (a
+    stale file from a server that died is cleared, not obeyed)."""
+    import os
+
+    try:
+        pid = int(pidfile.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pidfile.unlink(missing_ok=True)
+        return None
+    except PermissionError:
+        return pid
+    return pid
+
+
+def _serve_stop(args: argparse.Namespace) -> int:
+    """`dst serve --stop`: SIGTERM the pid in .dst/serve.pid and wait for it."""
+    import os
+    import signal
+    import time
+
+    pidfile = _serve_state_dir() / "serve.pid"
+    pid = _daemon_pid(pidfile)
+    if pid is None:
+        print(f"no background server recorded in {pidfile}", file=sys.stderr)
+        return 1
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        print(f"pid {pid} did not exit after SIGTERM; see {pidfile.parent / 'serve.log'}")
+        return 1
+    pidfile.unlink(missing_ok=True)
+    print(f"stopped background server (pid {pid})")
+    return 0
+
+
+def _serve_daemon(args: argparse.Namespace) -> int:
+    """`dst serve --daemon`: run the same command detached, pid in
+    .dst/serve.pid, output in .dst/serve.log; return once /health answers or
+    the child has died (its log tail is the error)."""
+    import os
+    import subprocess
+    import time
+
+    state = _serve_state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    pidfile, logfile = state / "serve.pid", state / "serve.log"
+    running = _daemon_pid(pidfile)
+    if running is not None:
+        print(f"a background server is already running (pid {running}); `dst serve --stop` first")
+        return 1
+    argv = [a for a in sys.argv[1:] if a != "--daemon"]
+    with logfile.open("ab") as log:
+        child = subprocess.Popen(
+            [sys.executable, "-m", "services.cli.main", *argv],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=os.getcwd(),
+        )
+    pidfile.write_text(f"{child.pid}\n")
+    port = args.port or 8000
+    url = f"http://{args.host}:{port}"
+    for _ in range(240):
+        if child.poll() is not None:
+            pidfile.unlink(missing_ok=True)
+            tail = logfile.read_text(errors="replace").splitlines()[-20:]
+            print(f"background server exited with {child.returncode}:", file=sys.stderr)
+            print("\n".join(tail), file=sys.stderr)
+            return 1
+        if _wait_for_health(url, tries=1, delay=0):
+            break
+        time.sleep(0.5)
+    print(f"serving in the background — {url} (pid {child.pid}, log {logfile})", flush=True)
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     import os
     import subprocess
@@ -1935,6 +2162,8 @@ def _serve(args: argparse.Namespace) -> int:
     from services.config import resolve_env_ref, settings
     from services.db.schema_state import schema_state, serve_refusal
 
+    if getattr(args, "stop", False):
+        return _serve_stop(args)
     env_url = resolve_env_ref("DST_URL")
     if args.port is None:
         args.port = (urlparse(env_url).port or 8000) if env_url else 8000
@@ -1949,6 +2178,8 @@ def _serve(args: argparse.Namespace) -> int:
         if not url or (urlparse(url).port or 8000) != args.port:
             url = f"http://localhost:{args.port}"
         os.environ["DST_URL"] = url
+    if getattr(args, "daemon", False):
+        return _serve_daemon(args)
 
     # Schema preflight, before the port probe: a server on a schema behind this build
     # serves answers correctly and loses every trace, in silence (services/db/
@@ -3084,8 +3315,13 @@ def _apply(args: argparse.Namespace) -> int:
         params["require_gates"] = "true"
     if selected := [n for n in (getattr(args, "lens", None) or []) if n.strip()]:
         params["lens"] = selected
-    allow_cases = [c for c in (getattr(args, "allow_case", None) or []) if c.strip()]
-    if getattr(args, "allow_failing_cases", False) or allow_cases:
+    # --allow-failing-cases is None when absent, [] when bare (blanket), and
+    # a list of ids when it names the cases it covers.
+    named = getattr(args, "allow_failing_cases", None)
+    allow_cases = [
+        c for c in [*(getattr(args, "allow_case", None) or []), *(named or [])] if c.strip()
+    ]
+    if named is not None or allow_cases:
         reason = (getattr(args, "reason", None) or "").strip()
         if not reason:
             print(
@@ -3199,7 +3435,29 @@ def _apply(args: argparse.Namespace) -> int:
     # a bulk certified import where every entry hit a gate must not look green
     # to CI/agents.
     ok = all(r.get("action") != "rejected" and not r.get("errors") for r in out)
+    if ok:
+        _advance_baselines(Path(getattr(args, "dir", ".") or "."))
     return 0 if ok else 1
+
+
+def _advance_baselines(root: Path) -> None:
+    """A deploy is the moment the layer was reviewed against the warehouse as
+    the probe artifact records it, so the drift baseline advances to that
+    artifact here — the one other moment besides `dst drift --accept`. Only
+    when the recorded facts actually differ: a deploy that moved nothing
+    leaves no timestamp-only commit."""
+    from services.project import probe as probe_artifact
+    from services.project import warehouse_drift as wd
+
+    for path in sorted((root / wd.BASELINE_DIR).glob(f"*{probe_artifact.PROBE_SUFFIX}")):
+        try:
+            artifact = probe_artifact.parse_probe(path.read_text(encoding="utf-8"), str(path))
+        except (ValueError, OSError):
+            continue
+        if wd.baseline_changed(root, artifact.connection, artifact.tables):
+            written = wd.write_baseline(root, artifact.connection, artifact.tables)
+            rel = written.relative_to(root) if written.is_relative_to(root) else written
+            print(f"drift baseline advanced for '{artifact.connection}' -> {rel}", file=sys.stderr)
 
 
 def _semantic(args: argparse.Namespace) -> int:
@@ -4695,6 +4953,10 @@ def _observe(args: argparse.Namespace) -> int:
 
     if isinstance(kpis, dict):
         head = f"{kpis.get('queries', 0)} queries · ${float(kpis.get('ai_cost_usd') or 0):.4f} AI"
+        if (scanned := kpis.get("wh_bytes")) is not None:
+            # The warehouse half of the bill, in the unit the warehouse bills:
+            # a Snowflake credit has no price here, but bytes are bytes.
+            head += f" · {_bytes(int(scanned))} scanned"
         outcomes = kpis.get("outcomes")
         if isinstance(outcomes, dict):
             # Declines are governed outcomes (authoring/scope work), errors are
@@ -6183,9 +6445,11 @@ def main() -> int:
     p.add_argument(
         "--accept",
         action="store_true",
-        help="re-record the baseline as the warehouse now stands, after reviewing "
-        "the findings — the reviewed-it act, so the next run reports what changed "
-        "since THIS review and not since the first one",
+        help="re-record the baseline as the warehouse now stands (schema and comments "
+        "from the catalog, measured facts from the newest probe artifact), after "
+        "reviewing the findings — the reviewed-it act, so the next run reports what "
+        "changed since THIS review and not since the first one; `dst apply` does the "
+        "same at deploy",
     )
     p.add_argument(
         "--json",
@@ -6238,12 +6502,25 @@ def main() -> int:
     p = sub.add_parser("dev", help="Postgres up + migrate + serve (auto-reload), one command")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, help="default: the port in DST_URL (.env), else 8000")
+    p.add_argument(
+        "--daemon",
+        action="store_true",
+        help="detach: pid in .dst/serve.pid, output in .dst/serve.log; `dst serve --stop` ends it",
+    )
     p.set_defaults(fn=_dev, reload=True)
 
     p = sub.add_parser("serve", help="run the API (+ SPA when built) via uvicorn")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, help="default: the port in DST_URL (.env), else 8000")
     p.add_argument("--reload", action="store_true")
+    p.add_argument(
+        "--daemon",
+        action="store_true",
+        help="detach: pid in .dst/serve.pid, output in .dst/serve.log; `dst serve --stop` ends it",
+    )
+    p.add_argument(
+        "--stop", action="store_true", help="stop the background server recorded in .dst/serve.pid"
+    )
     p.set_defaults(fn=_serve)
 
     p = sub.add_parser(
@@ -6744,11 +7021,13 @@ def main() -> int:
             )
             p.add_argument(
                 "--allow-failing-cases",
-                action="store_true",
-                help="publish once past a failing-case gate block WITHOUT editing "
-                "eval_gate in the file — audited: requires --reason, which lands in "
-                "the version history and the apply row; certified divergences still "
-                "block (re-certify in the same push instead)",
+                nargs="*",
+                metavar="CASE_ID",
+                help="publish once past a gate block WITHOUT editing eval_gate in the "
+                "file — audited: requires --reason, which lands in the version history "
+                "and the apply row. With case ids it covers exactly those cases "
+                "(a certified divergence is `certified:<answer id>`) and applies only "
+                "when every failing case is named; bare, it is blanket",
             )
             p.add_argument(
                 "--allow-case",
@@ -6756,7 +7035,7 @@ def main() -> int:
                 metavar="CASE_ID",
                 help="publish once past a gate block for THIS failing case only "
                 "(repeatable; the override applies only when every failing case is "
-                "named) — audited: requires --reason; certified divergences still block",
+                "named) — audited: requires --reason",
             )
             p.add_argument(
                 "--reason",
