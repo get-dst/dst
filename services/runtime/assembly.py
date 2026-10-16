@@ -27,7 +27,7 @@ from services.benchmark.contamination import normalize
 from services.certdefs import load_certified_defs, select_context
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
-from services.certify.lexical import governed_names, lexical_mismatch
+from services.certify.lexical import answer_names, governed_names, lexical_mismatch
 from services.context import store as ctx_store
 from services.contracts.lens_config import LensConfig
 from services.contracts.profile import TableProfile
@@ -394,10 +394,11 @@ def certified_lookup(
     serve branches are skipped and only exemplars fold (the eval suites test
     generation, not the bypass); ``exclude_id`` keeps an answer under test out
     of its own exemplars. ``governed`` is the lens's metric and definition
-    names: a plain hit whose approved question names a different governed
-    name than the asked one is vetoed before the exact/equivalent bands
-    (the collections template must never serve an invoicing question), and
-    folds as an exemplar instead.
+    names: a hit — plain or template — whose approved question (or own
+    resolution ledger) names a different governed name than the asked one is
+    vetoed before binding and before the exact/equivalent bands (the
+    collections template must never serve an invoicing question); a plain
+    one folds as an exemplar instead.
     """
     if qvec is None:
         return None, [], "none", None, None
@@ -413,17 +414,20 @@ def certified_lookup(
     bands = certified_bands()
     if serve and hits[0].score >= bands.equiv:
         top = hits[0].answer
-        if top.slots:
+        if lexical_mismatch(question, top.question, governed, answer_names(top.resolution)):
+            # A collections answer never serves an invoicing ask — cosine
+            # cannot see the name, and neither can the bind gate: a template
+            # binds its slots from the question, not the metric. Fall through:
+            # a plain pair still folds as an exemplar below.
+            pass
+        elif top.slots:
             if (pair := assist_llm()) is not None:
                 bound = certified_bind(pair.llm, pair.name, question, top)
                 if bound is not None:
                     return top, [], "certified", "parameterized", bound
-        elif temporal_mismatch(question, top.question) or lexical_mismatch(
-            question, top.question, governed
-        ):
-            # A "this quarter" answer must never serve a "last quarter" ask,
-            # and a collections answer never an invoicing ask — cosine cannot
-            # see the qualifier or the name. Fall through: the pair still
+        elif temporal_mismatch(question, top.question):
+            # A "this quarter" answer must never serve a "last quarter" ask —
+            # cosine cannot see the qualifier. Fall through: the pair still
             # folds as an exemplar below, and generation handles the asked
             # window (the matcher is the wrong path here, not generation).
             pass

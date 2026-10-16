@@ -1046,3 +1046,22 @@ def test_dst_test_exits_one_on_a_divergence_under_json_too(org, monkeypatch, cap
     assert rc == 1
     assert report["total"] == 1 and report["passed"] == 0
     assert [r["verdict"] for r in report["results"]] == ["fail"]
+
+
+def test_a_decimal_percentage_beside_a_label_column_is_value_equivalent() -> None:
+    """Warehouse drivers hand back NUMERIC as Decimal; the projected
+    comparison read it as a non-number and the pct-vs-fraction pair failed."""
+    from decimal import Decimal
+
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["pct"], [[Decimal("58.71")]], ["hero", "pct"], [["x", Decimal("0.587123")]]
+    )
+    assert ok and reason is not None and "fraction/percentage" in reason
+    ok, reason = _compare(
+        ["pct"], [[Decimal("58.71")]], ["hero", "share"], [["x", Decimal("0.5871")]]
+    )
+    assert ok and reason is not None and "shape-lenient" in reason
+    ok, _reason = _compare(["pct"], [[Decimal("58.71")]], ["hero", "pct"], [["x", Decimal("0.42")]])
+    assert not ok

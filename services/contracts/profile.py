@@ -180,6 +180,11 @@ class ColumnSampleSpec(BaseModel):
 
     name: str
     type: str = ""  # warehouse type from the catalog pass; decides min/max eligibility
+    # The catalog pass measured this column's values (null rate, dictionary)
+    # but no catalog can supply its distribution facts — a numeric mean, a
+    # time column's median offset from the entity clock. Only those are read,
+    # and the catalog's own facts are never overwritten by a sample.
+    distribution_only: bool = False
     # A declared DIMENSION of the semantic layer: the only kind of column whose
     # whole dictionary (up to MATCH_DICTIONARY_MAX) is collected for value
     # matching. Other text columns (an email, a free-text note) stay at the

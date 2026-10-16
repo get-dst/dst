@@ -310,21 +310,23 @@ def baseline_drift(previous: list[TableProfile], current: list[TableProfile]) ->
 
 def _comment_drift(previous: TableProfile, current: TableProfile) -> list[ProfileDrift]:
     """A column whose warehouse comment changed — the meaning moved while the
-    column list stayed put. Only a comment that WAS there counts: a comment
-    appearing on an undocumented column is documentation, not a change."""
+    column list stayed put. Added, removed and rewritten all count: a comment
+    appearing on a column the baseline knew bare is the warehouse stating a
+    meaning the layer was authored without, and the author decides whether it
+    agrees."""
     cur = {c.name: c for c in current.columns}
     out: list[ProfileDrift] = []
     for prev_c in previous.columns:
         cur_c = cur.get(prev_c.name)
-        if cur_c is None or not prev_c.description:
+        if cur_c is None:
             continue
-        before, after = prev_c.description.strip(), (cur_c.description or "").strip()
+        before, after = (prev_c.description or "").strip(), (cur_c.description or "").strip()
         if before != after:
             out.append(
                 ProfileDrift(
                     table=current.table,
                     kind="column_recommented",
-                    detail=f"{prev_c.name}: '{before}' -> '{after or '(removed)'}'",
+                    detail=f"{prev_c.name}: '{before or '(none)'}' -> '{after or '(removed)'}'",
                 )
             )
     return out

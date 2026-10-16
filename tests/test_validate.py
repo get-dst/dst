@@ -457,6 +457,32 @@ def test_status_warning_is_silent_when_a_definition_owns_the_column() -> None:
     assert status_done_family_warnings(sm, profiles) == []  # type: ignore[arg-type]
 
 
+def test_the_definition_the_status_warning_asks_for_is_not_a_double_truth() -> None:
+    from services.validate.report import definition_double_truth, status_done_family_warnings
+
+    sm = jaffle_customer_value_bundle().semantic_model
+    profiles = _status_profile(["Open", "Completed", "Invoiced"])
+    assert [i.code for i in status_done_family_warnings(sm, profiles)] == [  # type: ignore[arg-type]
+        "status_done_ambiguous"
+    ]
+    done = Definition(
+        term="done order",
+        body="an order that is invoiced or completed",
+        about="orders.status",
+        sql_expr="orders.status IN ('Invoiced', 'Completed')",
+    )
+    # Writing exactly what the warning asked for silences it and trips nothing else.
+    assert definition_double_truth(done, sm.entities) is None
+    sm.definitions.append(done)
+    assert status_done_family_warnings(sm, profiles) == []  # type: ignore[arg-type]
+    # The exemption is the status column's: a plain field still carries two truths.
+    big = Definition(term="big", body="b", about="orders.amount", sql_expr="orders.amount > 100")
+    assert definition_double_truth(big, sm.entities) is not None
+    # ...and a status definition whose SQL never reads the column is still one.
+    off = Definition(term="off", body="b", about="orders.status", sql_expr="orders.amount > 100")
+    assert definition_double_truth(off, sm.entities) is not None
+
+
 def test_status_warning_is_silent_on_one_done_value_or_a_partial_dictionary() -> None:
     from services.validate.report import status_done_family_warnings
 
@@ -469,3 +495,27 @@ def test_status_warning_is_silent_on_one_done_value_or_a_partial_dictionary() ->
     other = _status_profile(["Completed", "Invoiced"])
     other["orders"].columns[1].name = "notes"  # type: ignore[attr-defined]
     assert status_done_family_warnings(sm, other) == []  # type: ignore[arg-type]
+
+
+def test_regular_expression_matches_are_predicates() -> None:
+    """A `sql:` using `~`, REGEXP or SIMILAR TO was refused as a derivation:
+    sqlglot parses regex matches as functions, not predicates."""
+    from services.runtime.compiler import is_predicate
+
+    for sql, dialect in (
+        ("name ~ '^ACME'", "postgres"),
+        ("name ~* 'acme'", "postgres"),
+        ("name REGEXP 'acme'", "duckdb"),
+        ("name RLIKE 'acme'", "snowflake"),
+        ("REGEXP_LIKE(name, 'acme')", "snowflake"),
+        ("REGEXP_CONTAINS(name, 'acme')", "bigquery"),
+        ("name SIMILAR TO 'ac%'", "postgres"),
+        ("NOT closed", "postgres"),
+        ("closed_at IS NULL", "postgres"),
+        ("amount BETWEEN 1 AND 2", "postgres"),
+        ("name LIKE 'a%'", "postgres"),
+        ("starts_with(name, 'a') AND amount > 1", "postgres"),
+    ):
+        assert is_predicate(sql, dialect), sql
+    for sql in ("amount * 2", "'done'", "closed_at", "COALESCE(amount, 0)"):
+        assert not is_predicate(sql, "postgres") or sql == "closed_at", sql

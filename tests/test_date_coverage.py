@@ -278,3 +278,31 @@ def test_a_snapshot_serve_carries_its_as_of() -> None:
     }
     res = _serve("Revenue in September 2026?", _SQL_SEPT, cov)
     assert "single snapshot as of 2026-06-05" in res.response.answer
+
+
+def test_a_dimension_table_never_fails_coverage() -> None:
+    """A customers table whose business date ends in March is not a period
+    the warehouse failed to load: without a ``default_time_field`` the entity
+    skips with its reason, never fails."""
+    from dataclasses import replace
+
+    from services.runtime.verification import date_coverage_check
+
+    cov = {
+        "customers": EntityCoverage(
+            table="main.customers",
+            column="created_at",
+            start=date(2024, 1, 1),
+            end=date(2025, 3, 15),
+            declared=False,
+            time_series=False,
+        )
+    }
+    sql = "SELECT COUNT(*) FROM main.customers WHERE created_at >= '2026-09-01'"
+    check = date_coverage_check("how many customers joined in September 2026?", sql, _model(), cov)
+    assert check.status == "skip"
+    assert "no default_time_field" in (check.reason or "")
+    # The same span on a time series still fails.
+    series = {"customers": replace(cov["customers"], time_series=True)}
+    status = date_coverage_check("customers in September 2026?", sql, _model(), series).status
+    assert status == "fail"

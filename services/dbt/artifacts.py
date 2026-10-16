@@ -165,6 +165,14 @@ def _parse_models(
                         description=_str(col.get("description")),
                     )
                 )
+        # The catalog is what the warehouse built; a schema.yml that documents
+        # fewer columns than the table holds must not shrink the entity.
+        documented = {c.name.lower() for c in columns}
+        columns += [
+            DbtColumn(name=cname, data_type=ctype)
+            for cname, ctype in catalog_cols.items()
+            if cname.lower() not in documented
+        ]
         models[alias] = DbtModel(
             unique_id=str(unique_id),
             name=name,

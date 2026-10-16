@@ -128,6 +128,23 @@ def resolve_expose(
                     continue
                 seen[entity.name] = profile.table
                 entities.append(entity)
+        granted = [p for p in known if any(_matches(t, p.table) for t in grant.tables)]
+        for pattern in grant.hide:
+            if granted and not any(
+                _matches(pattern, f"{p.table.rsplit('.', 1)[-1]}.{c.name}")
+                or _matches(pattern, f"{p.table}.{c.name}")
+                for p in granted
+                for c in p.columns
+            ):
+                # A hide that withholds nothing is a column the author believes
+                # is hidden and is not — the same silent miss as a table pattern
+                # matching nothing, and it fails the same way.
+                errors.append(
+                    f"lens '{config.name}' hides '{pattern}' on connection "
+                    f"'{grant.connection}' but no column of the exposed tables "
+                    f"({', '.join(p.table for p in granted)}) matches it — fix the "
+                    "pattern (`table.column`, the table bare or as profiled) or drop it"
+                )
     return entities, errors
 
 

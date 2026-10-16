@@ -253,10 +253,10 @@ def test_the_reconcile_grades_consumer_prose_the_same() -> None:
     assert "since September 2025" in notes
     out = faithfulness.reconcile(prose, result, question_text=_QUESTION, notes_text=notes)
     assert "48.9%" in out and "48.88" not in out
-    assert "since September 2025" in out and "over 26 games (as of 26 September)" in out
+    assert "since September 2025" in out and "over 26 games (as of 26 September)" in out  # noqa: E501
     assert faithfulness.numeric_check(out, result, question_text=_QUESTION, notes_text=notes) == (
         "pass",
-        None,
+        "26 games = a cell of `games`",
     )
     # …and without the scope on the grounding rail the same sentence is withheld
     assert faithfulness.numeric_check(out, result, question_text=_QUESTION)[0] == "fail"

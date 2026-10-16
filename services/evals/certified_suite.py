@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import calendar
 import datetime as _dt
+import decimal
 import json
 import math
 import re
@@ -170,7 +171,11 @@ def _shape_story(
 
 
 def _numeric(v: Any) -> bool:
-    return isinstance(v, int | float) and not isinstance(v, bool)
+    """A number cell. Exact-numeric columns arrive as ``decimal.Decimal`` from
+    the warehouse drivers (Postgres NUMERIC, the money and ratio columns), and
+    a reader that only knew int/float sent every such pair down the exact set
+    diff — a percentage beside a label column then failed its own fraction."""
+    return isinstance(v, int | float | decimal.Decimal) and not isinstance(v, bool)
 
 
 def _printed_decimals(want: Any) -> int:

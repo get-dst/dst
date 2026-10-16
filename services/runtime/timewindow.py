@@ -56,11 +56,15 @@ def _month_name(raw: str) -> str:
     return _ABBR.get(raw.lower(), raw.lower())
 
 
-# "January through August 2026", "March to June 2026", "Apr–Jun 2026": one
-# span, first month's start to last month's end, in the stated year.
+# "January through August 2026", "March to June 2026", "Apr–Jun 2026",
+# "from January to September 2026 inclusive", "between March and June 2026":
+# one span, first month's start to last month's END whatever the connector
+# word — "to" and "until" bind the last month whole, exactly like "through".
 _SPAN = re.compile(
-    rf"\b(?P<m1>{_MONTH_ANY})\.?\s*(?:through|thru|to|until|till|-|–|—)\s*"
-    rf"(?P<m2>{_MONTH_ANY})\.?\s+(?P<syear>(?:19|20)\d{{2}})\b",
+    rf"\b(?:from\s+|(?P<between>between)\s+)?(?P<m1>{_MONTH_ANY})\.?\s*"
+    rf"(?:through|thru|to|until|till|up to|-|–|—|(?(between)and|(?!)))\s*"
+    rf"(?P<m2>{_MONTH_ANY})\.?(?:\s+(?:inclusive|incl\.?))?\s+(?P<syear>(?:19|20)\d{{2}})"
+    rf"(?:\s+(?:inclusive|incl\.?))?\b",
     re.IGNORECASE,
 )
 _MONTH_WORD = re.compile(rf"\b(?P<month>{_MONTHS})\b", re.IGNORECASE)

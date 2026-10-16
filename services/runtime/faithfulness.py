@@ -387,22 +387,25 @@ def _count_column(noun: str, columns: Sequence[str]) -> int | None:
     return None
 
 
-def _count_grounds(result: QueryResult, col: int) -> tuple[list[float], str]:
-    """What a count of the things in column ``col`` can honestly be, and a
-    rendering of it for the failure reason. An integer column is per-group
-    counts: its cells and its sum. Any other column lists the things
-    themselves: its distinct non-null values, and the row count."""
+def _count_grounds(result: QueryResult, col: int) -> tuple[list[tuple[float, str]], str]:
+    """What a count of the things in column ``col`` can honestly be, each
+    labelled, and a rendering of it for the failure reason. An integer column
+    is per-group counts: its cells and its sum. Any other column lists the
+    things themselves: its distinct non-null values, and the row count."""
+    name = result.columns[col]
     cells = [row[col] for row in result.rows[:_TOTAL_ROW_CAP] if col < len(row)]
     present = [c for c in cells if c is not None]
     numeric = [_numeric_cell(c) for c in present]
     if present and all(v is not None and v == int(v) for v in numeric):
         ints = [v for v in numeric if v is not None]
         total = sum(ints)
-        return [*ints, total], f"{int(total):,} (the sum of `{result.columns[col]}`)"
+        grounds = [(v, f"a cell of `{name}`") for v in ints]
+        return [*grounds, (total, f"the sum of `{name}`")], f"{int(total):,} (the sum of `{name}`)"
     distinct = len({str(c) for c in present})
-    return [float(distinct), float(len(result.rows))], (
-        f"{distinct:,} distinct `{result.columns[col]}` over {len(result.rows):,} rows"
-    )
+    return [
+        (float(distinct), f"{distinct:,} distinct `{name}`"),
+        (float(len(result.rows)), f"the row count ({len(result.rows):,})"),
+    ], f"{distinct:,} distinct `{name}` over {len(result.rows):,} rows"
 
 
 def _distinct_counts(result: QueryResult) -> list[float]:
@@ -658,6 +661,7 @@ def numeric_check(
     clock_set = {float(y) for y in clock_years}
     grounded_any = False
     seen_claims = False
+    count_reasons: list[str] = []  # what each count claim matched — a pass names it
     for m, value, kind in _scan(answer_text):
         seen_claims = True
         if kind == "derived":
@@ -678,8 +682,12 @@ def numeric_check(
             and not _numbers(question_text).count(value)
         ):
             grounds, holds = _count_grounds(result, col)
-            if any(_matches(value, g) for g in grounds):
+            matched = next(
+                (label for g, label in grounds if _matches(value, g)), None
+            ) or _count_elsewhere(value, result)
+            if matched is not None:
                 grounded_any = True
+                count_reasons.append(f"{m.group(1)} {noun.group(1)} = {matched}")
                 continue
             return "fail", (
                 f"the answer states {m.group(1)} {noun.group(1)}, but the result holds {holds}"
@@ -736,7 +744,37 @@ def numeric_check(
         return "skip", "no_numeric_claims"
     if not grounded_any:
         return "skip", "only_derived_claims"
-    return "pass", None
+    return "pass", ("; ".join(count_reasons) if count_reasons else None)
+
+
+def _count_elsewhere(value: float, result: QueryResult) -> str | None:
+    """What else in the result a count claim honestly equals, named — the row
+    count, the distinct values of any column, the sum of any integer column,
+    or a cell. A correct "7" over 7 rows must never be withheld because the
+    column the noun names happens to count something else."""
+    if _matches(value, float(len(result.rows))):
+        return f"the row count ({len(result.rows):,})"
+    for i, name in enumerate(result.columns):
+        seen = {
+            str(row[i])
+            for row in result.rows[:_TOTAL_ROW_CAP]
+            if i < len(row) and row[i] is not None
+        }
+        if seen and _matches(value, float(len(seen))):
+            return f"{len(seen):,} distinct `{name}`"
+    for i, name in enumerate(result.columns):
+        cells = [_numeric_cell(row[i]) for row in result.rows[:_TOTAL_ROW_CAP] if i < len(row)]
+        present = [c for c in cells if c is not None]
+        if present and all(c == int(c) for c in present) and _matches(value, sum(present)):
+            return f"the sum of `{name}`"
+    for i, name in enumerate(result.columns):
+        if any(
+            (c := _numeric_cell(row[i])) is not None and _matches(value, c)
+            for row in result.rows[:_TOTAL_ROW_CAP]
+            if i < len(row)
+        ):
+            return f"a cell of `{name}`"
+    return None
 
 
 def is_grounded(

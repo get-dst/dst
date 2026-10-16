@@ -252,6 +252,20 @@ def test_hide_removes_the_column_and_the_guard_refuses_it() -> None:
     assert admitted.ok, admitted.reason
 
 
+def test_a_hide_pattern_that_withholds_nothing_fails_by_name() -> None:
+    # A column the author believes is hidden and is not would be served; the
+    # miss fails like a table pattern matching nothing.
+    _entities, errors = resolve_expose(_config(["staging.customers"], hide=["*.snn"]), _profiles())
+    assert len(errors) == 1
+    assert "hides '*.snn'" in errors[0] and "staging.customers" in errors[0]
+    for hide in ("*.ssn", "customers.SSN", "staging.customers.ssn"):
+        _entities, errors = resolve_expose(_config(["staging.customers"], hide=[hide]), _profiles())
+        assert errors == [], hide
+    # A table pattern that matched nothing is the error already reported.
+    _entities, errors = resolve_expose(_config(["staging.nothing"], hide=["*.snn"]), _profiles())
+    assert len(errors) == 1 and "no profiled table matches" in errors[0]
+
+
 def test_star_passes_on_an_exposed_only_statement_with_nothing_hidden() -> None:
     model = _compile(_config(["analytics.dim_*"]))
     assert next(e for e in model.entities if e.exposed).exposed_whole

@@ -145,6 +145,11 @@ class EntityCoverage:
     start: date
     end: date
     declared: bool
+    # False when the entity declares no ``default_time_field`` at all — a
+    # dimension table. Its business date (a customer's created_at) says when
+    # members were added, never which periods were loaded, so it can skip a
+    # coverage check with its reason but never fail one.
+    time_series: bool = True
 
     @property
     def snapshot(self) -> bool:
@@ -169,6 +174,7 @@ def entity_coverage(
             start=tc.min.date(),
             end=tc.max.date(),
             declared=entity.default_time_field == tc.column,
+            time_series=entity.default_time_field is not None,
         )
     return out
 

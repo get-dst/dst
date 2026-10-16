@@ -783,7 +783,16 @@ def test_build_sample_spec_exclusions_and_nothing_to_do() -> None:
         table="public.done",
         columns=[ColumnProfile(name="id", type="integer", description="pk", null_rate=0.0)],
     )
-    assert build_sample_spec(documented) is None  # no gaps, no time column → skip the table
+    # No gaps and no time column, but a numeric column with no measured mean:
+    # the distribution facts are read on their own, nothing else.
+    spec = build_sample_spec(documented)
+    assert spec is not None and [(c.name, c.distribution_only) for c in spec.columns] == [
+        ("id", True)
+    ]
+    measured = documented.model_copy(
+        update={"columns": [documented.columns[0].model_copy(update={"mean": 1.0})]}
+    )
+    assert build_sample_spec(measured) is None  # nothing left to read → skip the table
 
 
 def test_freshness_column_preference() -> None:
@@ -958,7 +967,10 @@ def test_run_sampling_pass_fills_gaps_merges_and_persists(
         _record_duckdb(conn, monkeypatch, recorded)
         with org_session(org) as s:
             again = run_sampling_pass(s, conn, "jaffle", tables=["orders", "customers"])
-        assert recorded and all(q.startswith("SELECT MIN(") for q in recorded)
+        # ...plus the one distribution read (means, offsets) no catalog supplies.
+        assert recorded and all(
+            q.startswith("SELECT MIN(") or ("AVG(" in q and "nn_" not in q) for q in recorded
+        )
         orders_again = {p.table: p for p in again}["orders"]
         assert orders_again.source == "sampled"  # provenance sticks
         assert _col(orders_again, "status").top_values == status.top_values

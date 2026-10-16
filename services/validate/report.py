@@ -422,6 +422,11 @@ def collapse_warnings(issues: Sequence[Issue]) -> list[str]:
     return out
 
 
+def _mentions_column(sql_expr: str, column: str) -> bool:
+    """The expression reads the column (bare or entity-qualified, whole word)."""
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])", sql_expr) is not None
+
+
 def definition_double_truth(d: Definition, entities: Sequence[Entity]) -> Issue | None:
     """ONE rule, ONE wording for both lint paths — compiled bundles below and
     the shared-asset lint at apply (R11: a definition no lens selects never
@@ -434,6 +439,11 @@ def definition_double_truth(d: Definition, entities: Sequence[Entity]) -> Issue 
     entity_name, _, member = d.about.partition(".")
     entity = next((e for e in entities if e.name == entity_name), None)
     if entity is not None and member and any(m.name == member for m in entity.metrics):
+        return None
+    if member and _STATUS_COLUMN.search(member) and _mentions_column(d.sql_expr or "", member):
+        # A definition about a status column whose SQL is a predicate on that
+        # column is the one `status_done_ambiguous` asks for (which values
+        # count as done); the two lints must never fire against each other.
         return None
     return Issue(
         severity="warning",

@@ -37,6 +37,7 @@ from services.contracts.profile import (
     SampleWindow,
     TableProfile,
     TableSampleSpec,
+    is_numeric_type,
     is_temporal_type,
     is_text_type,
 )
@@ -167,8 +168,6 @@ def build_sample_spec(
                 )
             )
     freshness = _freshness_column(profile, excluded)
-    if not columns and freshness is None:
-        return None
     by_name = {c.name: c for c in profile.columns}
     window_type = by_name[window.column].type if window and window.column in by_name else ""
     # The offset anchor must be a real time column of this table that is not
@@ -181,6 +180,25 @@ def build_sample_spec(
         and not _shape_only(profile.table, time_field, excluded)
         else None
     )
+    # A catalog that measured a column's values (Postgres' pg_stats) leaves no
+    # gap, yet no catalog carries a mean or a clock offset — and a baseline
+    # without them can never see a distribution shift. Those facts are read
+    # on their own for every numeric and time column the gap pass skipped.
+    gaps = {c.name for c in columns}
+    for c in profile.columns:
+        if c.name in gaps or _shape_only(profile.table, c.name, excluded):
+            continue
+        wants_mean = is_numeric_type(c.type) and c.mean is None
+        wants_offset = (
+            is_temporal_type(c.type)
+            and anchor is not None
+            and c.name != anchor
+            and c.time_offset_seconds is None
+        )
+        if wants_mean or wants_offset:
+            columns.append(ColumnSampleSpec(name=c.name, type=c.type, distribution_only=True))
+    if not columns and freshness is None:
+        return None
     return TableSampleSpec(
         table=profile.table,
         columns=columns,

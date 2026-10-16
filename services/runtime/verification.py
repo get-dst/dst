@@ -555,6 +555,23 @@ def _all_ones_ratio(sql: str, result: QueryResult) -> VerificationCheck:
     if not named and not divides:
         return VerificationCheck(name="all_ones_ratio", status="skip", reason="not a ratio result")
     if len(result.rows) < 2:
+        # One row cannot show the per-row pattern; the SQL can. A ratio of
+        # exactly 1 whose numerator and denominator are filtered by the same
+        # predicate is the same pin, read statically — deterministic, so it
+        # fails; anything less certain stays a skip.
+        cells = [
+            v
+            for v in (result.rows[0] if result.rows else [])
+            if isinstance(v, int | float | decimal.Decimal) and not isinstance(v, bool)
+        ]
+        shared = _shared_ratio_filter(sql) if any(float(v) in (1.0, 100.0) for v in cells) else None
+        if shared is not None:
+            return VerificationCheck(
+                name="all_ones_ratio",
+                status="fail",
+                reason=f"numerator and denominator share the filter ({shared}) — the "
+                "ratio is pinned to 1 by construction, not measured",
+            )
         return VerificationCheck(
             name="all_ones_ratio",
             status="skip",
@@ -591,6 +608,85 @@ def _all_ones_ratio(sql: str, result: QueryResult) -> VerificationCheck:
             "denominator"
         ),
     )
+
+
+def _aggregate_condition(node: exp.Expression) -> exp.Expression | None:
+    """The predicate an aggregate counts under: its FILTER (WHERE …) clause,
+    or the single WHEN of a CASE it aggregates (`SUM(CASE WHEN p THEN 1 END)`,
+    `COUNT(CASE WHEN p THEN 1 END)`). None for a plain aggregate."""
+    while True:
+        if isinstance(node, exp.Paren | exp.Cast | exp.Nullif):
+            node = node.this
+        elif isinstance(node, exp.Mul | exp.Div) and isinstance(node.expression, exp.Literal):
+            node = node.this  # `SUM(…) * 1.0`: the scale is not the aggregate
+        elif isinstance(node, exp.Mul) and isinstance(node.this, exp.Literal):
+            node = node.expression
+        else:
+            break
+    if isinstance(node, exp.Anonymous) and str(node.name).upper() == "COUNTIF":
+        first = node.expressions[0] if node.expressions else None
+        return first if isinstance(first, exp.Expression) else None
+    if isinstance(node, exp.CountIf):
+        this = node.this
+        return this if isinstance(this, exp.Expression) else None
+    if isinstance(node, exp.Filter):
+        where = node.expression
+        return where.this if isinstance(where, exp.Where) else None
+    if isinstance(node, exp.AggFunc):
+        inner = node.this
+        while isinstance(inner, exp.Paren | exp.Cast):
+            inner = inner.this
+        if isinstance(inner, exp.Case):
+            ifs = inner.args.get("ifs", [])
+            if len(ifs) == 1 and isinstance(ifs[0].this, exp.Expression):
+                return ifs[0].this
+    return None
+
+
+def _shared_ratio_filter(sql: str) -> str | None:
+    """The predicate a ratio's numerator and denominator BOTH apply, as text,
+    or None. Shared when the two aggregates count under the same condition,
+    or when one side's condition is also a conjunct of the WHERE clause (the
+    denominator is then filtered to the numerator's rows). Parse failures and
+    SQL with no division read as not shared — this is a tripwire, never a
+    guess."""
+    try:
+        tree = sqlglot.parse_one(sql)
+    except Exception:  # noqa: BLE001 — unparseable SQL is not a shared filter
+        return None
+    division = tree.find(exp.Div)
+    num_den: tuple[exp.Expression, exp.Expression] | None = None
+    if division is not None:
+        num_den = (division.this, division.expression)
+    else:
+        safe = next(
+            (
+                f
+                for f in tree.find_all(exp.Anonymous)
+                if str(f.name).upper() == "SAFE_DIVIDE" and len(f.expressions) == 2
+            ),
+            None,
+        )
+        if safe is not None:
+            num_den = (safe.expressions[0], safe.expressions[1])
+    if num_den is None:
+        return None
+    conditions = [_aggregate_condition(side) for side in num_den]
+    where = tree.find(exp.Where)
+    clause = where.this if where is not None else None
+    parts: list[exp.Expression] = []
+    if isinstance(clause, exp.And):
+        parts = [c for c in clause.flatten() if isinstance(c, exp.Expression)]
+    elif isinstance(clause, exp.Expression):
+        parts = [clause]
+    conjuncts = [_strip_refs(c.copy()).sql() for c in parts]
+    texts = [_strip_refs(c.copy()).sql() if c is not None else None for c in conditions]
+    if texts[0] is not None and texts[0] == texts[1]:
+        return texts[0]
+    for t in texts:
+        if t is not None and t in conjuncts:
+            return t
+    return None
 
 
 def _strip_refs(node: exp.Expression) -> exp.Expression:
@@ -794,6 +890,7 @@ def date_coverage_check(
         )
     filtered = _filtered_columns(sql, model.dialect)
     problems: list[str] = []
+    dimensions: list[str] = []
     for name, cov in sorted(coverage.items()):
         if cov.column.lower() not in filtered:
             # Nothing pinned rows to this table's clock — its span cannot have
@@ -802,6 +899,11 @@ def date_coverage_check(
             continue
         table = cov.table.split(".")[-1]
         if not re.search(rf"\b{re.escape(name)}\b|\b{re.escape(table)}\b", sql, re.IGNORECASE):
+            continue
+        if not cov.time_series:
+            # A dimension's date is when its members arrived, not a loaded
+            # period: nothing here can prove the asked window was never loaded.
+            dimensions.append(f"{name} ({cov.column})")
             continue
         if all(start > cov.end for start, _ in ranges):
             if cov.snapshot:
@@ -822,6 +924,15 @@ def date_coverage_check(
                 + "; ".join(problems)
                 + " — an empty or zero result here means the period was never "
                 "loaded, not that nothing happened"
+            ),
+        )
+    if dimensions:
+        return VerificationCheck(
+            name="date_coverage",
+            status="skip",
+            reason=(
+                f"{', '.join(dimensions)} declares no default_time_field — a dimension's "
+                "date span says when members were added, not which periods were loaded"
             ),
         )
     return VerificationCheck(name="date_coverage", status="pass")
@@ -1024,6 +1135,11 @@ def build_report(
 # advisory (fold_judge), so partial_reason never names it.
 _ADVISORY = frozenset({"judge"})
 
+# The checks a certified serve's grade does not read: the judge (advisory
+# everywhere) and definition_applied, which abstains on certified SQL by
+# contract — the SQL is approved, not generated from the definition.
+CERTIFIED_WAIVED = _ADVISORY | {"definition_applied"}
+
 
 def partial_reason(grade: Grade, checks: list[VerificationCheck]) -> str | None:
     """Why the grade is `partial`, named — never a bare word. The first
@@ -1196,20 +1312,16 @@ def _with_grade(
     fails = {c.name for c in checks if c.status == "fail"}
     grade: Grade
     if certification == "certified":
-        # Certified is the top tier: the SQL is human-approved. Only prose that
-        # contradicts the (approved) result — or a payload that doesn't carry all
-        # of it — can demote it. Approved SQL served short is still a short answer:
-        # "verified" over a truncated payload is the certification badge vouching
-        # for rows the caller never received. Stale is the
-        # third demotion: approval vouches for the SQL, not for month-old data —
-        # a certified serve past the declared freshness contract is still stale.
-        # Coverage is the fourth, for the same reason: approval vouches for the
-        # SQL's meaning, never for a period the warehouse hasn't loaded.
-        grade = (
-            "partial"
-            if fails & {"numeric_grounding", "not_truncated", "freshness", "date_coverage"}
-            else "verified"
-        )
+        # Certified is the top tier: the SQL is human-approved, so the checks
+        # that ask whether GENERATION honoured the model are waived
+        # (`CERTIFIED_WAIVED`: definition_applied abstains by contract, the
+        # judge is advisory). Everything else still binds, and a fail demotes:
+        # prose that contradicts the approved result, a payload served short,
+        # data past the freshness contract, a period the warehouse never
+        # loaded, a shape or scope the serve got wrong. Approval vouches for
+        # the SQL's meaning, never for what happened around it — "verified"
+        # over a failed check is the badge vouching for a miss.
+        grade = "partial" if fails - CERTIFIED_WAIVED else "verified"
     elif fails & {"numeric_grounding", "intent_alignment"}:
         grade = "unverified"
     elif fails or (composed and numeric_status == "skip") or _semantic_abstained(checks):

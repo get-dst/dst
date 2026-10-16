@@ -458,17 +458,18 @@ def stats_sql(
     anchor = _quote_name(time_field, dialect) if time_field else None
     for i, col in enumerate(columns):
         qc = _quote_name(col.name, dialect)
-        selects.append(f"COUNT({qc}) AS nn_{i}")
-        if approx is not None:
-            selects.append(f"{approx}({qc}) AS dc_{i}")
-        else:
-            selects.append(f"COUNT(DISTINCT {qc}) AS dc_{i}")
-        if col.shape_only:
-            continue
         numeric, temporal = is_numeric_type(col.type), is_temporal_type(col.type)
-        if numeric or temporal:
-            selects.append(f"MIN({qc}) AS mn_{i}")
-            selects.append(f"MAX({qc}) AS mx_{i}")
+        if not col.distribution_only:
+            selects.append(f"COUNT({qc}) AS nn_{i}")
+            if approx is not None:
+                selects.append(f"{approx}({qc}) AS dc_{i}")
+            else:
+                selects.append(f"COUNT(DISTINCT {qc}) AS dc_{i}")
+            if col.shape_only:
+                continue
+            if numeric or temporal:
+                selects.append(f"MIN({qc}) AS mn_{i}")
+                selects.append(f"MAX({qc}) AS mx_{i}")
         if numeric:
             selects.append(f"AVG({qc}) AS av_{i}")
         if temporal and anchor is not None and col.name != time_field:
@@ -758,8 +759,8 @@ def _fold_stats(
     scanned = _as_int(row[idx["n_rows"]]) or 0
     profiles: list[ColumnProfile] = []
     for i, spec in enumerate(columns):
-        non_null = _as_int(row[idx[f"nn_{i}"]])
-        distinct = _as_int(row[idx[f"dc_{i}"]])
+        non_null = _as_int(row[idx[f"nn_{i}"]]) if f"nn_{i}" in idx else None
+        distinct = _as_int(row[idx[f"dc_{i}"]]) if f"dc_{i}" in idx else None
         # An estimate that exceeds the rows it was computed over is self-evidently
         # broken — approx_count_distinct claimed 520 distinct ids in 500 rows.
         # Sampled, the clamped number is a lower bound on the table's cardinality.

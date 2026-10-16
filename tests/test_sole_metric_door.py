@@ -108,3 +108,39 @@ def test_the_query_door_serves_the_compiled_metric_without_generation(
         assert routed["answer"]["sql"] == body["sql"]
     finally:
         _cleanup(settings.database_admin_url, org)
+
+
+@needs_db
+@pytest.mark.parametrize("typed_serving", ["off", "auto"])
+def test_the_served_ledger_reads_construction_on_both_typed_settings(
+    monkeypatch: pytest.MonkeyPatch, typed_serving: str
+) -> None:
+    """The compiled metric is not only the SQL: the resolution ledger the
+    caller reads must say ``construction``, with the metric as a declared
+    slot — an ``attributed`` ledger here means generation ran after all."""
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(settings, "typed_serving", typed_serving)
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider", lambda _key, **_: _NeverGenerates()
+    )
+    _dead_embedder(monkeypatch)
+    auth = {"Authorization": f"Bearer {raw}"}
+    try:
+        r = client.post(
+            "/v1/lenses/customer_value/query",
+            json={"q": "what is revenue?", "format": "structured"},
+            headers=auth,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ok", body
+        ledger = body["resolution"]
+        assert ledger is not None and ledger["method"] == "construction", ledger
+        assert any(
+            s["kind"] == "metric" and s["name"] == "revenue" and s["source"] == "declared"
+            for s in ledger["slots"]
+        ), ledger
+    finally:
+        _cleanup(settings.database_admin_url, org)

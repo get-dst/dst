@@ -58,6 +58,7 @@ class _Answer:
     question: str = _THIS_QUARTER_Q
     sql: str = _THIS_QUARTER_SQL
     slots: dict[str, str] | None = None
+    resolution: dict[str, object] | None = None
 
 
 @dataclass
@@ -210,3 +211,23 @@ def test_an_iso_date_is_that_day_not_its_year() -> None:
     assert window_ranges(terms, date(2026, 10, 15)) == [(date(2026, 8, 31), date(2026, 8, 31))]
     assert temporal_mismatch("ARR as of 2026-08-31", "ARR as of 2026-09-30")
     assert window_ranges(temporal_terms("as of 2026-02-30"), date(2026, 10, 15)) == []
+
+
+def test_month_span_phrasings_all_bind_the_last_month_whole() -> None:
+    """ "January to September inclusive" dropped September 30: the span only
+    parsed with "through". Every connector word binds the last month's end."""
+    from datetime import date
+
+    from services.runtime.timewindow import window_ranges
+
+    for text in (
+        "revenue January to September 2026 inclusive",
+        "revenue from January through September 2026",
+        "revenue between January and September 2026",
+        "revenue January until September 2026",
+        "revenue Jan-Sep 2026",
+        "revenue January to September inclusive 2026",
+    ):
+        terms = temporal_terms(text)
+        assert "span:january-september" in terms, text
+        assert window_ranges(terms, date(2026, 10, 1)) == [(date(2026, 1, 1), date(2026, 9, 30))]

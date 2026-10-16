@@ -4533,6 +4533,9 @@ def _test(args: argparse.Namespace) -> int:
                         say(
                             _ledger_line(
                                 f"PASS  {label}: {r.question}"
+                                # A lenient pass says how it passed, here as in
+                                # --json: a reader of either sees the same bridge.
+                                + (f" ({r.reason})" if r.reason else "")
                                 + (
                                     f" [resolution: {r.stage_evidence}]"
                                     if r.ungoverned_pass

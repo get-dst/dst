@@ -469,10 +469,18 @@ def _join_plan(
 
 
 _PREDICATES = (
-    exp.Predicate,  # comparisons, IN, IS, LIKE, BETWEEN, EXISTS
+    exp.Predicate,  # comparisons, IN, IS, LIKE, SIMILAR TO, GLOB, BETWEEN, EXISTS
     exp.Connector,  # AND / OR
     exp.Not,
     exp.Boolean,
+    # Regular-expression matches parse as functions, not predicates: `~`,
+    # `~*`, REGEXP, RLIKE, REGEXP_LIKE / REGEXP_CONTAINS / regexp_matches.
+    exp.RegexpLike,
+    exp.RegexpILike,
+    exp.RegexpFullMatch,
+    exp.StartsWith,
+    exp.EndsWith,
+    exp.Contains,
 )
 
 

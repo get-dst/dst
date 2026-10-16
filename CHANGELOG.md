@@ -73,6 +73,51 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.10.1] — 2026-10-16
+
+No schema change. Upgrade fix: 0.10.0's certified plan check rejected valid corpora;
+upgrade to this release before applying a 0.9.x project.
+
+### Fixed
+
+- **Upgrade fix: the certified plan check no longer rejects legitimate near-paraphrases.** Two
+  certified answers above the paraphrase band with different SQL fail plan and apply only
+  when both name the same governed names including a metric or definition, or share no
+  distinguishing name inside the exact band; every other pair is a warning. A stored row the
+  file no longer carries is not compared, so a rename lands in one apply. One-line fix for a
+  corpus that still fails: reword one question so it names its metric.
+- **Template hits respect the lexical veto.** A certified template never binds for a question
+  naming a different governed term; the veto also reads each answer's own resolution ledger,
+  folds regular English inflections (invoice, invoiced, invoicing), and lets a distinctive
+  word of a multi-word name stand for it. Entity names join the governed set.
+- **`status_done_ambiguous` and `definition_double_truth` can no longer fire for the same
+  column**: a definition about a status column whose `sql:` reads it is exempt from double
+  truth.
+- **A `hide:` pattern that matches no column of the exposed tables fails plan and apply**,
+  naming the pattern.
+- **Correct counts are never withheld.** A count claim grounds on the noun's column first, then
+  the row count, the distinct values of any column, the sum of any integer column, or any
+  cell; `numeric_grounding` names which one matched on a pass.
+- **dbt manifest-only import writes `table: schema.alias`** and keeps every catalog column even
+  when `schema.yml` documents fewer.
+- **`dst test` prints the lenient reason on the PASS line**, as `--json` already did.
+- **A certified serve demotes to `partial` on any failed check** except the two the certified
+  contract waives (`definition_applied`, which abstains on approved SQL, and the advisory
+  `judge`).
+- **Semantic drift fires on Postgres.** Numeric and time columns the catalog already measured
+  are still sampled for their mean and median clock offset, without overwriting catalog
+  facts; a column comment that appears or disappears is `column_recommented`.
+- **A dimension table (no `default_time_field`) never fails `date_coverage`**; it skips with
+  the reason.
+- **Month spans bind the last month whole under every phrasing**: "to", "until", "up to",
+  "between … and", "inclusive", "from … through".
+- **A single-row ratio of exactly 1 whose numerator and denominator share a filter predicate
+  fails `all_ones_ratio`** naming the predicate; other single rows stay a skip.
+- **`dst test` treats `Decimal` cells as numbers**, so a percentage beside a label column
+  passes value-equivalent against its fraction.
+- **Regular-expression matches are predicates** in the definition filter check (`~`, `~*`,
+  `REGEXP`, `RLIKE`, `SIMILAR TO`, `REGEXP_LIKE`, `REGEXP_CONTAINS`, `starts_with`).
+
 ## [0.10.0] — 2026-10-16
 
 No schema change. Behaviour changes: explicit date ranges are inclusive; an exposed read

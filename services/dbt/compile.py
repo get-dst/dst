@@ -98,9 +98,19 @@ def _qualify(entity_name: str, expr: str) -> str:
     return f"{entity_name}.{expr}"
 
 
-def _table_name(sm: DbtSemanticModel, strategy: str) -> str:
+def _table_name(
+    sm: DbtSemanticModel, strategy: str, model: DbtModel | None, *, manifest_only: bool
+) -> str:
+    """The physical table an entity reads. ``relation_name`` is dbt's own fully
+    qualified relation; ``alias`` is the model alias, and on a manifest-only
+    import it is written under the schema dbt built it in (``marts.orders``) —
+    a bare alias resolves only in the connection's default schema, which is
+    rarely where dbt writes. The catalog (BigQuery project, Snowflake database)
+    is the connection's to supply at compile time, never the file's."""
     if strategy == "relation_name" and sm.relation_name:
         return sm.relation_name.replace('"', "")
+    if manifest_only and model is not None and model.schema and "." not in sm.model_alias:
+        return f"{model.schema}.{sm.model_alias}"
     return sm.model_alias
 
 
@@ -170,7 +180,10 @@ def _compile_entity(
     entity = Entity(
         name=sm.name,
         description=sm.description,
-        source=EntitySource(connection=connection, table=_table_name(sm, strategy)),
+        source=EntitySource(
+            connection=connection,
+            table=_table_name(sm, strategy, model, manifest_only=artifacts.manifest_only),
+        ),
         default_time_field=default_time,
         primary_key=primary_key,
         fields=_fields(model),

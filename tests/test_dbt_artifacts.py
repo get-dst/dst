@@ -125,7 +125,7 @@ def test_no_semantic_layer_imports_manifest_models(tmp_path: Path) -> None:
     result = import_shared_assets(art, connection="warehouse")
     assert [e.name for e in result.entities] == ["orders"]
     orders = result.entities[0]
-    assert orders.source.table == "orders"
+    assert orders.source.table == "main.orders"  # the schema dbt built it in
     assert orders.primary_key == ["order_id"]
     assert orders.description == "One row per order."
     assert {f.name: f.type for f in orders.fields} == {
@@ -162,6 +162,6 @@ def test_import_dbt_cli_says_what_it_imported(
     assert _import_dbt(args) == 0
     out = capsys.readouterr().out
     assert "no semantic layer found" in out
-    assert "entity orders: orders, 3 fields, key order_id" in out
+    assert "entity orders: main.orders, 3 fields, key order_id" in out
     assert "metrics and dimensions still need authoring" in out
     assert (project / "semantic" / "entities" / "orders.yaml").exists()

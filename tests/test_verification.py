@@ -485,7 +485,9 @@ def test_fuzzy_certified_serve_is_judged_and_noted() -> None:
     the highest trust tier had the thinnest verification. A serve whose asked
     question is not the certified question gets the judge, and its reject is
     recorded as the judge check; the grade is the deterministic checks' own
-    (the judge is advisory)."""
+    (the judge is advisory) — here the window check, which fails on approved
+    SQL with no date handling asked about last quarter, and that fail demotes
+    a certified serve like any other."""
     judge_llm = ScriptedLLM(['{"verdict": "reject", "reasoning": "SQL window != asked window"}'])
     res = run_query(
         question="How many leads did we generate last quarter?",
@@ -505,7 +507,9 @@ def test_fuzzy_certified_serve_is_judged_and_noted() -> None:
     judge = res.response.verification.check("judge")
     assert judge is not None and judge.status == "fail"
     assert "SQL window" in (judge.reason or "")
-    assert res.response.confidence == "verified"
+    assert res.response.confidence == "partial"
+    assert "window" in (res.response.verification.partial_reason or "")
+    assert "judge" not in (res.response.verification.partial_reason or "")
 
 
 def test_judge_reads_the_governed_context_the_composer_had() -> None:
@@ -1493,8 +1497,14 @@ def test_a_ratio_rendered_as_100_on_every_row_fails_too() -> None:
 
 
 def test_a_ratio_with_one_row_skips_with_a_reason_never_a_pass() -> None:
+    # The helper's SQL pins both sides to `delivered_at <= due_at`: one row
+    # of exactly 1.0 over it is the pin read statically, and fails by name.
     report = _ratio_report([["dhl", 1.0]])
     check = report.check("all_ones_ratio")
+    assert check is not None and check.status == "fail"
+    assert "share the filter (delivered_at <= due_at)" in (check.reason or "")
+    # A row below 1 shows no pin; a single row over an honest filter is a skip.
+    check = _ratio_report([["dhl", 0.93]]).check("all_ones_ratio")
     assert check is not None and check.status == "skip"
     assert "single-row" in (check.reason or "")
 
@@ -1663,17 +1673,50 @@ def test_a_certified_no_answer_refuses_instead_of_grading_verified() -> None:
 
 def test_a_count_claim_is_graded_against_the_column_it_counts() -> None:
     """ "7 contracts" over per-status rows whose `contracts` sum to 6 served
-    grounded, because a 7 sat elsewhere in the result."""
+    grounded, because a 7 sat elsewhere in the result. The column the noun
+    names is read first; a figure the result holds nowhere fails."""
     result = QueryResult(
-        columns=["status", "contracts", "days_open"], rows=[["a", 2, 7], ["b", 3, 7], ["c", 1, 7]]
+        columns=["status", "contracts", "days_open"], rows=[["a", 2, 9], ["b", 3, 9], ["c", 1, 9]]
     )
     status, reason = numeric_check("There are 7 contracts across 3 statuses.", result)
     assert status == "fail"
     assert (
         reason == "the answer states 7 contracts, but the result holds 6 (the sum of `contracts`)"
     )
-    assert numeric_check("There are 6 contracts across 3 statuses.", result) == ("pass", None)
-    assert numeric_check("Status b has 3 contracts.", result) == ("pass", None)
+    assert numeric_check("There are 6 contracts across 3 statuses.", result) == (
+        "pass",
+        "6 contracts = the sum of `contracts`",
+    )
+    assert numeric_check("Status b has 3 contracts.", result) == (
+        "pass",
+        "3 contracts = a cell of `contracts`",
+    )
+
+
+def test_a_correct_count_is_never_withheld_when_the_result_holds_it() -> None:
+    """A "7" over 7 rows was withheld because the column the noun bound counted
+    something else. The noun's column is read first, then the row count, the
+    distinct values of any column, the sum of any integer column, and any
+    cell — and a pass names which one matched, so the grade is never a bare
+    word."""
+    rows = [["a", 2, 1], ["b", 3, 1], ["c", 1, 1], ["d", 1, 1], ["e", 1, 1], ["f", 1, 1]]
+    result = QueryResult(columns=["status", "contracts", "flag"], rows=[*rows, ["g", 1, 1]])
+    assert numeric_check("7 contracts are open.", result) == (
+        "pass",
+        "7 contracts = the row count (7)",
+    )
+    assert numeric_check("10 contracts in total.", result) == (
+        "pass",
+        "10 contracts = the sum of `contracts`",
+    )
+    by_region = QueryResult(
+        columns=["region", "contracts"], rows=[["n", 5], ["s", 5], ["n", 5], ["e", 5]]
+    )
+    assert numeric_check("3 contracts.", by_region) == ("pass", "3 contracts = 3 distinct `region`")
+    cell = QueryResult(columns=["status", "contracts", "days"], rows=[["a", 2, 9], ["b", 3, 9]])
+    assert numeric_check("9 contracts.", cell) == ("pass", "9 contracts = a cell of `days`")
+    status, reason = numeric_check("11 contracts.", cell)
+    assert status == "fail" and reason is not None and "11 contracts" in reason
 
 
 def test_a_count_of_listed_things_grounds_on_distinct_values_and_rows() -> None:
@@ -1681,14 +1724,20 @@ def test_a_count_of_listed_things_grounds_on_distinct_values_and_rows() -> None:
         columns=["contract_id", "amount"],
         rows=[["c1", 7], ["c2", 7], ["c3", 7], ["c4", 7], ["c5", 7], ["c6", 7]],
     )
-    assert numeric_check("6 contracts were found.", result) == ("pass", None)
-    status, reason = numeric_check("7 contracts were found.", result)
+    assert numeric_check("6 contracts were found.", result) == (
+        "pass",
+        "6 contracts = 6 distinct `contract_id`",
+    )
+    status, reason = numeric_check("8 contracts were found.", result)
     assert status == "fail" and reason is not None and "6 distinct `contract_id`" in reason
 
 
 def test_distinct_counts_ground_a_group_count() -> None:
     result = QueryResult(columns=["region", "revenue"], rows=[["n", 10], ["s", 20], ["n", 5]])
-    assert numeric_check("Revenue is 35 across 2 regions.", result) == ("pass", None)
+    assert numeric_check("Revenue is 35 across 2 regions.", result) == (
+        "pass",
+        "2 regions = 2 distinct `region`",
+    )
 
 
 def test_count_claims_keep_hyphen_and_timestamp_tokens_out() -> None:
@@ -1696,10 +1745,40 @@ def test_count_claims_keep_hyphen_and_timestamp_tokens_out() -> None:
     # The -08/-15 of a date and the 5 of a range are not claims; the 4 is.
     assert numeric_check(
         "4 contracts on 2026-08-15, rated 4-5.", result, sql_text="SELECT 1 WHERE d >= '2026-08-15'"
-    ) == ("pass", None)
+    ) == ("pass", "4 contracts = a cell of `contracts`")
     # A question echo stays an echo.
     assert numeric_check(
         "No customers with 9 contracts: 0 contracts.",
         QueryResult(columns=["contracts"], rows=[]),
         question_text="customers with 9 contracts",
-    ) == ("pass", None)
+    ) == ("pass", "0 contracts = 0 distinct `contracts`")
+
+
+# ── a single-row ratio pinned by a shared filter ─────────────────────────────
+
+
+def test_a_single_row_ratio_of_one_fails_when_both_sides_share_the_filter() -> None:
+    """587/587 → 1.0 served verified: one row cannot show the per-row pattern,
+    but the SQL can — the numerator's condition is also the WHERE clause."""
+    from services.runtime.verification import _all_ones_ratio
+
+    one = QueryResult(columns=["rate"], rows=[[1.0]])
+    pinned = (
+        "SELECT SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS rate "
+        "FROM jobs WHERE status = 'done'"
+    )
+    check = _all_ones_ratio(pinned, one)
+    assert check.status == "fail"
+    assert check.reason is not None and "share the filter (status = 'done')" in check.reason
+    filtered = (
+        "SELECT COUNT(*) FILTER (WHERE delivered <= due) * 1.0 / COUNT(*) AS rate "
+        "FROM d WHERE delivered <= due AND region = 'n'"
+    )
+    assert _all_ones_ratio(filtered, one).status == "fail"
+    # Different filters, or a ratio below 1, stay a skip on one row.
+    honest = (
+        "SELECT SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS rate "
+        "FROM jobs WHERE region = 'n'"
+    )
+    assert _all_ones_ratio(honest, one).status == "skip"
+    assert _all_ones_ratio(pinned, QueryResult(columns=["rate"], rows=[[0.8]])).status == "skip"

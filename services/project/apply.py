@@ -1151,7 +1151,7 @@ def check_lens(
         if str(answer.get("question", "")).strip()
         for e in _certified_entry_errors(answer, model)
     ]
-    errors += _cross_match_errors(session, name, source, model)
+    errors += _cross_match_errors(session, name, source, model, warnings_out)
     errors += _starvation_errors(session, name, source)
     gate_errors, _report = _deterministic_gates(
         session, name, store.LensBundle(config=config, semantic_model=model)
@@ -1885,7 +1885,11 @@ def _sql_text(sql: object) -> str:
 
 
 def _cross_match_errors(
-    session: Session, name: str, source: LensSource, model: SemanticModel
+    session: Session,
+    name: str,
+    source: LensSource,
+    model: SemanticModel,
+    warnings_out: list[str] | None = None,
 ) -> list[str]:
     """Two certified answers that would answer each other's question.
 
@@ -1894,12 +1898,23 @@ def _cross_match_errors(
     other's question as ``certified``. That is a static inconsistency, so it
     dies here, at plan and apply alike: every incoming question's anchor is
     embedded once and compared against the other incoming anchors and against
-    the stored corpus (rows the file does not carry). A pair above the
-    equivalence band whose SQL differs is an error naming both questions; the
-    author rewords one or merges them. Same SQL is one answer under two
-    phrasings, which is fine. Without an embedder nothing can be measured and
-    nothing is reported (the unembedded-corpus warning already says matching
-    is off)."""
+    the stored corpus (rows the file does not carry). Same SQL is one answer
+    under two phrasings, which is fine.
+
+    The score alone is not the verdict — real corpora hold legitimate pairs
+    above the band ("MRR today" / "ARR today"), and serving already separates
+    those by the governed names each question carries (the lexical veto). So a
+    pair above the equivalence band whose SQL differs is an ERROR only when the
+    two questions name the same governed names (metrics, definitions, entities)
+    and a metric or definition is among them (nothing downstream can tell them
+    apart), or when the same set carries no metric or definition and the score
+    sits in the exact band ("how many customers churned" / "which customers
+    churned" is a warning at 0.92); any other pair is a WARNING in
+    ``warnings_out``. A stored row the file no longer carries is deleted by this
+    apply (files win), so it is not compared; a stored row under a question the
+    file carries is the same answer, not a pair. Without an embedder nothing
+    can be measured and nothing is reported (the unembedded-corpus warning
+    already says matching is off)."""
     entries = [
         a
         for a in source.certified_answers or []
@@ -1915,6 +1930,7 @@ def _cross_match_errors(
         return []
     if embedder is None:
         return []
+    from services.certify.lexical import governed_names, measure_names, names_in
     from services.runtime.assembly import certified_bands
 
     anchors = [_anchor_question(a) for a in entries]
@@ -1922,21 +1938,39 @@ def _cross_match_errors(
         vectors = [list(v) for v in embedder.embed(anchors)]
     except Exception:  # noqa: BLE001 — same: the store path names a failing embedder
         return []
-    equiv = certified_bands().equiv
+    bands = certified_bands()
+    names = governed_names(model)
+    measures = measure_names(model)
     incoming = {str(a.get("question", "")).strip().lower() for a in entries}
     seen: set[frozenset[str]] = set()
     errors: list[str] = []
 
-    def _report(q1: str, sql1: object, q2: str, sql2: object, score: float) -> None:
+    def _report(  # noqa: PLR0913
+        q1: str, a1: str, sql1: object, q2: str, a2: str, sql2: object, score: float
+    ) -> None:
         pair = frozenset({q1.lower(), q2.lower()})
         if pair in seen or len(pair) < 2 or _sql_text(sql1) == _sql_text(sql2):
             return
         seen.add(pair)
-        errors.append(
-            f"certified answers '{q1}' and '{q2}' would answer each other's question "
-            f"(similarity {score:.2f}) with different SQL — one would serve the other's "
-            "question as certified; reword one so the questions differ, or merge them"
-        )
+        n1, n2 = names_in(a1, names), names_in(a2, names)
+        if n1 == n2 and (n1 & measures or score >= bands.exact):
+            errors.append(
+                f"certified answers '{q1}' and '{q2}' would answer each other's question "
+                f"(similarity {score:.2f}) with different SQL — one would serve the other's "
+                "question as certified; reword one so the questions differ, or merge them"
+            )
+        elif warnings_out is not None:
+            named = (
+                f"they name different governed terms ({_names_list(n1)} vs {_names_list(n2)}), "
+                "which keeps them apart at serve time"
+                if n1 != n2
+                else "no metric or definition tells them apart, only the score"
+            )
+            warnings_out.append(
+                f"certified answers '{q1}' and '{q2}' sit inside the paraphrase band "
+                f"(similarity {score:.2f}) with different SQL; {named} — reword one if "
+                "the questions should read further apart"
+            )
 
     def _cosine(a: list[float], b: list[float]) -> float:
         dot = sum(x * y for x, y in zip(a, b, strict=True))
@@ -1947,12 +1981,14 @@ def _cross_match_errors(
     for i, a in enumerate(entries):
         for j in range(i + 1, len(entries)):
             score = _cosine(vectors[i], vectors[j])
-            if score >= equiv:
+            if score >= bands.equiv:
                 b = entries[j]
                 _report(
                     str(a["question"]).strip(),
+                    anchors[i],
                     a.get("sql"),
                     str(b["question"]).strip(),
+                    anchors[j],
                     b.get("sql"),
                     score,
                 )
@@ -1961,12 +1997,31 @@ def _cross_match_errors(
         except Exception:  # noqa: BLE001 — a corpus embedded by another model cannot be compared
             break
         for h in hits:
-            if h.answer.question.strip().lower() in incoming or h.score < equiv:
+            if h.answer.question.strip().lower() in incoming or h.score < bands.equiv:
                 continue
+            if not (h.answer.source or "").startswith("review:"):
+                continue  # file-originated and absent from the file: deleted by this apply
+            stored_anchor = _anchor_question(
+                {
+                    "question": h.answer.question,
+                    "slots": h.answer.slots,
+                    "sample_bindings": h.answer.sample_bindings,
+                }
+            )
             _report(
-                str(a["question"]).strip(), a.get("sql"), h.answer.question, h.answer.sql, h.score
+                str(a["question"]).strip(),
+                anchors[i],
+                a.get("sql"),
+                h.answer.question,
+                stored_anchor,
+                h.answer.sql,
+                h.score,
             )
     return errors
+
+
+def _names_list(names: frozenset[str]) -> str:
+    return ", ".join(sorted(names)) if names else "none"
 
 
 def _anchor_question(answer: dict[str, Any]) -> str:
@@ -2106,7 +2161,7 @@ def _apply_certified_answers(
     fresh: list[dict[str, Any]] = []
     changed: list[tuple[certify_store.CertifiedAnswer, dict[str, Any]]] = []
     unchanged = 0
-    result.errors.extend(_cross_match_errors(session, name, source, model))
+    result.errors.extend(_cross_match_errors(session, name, source, model, result.warnings))
     for answer in source.certified_answers:
         question = str(answer.get("question", "")).strip()
         if not question:

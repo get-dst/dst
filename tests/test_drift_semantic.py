@@ -72,10 +72,14 @@ def test_a_changed_column_comment_breaks_a_declared_reference() -> None:
     assert "entity `orders`" in text and "stated meaning changed" in text
 
 
-def test_a_comment_appearing_on_an_undocumented_column_is_not_a_change() -> None:
+def test_a_comment_appearing_on_an_undocumented_column_is_a_recommented_finding() -> None:
+    # The warehouse now states a meaning the layer was authored without; the
+    # author decides whether the layer agrees, so it is named, never silent.
     before = _table(_column("shipped_at"))
     after = _table(_column("shipped_at", description="now documented"))
-    assert wd.baseline_drift(before, after) == []
+    found = wd.baseline_drift(before, after)
+    assert [d.kind for d in found] == ["column_recommented"]
+    assert "'(none)' -> 'now documented'" in found[0].detail
 
 
 def test_a_duration_shift_beyond_tolerance_breaks_within_it_is_silent() -> None:
@@ -348,3 +352,103 @@ def test_drift_tolerance_is_declared_in_dst_yaml() -> None:
         parse_project_yaml(
             "name: t\nconnections: {}\nprobe:\n  drift_tolerance:\n    time_shift: 7\n"
         )
+
+
+# ── a measured catalog still gets its distribution facts ─────────────────────
+
+
+def test_a_comment_appearing_on_a_bare_column_is_a_recommented_finding() -> None:
+    from services.contracts.profile import ColumnProfile, TableProfile
+    from services.project.warehouse_drift import _comment_drift
+
+    before = TableProfile(
+        connection="wh",
+        table="public.jobs",
+        columns=[ColumnProfile(name="closed_at", type="timestamp")],
+    )
+    after = before.model_copy(
+        update={
+            "columns": [ColumnProfile(name="closed_at", type="timestamp", description="local time")]
+        }
+    )
+    added = _comment_drift(before, after)
+    assert [d.kind for d in added] == ["column_recommented"]
+    assert "'(none)' -> 'local time'" in added[0].detail
+    removed = _comment_drift(after, before)
+    assert len(removed) == 1 and "(removed)" in removed[0].detail
+    assert _comment_drift(before, before) == []
+
+
+def test_postgres_stats_statement_carries_mean_and_median_offset() -> None:
+    from services.connectors.sampling import stats_sql
+    from services.contracts.profile import ColumnSampleSpec
+
+    sql = stats_sql(
+        "public.jobs",
+        [
+            ColumnSampleSpec(name="amount", type="numeric", distribution_only=True),
+            ColumnSampleSpec(name="closed_at", type="timestamp", distribution_only=True),
+        ],
+        dialect="postgres",
+        max_rows=1000,
+        row_count=10,
+        exact=True,
+        time_field="opened_at",
+    )
+    assert sql is not None
+    assert 'AVG("amount") AS av_0' in sql
+    assert "percentile_cont(0.5) WITHIN GROUP" in sql and "EXTRACT(EPOCH FROM" in sql
+    assert "AS md_1" in sql
+    # Distribution-only columns read nothing else: the catalog's facts stand.
+    assert "nn_0" not in sql and "dc_1" not in sql and "mn_0" not in sql
+
+
+def test_a_fully_measured_table_still_samples_its_distribution() -> None:
+    """Postgres' catalog pass measures every column's values, so nothing is a
+    gap — and the baseline recorded no means or offsets, so semantic drift
+    could never fire there."""
+    from services.connectors.sampling import _fold_stats
+    from services.contracts.profile import ColumnProfile, TableProfile
+    from services.contracts.protocols import QueryResult
+    from services.lenses.profiler import build_sample_spec
+
+    measured = TableProfile(
+        connection="wh",
+        table="public.jobs",
+        columns=[
+            ColumnProfile(name="id", type="integer", null_rate=0.0, top_values=["1"]),
+            ColumnProfile(name="amount", type="numeric", null_rate=0.0, top_values=["9"]),
+            ColumnProfile(name="opened_at", type="timestamp", null_rate=0.0, top_values=[]),
+            ColumnProfile(name="closed_at", type="timestamp", null_rate=0.1, top_values=[]),
+            ColumnProfile(name="note", type="text", null_rate=0.5, top_values=["a"]),
+        ],
+    )
+    spec = build_sample_spec(measured, time_field="opened_at")
+    assert spec is not None
+    wanted = {(c.name, c.distribution_only) for c in spec.columns}
+    assert ("amount", True) in wanted and ("id", True) in wanted
+    assert ("closed_at", True) in wanted
+    assert not any(c.name in ("opened_at", "note") for c in spec.columns)  # the anchor, text
+    # Once measured, nothing is asked again.
+    again = measured.model_copy(
+        update={
+            "columns": [
+                c.model_copy(update={"mean": 1.0, "time_offset_seconds": 0.0})
+                for c in measured.columns
+            ]
+        }
+    )
+    later = build_sample_spec(again, time_field="opened_at")
+    assert later is None or not any(c.distribution_only for c in later.columns)
+    # The folded fragment carries only the distribution facts.
+    cols = [c for c in spec.columns if c.name in ("amount", "closed_at")]
+    folded = _fold_stats(
+        cols,
+        QueryResult(columns=["n_rows", "av_0", "md_1"], rows=[[10, 4.5, -3600.0]]),
+        exact=True,
+        max_distinct_for_enum=20,
+    )
+    assert [(c.name, c.mean, c.time_offset_seconds, c.null_rate) for c in folded] == [
+        ("amount", 4.5, None, None),
+        ("closed_at", None, -3600.0, None),
+    ]
