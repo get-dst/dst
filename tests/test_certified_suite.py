@@ -1277,7 +1277,8 @@ def test_compare_reads_text_stored_values_as_their_type() -> None:
     import datetime
     import decimal
 
-    from services.evals.certified_suite import _canon, _compare
+    from services.evals.certified_suite import _compare
+    from services.runtime.canon import canon_cell as _canon
 
     ok, _ = _compare(["value"], [["82.59"]], ["value"], [[82.59]])
     assert ok

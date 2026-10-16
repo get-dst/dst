@@ -114,14 +114,19 @@ def temporal_terms(text: str) -> frozenset[str]:
 
 
 # A breakdown phrase: the question wants one figure PER calendar bucket.
-# "by month", "per week", "each quarter", "end of every month", "a monthly
-# trend". A bare "monthly" or "weekly" is not one: it names metrics ("monthly
-# recurring revenue", "weekly active users") far more often than a series.
+# "by month", "per week", "each quarter", "end of every month", "at the end
+# of each month", "per month-end", "a monthly trend", "MRR monthly for 2026".
+# A bare "monthly" or "weekly" before a noun is not one: it names metrics
+# ("monthly recurring revenue", "weekly active users") far more often than a
+# series; the adverb counts only before a series noun, a period preposition,
+# or the end of the question.
 _BREAKDOWN = re.compile(
     r"\b(?:by|per|each|every|for\s+each|of\s+each|of\s+every)\s+"
     r"(?P<unit>week|month|quarter|year)s?\b"
-    r"|\b(?P<adv>weekly|monthly|quarterly|yearly|annual)\s+"
-    r"(?:trend|breakdown|series|basis|progression|development|view)\b",
+    r"|\b(?P<adv>weekly|monthly|quarterly|yearly|annual)"
+    r"(?:\s+(?:trend|breakdown|series|basis|progression|development|view)\b"
+    r"|\s+(?:for|in|over|during|since|across|through|throughout|from|until|to)\b"
+    r"|\s*[,.?!]|\s*$)",
     re.IGNORECASE,
 )
 _ADVERB_UNIT = {"weekly": "week", "monthly": "month", "quarterly": "quarter", "yearly": "year"}

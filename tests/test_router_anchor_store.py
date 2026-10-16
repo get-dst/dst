@@ -257,6 +257,50 @@ def test_cross_claims_names_inseparable_lens_pairs(org: uuid.UUID) -> None:
 
 
 @needs_db
+def test_cross_claim_lint_names_the_anchors_two_lenses_carry_verbatim(
+    org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two lenses selecting the same entity or definition carry its anchor
+    verbatim: 1.000 cosine under any embedder. The lint names the shared
+    text (the finding) instead of blaming the embedding for a cosine."""
+    from services.api.mgmt_project import _router_lint
+    from services.llm import registry
+
+    emb = HashEmbedder()
+    monkeypatch.setattr(registry, "resolve_embedder", lambda: emb)
+    with org_session(org) as s:
+        anchor_store.sync(s, _profile("finance", ["clinics", "visits", "net revenue"]), emb)
+        anchor_store.sync(s, _profile("ops", ["clinics", "visits", "no show rate"]), emb)
+        assert anchor_store.shared_anchors(s, "finance", "ops") == ["clinics", "visits"]
+        assert anchor_store.shared_anchors(s, "finance", "nobody") == []
+        rows = _router_lint(s)
+    assert len(rows) == 1 and rows[0]["scope"] == "router"
+    [warning] = rows[0]["warnings"]  # type: ignore[misc]
+    assert "carry 2 router anchor(s) verbatim ('clinics', 'visits')" in warning
+    assert "cosine" not in warning and "embedding cannot separate" not in warning
+
+
+@needs_db
+def test_cross_claim_lint_skips_with_a_reason_when_no_embedder_resolves(
+    org: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.api.mgmt_project import _router_lint
+    from services.llm import registry
+
+    emb = HashEmbedder()
+    monkeypatch.setattr(registry, "resolve_embedder", lambda: None)
+    with org_session(org) as s:
+        assert _router_lint(s) == []  # an empty store on a keyless install says nothing
+        anchor_store.sync(s, _profile("finance", ["clinics"]), emb)
+        anchor_store.sync(s, _profile("ops", ["clinics"]), emb)
+    with org_session(org) as s:
+        rows = _router_lint(s)
+    [warning] = rows[0]["warnings"]  # type: ignore[misc]
+    assert warning.startswith("router cross-claim lint skipped: no embedding provider")
+    assert "1.000" not in warning
+
+
+@needs_db
 def test_separable_lenses_report_no_cross_claims(org: uuid.UUID) -> None:
     emb = HashEmbedder()
     with org_session(org) as s:

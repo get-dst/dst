@@ -50,7 +50,6 @@ from services.evals import store
 from services.evals.certified_suite import (
     _ROW_CAP,
     CertifiedCaseResult,
-    _canon,
     _compare,
     _render_template_case,
     format_result,
@@ -70,6 +69,7 @@ from services.project.plan import stale_certified
 from services.runtime import assembly
 from services.runtime.answer import AnswerComposer
 from services.runtime.bounded import ApplyStepTimeout
+from services.runtime.canon import canon_cell
 from services.runtime.pipeline import _jsonable
 from services.semantic import store as semantic_store
 
@@ -516,7 +516,7 @@ def _modernised(stored: dict[str, Any], now: dict[str, Any]) -> dict[str, Any] |
         if not isinstance(v, str):
             return v
         live = witness.get(col.lower())
-        c = _canon(v)
+        c = canon_cell(v)
         if isinstance(c, int | float) and not isinstance(c, bool):
             return c if isinstance(live, int | float) and not isinstance(live, bool) else v
         if isinstance(live, str) and isinstance(c, str) and c != v.strip().casefold():

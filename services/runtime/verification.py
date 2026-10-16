@@ -31,6 +31,7 @@ from services.lenses.profile_age import STALE_REASON
 from services.lenses.profile_enrich import EntityCoverage
 from services.runtime import adversary, faithfulness, sql_canon
 from services.runtime.answer import grounding_notes
+from services.runtime.canon import canon_cell
 from services.runtime.timewindow import (
     breakdown_unit,
     sql_engages_time,
@@ -1333,12 +1334,15 @@ def _as_number(v: object) -> decimal.Decimal | None:
 
 def _cell_moved(want: object, got: object) -> bool:
     """Did one cell move beyond the stored value's printed precision? Numbers
-    compare numerically at that precision; everything else compares as text."""
+    compare numerically at that precision; everything else compares through
+    the same canonical reading the eval gate uses (``canon_cell``), so a
+    timestamp's two text forms, a date against its midnight timestamp, or a
+    ``Decimal`` against the float it was stored as never read as a move."""
     w, g = _as_number(want), _as_number(got)
     if w is not None and g is not None:
         decimals = _printed_decimals(float(w) if not isinstance(want, int) else want)
         return round(float(g), decimals) != round(float(w), decimals)
-    return str(want) != str(got)
+    return bool(canon_cell(want) != canon_cell(got))
 
 
 def _cell_text(v: object) -> str:

@@ -934,6 +934,21 @@ def test_a_level_asked_per_month_gets_the_grain_the_model_forgot() -> None:
     sql = compile_intent(gate_level_grain("ARR per month in Q3", bare, model), model)
     rows = sorted(_snapshot_warehouse().execute(sql).fetchall())
     assert [(r[0].month, r[1]) for r in rows] == [(7, 150), (8, 170), (9, 195)]
+    # "at the end of each month" with the entity's own date column picked as a
+    # dimension: grouped by day the pin correlates on the day itself (a no-op)
+    # and a daily table serves every day — the date dimension gives way to the
+    # month grain the question states
+    by_day = QueryIntent(
+        entity="arr_snapshots", metrics=["arr"], dimensions=["snapshot_date"], filters=_Q3
+    )
+    gated = gate_level_grain("ARR at the end of each month in Q3", by_day, model)
+    assert gated.grain == "month" and gated.dimensions == []
+    gated = gate_level_grain(
+        "ARR at the end of each month in Q3 by plan",
+        by_day.model_copy(update={"dimensions": ["snapshot_date", "plan"]}),
+        model,
+    )
+    assert gated.grain == "month" and gated.dimensions == ["plan"]
 
 
 def test_a_level_metric_by_dimension_reads_every_group_at_the_snapshot() -> None:

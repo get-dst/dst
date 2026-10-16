@@ -497,3 +497,20 @@ def test_refresh_samples_re_records_a_template_whose_range_reads_inclusive(org) 
     refreshed = stored()
     assert refreshed.verified_value not in (stale, None)  # the sample as the warehouse answers it
     assert refreshed.terms is not None and "orders" in refreshed.sql
+    assert any("1 of 1 template(s); 1 moved" in a for a in row["applied"])
+    # Nothing moved on a second refresh (the file now omits verified_value,
+    # which keeps the stored one): the stored form is re-read, and the report
+    # prints no old -> new line — an old -> new over the same value, differing
+    # only in key order or number spelling, read like a change.
+    out = client.post(
+        "/mgmt/project/apply",
+        headers=headers,
+        params={"refresh_samples": "true"},
+        json={"files": _files([{k: v for k, v in template.items() if k != "verified_value"}])},
+    ).json()
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert not row.get("errors"), row
+    assert not any(" -> " in a for a in row["applied"]), row["applied"]
+    assert any(
+        "re-recorded the sample result of 1 of 1 template(s); 0 moved" in a for a in row["applied"]
+    ), row["applied"]

@@ -217,11 +217,14 @@ def gate_definitions(question: str, intent: QueryIntent, model: SemanticModel) -
 
 def gate_level_grain(question: str, intent: QueryIntent, model: SemanticModel) -> QueryIntent:
     """The intent with ``grain`` set from the question's breakdown phrase ("by
-    month", "per quarter") when every selected metric is a level and the model
-    bucketed by nothing — neither a grain nor one of the entity's date-typed
-    dimensions. A level pinned to one latest snapshot under a "per month" ask
-    collapses the series to its last day; the phrase is deterministic and the
-    compiler reads one snapshot per bucket once the grain says so."""
+    month", "at the end of each month") when every selected metric is a level
+    and the model set no grain. A level pinned to one latest snapshot under a
+    "per month" ask collapses the series to its last day, and a level grouped
+    by the entity's own date column under the same ask serves every day
+    (the pin correlates on the day itself, a no-op) — so the entity's
+    date-typed dimensions give way to the grain the question states. The
+    phrase is deterministic and the compiler reads one snapshot per bucket
+    once the grain says so."""
     unit = breakdown_unit(question)
     if unit is None or intent.grain is not None or not intent.metrics:
         return intent
@@ -232,9 +235,10 @@ def gate_level_grain(question: str, intent: QueryIntent, model: SemanticModel) -
     if not all(m in by_name and by_name[m].additivity == "level" for m in intent.metrics):
         return intent
     typed = {d.name: d.type for d in entity.dimensions} | {f.name: f.type for f in entity.fields}
-    if any(typed.get(d.rpartition(".")[2]) in ("date", "timestamp") for d in intent.dimensions):
-        return intent
-    return intent.model_copy(update={"grain": unit})
+    dimensions = [
+        d for d in intent.dimensions if typed.get(d.rpartition(".")[2]) not in ("date", "timestamp")
+    ]
+    return intent.model_copy(update={"grain": unit, "dimensions": dimensions})
 
 
 def intent_term(intent: QueryIntent | None) -> str | None:

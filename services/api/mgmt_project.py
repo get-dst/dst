@@ -285,6 +285,72 @@ def _unselected_definitions(
     return sorted(all_terms - selected)
 
 
+def _router_lint(session: Session) -> list[dict[str, object]]:
+    """The router's apply-time lint row: cross-claiming lens pairs, each with
+    the anchors the two carry verbatim when that is what the overlap is (two
+    lenses selecting the same entity or definition score 1.000 under any
+    embedder — the text is the finding, not the cosine), or one skip line when
+    no embedder resolves but the store holds vectors (the request path's
+    lexical fallback wrote them, and a cosine over those would read shared
+    words as inseparable lenses). A keyless install with an empty store says
+    nothing, as before. Best-effort: a store that cannot be read reports
+    nothing."""
+    from services.llm import registry
+    from services.router import anchor_store
+
+    try:
+        embedder = registry.resolve_embedder()
+    except Exception:  # noqa: BLE001 — a failed embedder is reported where it is used
+        embedder = None
+    if embedder is None:
+        try:
+            stored = session.execute(text("SELECT COUNT(*) FROM router_anchor")).scalar_one()
+        except Exception:  # noqa: BLE001
+            return []
+        if not stored:
+            return []
+        return [
+            {
+                "scope": "router",
+                "action": "lint",
+                "warnings": [
+                    "router cross-claim lint skipped: no embedding provider is configured "
+                    "(declare one under providers, or install dst-core[local-embed]) — "
+                    "lens overlap cannot be measured without one"
+                ],
+                "errors": [],
+            }
+        ]
+    try:
+        overlaps = anchor_store.cross_claims(session)[:10]
+        shared = {(a, b): anchor_store.shared_anchors(session, a, b) for a, b, _ in overlaps}
+    except Exception:  # noqa: BLE001 — an unreadable anchor store reports nothing
+        return []
+    if not overlaps:
+        return []
+    warnings: list[str] = []
+    for a, b, sim in overlaps:
+        verbatim = shared.get((a, b)) or []
+        if verbatim:
+            shown = ", ".join(f"'{t}'" for t in verbatim[:5])
+            more = f" and {len(verbatim) - 5} more" if len(verbatim) > 5 else ""
+            warnings.append(
+                f"lenses '{a}' and '{b}' cross-claim: they carry {len(verbatim)} router "
+                f"anchor(s) verbatim ({shown}{more}) — the same entity, metric, definition "
+                "or sample question selected by both, which no embedding can separate, so "
+                "routing between them on those words rests entirely on the LLM decider; "
+                "give each lens its own use_when/sample questions, or merge the lenses"
+            )
+        else:
+            warnings.append(
+                f"lenses '{a}' and '{b}' cross-claim: their router anchors overlap at "
+                f"{sim:.3f} cosine — the embedding cannot separate them, so routing "
+                "between them rests entirely on the LLM decider; split the shared "
+                "vocabulary between their use_when/sample questions, or merge the lenses"
+            )
+    return [{"scope": "router", "action": "lint", "warnings": warnings, "errors": []}]
+
+
 def _dormant_definition_warnings(session: Session) -> list[str]:
     """validate_bundle only ever sees COMPILED models, so a shared
     definition no lens selects is never linted — its author shipped governance
@@ -866,29 +932,10 @@ def _apply(
     # overlap at near-verbatim similarity is inseparable by embedding — a
     # modelling problem reported HERE, at apply, never left as a runtime coin
     # flip. Standing misconfiguration: warns on every apply until the
-    # vocabularies split or the lenses merge. Best-effort — an unembedded
-    # anchor store (keyless install) just reports nothing.
-    try:
-        from services.router import anchor_store
-
-        overlaps = anchor_store.cross_claims(session)
-    except Exception:
-        overlaps = []
-    if overlaps:
-        out.append(
-            {
-                "scope": "router",
-                "action": "lint",
-                "warnings": [
-                    f"lenses '{a}' and '{b}' cross-claim: their router anchors overlap at "
-                    f"{sim:.3f} cosine — the embedding cannot separate them, so routing "
-                    "between them rests entirely on the LLM decider; split the shared "
-                    "vocabulary between their use_when/sample questions, or merge the lenses"
-                    for a, b, sim in overlaps[:10]
-                ],
-                "errors": [],
-            }
-        )
+    # vocabularies split or the lenses merge. With no embedder the stored
+    # anchors carry no vectors worth reading, so the lint says it skipped
+    # rather than report a cosine over them.
+    out.extend(_router_lint(session))
     # A successful apply is the repair act: clear the serve-time drift
     # marks — the layer just caught up with the warehouse, deliberately. If the
     # drift persists, the next serve error re-marks within one request.

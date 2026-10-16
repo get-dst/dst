@@ -2282,6 +2282,16 @@ def run_query(
             trust_summary = (
                 f"{trust_summary} {' '.join(basis)}" if trust_summary else " ".join(basis)
             )
+            # When code wrote the answer (a template frame, a rows-only serve)
+            # the text so far names the table it dates from and nothing of
+            # what the figures mean; the basis rides the answer too, so a
+            # caller reading only the prose holds the meaning with the number.
+            # Certify-time prose stays verbatim: a model composed it over
+            # these definitions once, and byte-identity across serves is
+            # its own guarantee.
+            code_wrote = composer is None or certified_match == "parameterized"
+            if code_wrote and answer_text and basis[0] not in answer_text:
+                answer_text += " " + " ".join(basis)
         on_ledger = {slot.name for slot in ledger.slots if slot.kind == "definition"}
         ledger.slots.extend(
             Slot(kind="definition", name=d.term, source="certified", value=d.sql_expr or d.about)

@@ -75,6 +75,7 @@ from services.project.schema import ConnectionDecl, ProjectConfig
 from services.router import anchor_store
 from services.runtime import sql_guard
 from services.runtime.bounded import ApplyStepTimeout, apply_bounded, apply_first_open
+from services.runtime.canon import canon_summary
 from services.runtime.identifiers import reserved_in
 from services.security.crypto import CryptoNotConfigured
 from services.semantic import store as semantic_store
@@ -1669,11 +1670,15 @@ def _refresh_samples(
     stored template — execute the sample-bound SQL once more (read-only,
     row-capped), store the value it returns as ``verified_value``, and
     re-stamp bindings and terms from the SQL as it renders today. Every
-    template prints its old -> new line and the applied count says how many;
-    a failed execution warns and leaves the row as it was. This is the
+    template whose value moved prints its old -> new line (compared on the
+    canonical reading, so a stored form that differs only in key order or
+    number/timestamp spelling is not a change) and the applied count says how
+    many were re-recorded and how many moved; a failed execution warns and
+    leaves the row as it was. This is the
     file-side acceptance route for a template whose sample moved (an
     unslotted entry writes its new ``verified_value`` instead)."""
     done = 0
+    moved = 0
     if not stored:
         result.applied.append("--refresh-samples: no stored template to re-record")
         return
@@ -1708,6 +1713,9 @@ def _refresh_samples(
             terms=_certified_terms(rendered, model),
         )
         done += 1
+        if canon_summary(a.verified_value) == canon_summary(verified):
+            continue
+        moved += 1
         # A flag that rewrites the signed value of a certified answer says
         # before and after, per template — the sample binding it ran and the
         # value it replaced, so the diff is in the report, not only in git.
@@ -1720,7 +1728,9 @@ def _refresh_samples(
             f"{format_result(verified) if verified else 'unrecorded'}"
         )
     result.applied.append(
-        f"--refresh-samples: re-recorded the sample result of {done} of {len(stored)} template(s)"
+        f"--refresh-samples: re-recorded the sample result of {done} of {len(stored)} "
+        f"template(s); {moved} moved"
+        + ("" if moved else " (the stored form was re-read, no value changed)")
     )
 
 

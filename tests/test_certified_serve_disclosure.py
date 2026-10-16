@@ -317,3 +317,102 @@ def test_definition_about_a_metric_member_rides_the_certified_answer() -> None:
         "from staging.stg_ehr_invoices"
     )
     assert plain.response.definition_used is None
+
+
+def test_every_governing_definition_rides_the_code_written_answer_text() -> None:
+    """Approved SQL that de-duplicates the invoice lines AND reads the mart
+    for comparison is governed by two definitions: ``net_revenue`` (about the
+    mart's column) and ``duplicate_lines`` (about the derived metric whose
+    refs resolve to the columns the DISTINCT reads). Both ride the basis line
+    and the ledger; and when code wrote the answer (no composer) the text
+    itself names them, not only the table it dates from — a caller reading
+    the prose alone holds the meaning with the number."""
+    invoice_lines = Entity(
+        name="invoice_lines",
+        source=EntitySource(connection="wh", table="staging.stg_ehr_invoices"),
+        fields=[
+            Field(name="invoice_id", type="string"),
+            Field(name="line_no", type="number"),
+            Field(name="net_amount", type="number"),
+            Field(name="invoice_date", type="date"),
+        ],
+        metrics=[
+            Metric(name="line_count", agg="count"),
+            Metric(
+                name="distinct_line_count",
+                agg="count_distinct",
+                expr="invoice_lines.invoice_id || '-' || invoice_lines.line_no",
+            ),
+            Metric(
+                name="duplicate_lines", type="derived", expr="{line_count} - {distinct_line_count}"
+            ),
+        ],
+    )
+    revenue_daily = Entity(
+        name="revenue_daily",
+        source=EntitySource(connection="wh", table="marts.fct_revenue_daily"),
+        fields=[Field(name="day", type="date"), Field(name="revenue_eur", type="number")],
+        metrics=[Metric(name="net_revenue", agg="sum", expr="revenue_daily.revenue_eur")],
+    )
+    model = SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[revenue_daily, invoice_lines],
+        definitions=[
+            Definition(
+                term="net_revenue",
+                body="Revenue is SUM(revenue_eur) on invoice date.",
+                summary="Revenue = revenue_eur (ex VAT) on invoice date, credited excluded",
+                about="revenue_daily.net_revenue",
+            ),
+            Definition(
+                term="duplicate_lines",
+                body="The May export reached the warehouse twice.",
+                summary="May revenue must be de-duplicated on invoice_id + line_no",
+                about="invoice_lines.duplicate_lines",
+            ),
+        ],
+    )
+    sql = (
+        "select round(sum(net_amount), 2) as net_revenue_eur_deduplicated, "
+        "(select round(sum(revenue_eur), 2) from marts.fct_revenue_daily "
+        "where day between '2026-05-01' and '2026-05-31') as warehouse_mart_figure_eur "
+        "from (select distinct invoice_id, line_no, net_amount from staging.stg_ehr_invoices "
+        "where invoice_date between '2026-05-01' and '2026-05-31')"
+    )
+    res = run_query(
+        question="what was net revenue in May 2026 after de-duplicating the doubled export?",
+        lens_name="finance",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=model,
+        connector=FakeConnector(
+            result=QueryResult(
+                columns=["net_revenue_eur_deduplicated", "warehouse_mart_figure_eur"],
+                rows=[[2629135.69, 3239991.65]],
+            )
+        ),
+        generator=FixedSQLGenerator(sql),
+        composer=None,
+        certification="certified",
+        certified_match="exact",
+        certified_provenance=_PROVENANCE,
+        verified_value={
+            "columns": ["net_revenue_eur_deduplicated", "warehouse_mart_figure_eur"],
+            "rows": [[2629135.69, 3239991.65]],
+        },
+    )
+    response = res.response
+    ledger = {
+        s.name
+        for s in (response.resolution.slots if response.resolution else [])
+        if s.kind == "definition"
+    }
+    assert ledger == {"net_revenue", "duplicate_lines"}
+    assert response.definition_used in ledger
+    trust = response.trust_summary or ""
+    assert "Computed as `net_revenue`" in trust and "Computed as `duplicate_lines`" in trust
+    # code wrote the answer: it carries both meanings, not only the table it dates from
+    assert "Computed as `net_revenue`" in response.answer
+    assert "de-duplicated on invoice_id + line_no" in response.answer
+    assert response.answer.count("Computed as `duplicate_lines`") == 1

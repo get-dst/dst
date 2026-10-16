@@ -131,3 +131,17 @@ def cross_claims(session: Session, threshold: float = 0.95) -> list[tuple[str, s
         {"t": threshold},
     ).all()
     return [(r[0], r[1], float(r[2])) for r in rows]
+
+
+def shared_anchors(session: Session, a: str, b: str) -> list[str]:
+    """The anchor texts two lenses carry verbatim — the same entity, metric,
+    definition or sample question selected by both. Identical text scores
+    1.000 under any embedder; the lint names the text, not the cosine."""
+    rows = session.execute(
+        text(
+            "SELECT a.anchor FROM router_anchor a JOIN router_anchor b "
+            "ON a.anchor = b.anchor AND a.lens = :a AND b.lens = :b ORDER BY a.anchor"
+        ),
+        {"a": a, "b": b},
+    ).all()
+    return [str(r[0]) for r in rows]

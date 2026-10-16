@@ -73,6 +73,25 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.11.2] — 2026-10-17
+
+No schema change.
+
+### Fixed
+
+- **A certified serve no longer reports a timestamp cell as restated on its text form.** The
+  serve-time check reads values through the same canonical normalisation as the eval gate.
+- **"At the end of each month", "per month-end" and "MRR monthly for 2026" are read as a
+  month bucket**; a level metric asked that way returns one row per month even when
+  generation grouped by the entity's day column.
+- **`dst apply --refresh-samples` prints an old → new line only for templates whose value
+  moved**, and says how many moved.
+- **The apply-time router lint names the anchors two lenses carry verbatim** instead of
+  reporting a 1.000 cosine as an embedding failure, and skips with a reason when no
+  embedding provider resolves.
+- **A certified template frame or rows-only serve names every governing definition in the
+  answer text**, not only the table it dates from.
+
 ## [0.11.1] — 2026-10-16
 
 No schema change. Upgrade fix: 0.11.0's restated check compared values an earlier release
