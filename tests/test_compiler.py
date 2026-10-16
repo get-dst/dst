@@ -10,6 +10,7 @@ from services.contracts.fakes import ScriptedLLM
 from services.contracts.query_intent import IntentFilter, IntentOrder, QueryIntent
 from services.contracts.semantic_model import (
     Definition,
+    Dimension,
     Entity,
     EntitySource,
     Field,
@@ -894,6 +895,43 @@ def test_a_level_metric_by_month_is_each_months_last_snapshot() -> None:
         "DATE_TRUNC('MONTH', arr_snapshots_latest.snapshot_date) = "
         "DATE_TRUNC('MONTH', arr_snapshots.snapshot_date)"
     ) in sql
+    rows = sorted(_snapshot_warehouse().execute(sql).fetchall())
+    assert [(r[0].month, r[1]) for r in rows] == [(7, 150), (8, 170), (9, 195)]
+
+
+def test_a_level_metric_grouped_by_its_own_month_column_is_each_months_last_snapshot() -> None:
+    """A month-end table exposes a `month` dimension; grouping by it without a
+    grain pinned ONE latest snapshot for the whole series and served a year's
+    trend as one row. The pin correlates on every date-typed group dimension."""
+    model = _snapshot_model()
+    model.entities[0].dimensions.append(
+        Dimension(name="month", expr="DATE_TRUNC('month', arr_snapshots.snapshot_date)")
+    )
+    model.entities[0].dimensions[-1].type = "timestamp"
+    sql = compile_intent(
+        QueryIntent(entity="arr_snapshots", metrics=["arr"], dimensions=["month"], filters=_Q3),
+        model,
+    )
+    assert (
+        "DATE_TRUNC('MONTH', arr_snapshots_latest.snapshot_date) = "
+        "DATE_TRUNC('MONTH', arr_snapshots.snapshot_date))"
+    ) in sql
+    rows = sorted(_snapshot_warehouse().execute(sql).fetchall())
+    assert [(r[0].month, r[1]) for r in rows] == [(7, 150), (8, 170), (9, 195)]
+
+
+def test_a_level_asked_per_month_gets_the_grain_the_model_forgot() -> None:
+    from services.runtime.intent_generator import gate_level_grain
+
+    model = _snapshot_model()
+    bare = QueryIntent(entity="arr_snapshots", metrics=["arr"], filters=_Q3)
+    assert gate_level_grain("ARR at month end, per month, in Q3", bare, model).grain == "month"
+    assert gate_level_grain("ARR each quarter", bare, model).grain == "quarter"
+    assert gate_level_grain("What is our ARR today?", bare, model).grain is None
+    # a flow asked per month is the intent model's call, not the gate's
+    flow = QueryIntent(entity="arr_snapshots", metrics=["bookings"], filters=_Q3)
+    assert gate_level_grain("bookings per month", flow, model).grain is None
+    sql = compile_intent(gate_level_grain("ARR per month in Q3", bare, model), model)
     rows = sorted(_snapshot_warehouse().execute(sql).fetchall())
     assert [(r[0].month, r[1]) for r in rows] == [(7, 150), (8, 170), (9, 195)]
 

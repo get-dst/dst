@@ -31,7 +31,12 @@ from services.lenses.profile_age import STALE_REASON
 from services.lenses.profile_enrich import EntityCoverage
 from services.runtime import adversary, faithfulness, sql_canon
 from services.runtime.answer import grounding_notes
-from services.runtime.timewindow import sql_engages_time, temporal_terms, window_ranges
+from services.runtime.timewindow import (
+    breakdown_unit,
+    sql_engages_time,
+    temporal_terms,
+    window_ranges,
+)
 
 _DISTINCT_ASK = re.compile(r"\b(unique|distinct|individual|deduplicated)\b", re.IGNORECASE)
 _COUNT_ASK = re.compile(r"\b(how many|count|number of)\b", re.IGNORECASE)
@@ -444,7 +449,28 @@ def _latest_per_bucket(tree: exp.Expression, time_field: str) -> bool:
     return False
 
 
-def _level_grain(sql: str, model: SemanticModel, certification: str = "none") -> VerificationCheck:
+def _global_pin(tree: exp.Expression, time_field: str) -> bool:
+    """Does the statement pin the snapshot to ONE latest day — a ``MAX(time_field)``
+    subselect that groups by nothing and refers to no other table alias (so
+    nothing correlates it to a bucket of the outer query)?"""
+    for sel in tree.find_all(exp.Select):
+        maxes = [
+            mx
+            for proj in sel.expressions
+            for mx in proj.find_all(exp.Max)
+            if any(c.name.lower() == time_field for c in mx.find_all(exp.Column))
+        ]
+        if not maxes or sel.args.get("group") is not None:
+            continue
+        aliases = {c.table for c in sel.find_all(exp.Column) if c.table}
+        if len(aliases) <= 1:
+            return True
+    return False
+
+
+def _level_grain(
+    sql: str, model: SemanticModel, certification: str = "none", question: str = ""
+) -> VerificationCheck:
     """Is a level metric read as the latest snapshot per time bucket?
 
     A stock (ARR, headcount, a balance) is declared ``additivity: level``: a
@@ -454,8 +480,12 @@ def _level_grain(sql: str, model: SemanticModel, certification: str = "none") ->
     well-formed query over well-formed rows that no other check can see.
     Deterministic and model-declared: fires only on SUM over a declared level
     column, a bucket wider than a day over its time field, and no
-    latest-per-bucket selection anywhere in the statement. Certified SQL is
-    approved as meaning what it says and is not re-read here."""
+    latest-per-bucket selection anywhere in the statement. The mirror shape
+    fires on the question's breakdown phrase: "per month" over a level column
+    whose snapshot is pinned to ONE latest day (``MAX(time_field)`` correlated
+    to nothing) is the series collapsed to its last day, one row served as a
+    year. Certified SQL is approved as meaning what it says and is not re-read
+    here."""
     if certification == "certified":
         return VerificationCheck(
             name="level_grain", status="skip", reason="certified SQL: approval binds the reading"
@@ -469,7 +499,25 @@ def _level_grain(sql: str, model: SemanticModel, certification: str = "none") ->
         tree = sqlglot.parse_one(sql, read=model.dialect)
     except Exception:  # noqa: BLE001
         return VerificationCheck(name="level_grain", status="skip", reason="SQL did not parse")
-    if not isinstance(tree, exp.Expression) or tree.find(exp.Group) is None:
+    if not isinstance(tree, exp.Expression):
+        return VerificationCheck(name="level_grain", status="skip", reason="SQL did not parse")
+    unit = breakdown_unit(question)
+    if unit is not None:
+        present = {c.name.lower() for c in tree.find_all(exp.Column)}
+        for col, (_entity, time_field) in levels.items():
+            if col in present and _global_pin(tree, time_field):
+                return VerificationCheck(
+                    name="level_grain",
+                    status="fail",
+                    reason=(
+                        f"the question asks for '{col}' per {unit}, but the SQL pins "
+                        f"'{time_field}' to one latest snapshot for the whole series "
+                        f"(MAX({time_field}) correlated to no {unit}) — that collapses "
+                        f"every {unit} to the last day; read the latest snapshot "
+                        f"inside each {unit}"
+                    ),
+                )
+    if tree.find(exp.Group) is None:
         return VerificationCheck(
             name="level_grain", status="skip", reason="no grouped aggregate in this query"
         )
@@ -983,23 +1031,41 @@ def _population_declared(sql: str, model: SemanticModel) -> VerificationCheck:
 _AGG_FN = re.compile(r"\b(SUM|AVG|MIN|MAX)\s*\(", re.IGNORECASE)
 
 
+_UNDENOMINATED_TYPES = frozenset({"string", "boolean", "timestamp", "date", "json"})
+
+
+def _undenominated_columns(model: SemanticModel) -> set[str]:
+    """Columns the model declares as something no currency denominates — a
+    date, a timestamp, text, a flag. ``MAX(cancelled_at)`` per customer is a
+    churn date, not a total across currencies."""
+    return {
+        f.name.lower() for e in model.entities for f in e.fields if f.type in _UNDENOMINATED_TYPES
+    }
+
+
 def _denominating_aggregates(sql: str, model: SemanticModel) -> list[set[str]] | None:
     """The column sets of every aggregate whose result a pinned dimension
-    denominates. COUNTs are left out (a row
-    count is in no currency), and so is a scalar subselect inside a predicate
-    (the latest-snapshot pin's ``MAX(time_field)`` aggregates nothing the
-    answer states). None when the SQL does not parse."""
+    denominates. COUNTs are left out (a row count is in no currency), so is
+    a scalar subselect inside a predicate (the latest-snapshot pin's
+    ``MAX(time_field)`` aggregates nothing the answer states), and so is an
+    aggregate over columns the model declares as dates, timestamps, text or
+    flags — a ``MAX(cancelled_at)`` or ``BOOL_AND(status = 'cancelled')``
+    feeding a count. None when the SQL does not parse."""
     try:
         tree = sqlglot.parse_one(sql, read=model.dialect)
     except Exception:  # noqa: BLE001
         return None
     if not isinstance(tree, exp.Expression):
         return None
+    undenominated = _undenominated_columns(model)
     out: list[set[str]] = []
     for agg in tree.find_all(exp.AggFunc):
         if isinstance(agg, exp.Count) or agg.find_ancestor(exp.Predicate) is not None:
             continue
-        out.append({c.name.lower() for c in agg.find_all(exp.Column)})
+        cols = {c.name.lower() for c in agg.find_all(exp.Column)}
+        if cols and cols <= undenominated:
+            continue
+        out.append(cols)
     return out
 
 
@@ -1448,7 +1514,7 @@ def build_report(
         ),
         _intent_alignment(question, sql, semantic_model.dialect),
         _window_applied(question, sql, semantic_model, certification, certified_question),
-        _level_grain(sql, semantic_model, certification),
+        _level_grain(sql, semantic_model, certification, question),
         _zero_ratio_plausibility(sql, result),
         _all_ones_ratio(sql, result),
         _ratio_population(sql, semantic_model.dialect),

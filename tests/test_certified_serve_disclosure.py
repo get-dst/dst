@@ -241,3 +241,79 @@ def test_certified_answer_names_the_metric_it_served() -> None:
     assert res.response.trust_summary.startswith("Certified answer — approved by ana")
     assert "Computed as `bookings` on `deals`. (entity metric)" in res.response.trust_summary
     assert res.response.definition_used == "bookings"
+
+
+def test_definition_about_a_metric_member_rides_the_certified_answer() -> None:
+    """``about: entity.member`` may name a METRIC, not a column: a definition
+    about a derived ``duplicate_lines`` metric binds to the columns its
+    expression reads (through ``{refs}`` to sibling metrics). Approved SQL
+    that de-duplicates on those columns discloses it; SQL that reads the
+    table without touching them does not."""
+    entity = Entity(
+        name="invoice_lines",
+        source=EntitySource(connection="wh", table="staging.stg_ehr_invoices"),
+        fields=[
+            Field(name="invoice_id", type="string"),
+            Field(name="line_no", type="number"),
+            Field(name="net_amount", type="number"),
+            Field(name="status", type="string"),
+        ],
+        metrics=[
+            Metric(name="line_count", agg="count"),
+            Metric(
+                name="distinct_line_count",
+                agg="count_distinct",
+                expr="invoice_lines.invoice_id || '-' || invoice_lines.line_no",
+            ),
+            Metric(
+                name="duplicate_lines",
+                type="derived",
+                expr="{line_count} - {distinct_line_count}",
+            ),
+        ],
+    )
+    about = Definition(
+        term="duplicate_lines",
+        body="The May export reached the warehouse twice; de-duplicate on invoice_id + line_no.",
+        summary="May export loaded twice",
+        about="invoice_lines.duplicate_lines",
+    )
+    model = SemanticModel(lens="finance", dialect="duckdb", entities=[entity], definitions=[about])
+    dedup = (
+        "select round(sum(net_amount), 2) as net_revenue_eur_deduplicated from "
+        "(select distinct invoice_id, line_no, net_amount from staging.stg_ehr_invoices "
+        "where status <> 'credited')"
+    )
+
+    def serve(sql: str):
+        return run_query(
+            question="net revenue in May after de-duplicating the export?",
+            lens_name="finance",
+            org_id="org-1",
+            caller="analyst",
+            semantic_model=model,
+            connector=FakeConnector(
+                result=QueryResult(columns=["net_revenue_eur_deduplicated"], rows=[[2629135.69]])
+            ),
+            generator=FixedSQLGenerator(sql),
+            composer=None,
+            certification="certified",
+            certified_match="exact",
+            certified_provenance=_PROVENANCE,
+            verified_value={"value": 2629135.69},
+        )
+
+    res = serve(dedup)
+    assert res.response.definition_used == "duplicate_lines"
+    assert "Computed as `duplicate_lines` — May export loaded twice" in (
+        res.response.trust_summary or ""
+    )
+    assert res.response.resolution is not None and any(
+        s.kind == "definition" and s.name == "duplicate_lines" and s.source == "certified"
+        for s in res.response.resolution.slots
+    )
+    plain = serve(
+        "select round(sum(net_amount), 2) as net_revenue_eur_deduplicated "
+        "from staging.stg_ehr_invoices"
+    )
+    assert plain.response.definition_used is None

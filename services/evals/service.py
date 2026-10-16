@@ -50,6 +50,7 @@ from services.evals import store
 from services.evals.certified_suite import (
     _ROW_CAP,
     CertifiedCaseResult,
+    _canon,
     _compare,
     _render_template_case,
     format_result,
@@ -496,6 +497,40 @@ def _restated(question: str, stored: dict[str, Any], now: dict[str, Any]) -> str
     )
 
 
+def _modernised(stored: dict[str, Any], now: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored value re-read JSON-native when a release before 0.11.1 stored
+    it as text — ``str(Decimal)`` for a number, ``str(datetime)`` for a day —
+    and the live read says what type the cell is: a numeric string against a
+    live number becomes that number (at the precision it was stored with), a
+    date-shaped string against live text becomes ISO. None when nothing is
+    text that should not be. Labels keep their case: only cells whose live
+    counterpart is a number or a date move."""
+    want_cols, want_rows = _as_table(stored)
+    now_cols, now_rows = _as_table(now)
+    witness: dict[str, Any] = {}
+    for i, col in enumerate(now_cols):
+        cells = (r[i] for r in now_rows if i < len(r) and r[i] is not None)
+        witness[col.lower()] = next(cells, None)
+
+    def _cell(col: str, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        live = witness.get(col.lower())
+        c = _canon(v)
+        if isinstance(c, int | float) and not isinstance(c, bool):
+            return c if isinstance(live, int | float) and not isinstance(live, bool) else v
+        if isinstance(live, str) and isinstance(c, str) and c != v.strip().casefold():
+            return c  # a date/timestamp read as its ISO day
+        return v
+
+    rows = [[_cell(c, v) for c, v in zip(want_cols, r, strict=False)] for r in want_rows]
+    if rows == want_rows:
+        return None
+    if set(stored) == {"value"}:
+        return {"value": rows[0][0]}
+    return {"columns": want_cols, "rows": rows}
+
+
 def _value_lane(
     *,
     session: Session,
@@ -559,6 +594,13 @@ def _value_lane(
             passed, reason = _compare(want_cols, want_rows, *_as_table(now))
             if not passed:
                 lane.restated.append(_restated(a.question, stored, now))
+            elif (modern := _modernised(stored, now)) is not None:
+                # Stored as text by an older release; the value stands, so it
+                # is re-recorded in today's shape on this first comparison.
+                stored = modern
+                certify_store.update(session, a.id, sql=a.sql, verified_value=modern)
+                lane.recorded += 1
+                reason = "verified value stored as text by an earlier release — re-recorded"
         if passed:
             _questions, changed = stale_certified([(a.question, a.bindings)], hashes)
             if changed:

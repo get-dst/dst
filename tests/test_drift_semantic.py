@@ -327,13 +327,13 @@ def test_a_deploy_advances_the_baseline_to_the_artifact(
     capsys.readouterr()
     _advance_baselines(root)
     assert baseline.read_text(encoding="utf-8") == recorded  # nothing moved: no rewrite
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().out == ""
 
     _sql(root, "ALTER TABLE ops.orders ADD COLUMN carrier VARCHAR")
     assert _cli(monkeypatch, ["probe", *where]) == 0
     capsys.readouterr()
     _advance_baselines(root)
-    assert "drift baseline advanced for 'warehouse'" in capsys.readouterr().err
+    assert "drift baseline advanced for 'warehouse'" in capsys.readouterr().out
     assert "carrier" in baseline.read_text(encoding="utf-8")
     assert _cli(monkeypatch, ["drift", *where]) == 0
 
@@ -362,17 +362,22 @@ def test_a_deploy_leaves_the_baseline_alone_over_a_breaking_finding(
     capsys.readouterr()
 
     _advance_baselines(root)
-    err = capsys.readouterr().err
+    out = capsys.readouterr().out
     assert baseline.read_text(encoding="utf-8") == recorded  # left alone
-    assert "left alone: 1 BREAKING finding(s)" in err
-    assert "DROPPED column `shipped_at`" in err and "--accept-drift" in err
+    assert "left alone: 1 BREAKING finding(s)" in out
+    assert "DROPPED column `shipped_at`" in out and "--accept-drift" in out
+    # The report's LAST line says what was left and how to accept it: on
+    # stdout, after the apply report, so a log read from its tail never
+    # shows a clean apply over breakage.
+    assert out.rstrip().splitlines()[-1].startswith("drift: 1 BREAKING finding(s) on 'warehouse'")
+    assert "`dst apply --accept-drift`" in out.rstrip().splitlines()[-1]
     assert _cli(monkeypatch, ["drift", *where]) == 1  # the evidence survives the deploy
     capsys.readouterr()
 
     _advance_baselines(root, accept_drift=True)
-    err = capsys.readouterr().err
-    assert "drift baseline advanced for 'warehouse' over 1 finding(s)" in err
-    assert "BREAKING ops.orders: DROPPED column `shipped_at` — accepted into the baseline" in err
+    out = capsys.readouterr().out
+    assert "drift baseline advanced for 'warehouse' over 1 finding(s)" in out
+    assert "BREAKING ops.orders: DROPPED column `shipped_at` — accepted into the baseline" in out
     assert "shipped_at" not in baseline.read_text(encoding="utf-8")
     assert _cli(monkeypatch, ["drift", *where]) == 0
 

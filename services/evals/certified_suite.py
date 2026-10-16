@@ -135,6 +135,47 @@ def format_result(summary: dict[str, Any]) -> str:
     return json.dumps(summary, separators=(",", ":"), default=str)
 
 
+_NUMBER_TEXT = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _canon(v: Any) -> Any:
+    """One cell in the shape the comparison reads: a number is a number
+    whichever driver or store it came through (``Decimal`` and a stored
+    "82.59" both read as 82.59), a date or timestamp is ISO text, with a
+    midnight timestamp equal to its date ("2026-09-30 00:00:00",
+    "2026-09-30T00:00:00" and "2026-09-30" are one day), and text compares
+    without surrounding whitespace or case. A value a release before 0.11.1
+    stored as text (``str(Decimal)``, ``str(datetime)``) therefore meets the
+    live read as itself, never as a restatement."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, int | float):
+        return v
+    if isinstance(v, _dt.datetime):
+        midnight = v.time() == _dt.time() and v.tzinfo is None
+        return v.date().isoformat() if midnight else v.isoformat()
+    if isinstance(v, _dt.date):
+        return v.isoformat()
+    if isinstance(v, str):
+        text = v.strip()
+        if _NUMBER_TEXT.match(text):
+            return float(text) if "." in text else int(text)
+        if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+            try:
+                parsed = _dt.datetime.fromisoformat(text)
+            except ValueError:
+                return text.casefold()
+            return _canon(parsed)
+        return text.casefold()
+    return str(v)
+
+
+def _canon_rows(rows: list[list[Any]]) -> list[list[Any]]:
+    return [[_canon(c) for c in r] for r in rows]
+
+
 def _key(row: list[Any]) -> tuple[Any, ...]:
     """A hashable row key; exotic cells (structs/arrays) compare by repr. An
     exact-numeric cell (the warehouse's ``Decimal``) keys as a float: keyed as
@@ -522,7 +563,10 @@ def _compare(
     by name (extra generated columns ignored), set diff, column-order-
     insensitive, and numbers value-equivalent — the scalar tolerance, a
     percentage against its fraction, and a value rounded to the precision the
-    certified value prints with (``_cells_close``)."""
+    certified value prints with (``_cells_close``). Both sides are read
+    through ``_canon`` first, so a value's type and text form never decide
+    equality — only the value does."""
+    oracle_rows, gen_rows = _canon_rows(oracle_rows), _canon_rows(gen_rows)
     gen_cols, gen_rows, projected = _projection(oracle_cols, gen_cols, gen_rows)
     if projected is not None:
         ok, reason = _compare(oracle_cols, oracle_rows, gen_cols, gen_rows)

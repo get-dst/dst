@@ -73,6 +73,31 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.11.1] — 2026-10-16
+
+No schema change. Upgrade fix: 0.11.0's restated check compared values an earlier release
+stored as text against live numbers and blocked the first apply; upgrade straight to this
+release.
+
+### Fixed
+
+- **The eval gate compares certified values by value, not by type or text form.** Values an
+  earlier release stored as text are re-recorded on first comparison, so the first apply
+  after upgrading never blocks on them. `dst apply --refresh-samples` re-records every
+  template and prints old → new.
+- **A certified answer discloses definitions written about a metric or dimension**, not only
+  about a column.
+- **A level metric asked per month, week, quarter or year is one snapshot per bucket on
+  every rail**; `level_grain` fails a series collapsed to one global latest day.
+- **`aggregation_scope` no longer fires on counts built over dates, timestamps or flags.**
+- **`dst apply` prints the breaking drift findings it left in the baseline** at the end of its
+  report, with the `--accept-drift` hint.
+- **`dst import dbt` imports a measure and metric twin once** and writes no empty
+  `primary_key`.
+- **The gate's block message names a status apply accepts.**
+- **`run_certified` resolves the stored question asked verbatim** whatever its similarity
+  score.
+
 ## [0.11.0] — 2026-10-16
 
 No schema change. Behaviour changes: the publish gate grades certified answers by their

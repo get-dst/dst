@@ -238,6 +238,45 @@ def _agg_check(sql: str):  # noqa: ANN202
     return _aggregation_scope(sql, _currency_model())
 
 
+def test_a_count_over_per_row_dates_and_flags_is_not_a_cross_currency_total() -> None:
+    """A churn count built from MAX(cancelled_at) and BOOL_AND(status = …)
+    per customer aggregates a timestamp and a flag — nothing a currency
+    denominates — before counting rows. The check used to fire on the MAX."""
+    from services.runtime.verification import _aggregation_scope
+
+    model = SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="subscriptions",
+                source=EntitySource(connection="wh", table="staging.stg_stripe_subscriptions"),
+                pinned_dimensions=["currency"],
+                fields=[
+                    Field(name="customer_id", type="string"),
+                    Field(name="status", type="string"),
+                    Field(name="cancelled_at", type="timestamp"),
+                    Field(name="mrr_cents", type="number"),
+                    Field(name="currency", type="string"),
+                ],
+            )
+        ],
+    )
+    churn = (
+        "WITH per_customer AS (SELECT customer_id, "
+        "BOOL_AND(status = 'cancelled') AS all_cancelled, MAX(cancelled_at) AS churn_at "
+        "FROM staging.stg_stripe_subscriptions GROUP BY customer_id) "
+        "SELECT COUNT(*) AS churned_customers FROM per_customer "
+        "WHERE all_cancelled AND churn_at >= '2026-01-01' AND churn_at < '2027-01-01'"
+    )
+    check = _aggregation_scope(churn, model)
+    assert check.status == "skip", check
+    assert "nothing denominated" in (check.reason or "")
+    # a value aggregate beside the dates still fails without a currency reference
+    total = "SELECT MAX(cancelled_at), SUM(mrr_cents) FROM staging.stg_stripe_subscriptions"
+    assert _aggregation_scope(total, model).status == "fail"
+
+
 def test_a_cross_currency_sum_fails_aggregation_scope() -> None:
     """SUM(ns_credit - ns_debit) with no currency reference anywhere: the
     arithmetic sum of three currencies is a number denominated in nothing,

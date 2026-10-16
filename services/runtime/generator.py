@@ -85,7 +85,10 @@ _LEVEL_RULE = (
     "date_trunc(<bucket>, l.<time>) = date_trunc(<bucket>, <entity>.<time>)) and "
     "aggregate the snapshot's rows at that date. Never SUM a level metric across "
     "the snapshot rows of a bucket, and never pin one MAX(<time>) for the whole "
-    "series (that collapses every bucket to the latest day)."
+    "series (that collapses every bucket to the latest day). 'By month', 'per "
+    "month', 'each month' or 'at month end per month' over a level metric (likewise "
+    "week, quarter, year) always means the latest snapshot PER BUCKET, one row per "
+    "bucket — never one global latest row."
 )
 
 # Per-dialect hints appended to the system prompt so generated SQL matches the

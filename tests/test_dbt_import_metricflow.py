@@ -133,6 +133,16 @@ def _semantic_manifest() -> dict[str, object]:
                 "description": "Weekly slot capacity (a level, copied per day).",
                 "type_params": {"measure": {"name": "slots_per_week"}},
             },
+            {
+                "name": "billed_visits",
+                "type": "simple",
+                "type_params": {"measure": {"name": "completed_visits"}},
+                "filter": {
+                    "where_filters": [
+                        {"where_sql_template": "{{ Dimension('visit__status') }} = 'billed'"}
+                    ]
+                },
+            },
         ],
     }
 
@@ -148,11 +158,11 @@ def _import(tmp_path: Path):  # type: ignore[no-untyped-def]
 def test_case_when_measures_are_qualified_with_the_entity_alias(tmp_path: Path) -> None:
     by_name = {e.name: e for e in _import(tmp_path).entities}
     metrics = {m.name: m for m in by_name["visits"].metrics}
-    assert metrics["completed_visits"].expr == (
+    assert metrics["visits_completed"].expr == (
         "CASE WHEN visits.status IN ('completed', 'billed') THEN 1 ELSE 0 END"
     )
-    # the business-named alias of the measure carries the same qualified expression
-    assert metrics["visits_completed"].expr == metrics["completed_visits"].expr
+    # the filtered metric over the same measure carries the same qualified expression
+    assert metrics["visits_completed"].expr == metrics["billed_visits"].expr
     # a time dimension over `expr: visit_date` names the COLUMN as the time field
     assert by_name["visits"].default_time_field == "visit_date"
 
@@ -169,6 +179,46 @@ def test_an_expression_primary_entity_is_not_a_primary_key(tmp_path: Path) -> No
         ("visits", "clinics"),
         ("capacity_daily", "clinics"),
     }
+
+
+def test_an_expression_primary_entity_writes_no_primary_key_line(tmp_path: Path) -> None:
+    res = _import(tmp_path)
+    files = render_semantic_files(res.entities, [], [])
+    assert "primary_key" not in files["semantic/entities/capacity-daily.yaml"]
+    assert "primary_key:\n- visit_id" in files["semantic/entities/visits.yaml"]
+    entities, _d, _r = parse_semantic_files(files)
+    assert entities["capacity_daily"].primary_key == []
+
+
+def test_a_metric_over_a_measure_with_the_same_expression_imports_once(tmp_path: Path) -> None:
+    res = _import(tmp_path)
+    visits = next(e for e in res.entities if e.name == "visits")
+    metrics = {m.name: m for m in visits.metrics}
+    # the dbt metric's name wins; the measure's name is gone, the fold is noted
+    assert "completed_visits" not in metrics
+    folded = metrics["visits_completed"]
+    assert folded.expr.startswith("CASE WHEN visits.status IN")
+    assert folded.filters == []
+    assert "completed_visits" in (folded.description or "")
+    assert any("'completed_visits'" in n and "'visits_completed'" in n for n in res.notes)
+    assert all(s.name != "completed_visits" for s in res.skipped)
+    # a level folds the same way, keeping its additivity
+    capacity = next(e for e in res.entities if e.name == "capacity_daily")
+    names = [m.name for m in capacity.metrics]
+    assert names.count("planned_slots") == 1 and "slots_per_week" not in names
+    # the definition still binds to the surviving metric
+    assert {d.term: d.about for d in res.definitions}["visits_completed"] == (
+        "visits.visits_completed"
+    )
+
+
+def test_a_metric_with_a_filter_stays_beside_its_measure(tmp_path: Path) -> None:
+    visits = next(e for e in _import(tmp_path).entities if e.name == "visits")
+    metrics = {m.name: m for m in visits.metrics}
+    billed = metrics["billed_visits"]
+    assert billed.filters == ["visits.status = 'billed'"]
+    assert billed.expr == metrics["visits_completed"].expr
+    assert billed.description is None
 
 
 def test_definitions_bind_to_the_metric_and_carry_no_aggregate_sql(tmp_path: Path) -> None:
@@ -190,11 +240,10 @@ def test_a_duplicate_measure_name_keeps_its_first_home_with_a_note(tmp_path: Pat
 def test_a_non_additive_measure_imports_as_a_level(tmp_path: Path) -> None:
     by_name = {e.name: e for e in _import(tmp_path).entities}
     metrics = {m.name: m for m in by_name["capacity_daily"].metrics}
-    assert metrics["slots_per_week"].additivity == "level"
     assert metrics["planned_slots"].additivity == "level"
     # the snapshot field is the entity's default time field (the dimension's column)
     assert by_name["capacity_daily"].default_time_field == "day"
-    assert metrics["slots_per_week"].agg_time_field is None
+    assert metrics["planned_slots"].agg_time_field is None
 
 
 def test_the_imported_layer_plans_clean(tmp_path: Path) -> None:

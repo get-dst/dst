@@ -113,6 +113,32 @@ def temporal_terms(text: str) -> frozenset[str]:
     return frozenset(out)
 
 
+# A breakdown phrase: the question wants one figure PER calendar bucket.
+# "by month", "per week", "each quarter", "end of every month", "a monthly
+# trend". A bare "monthly" or "weekly" is not one: it names metrics ("monthly
+# recurring revenue", "weekly active users") far more often than a series.
+_BREAKDOWN = re.compile(
+    r"\b(?:by|per|each|every|for\s+each|of\s+each|of\s+every)\s+"
+    r"(?P<unit>week|month|quarter|year)s?\b"
+    r"|\b(?P<adv>weekly|monthly|quarterly|yearly|annual)\s+"
+    r"(?:trend|breakdown|series|basis|progression|development|view)\b",
+    re.IGNORECASE,
+)
+_ADVERB_UNIT = {"weekly": "week", "monthly": "month", "quarterly": "quarter", "yearly": "year"}
+
+
+def breakdown_unit(text: str) -> str | None:
+    """The calendar unit a question asks a breakdown by (week, month, quarter,
+    year), or None when it asks for one figure. Deterministic: the phrase
+    alone, no reading of the rest of the sentence."""
+    m = _BREAKDOWN.search(text)
+    if m is None:
+        return None
+    if m.group("unit"):
+        return m.group("unit").lower()
+    return _ADVERB_UNIT.get(m.group("adv").lower(), "year")
+
+
 def temporal_spans(text: str) -> list[tuple[int, int]]:
     """The character spans of every window phrase ``temporal_terms`` reads off
     the text, so a caller can blank them and judge what the question says

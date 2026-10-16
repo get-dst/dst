@@ -122,8 +122,13 @@ def render_semantic_files(
 ) -> dict[str, str]:
     files: dict[str, str] = {}
     for e in entities:
+        data = e.model_dump(mode="json", exclude_none=True)
+        if not data.get("primary_key"):
+            # No key column is "none declared", not a declared empty key; the
+            # parser defaults it the same way, and `[]` reads as a mistake.
+            data.pop("primary_key", None)
         files[f"{ENTITY_DIR}/{slug(e.name)}.yaml"] = yaml.safe_dump(
-            e.model_dump(mode="json", exclude_none=True), sort_keys=False, allow_unicode=True
+            data, sort_keys=False, allow_unicode=True
         )
     for d in definitions:
         files[f"{DEFINITION_DIR}/{slug(d.term)}.md"] = definition_to_page(d)

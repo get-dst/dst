@@ -3477,11 +3477,16 @@ def _advance_baselines(root: Path, *, accept_drift: bool = False) -> None:
     BREAKING finding against the baseline, or `--accept-drift` was passed:
     a CI job that runs drift and then apply must not have apply bury the
     breakage drift just reported. The layer still lands either way; what is
-    left alone is the baseline, and the report says so and why."""
+    left alone is the baseline, and the report says so and why — on stdout,
+    after the apply report, closing with one line that names what was left
+    and the flag that accepts it. (On stderr it ran ahead of the piped
+    report, and a log read from its tail showed a clean apply.)"""
     from services.project import probe as probe_artifact
     from services.project import warehouse_drift as wd
 
+    sys.stdout.flush()
     project_files: dict[str, str] | None = None
+    left: list[str] = []
     for path in sorted((root / wd.BASELINE_DIR).glob(f"*{probe_artifact.PROBE_SUFFIX}")):
         try:
             artifact = probe_artifact.parse_probe(path.read_text(encoding="utf-8"), str(path))
@@ -3495,14 +3500,16 @@ def _advance_baselines(root: Path, *, accept_drift: bool = False) -> None:
         breaking = [f for f in findings if wd.is_breaking(f)]
         if breaking and not accept_drift:
             print(
-                f"drift baseline for '{artifact.connection}' left alone: {len(breaking)} "
-                "BREAKING finding(s) against the pushed artifact — review with `dst drift`, "
-                "then `dst drift --accept` or `dst apply --accept-drift` once reviewed:",
-                file=sys.stderr,
+                style.warn(
+                    f"drift baseline for '{artifact.connection}' left alone: {len(breaking)} "
+                    "BREAKING finding(s) against the pushed artifact — review with `dst drift`, "
+                    "then `dst drift --accept` or `dst apply --accept-drift` once reviewed:"
+                )
             )
             for finding in breaking:
                 for line in wd.render(finding):
-                    print("  " + line, file=sys.stderr)
+                    print("  " + line)
+            left.append(f"{len(breaking)} BREAKING finding(s) on '{artifact.connection}'")
             continue
         # The same merge `dst drift --accept` performs: the artifact's catalog
         # with its measured facts, and the prior baseline's facts for columns
@@ -3513,11 +3520,17 @@ def _advance_baselines(root: Path, *, accept_drift: bool = False) -> None:
             over = f" over {len(findings)} finding(s)" if findings else ""
             print(
                 f"drift baseline advanced for '{artifact.connection}'{over} -> {rel}"
-                + (":" if findings else ""),
-                file=sys.stderr,
+                + (":" if findings else "")
             )
             for line in wd.accepted_lines(findings):
-                print(line, file=sys.stderr)
+                print(line)
+    if left:
+        print(
+            style.warn(
+                f"drift: {', '.join(left)} left in the baseline — the layer landed; "
+                "`dst apply --accept-drift` accepts them once reviewed"
+            )
+        )
 
 
 def _semantic(args: argparse.Namespace) -> int:
@@ -7068,10 +7081,10 @@ def main() -> int:
             p.add_argument(
                 "--refresh-samples",
                 action="store_true",
-                help="re-record the sample result of every stored template whose explicit "
-                "start/end binding reads inclusive since 0.10.0 (the certify self-test "
-                "names them): executes the sample-bound SQL once more and re-stamps "
-                "verified value, bindings and terms; prints old -> new per template",
+                help="re-record the sample result of every stored template: executes the "
+                "sample-bound SQL once more and re-stamps verified value, bindings and "
+                "terms; prints old -> new per template. The acceptance route for a "
+                "template the eval gate reports as restated",
             )
             p.add_argument(
                 "--accept-drift",

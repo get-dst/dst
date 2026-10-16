@@ -68,14 +68,15 @@ def test_supported_measures_and_business_metrics() -> None:
     orders = next(e for e in _import().entities if e.name == "orders")
     metrics = {m.name: m for m in orders.metrics}
     # raw measures, mapped aggs (average -> avg), expr qualified by entity alias
-    assert metrics["order_total"].agg == "sum"
-    assert metrics["order_total"].expr == "orders.amount"
     assert metrics["average_order_amount"].agg == "avg"
     assert metrics["distinct_customers"].agg == "count_distinct"
     assert metrics["order_count"].expr == "1"  # literal expr left unqualified
-    # simple dbt metric surfaced under its business name
-    assert "revenue" in metrics
+    # the unfiltered simple dbt metric over `order_total` IS that measure: one
+    # metric, under the business name, with the fold noted
+    assert "order_total" not in metrics
+    assert metrics["revenue"].agg == "sum"
     assert metrics["revenue"].expr == "orders.amount"
+    assert "order_total" in (metrics["revenue"].description or "")
     # unsupported (median) is NOT a queryable metric
     assert "median_order_amount" not in metrics
 

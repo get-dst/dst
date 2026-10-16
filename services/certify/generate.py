@@ -10,6 +10,8 @@ and graded against the warehouse, instead of living as a disconnected directory 
 
 from __future__ import annotations
 
+import datetime
+import decimal
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,9 +54,17 @@ def _schema_text(model: SemanticModel) -> str:
 
 
 def _cell(value: object) -> object:
-    """JSON-safe cell — numbers/strings/bools pass; Decimal/date/etc. become text."""
+    """JSON-native cell: numbers stay numbers (an exact-numeric ``Decimal``
+    becomes the float it prints as, the stored precision), dates and
+    timestamps become ISO text, everything else its text. The stored value is
+    compared against a live read that took the same path, so the shape is
+    the comparison's contract, not a display choice."""
     if value is None or isinstance(value, bool | int | float | str):
         return value
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, datetime.date | datetime.datetime):
+        return value.isoformat()
     return str(value)
 
 

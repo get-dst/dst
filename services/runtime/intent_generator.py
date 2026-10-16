@@ -25,6 +25,7 @@ from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
 from services.runtime import ambiguity
 from services.runtime.compiler import CompileError, compile_intent
+from services.runtime.timewindow import breakdown_unit
 
 _RULES = (
     "Translate the question into a structured QUERY INTENT over the lens's metric layer.\n"
@@ -36,7 +37,10 @@ _RULES = (
     "`entity.member` when the same name appears on more than one entity.\n"
     "For an over-time question ('by month', 'per week', 'daily trend'), set `grain` to "
     "hour|day|week|month|quarter|year and do NOT also list the time field as a dimension — "
-    "the compiler buckets the entity's time field for you.\n"
+    "the compiler buckets the entity's time field for you. A level metric (marked "
+    "[level]) asked 'by month', 'per month', 'each month' or 'at month end per month' is "
+    "a series of one snapshot per bucket, never one latest row: set `grain` (or group by "
+    "the entity's own month/week dimension).\n"
     "When a listed definition carries a `[filter: ...]`, that filter IS the governed "
     "meaning of the term: put the term in `definitions` and the compiler applies the "
     "predicate for you — do NOT reconstruct the condition yourself in `filters`. List a "
@@ -211,6 +215,28 @@ def gate_definitions(question: str, intent: QueryIntent, model: SemanticModel) -
     )
 
 
+def gate_level_grain(question: str, intent: QueryIntent, model: SemanticModel) -> QueryIntent:
+    """The intent with ``grain`` set from the question's breakdown phrase ("by
+    month", "per quarter") when every selected metric is a level and the model
+    bucketed by nothing — neither a grain nor one of the entity's date-typed
+    dimensions. A level pinned to one latest snapshot under a "per month" ask
+    collapses the series to its last day; the phrase is deterministic and the
+    compiler reads one snapshot per bucket once the grain says so."""
+    unit = breakdown_unit(question)
+    if unit is None or intent.grain is not None or not intent.metrics:
+        return intent
+    entity = next((e for e in model.entities if e.name == intent.entity), None)
+    if entity is None:
+        return intent
+    by_name = {m.name: m for m in entity.metrics}
+    if not all(m in by_name and by_name[m].additivity == "level" for m in intent.metrics):
+        return intent
+    typed = {d.name: d.type for d in entity.dimensions} | {f.name: f.type for f in entity.fields}
+    if any(typed.get(d.rpartition(".")[2]) in ("date", "timestamp") for d in intent.dimensions):
+        return intent
+    return intent.model_copy(update={"grain": unit})
+
+
 def intent_term(intent: QueryIntent | None) -> str | None:
     """The compiler-validated term a compiled intent implements — basis provenance.
 
@@ -282,6 +308,7 @@ class IntentSQLGenerator:
             if intent is None:
                 break
             intent = gate_definitions(question, intent, semantic_model)
+            intent = gate_level_grain(question, intent, semantic_model)
             try:
                 sql = compile_intent(intent, semantic_model)
                 error = None

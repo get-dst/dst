@@ -403,6 +403,7 @@ def _latest_snapshot(
     grain: str | None,
     dialect: str,
     zone: str,
+    buckets: Sequence[str] = (),
 ) -> str:
     """The predicate that makes a level metric read as a snapshot: the time
     field equals the latest value inside the window (or inside each grain
@@ -410,6 +411,11 @@ def _latest_snapshot(
     scalar subquery over the same table, which every supported dialect runs;
     the window predicates ride into it so "end of August" is August's last
     snapshot and not the table's.
+
+    *buckets* are the entity's date-typed dimensions the query groups by (a
+    ``month`` column on a month-end table): each is a bucket like a grain,
+    and the subquery is correlated on it, so grouping by the entity's own
+    month column reads one snapshot per month and not the series' last day.
 
     Only the window restricts the subquery: a snapshot is of the whole
     population at one date, so a dimension or a metric filter aggregates rows
@@ -421,11 +427,30 @@ def _latest_snapshot(
     if grain:
         same_bucket = _trunc_sql(entity.name, field, grain, dialect)
         conds.append(f"{_trunc_sql(inner, field, grain, dialect)} = {same_bucket}")
+    for expr in buckets:
+        conds.append(
+            f"{_realias(expr, entity.name, inner, dialect)} = "
+            f"{_realias(expr, entity.name, entity.name, dialect)}"
+        )
     table = quote_table(entity.source.table, dialect)
     sub = f"SELECT MAX({col}) FROM {table} AS {quote_ident(inner, dialect)}"
     if conds:
         sub += " WHERE " + " AND ".join(conds)
     return f"{_qualify(entity, field, dialect)} = ({sub})"
+
+
+def _realias(expr: str, entity: str, alias: str, dialect: str) -> str:
+    """*expr* with every column of *entity* (qualified by its name, or bare)
+    read from *alias* instead — the same authored expression on both sides of
+    the snapshot subquery's correlation."""
+    try:
+        tree = sqlglot.parse_one(expr, read=dialect)
+    except Exception as exc:  # noqa: BLE001
+        raise CompileError(f"could not parse dimension expression {expr!r}: {exc}") from exc
+    for col in tree.find_all(exp.Column):
+        if not col.table or col.table == entity:
+            col.set("table", exp.to_identifier(alias, quoted=is_reserved(alias, dialect)))
+    return tree.sql(dialect=dialect)
 
 
 def unsafe_join_reason(model: SemanticModel, base: str, target: str) -> str | None:
@@ -816,6 +841,11 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
             for f, (owner, _expr) in zip(intent.filters, filter_exprs, strict=True)
             if owner is entity and f.field.rpartition(".")[2] == snapshot_field
         ]
+        buckets = [
+            expr
+            for d, (owner, expr) in zip(intent.dimensions, dim_exprs, strict=True)
+            if owner is entity and _member_type(entity, d) in ("date", "timestamp")
+        ]
         predicates.append(
             _latest_snapshot(
                 entity,
@@ -824,6 +854,7 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
                 intent.grain,
                 dialect,
                 zone if _member_type(entity, snapshot_field) == "timestamp" else "",
+                buckets,
             )
         )
     if predicates:

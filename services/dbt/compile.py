@@ -70,6 +70,8 @@ class ImportResult:
     relationships: list[SharedRelationship] = field(default_factory=list)
     definitions: list[Definition] = field(default_factory=list)
     skipped: list[SkippedConstruct] = field(default_factory=list)
+    # What compiled under another name than dbt's (nothing lost, nothing doubled).
+    notes: list[str] = field(default_factory=list)
 
 
 def _field_type(data_type: str | None) -> FieldType:
@@ -440,7 +442,8 @@ def import_shared_assets(
         for measure_name in measures
     }
     entity_map = _entity_to_model(artifacts.semantic_models)
-    _apply_extra_metrics(entities, artifacts, measures_by_entity, owner_of, entity_map)
+    notes: list[str] = []
+    _apply_extra_metrics(entities, artifacts, measures_by_entity, owner_of, entity_map, notes)
     compound_owner = _apply_compound_metrics(entities, artifacts, entity_map, skipped)
     definitions, _used_metric_names = _compile_definitions(
         artifacts, measures_by_entity, owner_of, skipped, entity_map, entities, compound_owner
@@ -466,6 +469,7 @@ def import_shared_assets(
         relationships=_relationships(artifacts.semantic_models),
         definitions=definitions,
         skipped=skipped,
+        notes=notes,
     )
 
 
@@ -475,11 +479,16 @@ def _apply_extra_metrics(
     measures_by_entity: dict[str, dict[str, DbtMeasure]],
     owner_of: dict[str, str],
     entity_map: dict[str, str],
+    notes: list[str],
 ) -> None:
-    """Append business-named simple metrics (e.g. 'revenue') alongside the raw measures,
-    so callers can select either name. A metric filter becomes Metric.filters;
-    untranslatable filters mean NO queryable metric (already reported by
-    _compile_definitions) — an unfiltered stand-in would be the wrong number."""
+    """Surface business-named simple metrics (e.g. 'revenue') on the entity. A
+    dbt metric that adds nothing to its measure — same expression, no filter —
+    is the same number twice; the measure's metric is renamed to the business
+    name (the one people ask for) and the fold is noted on the metric and in
+    ``notes``. A filtered metric is a different number and lands beside the
+    measure, its filter as Metric.filters; an untranslatable filter means NO
+    queryable metric (already reported by _compile_definitions) — an unfiltered
+    stand-in would be the wrong number."""
     by_name = {e.name: e for e in entities}
     sm_by_name = {sm.name: sm for sm in artifacts.semantic_models}
     existing: dict[str, set[str]] = {e.name: {m.name for m in e.metrics} for e in entities}
@@ -499,7 +508,29 @@ def _apply_extra_metrics(
             filters = [translated]
         src = measures_by_entity[ent_name][metric.measure]
         biz = _measure_metric(sm_by_name[ent_name], src, by_name[ent_name].default_time_field)
-        if biz is not None:
+        if biz is None:
+            continue
+        twin = next(
+            (
+                m
+                for m in by_name[ent_name].metrics
+                if m.name == metric.measure
+                and (m.expr, m.agg, m.filters, m.agg_time_field, m.additivity)
+                == (biz.expr, biz.agg, filters, biz.agg_time_field, biz.additivity)
+            ),
+            None,
+        )
+        if twin is not None:
+            twin.name = metric.name
+            twin.description = (
+                f"dbt measure '{metric.measure}' folded into this metric: same expression"
+            )
+            existing[ent_name].add(metric.name)
+            notes.append(
+                f"measure '{metric.measure}' folded into metric '{metric.name}' "
+                f"on '{ent_name}' (same expression)"
+            )
+        else:
             by_name[ent_name].metrics.append(
                 Metric(
                     name=metric.name,

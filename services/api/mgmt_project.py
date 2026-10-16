@@ -574,8 +574,8 @@ def apply_project(
     org_id: uuid.UUID = Depends(get_admin_org),
     identity: AdminIdentity = Depends(get_admin_identity),
     probe_certified: bool = Query(default=False),
-    # Re-record the sample result of stored templates whose explicit-range
-    # binding reads inclusive since 0.10.0 (`dst apply --refresh-samples`).
+    # Re-record the sample result of every stored template, old -> new per
+    # template (`dst apply --refresh-samples`).
     refresh_samples: bool = Query(default=False),
     require_gates: bool = Query(default=False),
     # The transient, audited escape from a failing-case block.

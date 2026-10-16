@@ -38,7 +38,7 @@ from services.contracts.response import (
     QueryResponse,
     TruncationInfo,
 )
-from services.contracts.semantic_model import Definition, SemanticModel
+from services.contracts.semantic_model import Definition, Entity, SemanticModel
 from services.contracts.trace import TraceLog
 from services.contracts.verification import VerificationCheck
 from services.lenses.profile_age import ProfileAge
@@ -518,28 +518,69 @@ def _parsed_columns(expr: str) -> list[exp.Column]:
     return list(tree.find_all(exp.Column)) if tree is not None else []
 
 
+_MEMBER_REF = re.compile(r"\{(\w+)\}")
+
+
+def _member_columns(entity: Entity, member: str) -> set[str] | None:
+    """The warehouse columns an ``about: entity.member`` member reads when it
+    names a METRIC or DIMENSION of the entity rather than a column: the bare
+    column names in its expression, a derived metric's ``{refs}`` followed to
+    the metrics they name. An empty set is a member with no expression (a
+    plain count) — reading the table is reading it. None when the member is
+    no metric or dimension, i.e. it names a column itself."""
+    members = {m.name.lower(): m.expr for m in entity.metrics}
+    members.update({d.name.lower(): d.expr or d.name for d in entity.dimensions})
+    if member.lower() not in members:
+        return None
+    out: set[str] = set()
+    seen: set[str] = set()
+    todo = [member.lower()]
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        expr = members.get(name)
+        if not expr:
+            continue
+        for ref in _MEMBER_REF.findall(expr):
+            if ref.lower() in members:
+                todo.append(ref.lower())
+        out.update(col.name.lower() for col in _parsed_columns(_MEMBER_REF.sub("0", expr)))
+    return out
+
+
 def certified_definitions(
     sql: str, columns: Sequence[str], model: SemanticModel
 ) -> list[Definition]:
     """The definitions a certified serve must disclose: those ``about`` a
-    column the approved SQL touches on an entity it reads, plus those the
-    served columns bind to (``governing_definitions``, the composer's own
-    rail). Attribution by expression still runs first; this is the floor for
-    pages that carry no expression and would otherwise reach nobody."""
-    tables = {e.name.lower(): e.source.table.lower() for e in model.entities}
+    member the approved SQL touches on an entity it reads — a column by
+    name, a metric or dimension by the columns its expression reads — plus
+    those the served columns bind to (``governing_definitions``, the
+    composer's own rail). Attribution by expression still runs first; this
+    is the floor for pages that carry no expression and would otherwise
+    reach nobody."""
+    entities = {e.name.lower(): e for e in model.entities}
     sql_l = sql.lower()
 
     def reads(d: Definition) -> bool:
         head, dot, member = (d.about or "").rpartition(".")
         if not dot or not head.strip() or not member.strip():
             return False
-        table = tables.get(head.strip().lower())
-        if table is None:
+        entity = entities.get(head.strip().lower())
+        if entity is None:
             return False
-        return (
+        table = entity.source.table.lower()
+        read = (
             re.search(rf"\b{re.escape(table)}\b", sql_l) is not None
             or re.search(rf"\b{re.escape(head.strip().lower())}\b", sql_l) is not None
-        ) and verification._touches(member.strip(), sql)
+        )
+        if not read:
+            return False
+        columns = _member_columns(entity, member.strip())
+        if columns is None:
+            return verification._touches(member.strip(), sql)
+        return not columns or any(verification._touches(c, sql) for c in columns)
 
     out = [d for d in model.definitions if reads(d)]
     seen = {d.term for d in out}

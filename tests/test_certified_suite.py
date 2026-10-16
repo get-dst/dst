@@ -1266,3 +1266,54 @@ def test_compare_pairs_equal_width_label_against_helper_visibly() -> None:
         [["2026-09-01", 0.8259, 7]],
     )
     assert not ok
+
+
+def test_compare_reads_text_stored_values_as_their_type() -> None:
+    """A release before 0.11.1 stored a verified value as text (``str`` of a
+    Postgres NUMERIC or a timestamp); the live read is JSON-native. The value
+    is the same, so the comparison is: numbers by value at the stored
+    precision, a midnight timestamp as its day in any ISO spelling, text
+    without whitespace or case."""
+    import datetime
+    import decimal
+
+    from services.evals.certified_suite import _canon, _compare
+
+    ok, _ = _compare(["value"], [["82.59"]], ["value"], [[82.59]])
+    assert ok
+    ok, _ = _compare(["value"], [["37.90"]], ["value"], [[decimal.Decimal("37.9")]])
+    assert ok
+    ok, _ = _compare(
+        ["otd_pct", "n"], [["82.59", 21588]], ["otd_pct", "n"], [[decimal.Decimal("82.59"), 21588]]
+    )
+    assert ok
+    ok, _ = _compare(["day"], [["2026-09-30 00:00:00"]], ["day"], [["2026-09-30T00:00:00"]])
+    assert ok
+    ok, _ = _compare(["day"], [["2026-09-30"]], ["day"], [[datetime.datetime(2026, 9, 30)]])
+    assert ok
+    ok, _ = _compare(["ccy"], [["EUR "]], ["ccy"], [["eur"]])
+    assert ok
+    # a moved value is still a move
+    ok, reason = _compare(["value"], [["82.59"]], ["value"], [[83.0]])
+    assert not ok and "83.0" in (reason or "")
+    ok, _ = _compare(["day"], [["2026-09-30"]], ["day"], [["2026-10-01"]])
+    assert not ok
+    assert _canon(datetime.datetime(2026, 9, 30, 12, 30)) == "2026-09-30T12:30:00"
+    assert _canon("007") == 7 and _canon(True) is True
+
+
+def test_value_summary_stores_json_native_cells() -> None:
+    """The stored value takes the same shape the gate reads live: a Decimal
+    is the float it prints as, a date or timestamp its ISO text."""
+    import datetime
+    import decimal
+
+    from services.certify.generate import _value_summary
+
+    assert _value_summary(["v"], [[decimal.Decimal("82.59")]]) == {"value": 82.59}
+    assert _value_summary(
+        ["d", "t", "n"], [[datetime.date(2026, 9, 30), datetime.datetime(2026, 9, 30), 1]]
+    ) == {
+        "columns": ["d", "t", "n"],
+        "rows": [["2026-09-30", "2026-09-30T00:00:00", 1]],
+    }

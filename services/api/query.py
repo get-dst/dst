@@ -455,6 +455,24 @@ def _authorized_connector(bundle: LensBundle, caller: CallerIdentity) -> Connect
     return resolve_connector(bundle.config.connections[0], caller.org_id, caller=caller)
 
 
+def _verbatim_question(answer: CertifiedAnswer, question: str) -> bool:
+    """Is the question the stored one, word for word — whitespace collapsed,
+    case ignored — or a template's own sample-bound rendering of it?"""
+
+    def norm(text: str) -> str:
+        return " ".join(text.split()).casefold()
+
+    asked = norm(question)
+    if not asked:
+        return False
+    if asked == norm(answer.question):
+        return True
+    return bool(answer.slots) and any(
+        asked == norm(certify_binding.render_question(answer.question, b))
+        for b in answer.sample_bindings or []
+    )
+
+
 def active_certified(session: Session, lens: str) -> list[CertifiedAnswer]:
     """The lens's certified library as callers see it: every answer that is
     not retired. Retired answers are history (mgmt/export only), never served;
@@ -1112,34 +1130,38 @@ def list_certified_for_caller(
     _authorized_bundle(name, caller)
     qvec = assembly.embed_question(q) if q else None
     with org_session(caller.org_id) as session:
+        library = active_certified(session, name)
         if qvec is not None:
             hits = certify_store.search(session, name, qvec, k=5)
-            entries = [
-                CertifiedEntry(
-                    cert_id=h.answer.id,
-                    question=h.answer.question,
-                    sql=h.answer.sql,
-                    certified_by=h.answer.created_by,
-                    certified_at=h.answer.created_at,
-                    score=round(h.score, 4),
-                    slots=h.answer.slots,
-                    sample_bindings=h.answer.sample_bindings,
-                )
-                for h in hits
-            ]
+            answers = [h.answer for h in hits]
+            scores = {h.answer.id: h.score for h in hits}
         else:
-            entries = [
-                CertifiedEntry(
-                    cert_id=a.id,
-                    question=a.question,
-                    sql=a.sql,
-                    certified_by=a.created_by,
-                    certified_at=a.created_at,
-                    slots=a.slots,
-                    sample_bindings=a.sample_bindings,
-                )
-                for a in active_certified(session, name)
-            ]
+            answers, scores = list(library), {}
+        if q:
+            # The stored question itself, asked verbatim, is the exact match
+            # whatever its cosine (a template's vector is its sample-bound
+            # anchor, so its own `{slot}` text can score under the band) —
+            # and it is exact on a keyless install too.
+            listed = {a.id for a in answers}
+            for a in library:
+                if _verbatim_question(a, q):
+                    if a.id not in listed:
+                        answers.append(a)
+                    scores[a.id] = 1.0
+            answers.sort(key=lambda a: -scores.get(a.id, 0.0))
+        entries = [
+            CertifiedEntry(
+                cert_id=a.id,
+                question=a.question,
+                sql=a.sql,
+                certified_by=a.created_by,
+                certified_at=a.created_at,
+                score=round(scores[a.id], 4) if a.id in scores else None,
+                slots=a.slots,
+                sample_bindings=a.sample_bindings,
+            )
+            for a in (answers[:5] if qvec is not None else answers)
+        ]
     return CertifiedLibrary(
         lens=name, certified=entries, exact_band=assembly.certified_bands().exact
     )

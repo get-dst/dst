@@ -264,3 +264,37 @@ def test_typed_gold_is_stored_on_an_answer_that_had_none(org) -> None:
     with org_session(oid) as s:
         stored = certify_store.list_for_lens(s, "customer_value")[0].resolution
         assert stored is not None and stored["typed"] is True and stored["tag"] == "declared"
+
+
+@needs_db
+def test_template_own_question_is_an_exact_match_whatever_its_cosine(org) -> None:
+    """A template's vector is its sample-bound anchor, so its own `{slot}` text
+    can score under the exact band; `run_certified` with the stored question
+    then missed its own answer. The stored question verbatim (whitespace and
+    case aside), or its sample rendering, is scored 1.0 and leads the list."""
+    oid, headers = org
+    template = {
+        "question": "how many orders were placed in {period}",
+        "sql": "SELECT count(*) AS orders FROM orders "
+        "WHERE order_date >= {period.start} AND order_date < {period.end}",
+        "slots": {"period": {"type": "date_range"}},
+        "sample_bindings": [{"period": "2018-Q1"}],
+    }
+    _apply(headers, _files([template, {"question": _Q, "sql": _SQL}]))
+    with org_session(oid) as s:
+        by_q = {a.question: a for a in certify_store.list_for_lens(s, "customer_value")}
+    cert_id = by_q[template["question"]].id
+    for asked in (
+        "how many orders were placed in {period}",
+        "  How many ORDERS were placed in {period} ",
+        "how many orders were placed in 2018-Q1",
+    ):
+        lib = client.get(
+            "/v1/lenses/customer_value/certified", headers=headers, params={"q": asked}
+        ).json()
+        assert lib["certified"][0]["cert_id"] == cert_id, (asked, lib)
+        assert lib["certified"][0]["score"] == 1.0
+    lib = client.get(
+        "/v1/lenses/customer_value/certified", headers=headers, params={"q": "orders in 2018-Q2"}
+    ).json()
+    assert all((e["score"] or 0.0) < 1.0 for e in lib["certified"])

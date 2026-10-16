@@ -259,6 +259,55 @@ def test_a_table_whose_grain_is_the_bucket_has_nothing_to_collapse() -> None:
     assert _level_grain(_SUMMED_BY_MONTH, model).status == "pass"
 
 
+_GLOBAL_PIN = (
+    "SELECT DATE_TRUNC('month', balances.day) AS month, SUM(balances.balance) AS balance "
+    "FROM fin.balances AS balances WHERE balances.day >= '2026-01-01' AND balances.day = "
+    "(SELECT MAX(balances_latest.day) FROM fin.balances AS balances_latest "
+    "WHERE balances_latest.day >= '2026-01-01') GROUP BY 1"
+)
+_PER_BUCKET_PIN = _GLOBAL_PIN.replace(
+    "balances_latest.day >= '2026-01-01')",
+    "balances_latest.day >= '2026-01-01' AND DATE_TRUNC('month', balances_latest.day) = "
+    "DATE_TRUNC('month', balances.day))",
+)
+
+
+def test_a_level_asked_per_month_but_pinned_to_one_latest_day_fails() -> None:
+    """The series collapsed to its last day: one row served as a year."""
+    for question in (
+        "Balance per month in 2026",
+        "month-end balance by month in 2026",
+        "balance at the end of each month of 2026",
+    ):
+        check = _level_grain(_GLOBAL_PIN, _balances(), question=question)
+        assert check.status == "fail", question
+        assert "one latest snapshot" in (check.reason or "")
+    report = _report("Balance per month in 2026", _GLOBAL_PIN, certification="none")
+    assert report.grade == "partial"
+    assert (report.partial_reason or "").startswith("level_grain")
+
+
+def test_a_level_pinned_per_bucket_passes_the_breakdown_ask() -> None:
+    question = "Balance per month in 2026"
+    assert _level_grain(_PER_BUCKET_PIN, _balances(), question=question).status == "pass"
+    cte = (
+        "WITH me AS (SELECT DATE_TRUNC('month', day) AS month, MAX(day) AS d "
+        "FROM fin.balances GROUP BY 1) SELECT me.d AS day, SUM(b.balance) AS balance "
+        "FROM me JOIN fin.balances AS b ON b.day = me.d GROUP BY 1"
+    )
+    assert _level_grain(cte, _balances(), question=question).status == "pass"
+    # a question for one figure is answered by one snapshot
+    assert _level_grain(_GLOBAL_PIN, _balances(), question="Balance in 2026").status == "pass"
+    assert _level_grain(_GLOBAL_PIN, _balances(), question="Balance today").status == "pass"
+    # the table's own grain is no excuse: a global pin collapses a monthly table too
+    model = _balances(grain="one row per account per month")
+    assert _level_grain(_GLOBAL_PIN, model, question=question).status == "fail"
+    assert (
+        _level_grain(_GLOBAL_PIN, _balances(), certification="certified", question=question).status
+        == "skip"
+    )
+
+
 def test_a_flow_metric_is_untouched() -> None:
     assert _level_grain(_SUMMED_BY_MONTH, _balances(level=False)).status == "skip"
 
@@ -274,4 +323,11 @@ def test_the_prompt_states_the_level_rule_per_bucket_only_when_a_level_metric_ex
     prompt = serialize_model(_balances())
     assert "INSIDE EACH BUCKET" in prompt
     assert "never pin one MAX" in prompt
+    assert "never one global latest row" in prompt
     assert "INSIDE EACH BUCKET" not in serialize_model(_balances(level=False))
+
+
+def test_the_intent_rules_say_a_level_by_month_is_a_series() -> None:
+    from services.runtime.intent_generator import _RULES
+
+    assert "never one latest row" in _RULES

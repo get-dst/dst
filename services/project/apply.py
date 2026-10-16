@@ -839,7 +839,8 @@ def _publish_bundle(
     if decision is not None and decision.recorded:
         warnings.append(
             f"eval gate: recorded the verified value of {decision.recorded} certified "
-            "answer(s) that had none — the next push grades them against it"
+            "answer(s) (none stored, or stored as text by an earlier release) — the next "
+            "push grades them against it"
         )
     # What the file-side allow-list covered this push, each with its reason:
     # an override nobody can see is the blanket flag by another name.
@@ -922,10 +923,9 @@ def _publish_bundle(
             elif decision.failing:
                 errors.append(
                     f"eval gate blocked publish: {len(decision.failing)} case(s) failing "
-                    f"({gate_report}) — fix the cases or the lens, park red cases as "
-                    "status: candidate, or publish once with "
-                    f"--allow-failing-cases {ids} --reason '…' (audited; the gate stays "
-                    f"{bundle.config.eval_gate})"
+                    f"({gate_report}) — fix the cases or the lens, {_park_hint(decision.failing)}, "
+                    f"or publish once with --allow-failing-cases {ids} --reason '…' "
+                    f"(audited; the gate stays {bundle.config.eval_gate})"
                 )
             return None, errors, [], "blocked", detail
         else:
@@ -1656,18 +1656,6 @@ def _certified_terms(sql: str, model: SemanticModel) -> list[str]:
         return []
 
 
-def _reads_inclusive(sample_bindings: list[dict[str, Any]] | None) -> bool:
-    """Does one of the template's sample bindings carry an explicit
-    ``start/end`` range that reads like an exclusive end? Such a binding
-    parses differently since explicit ranges became inclusive (0.10.0): its
-    sample result moved with the release, not with the warehouse."""
-    return any(
-        isinstance(v, str) and certify_binding.explicit_range_note(v) is not None
-        for b in sample_bindings or []
-        for v in b.values()
-    )
-
-
 def _refresh_samples(
     session: Session,
     source: LensSource,
@@ -1678,13 +1666,18 @@ def _refresh_samples(
     org_id: uuid.UUID | str,
 ) -> None:
     """`dst apply --refresh-samples`: re-record the sample result of every
-    stored template whose explicit-range binding reads inclusive now —
-    execute the sample-bound SQL once more (read-only, row-capped), store the
-    value it returns as ``verified_value``, and re-stamp bindings and terms
-    from the SQL as it renders today. Said in the applied count; a failed
-    execution warns and leaves the row as it was."""
-    connector = _probe_connector(session, source.config, org_id, result)
+    stored template — execute the sample-bound SQL once more (read-only,
+    row-capped), store the value it returns as ``verified_value``, and
+    re-stamp bindings and terms from the SQL as it renders today. Every
+    template prints its old -> new line and the applied count says how many;
+    a failed execution warns and leaves the row as it was. This is the
+    file-side acceptance route for a template whose sample moved (an
+    unslotted entry writes its new ``verified_value`` instead)."""
     done = 0
+    if not stored:
+        result.applied.append("--refresh-samples: no stored template to re-record")
+        return
+    connector = _probe_connector(session, source.config, org_id, result)
     for a in stored:
         rendered, errors = _template_gate_sql(
             {"slots": a.slots, "sample_bindings": a.sample_bindings}, a.question, a.sql, model
@@ -1727,8 +1720,7 @@ def _refresh_samples(
             f"{format_result(verified) if verified else 'unrecorded'}"
         )
     result.applied.append(
-        f"--refresh-samples: re-recorded the sample result of {done} of {len(stored)} "
-        "template(s) whose explicit range reads inclusive"
+        f"--refresh-samples: re-recorded the sample result of {done} of {len(stored)} template(s)"
     )
 
 
@@ -2295,6 +2287,22 @@ def _gate_dialect_pins(
         )
 
 
+def _park_hint(failing: list[str]) -> str:
+    """How to park a red case, in the status its file accepts: a certified
+    answer (``certified:<id>``) is retired in certified_answers.yaml —
+    ``status: candidate`` is an eval case's status, and apply rejects it on
+    a certified entry — while a behavioral case is parked as a candidate in
+    evals/cases.yaml."""
+    certified = any(c.startswith("certified:") for c in failing)
+    behavioral = any(not c.startswith("certified:") for c in failing)
+    parts = []
+    if certified:
+        parts.append("retire red certified answers (status: retired in certified_answers.yaml)")
+    if behavioral:
+        parts.append("park red cases as status: candidate in evals/cases.yaml")
+    return " and ".join(parts) or "park red cases"
+
+
 def _apply_certified_answers(
     session: Session,
     name: str,
@@ -2396,7 +2404,7 @@ def _apply_certified_answers(
             changed.append((stored, answer))
         else:
             unchanged += 1
-            if refresh_samples and stored.slots and _reads_inclusive(stored.sample_bindings):
+            if refresh_samples and stored.slots:
                 refreshed.append(stored)
                 continue
             if not stored.bindings or stored.terms is None:
@@ -2426,7 +2434,7 @@ def _apply_certified_answers(
     # warning here; the follow-up decision made files WIN — file-originated
     # entries absent from the push now DELETE below, and review-origin
     # survivors are the server-only idiom, not orphans to warn about.)
-    if refreshed:
+    if refresh_samples:
         _refresh_samples(session, source, result, model, refreshed, org_id=org_id)
     reauthored: list[str] = []
     for stored, answer in changed:

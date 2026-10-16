@@ -1241,3 +1241,60 @@ def test_prev_score_compares_only_the_same_case_set(org, monkeypatch) -> None:
     with org_session(oid) as s:
         runs = eval_store.list_runs(s, "customer_value")
         assert [r.passed for r in runs] == [2, 1, 1]
+
+
+@needs_db
+def test_upgrade_never_restates_a_value_stored_as_text(org, monkeypatch) -> None:
+    """Releases before 0.11.1 stored the verified value through ``str``: a
+    Postgres NUMERIC as "82.59", a timestamp as "2026-09-30 00:00:00". The
+    first apply after upgrading reads the same SQL JSON-native, and under
+    eval_gate: block that difference in shape must never block the push:
+    the value stands, the gate passes, and the stored value is re-recorded
+    in today's shape on that first comparison."""
+    oid, headers = org
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    sql = (
+        "SELECT CAST(count(*) AS DECIMAL(18, 2)) AS n, TIMESTAMP '2018-01-01' AS day "
+        "FROM customers WHERE number_of_orders > 1"
+    )
+    out = _apply(headers, _files([{"question": _Q, "sql": sql}]))
+    assert not any(e.get("errors") for e in out)
+    n = _jaffle_scalar("SELECT count(*) FROM customers WHERE number_of_orders > 1")
+    legacy = {"columns": ["n", "day"], "rows": [[f"{n}.00", "2018-01-01 00:00:00"]]}
+    with org_session(oid) as s:
+        stored = next(a for a in certify_store.list_for_lens(s, "customer_value"))
+        certify_store.update(s, stored.id, sql=stored.sql, verified_value=legacy)
+        s.commit()
+
+    out = _apply(headers, _files([{"question": _Q, "sql": sql}]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert not row.get("errors"), row
+    assert row.get("action") != "aborted"
+    assert not any("restated" in w for w in row.get("warnings") or []), row["warnings"]
+    assert any("stored as text by an earlier release" in w for w in row["warnings"]), row[
+        "warnings"
+    ]
+    with org_session(oid) as s:
+        stored = next(a for a in certify_store.list_for_lens(s, "customer_value"))
+    assert stored.verified_value == {"columns": ["n", "day"], "rows": [[float(n), "2018-01-01"]]}
+    # the next push compares native against native: nothing to migrate, nothing restated
+    out = _apply(headers, _files([{"question": _Q, "sql": sql}]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert not row.get("errors") and not any("restated" in w for w in row["warnings"])
+
+
+def test_park_hint_names_a_status_apply_accepts() -> None:
+    """The block message once said "park red cases as status: candidate" for
+    every failing id; a certified answer parked that way is rejected by apply
+    ("status must be 'active' or 'retired'"). The hint names the status the
+    file of each failing case accepts."""
+    from services.project.apply import _park_hint
+
+    certified = _park_hint(["certified:a1", "certified:b2"])
+    assert "status: retired in certified_answers.yaml" in certified
+    assert "candidate" not in certified
+    behavioral = _park_hint(["behavioral:must-clarify"])
+    assert "status: candidate in evals/cases.yaml" in behavioral
+    assert "retired" not in behavioral
+    both = _park_hint(["certified:a1", "behavioral:x"])
+    assert "status: retired" in both and "status: candidate" in both

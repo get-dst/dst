@@ -51,6 +51,8 @@ class CoverageReport:
     ok: bool = True
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # compiled, under another name than dbt's (a measure folded into its metric)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def skipped_total(self) -> int:
@@ -122,6 +124,7 @@ def coverage_report(artifacts: DbtArtifacts, result: ImportResult) -> CoverageRe
         ok=ok,
         warnings=warnings,
         errors=errors,
+        notes=list(result.notes),
     )
 
 
@@ -154,6 +157,9 @@ def render_text(report: CoverageReport) -> str:
     if report.warnings:
         lines.append("  warnings (not synced):")
         lines.extend(f"    - {w}" for w in report.warnings)
+    if report.notes:
+        lines.append("  notes:")
+        lines.extend(f"    - {n}" for n in report.notes)
 
     # Explicitly enumerate every skipped construct so nothing is implicit.
     if report.skipped:
