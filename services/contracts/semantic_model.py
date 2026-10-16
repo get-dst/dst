@@ -229,6 +229,23 @@ class Metric(Authored):
         default=None, description="ratio only: sibling metric name on the same entity"
     )
     description: str | None = None
+    # What people CALL the metric. The typed rails read a metric's name off the
+    # question word for word (underscores as spaces, longest first); a metric
+    # named `otd_rate` is never said that way, so "on-time delivery rate" named
+    # nothing and the question went to a decider that could pick its count
+    # sibling. Same discipline as a definition's aliases: literal word-boundary
+    # matches on author-declared strings, zero model judgment.
+    label: str | None = PField(
+        default=None,
+        description="the metric's business-English name, matched word for word like "
+        "its identifier (e.g. 'on-time delivery rate' for otd_rate)",
+    )
+    aliases: StrList = PField(
+        default_factory=list,
+        description="further phrasings that name this metric word for word "
+        "(e.g. ['OTD', 'on-time rate']) — the sole-metric door and the typed "
+        "metric rail read them exactly like the name; no model involved",
+    )
     filters: StrList = PField(
         default_factory=list,
         description="SQL boolean fragments ANDed into WHERE whenever this metric is "

@@ -32,7 +32,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1153,6 +1153,8 @@ def check_lens(
     ]
     errors += _cross_match_errors(session, name, source, model, warnings_out)
     errors += _starvation_errors(session, name, source)
+    if warnings_out is not None:
+        warnings_out.extend(_binding_range_warnings(source))
     gate_errors, _report = _deterministic_gates(
         session, name, store.LensBundle(config=config, semantic_model=model)
     )
@@ -1595,6 +1597,18 @@ def _starvation_errors(session: Session, name: str, source: LensSource) -> list[
     ]
 
 
+def _certified_terms(sql: str, model: SemanticModel) -> list[str]:
+    """The metric and definition names and the aggregated columns a certified
+    answer's SQL reads, stored on the row for the lexical veto
+    (``resolution.governed_terms`` over the sample-bound SQL for a template)."""
+    from services.runtime import resolution
+
+    try:
+        return resolution.governed_terms(sql, model)
+    except Exception:  # noqa: BLE001 — attribution never gates an apply
+        return []
+
+
 def _probe_noop(pre_existing: int) -> str:
     """--probe-certified probes NEW entries only; saying so when zero qualify
     kills the ordering trap (answers landed by an earlier apply leave nothing
@@ -1906,15 +1920,17 @@ def _cross_match_errors(
     those by the governed names each question carries (the lexical veto). So a
     pair above the equivalence band whose SQL differs is an ERROR only when the
     two questions name the same governed names (metrics, definitions, entities)
-    and a metric or definition is among them (nothing downstream can tell them
-    apart), or when the same set carries no metric or definition and the score
-    sits in the exact band ("how many customers churned" / "which customers
-    churned" is a warning at 0.92); any other pair is a WARNING in
-    ``warnings_out``. A stored row the file no longer carries is deleted by this
-    apply (files win), so it is not compared; a stored row under a question the
-    file carries is the same answer, not a pair. Without an embedder nothing
-    can be measured and nothing is reported (the unembedded-corpus warning
-    already says matching is off)."""
+    with a metric or definition among them (or none, in the exact band) AND,
+    once stopwords and those shared names are removed, neither question says
+    anything the other does not — no grain word, no shape word, no dimension,
+    no value, nothing. "MRR level" and "MRR growth" share a metric and differ
+    in a word, so they are a WARNING in ``warnings_out``, as is any pair that
+    names different governed terms or sits below the exact band without one.
+    A stored row the file no longer carries is deleted by this apply (files
+    win), so it is not compared; a stored row under a question the file
+    carries is the same answer, not a pair. Without an embedder nothing can be
+    measured and nothing is reported (the unembedded-corpus warning already
+    says matching is off)."""
     entries = [
         a
         for a in source.certified_answers or []
@@ -1930,7 +1946,12 @@ def _cross_match_errors(
         return []
     if embedder is None:
         return []
-    from services.certify.lexical import governed_names, measure_names, names_in
+    from services.certify.lexical import (
+        distinguishing_tokens,
+        governed_names,
+        measure_names,
+        names_in,
+    )
     from services.runtime.assembly import certified_bands
 
     anchors = [_anchor_question(a) for a in entries]
@@ -1953,19 +1974,27 @@ def _cross_match_errors(
             return
         seen.add(pair)
         n1, n2 = names_in(a1, names), names_in(a2, names)
-        if n1 == n2 and (n1 & measures or score >= bands.exact):
+        only1, only2 = distinguishing_tokens(a1, a2, n1 & n2)
+        if n1 == n2 and (n1 & measures or score >= bands.exact) and not (only1 or only2):
             errors.append(
                 f"certified answers '{q1}' and '{q2}' would answer each other's question "
                 f"(similarity {score:.2f}) with different SQL — one would serve the other's "
                 "question as certified; reword one so the questions differ, or merge them"
             )
         elif warnings_out is not None:
-            named = (
-                f"they name different governed terms ({_names_list(n1)} vs {_names_list(n2)}), "
-                "which keeps them apart at serve time"
-                if n1 != n2
-                else "no metric or definition tells them apart, only the score"
-            )
+            if n1 != n2:
+                named = (
+                    f"they name different governed terms ({_names_list(n1)} vs "
+                    f"{_names_list(n2)}), which keeps them apart at serve time"
+                )
+            elif only1 or only2:
+                named = (
+                    f"they share {_names_list(n1)} and differ in wording "
+                    f"({_names_list(only1)} vs {_names_list(only2)}), which keeps them "
+                    "apart at serve time"
+                )
+            else:
+                named = "no metric or definition tells them apart, only the score"
             warnings_out.append(
                 f"certified answers '{q1}' and '{q2}' sit inside the paraphrase band "
                 f"(similarity {score:.2f}) with different SQL; {named} — reword one if "
@@ -2018,6 +2047,34 @@ def _cross_match_errors(
                 h.score,
             )
     return errors
+
+
+def _binding_range_warnings(source: LensSource) -> list[str]:
+    """Explicit date ranges that read as exclusive ends — a plan WARNING on
+    every template whose sample binding ends on the first of a month or spans
+    a month or year plus one day. Inclusive ranges are the contract; this says
+    where a stored binding most likely did not mean it."""
+    out: list[str] = []
+    for answer in source.certified_answers or []:
+        question = str(answer.get("question", "")).strip()
+        slots = answer.get("slots")
+        samples = answer.get("sample_bindings")
+        if not question or not isinstance(slots, dict) or not isinstance(samples, list):
+            continue
+        ranged = {
+            str(name)
+            for name, spec in slots.items()
+            if (spec.get("type") if isinstance(spec, dict) else spec) == "date_range"
+        }
+        for binding in samples:
+            if not isinstance(binding, dict):
+                continue
+            for name in sorted(ranged & {str(k) for k in binding}):
+                value = binding[name]
+                raw = value.isoformat() if isinstance(value, date) else str(value)
+                if note := certify_binding.explicit_range_note(raw):
+                    out.append(f"certified answer '{question}', slot '{name}': {note}")
+    return out
 
 
 def _names_list(names: frozenset[str]) -> str:
@@ -2153,7 +2210,10 @@ def _apply_certified_answers(
             a.question.strip().lower(): a for a in certify_store.list_for_lens(session, name)
         }
         _gate_dialect_pins(session, source, result, model, untouched, org_id=org_id, probe=probe)
-        if probe:
+        if probe and untouched:
+            # A lens with no certified_answers.yaml and nothing stored has
+            # nothing to probe — saying "probed 0" there reads as the probe
+            # having skipped the lens that DID carry answers.
             result.warnings.append(_probe_noop(len(untouched)))
         return
     existing = {a.question.strip().lower(): a for a in certify_store.list_for_lens(session, name)}
@@ -2162,6 +2222,7 @@ def _apply_certified_answers(
     changed: list[tuple[certify_store.CertifiedAnswer, dict[str, Any]]] = []
     unchanged = 0
     result.errors.extend(_cross_match_errors(session, name, source, model, result.warnings))
+    result.warnings.extend(_binding_range_warnings(source))
     for answer in source.certified_answers:
         question = str(answer.get("question", "")).strip()
         if not question:
@@ -2208,7 +2269,7 @@ def _apply_certified_answers(
             changed.append((stored, answer))
         else:
             unchanged += 1
-            if not stored.bindings:
+            if not stored.bindings or stored.terms is None:
                 stored_gated, stored_errors = _template_gate_sql(
                     {"slots": stored.slots, "sample_bindings": stored.sample_bindings},
                     stored.question,
@@ -2221,12 +2282,15 @@ def _apply_certified_answers(
                         + "; ".join(stored_errors)
                     )
                 else:
+                    # Terms backfill beside bindings: a row applied before they
+                    # were stored reads its SQL once, no warehouse involved.
                     certify_store.update(
                         session,
                         stored.id,
                         sql=stored.sql,
                         verified_value=stored.verified_value,
                         bindings=certified_bindings(stored_gated, model),
+                        terms=_certified_terms(stored_gated, model),
                     )
     # (run-3 shipped a loud "absence never deletes, they KEEP SERVING" orphan
     # warning here; the follow-up decision made files WIN — file-originated
@@ -2325,6 +2389,8 @@ def _apply_certified_answers(
             and stored.verified_dialect is not None,
             verified_prose=prose_in,
             clear_verified_prose=clear_prose,
+            # Re-authored SQL reads new names; everything else keeps the stored ones.
+            terms=_certified_terms(effective_sql, model) if sql_edited else None,
         )
     created = 0
     if fresh:
@@ -2370,6 +2436,7 @@ def _apply_certified_answers(
                     )
         if fresh:
             connector = _probe_connector(session, source.config, org_id, result) if probe else None
+            probed_count = 0
             for answer, vec in zip(fresh, vectors, strict=True):
                 question = str(answer["question"]).strip()
                 sql = str(answer.get("sql", ""))
@@ -2387,6 +2454,7 @@ def _apply_certified_answers(
                         probed = connector.execute(exec_sql, read_only=True, row_limit=_MAX_ROWS)
                         verified = _value_summary(probed.columns, probed.rows)
                         probed_ok = True
+                        probed_count += 1
                         if prose is None and not answer.get("slots"):
                             prose = _certify_prose(source.config, model, question, sql, probed)
                     except ApplyStepTimeout:
@@ -2415,9 +2483,17 @@ def _apply_certified_answers(
                     # The pin: a successful execution vouches for THIS dialect.
                     verified_dialect=model.dialect if probed_ok else None,
                     verified_prose=prose,
+                    terms=_certified_terms(exec_sql, model),
                 )
             created = len(fresh)
-    if probe and not fresh:
+            if connector is not None:
+                # Say what the probe DID, not only when it did nothing: the
+                # operator reading one lens's row must see its answers executed.
+                result.applied.append(
+                    f"--probe-certified: probed {probed_count} of {len(fresh)} new "
+                    "certified answer(s)"
+                )
+    if probe and not fresh and existing:
         result.warnings.append(_probe_noop(len(existing)))
     # Files win on deletion: a file-originated stored answer
     # the pushed certified_answers.yaml no longer carries deletes here —

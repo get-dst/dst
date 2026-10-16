@@ -59,6 +59,7 @@ class _Answer:
     sql: str = _THIS_QUARTER_SQL
     slots: dict[str, str] | None = None
     resolution: dict[str, object] | None = None
+    terms: list[str] | None = None
 
 
 @dataclass

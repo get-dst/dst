@@ -136,8 +136,18 @@ def format_result(summary: dict[str, Any]) -> str:
 
 
 def _key(row: list[Any]) -> tuple[Any, ...]:
-    """A hashable row key; exotic cells (structs/arrays) compare by repr."""
-    return tuple(v if isinstance(v, bool | int | float | str | type(None)) else str(v) for v in row)
+    """A hashable row key; exotic cells (structs/arrays) compare by repr. An
+    exact-numeric cell (the warehouse's ``Decimal``) keys as a float: keyed as
+    text it would compare against a generated float as a string, and the
+    per-cell tolerance could never see the number."""
+    return tuple(
+        float(v)
+        if isinstance(v, decimal.Decimal)
+        else v
+        if isinstance(v, bool | int | float | str | type(None))
+        else str(v)
+        for v in row
+    )
 
 
 def _shape_story(
@@ -226,7 +236,17 @@ def _equivalence_note(want: Any, got: Any) -> str | None:
 
 def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) -> bool:
     """Greedy 1:1 pairing of the exact-diff leftovers under per-cell tolerance."""
+    return _tolerant_pairs(want, got) is not None
+
+
+def _tolerant_pairs(
+    want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]
+) -> list[tuple[tuple[Any, ...], tuple[Any, ...]]] | None:
+    """The greedy 1:1 pairing itself — (certified row, generated row) per
+    leftover — or None when a certified row finds no partner or a generated
+    row is left over."""
     remaining = list(got)
+    pairs: list[tuple[tuple[Any, ...], tuple[Any, ...]]] = []
     for w in want:
         m = next(
             (
@@ -237,9 +257,22 @@ def _tolerant_rows_match(want: set[tuple[Any, ...]], got: set[tuple[Any, ...]]) 
             None,
         )
         if m is None:
-            return False
+            return None
         remaining.remove(m)
-    return not remaining
+        pairs.append((w, m))
+    return pairs if not remaining else None
+
+
+def _rows_equivalence_note(pairs: list[tuple[tuple[Any, ...], tuple[Any, ...]]]) -> str | None:
+    """Why the paired rows passed, read off the first cell that was not
+    equal: a row-set pass under the value rules carries the same reason a
+    scalar one does, never a silent green. None when every pairing was
+    last-bits wobble."""
+    for w, g in sorted(pairs, key=repr):  # set order is not an order; the note must be stable
+        for a, b in zip(w, g, strict=True):
+            if note := _equivalence_note(a, b):
+                return note
+    return None
 
 
 _ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")
@@ -433,13 +466,14 @@ def _compare(
     if (
         missing
         and missing == extra
-        and _tolerant_rows_match(want_set - got_set, got_set - want_set)
+        and (pairs := _tolerant_pairs(want_set - got_set, got_set - want_set)) is not None
     ):
         # The scalar tolerance above, applied per cell: two equivalent SQL
         # plans sum floats in different orders and drift in the last bits —
         # a multi-row result deserves the same physics as a 1×1 one. Floats
-        # only; ints, strings and everything else stay exact.
-        return True, None
+        # only; ints, strings and everything else stay exact. A pass by the
+        # value rules (a percentage against its fraction, a rounding) says so.
+        return True, _rows_equivalence_note(pairs)
     if missing or extra:
         # Count-vs-cardinality bridge: a "how many"
         # oracle is a 1×1 integer K, and generation often row-shapes the same

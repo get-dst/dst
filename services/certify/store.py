@@ -53,6 +53,13 @@ def _verified(raw: object) -> dict[str, Any] | None:
     return None
 
 
+def _strlist(raw: object) -> list[str] | None:
+    """A jsonb array of strings, or None."""
+    if isinstance(raw, str | bytes | bytearray):
+        raw = json.loads(raw)
+    return [str(v) for v in raw] if isinstance(raw, list) else None
+
+
 def _jsonlist(raw: object) -> list[dict[str, Any]] | None:
     if isinstance(raw, list):
         return raw  # jsonb already decoded by the driver
@@ -113,6 +120,10 @@ class CertifiedAnswer:
     # SQL runs. None = certified before the ledger existed (graded against the
     # attributed oracle SQL instead, never pretending to carry gold).
     resolution: dict[str, Any] | None = None
+    # What attribution read in the SQL at apply: the governed names (metrics,
+    # definitions, entities) and the columns it aggregates. The lexical veto
+    # reads them beside the ledger; None = applied before they were stored.
+    terms: list[str] | None = None
 
 
 @dataclass
@@ -123,7 +134,8 @@ class CertifiedHit:
 
 _COLS = (
     "id, lens, question, sql, created_by, created_at, verified_value, source, verified_by, "
-    "bindings, status, slots, sample_bindings, verified_dialect, verified_prose, resolution"
+    "bindings, status, slots, sample_bindings, verified_dialect, verified_prose, resolution, "
+    "terms"
 )
 
 
@@ -145,6 +157,7 @@ def _row(r: object) -> CertifiedAnswer:
         verified_dialect=r[13],  # type: ignore[index]
         verified_prose=r[14],  # type: ignore[index]
         resolution=_verified(r[15]),  # type: ignore[index]
+        terms=_strlist(r[16]),  # type: ignore[index]
     )
 
 
@@ -166,6 +179,7 @@ def create(
     verified_dialect: str | None = None,
     verified_prose: str | None = None,
     resolution: dict[str, Any] | None = None,
+    terms: list[str] | None = None,
 ) -> str:
     """``embedding=None`` stores the pair unembedded (no provider configured yet):
     it is listed but never matched until ``dst reindex`` backfills it — and
@@ -178,13 +192,13 @@ def create(
             INSERT INTO certified_answer (
                 org_id, lens, question, sql, embedding, created_by, verified_value,
                 source, verified_by, bindings, status, slots, sample_bindings,
-                verified_dialect, verified_prose, resolution
+                verified_dialect, verified_prose, resolution, terms
             )
             VALUES (
                 NULLIF(current_setting('app.current_org', true), '')::uuid,
                 :lens, :q, :sql, CAST(:e AS vector), :by, CAST(:vv AS jsonb),
                 :src, :vb, CAST(:b AS jsonb), :st, CAST(:slots AS jsonb),
-                CAST(:samples AS jsonb), :vd, :vp, CAST(:res AS jsonb)
+                CAST(:samples AS jsonb), :vd, :vp, CAST(:res AS jsonb), CAST(:terms AS jsonb)
             )
             RETURNING id
             """
@@ -205,6 +219,7 @@ def create(
             "vd": verified_dialect,
             "vp": verified_prose,
             "res": json.dumps(resolution) if resolution is not None else None,
+            "terms": json.dumps(terms) if terms is not None else None,
         },
     ).first()
     return str(row[0])  # type: ignore[index]
@@ -300,6 +315,7 @@ def update(
     clear_verified_dialect: bool = False,
     verified_prose: str | None = None,
     clear_verified_prose: bool = False,
+    terms: list[str] | None = None,
 ) -> int:
     """Update an answer's SQL/verified_value in place (apply's upsert path). The
     question is the upsert key and never changes here. source/verified_by/
@@ -337,7 +353,8 @@ def update(
             "sample_bindings = COALESCE(CAST(:samples AS jsonb), sample_bindings), "
             "embedding = COALESCE(CAST(:e AS vector), embedding), "
             "verified_dialect = CASE WHEN :vd_clear THEN NULL "
-            "  ELSE COALESCE(:vd, verified_dialect) END "
+            "  ELSE COALESCE(:vd, verified_dialect) END, "
+            "terms = COALESCE(CAST(:terms AS jsonb), terms) "
             "WHERE id = :i"
         ),
         {
@@ -354,6 +371,7 @@ def update(
             "vd_clear": clear_verified_dialect,
             "vp": verified_prose,
             "clear_vp": clear_verified_prose,
+            "terms": json.dumps(terms) if terms is not None else None,
             "i": answer_id,
         },
     )

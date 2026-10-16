@@ -64,6 +64,7 @@ def option_sets(
         Option(
             _qualified(m.name, e.name, metric_owners),
             " — ".join(p for p in (_metric_head(m, e), m.description or "") if p),
+            tuple(a for a in (m.label, *m.aliases) if a and a.strip()),
         )
         for e in model.entities
         for m in e.metrics

@@ -528,6 +528,27 @@ def plan_project(
                     }
                 )
 
+    # A metric with a multi-word identifier and no label or aliases is one a
+    # question never names word for word ("on-time delivery rate" for
+    # `otd_rate`), so the sole-metric door and the named-metric rail never
+    # see it. A hint, not a warning: the metric still serves through a decision.
+    if unlabeled := sorted(
+        f"{name}.{m.name}"
+        for name, entity in incoming_entities.items()
+        for m in entity.metrics
+        if len(m.name.replace("-", "_").split("_")) > 1 and not m.label and not m.aliases
+    ):
+        out.append(
+            {
+                "scope": "semantic",
+                "status": "hint",
+                "hint": "metrics with a multi-word name and no `label:` or `aliases:`: "
+                + ", ".join(unlabeled)
+                + " — a question names a metric word for word, so add the phrasing people "
+                "use (e.g. `label: on-time delivery rate` on otd_rate) for the compiled "
+                "path to reach it",
+            }
+        )
     unselected = _unselected_definitions(session, incoming_definitions, incoming_configs)
     if unselected:
         out.append(

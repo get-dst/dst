@@ -365,18 +365,27 @@ def named_options(question: str, options: list[Option]) -> list[str]:
     """The declared names the question says word for word, in the order it
     says them — the ``named_values`` discipline over an option set: a literal
     word-boundary match of each option's name read as words (a qualified
-    `entity.metric` by its bare name), longest first, so `subscription_arr`
-    inside "subscription ARR" is named once and `arr` is not named off its
-    tail. A spelling two options share (siblings each declaring `win_rate`)
-    names neither: which one is the decider's question, not the text's."""
+    `entity.metric` by its bare name) or of one of its aliases, longest first,
+    so `subscription_arr` inside "subscription ARR" is named once and `arr` is
+    not named off its tail. A spelling two options share (siblings each
+    declaring `win_rate`) names neither: which one is the decider's question,
+    not the text's."""
+    return [name for _pos, name, _surface in _named_spans(question, options)]
+
+
+def _named_spans(question: str, options: list[Option]) -> list[tuple[int, str, str]]:
+    """``(position, option name, the surface matched)`` per option the question
+    names — the body of ``named_options``, kept for the callers that must blank
+    the matched words out of the text."""
     text = _as_words(question)
-    by_surface: dict[str, list[str]] = {}
+    by_surface: dict[str, set[str]] = {}
     for o in options:
-        surface = _as_words(o.name.rsplit(".", 1)[-1])
-        if surface:
-            by_surface.setdefault(surface, []).append(o.name)
+        for spelling in (o.name.rsplit(".", 1)[-1], *o.aliases):
+            surface = _as_words(spelling)
+            if surface:
+                by_surface.setdefault(surface, set()).add(o.name)
     taken: list[tuple[int, int]] = []
-    found: list[tuple[int, str]] = []
+    found: list[tuple[int, str, str]] = []
     for surface in sorted(by_surface, key=lambda k: (-len(k), k)):
         if surface not in text or len(by_surface[surface]) > 1:
             continue
@@ -387,8 +396,8 @@ def named_options(question: str, options: list[Option]) -> list[str]:
         ]
         if spans:
             taken += spans
-            found.append((spans[0][0], by_surface[surface][0]))
-    return [name for _pos, name in sorted(found)]
+            found.append((spans[0][0], next(iter(by_surface[surface])), surface))
+    return sorted(found)
 
 
 # The words a question may add around a metric's name and still ask for
@@ -417,13 +426,12 @@ def sole_metric_intent(question: str, model: SemanticModel) -> QueryIntent | Non
         return None
     sets = option_sets(governed, [], domains={})
     metrics = sets["metric"]
-    named = named_options(question, metrics)
+    named = _named_spans(question, metrics)
     if len(named) != 1:
         return None
-    name = named[0]
+    _pos, name, surface = named[0]
     if asks_breakdown_over_time(question):
         return None
-    surface = _as_words(name.rsplit(".", 1)[-1])
     text = _as_words(question)
     residue = re.sub(rf"(?<!\w){re.escape(surface)}(?!\w)", " ", text, count=1)
     if any(word not in _FRAME_WORDS for word in residue.split()):

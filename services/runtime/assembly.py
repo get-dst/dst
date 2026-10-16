@@ -395,10 +395,11 @@ def certified_lookup(
     generation, not the bypass); ``exclude_id`` keeps an answer under test out
     of its own exemplars. ``governed`` is the lens's metric and definition
     names: a hit — plain or template — whose approved question (or own
-    resolution ledger) names a different governed name than the asked one is
-    vetoed before binding and before the exact/equivalent bands (the
-    collections template must never serve an invoicing question); a plain
-    one folds as an exemplar instead.
+    resolution ledger, or stored terms) names a different governed name than
+    the asked one — or, carrying none, does not say the governed words the
+    asked question says — is vetoed before binding and before the
+    exact/equivalent bands (the collections template must never serve an
+    invoicing question); a plain one folds as an exemplar instead.
     """
     if qvec is None:
         return None, [], "none", None, None
@@ -414,7 +415,13 @@ def certified_lookup(
     bands = certified_bands()
     if serve and hits[0].score >= bands.equiv:
         top = hits[0].answer
-        if lexical_mismatch(question, top.question, governed, answer_names(top.resolution)):
+        if lexical_mismatch(
+            question,
+            top.question,
+            governed,
+            answer_names(top.resolution),
+            frozenset(top.terms or ()),
+        ):
             # A collections answer never serves an invoicing ask — cosine
             # cannot see the name, and neither can the bind gate: a template
             # binds its slots from the question, not the metric. Fall through:

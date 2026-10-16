@@ -452,3 +452,68 @@ def test_a_fully_measured_table_still_samples_its_distribution() -> None:
         ("amount", 4.5, None, None),
         ("closed_at", None, -3600.0, None),
     ]
+
+
+def test_accept_keeps_the_measured_facts_so_a_later_shift_fires(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`drift --accept` after a schema change must carry the probe's measured
+    offset into the new baseline: a baseline without it can never report
+    `column_shifted`, whatever the next probe measures."""
+    root = _project(tmp_path, tolerance="1h")
+    where = ["--connection", "warehouse", "--dir", str(root)]
+    assert _cli(monkeypatch, ["probe", *where]) == 0
+    _sql(root, "ALTER TABLE ops.orders ADD COLUMN carrier VARCHAR")
+    assert _cli(monkeypatch, ["drift", "--accept", *where]) == 0
+    recorded = json.loads(wd.baseline_path(root, "warehouse").read_text(encoding="utf-8"))
+    shipped = next(c for c in recorded["tables"][0]["columns"] if c["name"] == "shipped_at")
+    assert shipped["time_offset_seconds"] == 7_200.0
+    capsys.readouterr()
+
+    _sql(root, "UPDATE ops.orders SET shipped_at = shipped_at + INTERVAL 3 HOUR")
+    assert _cli(monkeypatch, ["probe", *where]) == 0
+    capsys.readouterr()
+    assert _cli(monkeypatch, ["drift", *where]) == 1
+    out = capsys.readouterr().out
+    assert "SHIFTED `shipped_at`" in out and "2h -> 5h" in out and "1 BREAKING" in out
+
+
+def test_accepted_tables_merge_artifact_and_prior_facts_by_table_name() -> None:
+    """The artifact's facts land on the live column however the table is
+    qualified; a column the artifact did not measure keeps the facts the
+    previous baseline held instead of losing them."""
+    live = [
+        TableProfile(
+            connection="warehouse",
+            table="ops.orders",
+            columns=[
+                ColumnProfile(name="shipped_at", type="TIMESTAMP", description="UTC"),
+                ColumnProfile(name="amount", type="DECIMAL"),
+                ColumnProfile(name="carrier", type="VARCHAR"),
+            ],
+        )
+    ]
+    probed = [
+        TableProfile(
+            connection="warehouse",
+            table="orders",
+            columns=[ColumnProfile(name="SHIPPED_AT", type="TIMESTAMP", time_offset_seconds=1.0)],
+        )
+    ]
+    prior = [
+        TableProfile(
+            connection="warehouse",
+            table="ops.orders",
+            columns=[
+                ColumnProfile(name="shipped_at", type="TIMESTAMP", time_offset_seconds=9.0),
+                ColumnProfile(name="amount", type="DECIMAL", mean=12.5),
+            ],
+        )
+    ]
+    (merged,) = wd.accepted_tables(live, probed, prior)
+    by_name = {c.name: c for c in merged.columns}
+    assert by_name["shipped_at"].time_offset_seconds == 1.0  # the artifact wins
+    assert by_name["shipped_at"].description == "UTC"  # the catalog's schema stays
+    assert by_name["amount"].mean == 12.5  # unmeasured this time: the prior fact survives
+    assert by_name["carrier"].mean is None
+    assert wd.accepted_tables(live, None, None) == live

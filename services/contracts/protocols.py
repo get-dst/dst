@@ -195,10 +195,13 @@ class LLMProvider(Protocol):
 # ── Typed decisions ──────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Option:
-    """One member of a closed option set a decision is made over."""
+    """One member of a closed option set a decision is made over. ``aliases``
+    are the further spellings a question may name it by, word for word (a
+    metric's label and aliases); the decider sees the name and description."""
 
     name: str
     description: str = ""
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass

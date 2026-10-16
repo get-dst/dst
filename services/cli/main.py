@@ -1528,7 +1528,7 @@ def _drift_one(
             wd.write_baseline(
                 root,
                 args.connection,
-                wd.accepted_tables(current, artifact.tables if artifact else None),
+                wd.accepted_tables(current, artifact.tables if artifact else None, baseline.tables),
             )
         return 0, payload
     return wd.exit_code(findings), payload

@@ -22,6 +22,7 @@ from services.certify.lexical import (
     measure_names,
     names_in,
 )
+from services.contracts.semantic_model import Definition, Dimension, Metric
 from services.lenses.demo import jaffle_customer_value_bundle
 from services.project import apply as apply_mod
 from services.project.loader import LensSource
@@ -93,6 +94,7 @@ class _Answer:
     sample_bindings: list[dict[str, str]] | None = None
     source: str | None = None
     resolution: dict[str, object] | None = None
+    terms: list[str] | None = None
 
 
 @dataclass
@@ -165,6 +167,70 @@ def test_the_same_governed_name_still_serves_exact(monkeypatch) -> None:
     assert top is not None and mode == "certified" and match == "exact"
 
 
+def test_a_raw_template_never_serves_a_question_about_a_governed_term(monkeypatch) -> None:
+    """The asked question says "invoice", a definition term; the candidate's
+    question and SQL name nothing governed. Word by word, the candidate does
+    not say the asked question's governed word, so the exact hit drops to
+    assisted — no model, no score, decides it."""
+    model = MODEL.model_copy(deep=True)
+    model.definitions.append(Definition(term="invoiced", body="billed, paid or not"))
+    collections = _Answer(
+        question="how much was collected in {month}?",
+        sql="SELECT SUM(amount) FROM orders WHERE paid_at >= '{month.start}'",
+        slots={"month": {"type": "date_range"}},
+        sample_bindings=[{"month": "2026-09"}],
+        terms=["amount"],
+    )
+    _wire(monkeypatch, [_Hit(collections)])
+    monkeypatch.setattr(assembly, "assist_llm", lambda: SimpleNamespace(llm=None, name="m"))
+    monkeypatch.setattr(assembly, "certified_bind", lambda *_a, **_k: {"month": "2026-09"})
+    answer, _ex, mode, match, _bound = certified_lookup(
+        "customer_value",
+        [1.0],
+        "org",
+        "how much did we invoice in September 2026?",
+        governed=governed_names(model),
+    )
+    assert answer is None and mode != "certified" and match is None
+    # The same candidate SAYING the word (its question or the column it sums) serves.
+    invoiced = _Answer(
+        question="how much was invoiced in {month}?",
+        sql=collections.sql,
+        slots=collections.slots,
+        sample_bindings=collections.sample_bindings,
+        terms=["amount"],
+    )
+    _wire(monkeypatch, [_Hit(invoiced)])
+    monkeypatch.setattr(assembly, "assist_llm", lambda: SimpleNamespace(llm=None, name="m"))
+    monkeypatch.setattr(assembly, "certified_bind", lambda *_a, **_k: {"month": "2026-09"})
+    answer, _ex, mode, match, _bound = certified_lookup(
+        "customer_value",
+        [1.0],
+        "org",
+        "how much did we invoice in September 2026?",
+        governed=governed_names(model),
+    )
+    assert answer is invoiced and mode == "certified" and match == "parameterized"
+    by_column = _Answer(
+        question="how much came in during {month}?",
+        sql="SELECT SUM(invoiced_amount) FROM orders WHERE paid_at >= '{month.start}'",
+        slots=collections.slots,
+        sample_bindings=collections.sample_bindings,
+        terms=["invoiced_amount"],
+    )
+    _wire(monkeypatch, [_Hit(by_column)])
+    monkeypatch.setattr(assembly, "assist_llm", lambda: SimpleNamespace(llm=None, name="m"))
+    monkeypatch.setattr(assembly, "certified_bind", lambda *_a, **_k: {"month": "2026-09"})
+    answer, _ex, mode, _m, _bound = certified_lookup(
+        "customer_value",
+        [1.0],
+        "org",
+        "how much did we invoice in September 2026?",
+        governed=governed_names(model),
+    )
+    assert answer is by_column and mode == "certified"
+
+
 def test_without_governed_names_the_score_decides(monkeypatch) -> None:
     _wire(monkeypatch, [_Hit()])
     top, _ex, mode, match, _bound = certified_lookup(
@@ -205,7 +271,7 @@ def test_two_incoming_answers_in_the_paraphrase_band_fail_the_plan(monkeypatch) 
     source = _source(
         [
             {"question": "invoiced revenue last quarter?", "sql": _SQL_A},
-            {"question": "collected revenue last quarter?", "sql": _SQL_B},
+            {"question": "what was the revenue invoiced in the last quarter?", "sql": _SQL_B},
             {"question": "how many customers?", "sql": "SELECT count(*) FROM customers"},
         ]
     )
@@ -213,7 +279,33 @@ def test_two_incoming_answers_in_the_paraphrase_band_fail_the_plan(monkeypatch) 
     assert len(errors) == 1
     assert "would answer each other's question" in errors[0]
     assert "invoiced revenue last quarter?" in errors[0]
-    assert "collected revenue last quarter?" in errors[0]
+    assert "what was the revenue invoiced in the last quarter?" in errors[0]
+
+
+def test_a_word_one_question_says_and_the_other_does_not_keeps_them_apart(monkeypatch) -> None:
+    """Two questions over one metric that differ in a grain word, a shape
+    word or a dimension are two questions: a warning, never a rejected plan."""
+    monkeypatch.setattr(apply_mod, "_embedder", lambda: _Embedder())
+    monkeypatch.setattr(certify_store, "search", lambda session, lens, qvec, k=5: [])
+    model = MODEL.model_copy(deep=True)
+    orders = next(e for e in model.entities if e.name == "orders")
+    orders.metrics.append(Metric(name="mrr", agg="sum", expr="orders.amount"))
+    orders.metrics.append(Metric(name="otd_rate", agg="avg", expr="orders.amount"))
+    orders.dimensions.append(Dimension(name="service_level", expr="orders.status"))
+    pairs = [
+        ("what was MRR revenue at the end of September?", "by how much did MRR revenue grow?"),
+        ("MRR revenue level today?", "MRR revenue growth today?"),
+        ("otd_rate revenue by month?", "otd_rate revenue by service level?"),
+        ("invoiced revenue last quarter?", "collected revenue last quarter?"),
+    ]
+    for one, other in pairs:
+        warnings: list[str] = []
+        source = _source([{"question": one, "sql": _SQL_A}, {"question": other, "sql": _SQL_B}])
+        errors = apply_mod._cross_match_errors(  # type: ignore[arg-type]
+            None, "customer_value", source, model, warnings
+        )
+        assert errors == [], (one, other, errors)
+        assert len(warnings) == 1 and "keeps them apart" in warnings[0], (one, other)
 
 
 def test_same_sql_under_two_phrasings_is_one_answer(monkeypatch) -> None:
@@ -231,12 +323,12 @@ def test_same_sql_under_two_phrasings_is_one_answer(monkeypatch) -> None:
 def test_a_review_answer_the_file_does_not_carry_is_checked_too(monkeypatch) -> None:
     monkeypatch.setattr(apply_mod, "_embedder", lambda: _Embedder())
     stored = _Hit(
-        _Answer(question="collected revenue last quarter?", sql=_SQL_B, source="review:r1"), 0.97
+        _Answer(question="last quarter's invoiced revenue?", sql=_SQL_B, source="review:r1"), 0.97
     )
     monkeypatch.setattr(certify_store, "search", lambda session, lens, qvec, k=5: [stored])
     source = _source([{"question": "invoiced revenue last quarter?", "sql": _SQL_A}])
     errors = apply_mod._cross_match_errors(None, "customer_value", source, MODEL)  # type: ignore[arg-type]
-    assert len(errors) == 1 and "collected revenue last quarter?" in errors[0]
+    assert len(errors) == 1 and "last quarter's invoiced revenue?" in errors[0]
 
 
 def test_a_rename_is_not_a_pair_with_the_row_it_replaces(monkeypatch) -> None:
@@ -283,9 +375,20 @@ def test_a_shared_entity_name_alone_fails_only_in_the_exact_band(monkeypatch) ->
     errors = apply_mod._cross_match_errors(  # type: ignore[arg-type]
         None, "customer_value", _source(entries), MODEL, warnings
     )
-    assert errors == [] and len(warnings) == 1 and "only the score" in warnings[0]
+    assert errors == [] and len(warnings) == 1 and "which" in warnings[0]
     monkeypatch.setattr(apply_mod, "_embedder", lambda: _Embedder())  # identical vectors: 1.0
-    errors = apply_mod._cross_match_errors(None, "customer_value", _source(entries), MODEL)  # type: ignore[arg-type]
+    # "which" is a word one question says and the other does not: a listing
+    # against a count stays a warning even at 1.0.
+    warnings = []
+    errors = apply_mod._cross_match_errors(  # type: ignore[arg-type]
+        None, "customer_value", _source(entries), MODEL, warnings
+    )
+    assert errors == [] and len(warnings) == 1 and "which" in warnings[0]
+    same_words = [
+        {"question": "how many customers churned?", "sql": "SELECT count(*) FROM customers"},
+        {"question": "number of churned customers?", "sql": "SELECT count(1) FROM customers"},
+    ]
+    errors = apply_mod._cross_match_errors(None, "customer_value", _source(same_words), MODEL)  # type: ignore[arg-type]
     assert len(errors) == 1
 
 

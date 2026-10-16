@@ -583,6 +583,30 @@ def attribute(
     return Resolution(method="attributed", slots=slots, tag=derive_tag(slots))
 
 
+def governed_terms(sql: str, model: SemanticModel, dialect: str | None = None) -> list[str]:
+    """What a certified answer's SQL reads, by name, for the lexical veto: the
+    declared metric and definition names attribution finds, and the columns
+    inside every aggregate no governed expression accounts for
+    (``SUM(amount_eur)`` reads ``amount_eur``). Entity names stay out: a
+    question seldom says the table it reads, and a name the asked question
+    does not carry must not be held against it. Sorted, lower-cased; empty for
+    SQL that reads nothing governed and aggregates nothing."""
+    read = dialect or model.dialect
+    out: set[str] = set()
+    for slot in attribute(sql, model, dialect=read).slots:
+        if slot.kind not in ("metric", "definition"):
+            continue
+        if slot.source == "declared":
+            out.add(slot.name.strip().lower())
+        elif slot.source == "inferred" and slot.kind == "metric":
+            try:
+                node = sqlglot.parse_one(slot.name, read=read)
+            except Exception:  # noqa: BLE001 — an unreadable aggregate names no column
+                continue
+            out.update(c.name.lower() for c in node.find_all(exp.Column) if c.name)
+    return sorted(n for n in out if n)
+
+
 # ── certified overlay ────────────────────────────────────────────────────────
 
 

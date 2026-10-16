@@ -144,3 +144,55 @@ def test_the_served_ledger_reads_construction_on_both_typed_settings(
         ), ledger
     finally:
         _cleanup(settings.database_admin_url, org)
+
+
+@needs_db
+def test_a_metric_named_by_its_label_constructs_through_the_api_door(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nobody says `otd_rate`; they say "on-time delivery rate". A metric's
+    label and aliases are read word for word like its name, so the bare
+    question reaches the compiled path and the ledger says construction."""
+    import copy
+
+    from services.contracts.semantic_model import Metric
+    from services.db.session import org_session
+    from services.lenses import store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    bundle = copy.deepcopy(jaffle_customer_value_bundle())
+    orders = next(e for e in bundle.semantic_model.entities if e.name == "orders")
+    orders.metrics.append(
+        Metric(
+            name="otd_rate",
+            agg="avg",
+            expr="orders.amount",
+            label="on-time delivery rate",
+            aliases=["OTD"],
+        )
+    )
+    with org_session(org) as session:
+        store.create_lens(session, bundle)
+        store.publish(session, "customer_value")
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(settings, "typed_serving", "off")
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider", lambda _key, **_: _NeverGenerates()
+    )
+    _dead_embedder(monkeypatch)
+    auth = {"Authorization": f"Bearer {raw}"}
+    try:
+        for q in ("What is the on-time delivery rate?", "what's our OTD"):
+            r = client.post(
+                "/v1/lenses/customer_value/query",
+                json={"q": q, "format": "structured"},
+                headers=auth,
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["status"] == "ok", body
+            assert body["resolution"]["method"] == "construction", body["resolution"]
+            assert "avg(" in body["sql"].lower() and "otd_rate" in body["sql"].lower()
+    finally:
+        _cleanup(settings.database_admin_url, org)

@@ -14,7 +14,14 @@ and "invoicing" are one word of the governed term ``invoiced_revenue``, and a
 question about invoicing names it. Only the regular suffixes (s, es, ed, ing,
 a trailing e) fold, on stems of four letters or more; no stemming library,
 nothing irregular. The set a certified answer is read against is the lens's
-governed names plus the names its own resolution ledger declares.
+governed names plus the names its own resolution ledger declares and the
+terms attribution stored for it at apply.
+
+A candidate that carries no governed name at all (raw SQL over bare columns,
+a question that names none) is read token by token instead: the asked
+question's governed words must appear, by inflection, in the candidate's
+question or in the columns its SQL reads, or the hit is not a match. A
+question about invoicing never takes a raw collections template.
 """
 
 from __future__ import annotations
@@ -124,14 +131,79 @@ def names_in(text: str, names: frozenset[str]) -> frozenset[str]:
     return frozenset(found)
 
 
+# The words a question spends on asking rather than on what it asks: the
+# interrogative frame, articles, auxiliaries, politeness. Everything else —
+# a grain (month, quarter), a shape (growth, trend, top, by, per, share, which),
+# a dimension, a value, a number — is content that tells two questions apart.
+_STOPWORDS = frozenset(
+    "a an the of in on at to for from with and or is are was were be been being "
+    "do does did we our us you your i me my it its this that these those what how "
+    "much many show give tell please number figure value total overall all any "
+    "some there here s whats get got have has had can could would should will "
+    "as about".split()
+)
+_TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def content_tokens(text: str, names: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The stems of the words that carry content: stopwords out, and the words
+    of every name in ``names`` out (a shared governed name is what two
+    questions have in common, not what tells them apart)."""
+    shared = {_stem(w) for n in names for w in _words(n)}
+    return frozenset(
+        _stem(w)
+        for w in _TOKEN.findall(text.lower())
+        if w not in _STOPWORDS and _stem(w) not in shared
+    )
+
+
+def distinguishing_tokens(
+    one: str, other: str, shared_names: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
+    """What each question says that the other does not, once stopwords and
+    the governed names both carry are removed: ``(only in one, only in other)``.
+    Both empty means nothing downstream could tell the questions apart."""
+    a, b = content_tokens(one, shared_names), content_tokens(other, shared_names)
+    return a - b, b - a
+
+
+def spoken_words(text: str, names: frozenset[str]) -> frozenset[str]:
+    """The stems of the governed words the text actually says: for every name
+    it carries, the words of that name present in the text by inflection
+    ("invoice" says the ``invoiced`` term; "revenue" alone says nothing of
+    ``invoiced_revenue`` when it is not distinctive)."""
+    out: set[str] = set()
+    for name in names_in(text, names):
+        words = _words(name)
+        candidates = words if len(words) == 1 else _distinctive(name, names) or words
+        out.update(_stem(w) for w in candidates if _compile([w]).search(text))
+    return frozenset(out)
+
+
 def lexical_mismatch(
-    asked: str, approved: str, names: frozenset[str], approved_names: frozenset[str] = frozenset()
+    asked: str,
+    approved: str,
+    names: frozenset[str],
+    approved_names: frozenset[str] = frozenset(),
+    approved_terms: frozenset[str] = frozenset(),
 ) -> bool:
-    """True when both questions name governed metrics/definitions and the
-    names differ: an invoicing question must not take a collections answer.
+    """True when the asked question names a governed metric/definition the
+    approved answer is not about: an invoicing question must not take a
+    collections answer. Both naming governed names, the sets must agree.
     ``approved_names`` are names the approved answer carries beyond its
-    wording (its resolution ledger)."""
+    wording (its resolution ledger); ``approved_terms`` is what attribution
+    stored for its SQL at apply — governed names and the columns it
+    aggregates. An approved answer that carries no governed name at all is
+    read word by word: every governed word the asked question says must
+    appear, by inflection, in the approved question or in its terms."""
     if not names:
         return False
-    a, b = names_in(asked, names), names_in(approved, names) | approved_names
-    return bool(a) and bool(b) and a != b
+    a = names_in(asked, names)
+    if not a:
+        return False
+    b = names_in(approved, names) | approved_names | (approved_terms & names)
+    if b:
+        return a != b
+    carried = {_stem(w) for w in _TOKEN.findall(approved.lower())}
+    carried |= {_stem(w) for t in approved_terms for w in _words(t)}
+    return any(stem not in carried for stem in spoken_words(asked, a))

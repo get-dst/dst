@@ -670,3 +670,65 @@ def test_probe_with_zero_new_entries_says_so(org) -> None:
     note = next(w for w in row["warnings"] if "--probe-certified" in w)
     assert "probed 0 new certified answers — 1 pre-existing" in note
     assert "dst test" in note
+
+
+@needs_db
+def test_probe_says_what_it_probed_and_stays_quiet_where_nothing_could_be(org) -> None:
+    """A first apply with --probe-certified executes every new answer and the
+    lens row says how many; a second lens in the same push that carries no
+    certified_answers.yaml and holds nothing gets no "probed 0" note — that
+    note on the wrong row read as the probe having skipped the corpus."""
+    oid, headers = org
+    files = _files(
+        [
+            {"question": _GOOD_Q, "sql": _GOOD_SQL},
+            {"question": "How many customers in total?", "sql": "SELECT count(*) FROM customers"},
+        ]
+    )
+    for path in list(files):
+        if path.startswith("lenses/customer_value/") and not path.endswith(
+            "certified_answers.yaml"
+        ):
+            content = files[path]
+            if path.endswith("lens.yaml"):
+                cfg = yaml.safe_load(content)
+                cfg["name"] = "other"
+                content = yaml.safe_dump(cfg, sort_keys=False)
+            files[path.replace("lenses/customer_value/", "lenses/other/")] = content
+    out = _apply_out(headers, files, probe=True)
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert any("--probe-certified: probed 2 of 2 new" in a for a in row["applied"]), row["applied"]
+    assert not any("probed 0" in w for w in row["warnings"])
+    other = next(e for e in out if e.get("lens") == "other")
+    assert not any("probe" in w for w in other.get("warnings") or []), other.get("warnings")
+    with org_session(oid) as s:
+        rows = certify_store.list_for_lens(s, "customer_value")
+        assert all(a.verified_value is not None for a in rows)
+        # Attribution stored what each SQL reads, for the serve-time veto.
+        by_q = {a.question: a for a in rows}
+        assert by_q[_GOOD_Q].terms == ["repeat_customer"]
+        assert by_q["How many customers in total?"].terms == []
+
+
+@needs_db
+def test_terms_follow_a_sql_edit_and_backfill_on_an_unchanged_row(org) -> None:
+    oid, headers = org
+    _apply(headers, _files([{"question": _GOOD_Q, "sql": _GOOD_SQL}]))
+    with org_session(oid) as s:
+        (stored,) = certify_store.list_for_lens(s, "customer_value")
+        assert stored.terms == ["repeat_customer"]
+        s.execute(text("UPDATE certified_answer SET terms = NULL WHERE id = :i"), {"i": stored.id})
+        s.commit()
+    # An unchanged answer backfills when its lens next takes the publish path
+    # (an identical push skips the lens whole, as it does for bindings).
+    _apply(headers, _files([{"question": _GOOD_Q, "sql": _GOOD_SQL}], eval_gate="warn"))
+    with org_session(oid) as s:
+        (stored,) = certify_store.list_for_lens(s, "customer_value")
+        assert stored.terms == ["repeat_customer"]
+    _apply(
+        headers,
+        _files([{"question": _GOOD_Q, "sql": "SELECT SUM(amount) FROM orders"}]),
+    )
+    with org_session(oid) as s:
+        (stored,) = certify_store.list_for_lens(s, "customer_value")
+        assert stored.terms == ["revenue"]

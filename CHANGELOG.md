@@ -73,6 +73,41 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.10.2] — 2026-10-16
+
+Schema change: migration 0069 adds `certified_answer.terms`, backfilled on the next publish.
+Run `dst migrate`.
+
+### Added
+
+- **`label` and `aliases` on a metric.** A question names a metric word for word by its
+  identifier, its label or an alias ("on-time delivery rate" for `otd_rate`); the sole-metric
+  door and the typed metric rail read them, so the bare question compiles on every door.
+  `dst plan` hints at multi-word metrics with neither.
+- **Certified answers store what their SQL reads.** Apply attributes every answer's SQL and
+  stores the metric and definition names and aggregated columns; the serve-time veto reads a
+  candidate that carries no governed name word by word, so a raw collections template never
+  serves an invoicing question.
+- **Plan warns on explicit ranges that read exclusive.** A `date_range` sample binding ending
+  on the first of a month, or spanning a month or year plus one day, gets "explicit ranges
+  are inclusive; did you mean 2026-09-30?".
+
+### Fixed
+
+- **Cross-match errors only on indistinguishable pairs.** Two certified answers sharing a
+  metric name are rejected only when, with stopwords and the shared governed names removed,
+  neither question says a word the other does not; "MRR level" vs "MRR growth" and "OTD by
+  month" vs "OTD by service level" are warnings that name the differing words.
+- **`dst drift --accept` keeps the measured facts.** The baseline carries `mean` and
+  `time_offset_seconds` and the dictionaries from the probe artifact, and keeps the previous
+  baseline's facts for columns the artifact did not measure, so `column_shifted` can fire
+  after a re-record.
+- **`dst test` names a value-equivalent pass in the row-set path.** The PASS line and the
+  `--json` row carry the `value-equivalent:` reason; a `Decimal` certified result beside an
+  extra generated column is projected and compared as numbers.
+- **`--probe-certified` reports what it probed.** The lens row says
+  `probed N of N new certified answer(s)`.
+
 ## [0.10.1] — 2026-10-16
 
 No schema change. Upgrade fix: 0.10.0's certified plan check rejected valid corpora;

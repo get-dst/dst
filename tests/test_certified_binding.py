@@ -182,3 +182,28 @@ def test_yaml_dates_bind_as_iso_text_and_structures_are_named() -> None:
     assert errors == [] and canonical["asof"] == "2026-01-31"
     _, errors = validate_binding(specs, {"asof": ["2026-01-31"], "p": {"from": "x"}})
     assert len(errors) == 2 and all("not a scalar value" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    ("value", "meant"),
+    [
+        ("2025-10-01/2026-10-01", "2026-09-30"),  # a year plus one day
+        ("2026-01-01/2026-02-01", "2026-01-31"),  # a month plus one day
+        ("2026-01-15/2026-03-01", "2026-02-28"),  # an end on the first of a month
+    ],
+)
+def test_an_explicit_range_that_reads_exclusive_is_named(value: str, meant: str) -> None:
+    from services.certify.binding import explicit_range_note
+
+    note = explicit_range_note(value)
+    assert note is not None and "inclusive" in note and "did you mean" in note
+    assert note.endswith(f"/{meant}?")
+
+
+@pytest.mark.parametrize(
+    "value", ["2026-01-01/2026-09-30", "2026-03-10/2026-03-20", "2026-09", "2026-Q3", "2026"]
+)
+def test_other_ranges_get_no_note(value: str) -> None:
+    from services.certify.binding import explicit_range_note
+
+    assert explicit_range_note(value) is None

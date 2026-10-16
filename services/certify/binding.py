@@ -154,6 +154,35 @@ def _date_range(raw: str) -> tuple[datetime.date, datetime.date] | None:
     return None
 
 
+def explicit_range_note(raw: str) -> str | None:
+    """The sentence a plan says about an explicit ``start/end`` binding that
+    reads like an exclusive end: the end day is the first of a month, or the
+    pair spans a whole month or year plus one day (``2025-10-01/2026-10-01``).
+    Explicit ranges are inclusive on both ends, so such a binding covers one
+    day more than the author most likely meant. None for every other value."""
+    m = _EXPLICIT.match(raw.strip())
+    if m is None:
+        return None
+    try:
+        start = datetime.date.fromisoformat(m.group(1))
+        end = datetime.date.fromisoformat(m.group(2))
+    except ValueError:
+        return None
+    if start > end:
+        return None
+    plus_one_period = start.day == 1 and end in (
+        _add_months(start, 1),
+        _add_months(start, 12),
+    )
+    if end.day != 1 and not plus_one_period:
+        return None
+    meant = end - datetime.timedelta(days=1)
+    return (
+        f"explicit ranges are inclusive: {raw.strip()} covers {end.isoformat()} too; "
+        f"did you mean {start.isoformat()}/{meant.isoformat()}?"
+    )
+
+
 def _add_months(d: datetime.date, months: int) -> datetime.date:
     month0 = d.month - 1 + months
     return datetime.date(d.year + month0 // 12, month0 % 12 + 1, 1)

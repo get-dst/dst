@@ -249,38 +249,57 @@ def write_baseline(root: Path, connection: str, profiles: list[TableProfile]) ->
     return path
 
 
+# The measured half of a column — what only a probe can write, and what the
+# baseline must carry for `column_shifted` / `dictionary_changed` to have a
+# number to diff against. Every whitelisted field that is not schema.
+_MEASURED_FIELDS = (
+    "mean",
+    "time_offset_seconds",
+    "top_values",
+    "values_complete",
+    "distinct_count",
+)
+
+
 def accepted_tables(
-    live: list[TableProfile], probed: list[TableProfile] | None
+    live: list[TableProfile],
+    probed: list[TableProfile] | None,
+    prior: list[TableProfile] | None = None,
 ) -> list[TableProfile]:
     """What `--accept` records: the live catalog's schema and comments, with
     the newest probe artifact's measured facts (means, offsets, dictionaries)
-    laid over the columns it measured. The catalog is the schema's truth
-    today; the artifact is the distribution's truth as of the last probe."""
-    if not probed:
-        return live
-    measured = {p.table: {c.name: c for c in p.columns} for p in probed}
+    laid over the columns it measured, and, for a column the artifact did not
+    measure, the facts the previous baseline already held. The catalog is the
+    schema's truth today; the artifact is the distribution's truth as of the
+    last probe; a re-record must never erase a measured fact it has no newer
+    value for. Tables match as the layer names them (``orders`` ~
+    ``ops.orders``), columns by name, case-insensitively."""
+
+    def _by_table(tables: list[TableProfile] | None) -> list[tuple[str, dict[str, ColumnProfile]]]:
+        return [(p.table, {c.name.lower(): c for c in p.columns}) for p in tables or []]
+
+    measured, kept = _by_table(probed), _by_table(prior)
+
+    def _facts(
+        source: list[tuple[str, dict[str, ColumnProfile]]], table: str, column: str
+    ) -> ColumnProfile | None:
+        for name, columns in source:
+            if same_table(name, table) and column.lower() in columns:
+                return columns[column.lower()]
+        return None
+
     out: list[TableProfile] = []
     for table in live:
-        facts = measured.get(table.table)
-        if facts is None:
-            out.append(table)
-            continue
         columns = []
         for column in table.columns:
-            seen = facts.get(column.name)
+            seen = _facts(measured, table.table, column.name) or _facts(
+                kept, table.table, column.name
+            )
             if seen is None:
                 columns.append(column)
                 continue
             columns.append(
-                column.model_copy(
-                    update={
-                        "mean": seen.mean,
-                        "time_offset_seconds": seen.time_offset_seconds,
-                        "top_values": seen.top_values,
-                        "values_complete": seen.values_complete,
-                        "distinct_count": seen.distinct_count,
-                    }
-                )
+                column.model_copy(update={f: getattr(seen, f) for f in _MEASURED_FIELDS})
             )
         out.append(table.model_copy(update={"columns": columns}))
     return out

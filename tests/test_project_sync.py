@@ -313,7 +313,7 @@ def test_apply_export_plan_fixed_point(org) -> None:
             assert exported[path] == content, path
 
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": exported}).json()
-    assert {e["status"] for e in plan if e.get("scope") == "semantic"} == {"unchanged"}
+    assert {e["status"] for e in plan if e.get("scope") == "semantic"} - {"hint"} == {"unchanged"}
     lens_rows = [e for e in plan if "lens" in e]
     assert [(e["lens"], e["status"]) for e in lens_rows] == [("customer_value", "unchanged")]
     assert "stale" not in lens_rows[0]
@@ -337,7 +337,7 @@ def test_apply_plan_converges_across_yaml_styles(org) -> None:
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
     lens_rows = [(e["lens"], e["status"]) for e in plan if "lens" in e]
     assert lens_rows == [("customer_value", "unchanged")]
-    assert {e["status"] for e in plan if e.get("scope") == "semantic"} == {"unchanged"}
+    assert {e["status"] for e in plan if e.get("scope") == "semantic"} - {"hint"} == {"unchanged"}
 
     # The no-op apply must not pay a real one's cost: no republish, no version
     # bump — the lens row reports `unchanged`.
@@ -2578,3 +2578,21 @@ def test_a_warehouse_whose_every_open_hangs_still_fails_the_apply_at_its_deadlin
             assert connection_store.get_connection(s, "wh") is None
     finally:
         release.set()
+
+
+@needs_db
+def test_plan_hints_metrics_nobody_can_name_word_for_word(org) -> None:
+    """A metric whose identifier has several words and no label or aliases is
+    one the typed rails never see named; the plan says which, as a hint."""
+    _oid, headers = org
+    files = _project_files()
+    entity = yaml.safe_load(files["semantic/entities/orders.yaml"])
+    entity["metrics"].append({"name": "otd_rate", "agg": "avg", "expr": "orders.amount"})
+    entity["metrics"].append(
+        {"name": "late_rate", "agg": "avg", "expr": "orders.amount", "label": "late delivery rate"}
+    )
+    files["semantic/entities/orders.yaml"] = yaml.safe_dump(entity, sort_keys=False)
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    hint = next(e for e in plan if e.get("status") == "hint" and "label" in e["hint"])
+    assert "orders.otd_rate" in hint["hint"] and "late_rate" not in hint["hint"]
+    assert "orders.average_order_value" in hint["hint"]

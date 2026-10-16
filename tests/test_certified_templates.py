@@ -280,3 +280,39 @@ def test_a_structured_sample_binding_value_is_rejected_at_plan_not_apply() -> No
     }
     errors = _certified_entry_errors(entry, jaffle_customer_value_bundle().semantic_model)
     assert len(errors) == 1 and "not a scalar value" in errors[0]
+
+
+def test_plan_warns_on_an_explicit_range_ending_on_the_first(monkeypatch) -> None:
+    """``2025-10-01/2026-10-01`` is inclusive and covers 1 October: the plan
+    and the apply say so per slot, with the day the author most likely meant;
+    a range ending on a month's last day is left alone."""
+    import datetime
+
+    from services.lenses.demo import jaffle_customer_value_bundle
+    from services.project import apply as apply_mod
+    from services.project.loader import LensSource
+
+    bundle = jaffle_customer_value_bundle()
+    source = LensSource(
+        config=bundle.config,
+        local_definitions=[],
+        use_when=[],
+        sample_queries=[],
+        certified_answers=[
+            {
+                "question": "revenue in {period}?",
+                "sql": "SELECT SUM(amount) FROM orders WHERE order_date >= '{period.start}' "
+                "AND order_date < '{period.end}'",
+                "slots": {"period": {"type": "date_range"}},
+                "sample_bindings": [
+                    {"period": "2025-10-01/2026-10-01"},
+                    {"period": "2026-01-01/2026-09-30"},
+                    {"period": datetime.date(2026, 2, 1)},  # not a range: no note
+                ],
+            }
+        ],
+        eval_cases=[],
+    )
+    warnings = apply_mod._binding_range_warnings(source)
+    assert len(warnings) == 1
+    assert "slot 'period'" in warnings[0] and "did you mean 2025-10-01/2026-09-30?" in warnings[0]

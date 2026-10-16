@@ -120,6 +120,7 @@ pinned_dimensions: ["currency"]
 | a metric served without its defining constraint | `filters:` on the metric | yes; filter guard |
 | a term's meaning never checkable in answers | `sql:` on the definition (alias `sql_expr`) | yes; definition_applied check + generation grounding |
 | a term with two meanings silently guessed | `status: ambiguous` + `aliases` | yes; clarifies instead |
+| a metric nobody says by its identifier (`otd_rate`) resolved to a sibling | `label:` / `aliases:` on the metric | yes; the question names it word for word, and a bare metric question compiles without a decision |
 | a metric that must never serve from this lens | leave it out of `select:` | yes; refusal |
 | known-good numbers that must not drift | certified answer | yes; served verbatim, re-verified |
 | tone/derivation guidance for the prose | `description` / definition prose | no; advisory |

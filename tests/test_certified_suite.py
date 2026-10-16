@@ -1065,3 +1065,91 @@ def test_a_decimal_percentage_beside_a_label_column_is_value_equivalent() -> Non
     assert ok and reason is not None and "shape-lenient" in reason
     ok, _reason = _compare(["pct"], [[Decimal("58.71")]], ["hero", "pct"], [["x", Decimal("0.42")]])
     assert not ok
+
+
+def test_a_row_set_pass_by_value_equivalence_carries_its_reason() -> None:
+    """Label + pct rows where generation returned the fraction: the pass is
+    by the value rules, so the reason says so — the scalar path already did,
+    the row-set path returned a silent None."""
+    from decimal import Decimal
+
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["label", "pct"],
+        [["a", Decimal("82.59")], ["b", Decimal("10.10")]],
+        ["label", "pct"],
+        [["a", 0.8259], ["b", 0.101]],
+    )
+    assert ok and reason is not None and "value-equivalent" in reason
+    # Last-bits wobble alone stays a plain pass.
+    ok, reason = _compare(["l", "v"], [["a", 1.0000000001]], ["l", "v"], [["a", 1.0]])
+    assert ok and reason is None
+
+
+def test_an_extra_generated_column_beside_decimal_rows_is_projected_away() -> None:
+    """(label, pct) certified as NUMERIC against (label, pct, count) generated:
+    the extra column drops by name and the Decimal cells still compare as
+    numbers — keyed as text they failed the fraction rule after projection."""
+    from decimal import Decimal
+
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["label", "pct"],
+        [["a", Decimal("82.59")], ["b", Decimal("10.10")]],
+        ["label", "pct", "count"],
+        [["a", 0.8259, 3], ["b", 0.101, 4]],
+    )
+    assert ok, reason
+    assert reason is not None and "projection" in reason and "value-equivalent" in reason
+    # A genuinely extra row is still a failure.
+    ok, _ = _compare(
+        ["label", "pct"],
+        [["a", Decimal("82.59")]],
+        ["label", "pct", "count"],
+        [["a", 82.59, 3], ["c", 1.0, 5]],
+    )
+    assert not ok
+
+
+@needs_db
+def test_dst_test_prints_and_reports_the_lenient_reason(org, monkeypatch, capsys) -> None:
+    """A value-equivalent pass names its reason on the PASS line and in the
+    --json row; neither may read as an exact match."""
+    from services.certify import store as certify_store
+    from services.cli.main import _test
+    from services.db.session import org_session
+
+    certified = "SELECT 'all' AS label, 19.0 AS pct"
+    generated = "SELECT 'all' AS label, 0.19 AS pct"
+    with org_session(org) as s:
+        certify_store.create(
+            s, "customer_value", "share of repeat customers?", certified, None, "t"
+        )
+        s.commit()
+    monkeypatch.setattr(
+        "services.runtime.assembly.IntentSQLGenerator",
+        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+            llm, model=model, temperature=temperature
+        ),
+    )
+    monkeypatch.setattr("services.llm.registry.resolve_embedder", lambda: None)
+    monkeypatch.setattr(
+        "services.llm.registry.resolve",
+        lambda _ref: ResolvedModel(ScriptedLLM([generated, "19 percent."]), "fake", "m"),
+    )
+    rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    line = next(li for li in out.splitlines() if li.startswith("PASS"))
+    assert "value-equivalent" in line, line
+    monkeypatch.setattr(
+        "services.llm.registry.resolve",
+        lambda _ref: ResolvedModel(ScriptedLLM([generated, "19 percent."]), "fake", "m"),
+    )
+    rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG, as_json=True))
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    (row,) = report["results"]
+    assert row["verdict"] == "pass" and "value-equivalent" in str(row["reason"])
