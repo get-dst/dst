@@ -7,6 +7,7 @@ grounded against it and `sql_guard` derives its allow-list from it.
 from __future__ import annotations
 
 import re
+from fnmatch import fnmatchcase
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import AliasChoices, BaseModel, BeforeValidator, field_validator, model_validator
@@ -424,6 +425,42 @@ class Entity(Authored):
     # rewritten into the allowed columns, hidden ones absent, whole or not.
     exposed: bool = False
     exposed_whole: bool = False
+    # Columns the entity withholds from every door — generated SQL, the `sql`
+    # tool, describe — the way an `expose:` grant's `hide` withholds a profiled
+    # column. Patterns are fnmatch globs on the column name, bare or as
+    # `entity.column` / `table.column`. Compile fails on a pattern that matches
+    # no field and on a hidden column a dimension, metric or key still reads:
+    # a hide that withholds nothing is a column the author believes is hidden
+    # and is not.
+    hide: StrList = PField(
+        default_factory=list,
+        description="column patterns to withhold from every door, fnmatch on the "
+        "column name — bare ('ssn', '*_email') or qualified ('patients.birth_date'). "
+        "A hidden column is absent from the lens: naming it is out of scope",
+    )
+
+    def hidden_columns(self) -> set[str]:
+        """The field names `hide` withholds — the compile keeps the fields off
+        the entity, and the allow-list subtracts them again so a column an
+        expression still names cannot come back through the guard."""
+        return {f.name for f in self.fields if column_hidden(f.name, self)}
+
+
+def column_hidden(column: str, entity: Entity) -> bool:
+    """Does one of the entity's `hide` patterns name this column? Matched
+    case-insensitively against the bare name, `entity.column`, and the source
+    table's `table.column` (bare or qualified), so every spelling an author
+    reaches for reads naturally."""
+    if not entity.hide:
+        return False
+    table = entity.source.table
+    forms = (
+        column,
+        f"{entity.name}.{column}",
+        f"{table}.{column}",
+        f"{table.rsplit('.', 1)[-1]}.{column}",
+    )
+    return any(fnmatchcase(f.lower(), p.lower()) for p in entity.hide for f in forms)
 
 
 class Join(Authored):
@@ -657,6 +694,10 @@ class SemanticModel(BaseModel):
             if e.default_time_field:
                 cols.add(e.default_time_field)
             cols.update(e.primary_key or [])
+            # A hidden column is out of scope however it was named: a hide on
+            # a column an expression still reads is a compile error, and this
+            # subtraction is the guard's own copy of that promise.
+            cols.difference_update(c for c in list(cols) if column_hidden(c, e))
         return out
 
     def allowed_tables(self) -> set[str]:

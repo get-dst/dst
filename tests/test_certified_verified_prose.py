@@ -487,6 +487,13 @@ def test_refresh_samples_re_records_a_template_whose_range_reads_inclusive(org) 
     assert any(
         "--refresh-samples: re-recorded the sample result of 1 of 1" in a for a in row["applied"]
     )
+    # The flag rewrites a signed value, so the report says old -> new per
+    # template, with the sample binding it ran.
+    per_template = next(a for a in row["applied"] if "[period=2018-01-01/2018-02-01]" in a)
+    assert "how many orders were placed in {period}" in per_template
+    old, new = per_template.split(": {", 1)[1].split(" -> ")
+    assert '"rows":[[-1]]' in old  # the pre-release sample it replaced
+    assert new not in ("unrecorded", "") and "-1" not in new  # the value the warehouse answers
     refreshed = stored()
     assert refreshed.verified_value not in (stale, None)  # the sample as the warehouse answers it
     assert refreshed.terms is not None and "orders" in refreshed.sql

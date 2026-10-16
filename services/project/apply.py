@@ -59,6 +59,7 @@ from services.db import embedding_meta
 from services.definitions import standards as std_store
 from services.evals import service as eval_service
 from services.evals import store as eval_store
+from services.evals.certified_suite import format_result
 from services.evals.rewrite import rewrite_to_sources
 from services.lenses import connection_store, store
 from services.project.compile import (
@@ -800,6 +801,7 @@ def _publish_bundle(
     created_by: str = "",
     gate_override: str | None = None,
     allow_cases: frozenset[str] | None = None,
+    known_divergences: Mapping[str, str] | None = None,
 ) -> tuple[int | None, list[str], list[str], str | None, dict[str, Any] | None]:
     """validate → eval gate → upsert draft → publish → snapshot. Returns (version,
     errors, warnings, gate outcome, gate detail); errors non-empty means no lens rows were
@@ -825,9 +827,38 @@ def _publish_bundle(
     warnings = collapse_warnings([i for i in report.issues if i.severity == "warning"])
     warnings += _missing_warehouse_tables(session, bundle)
     warnings += _dictionary_warnings(session, bundle.semantic_model)
-    decision = eval_service.publish_gate(session=session, org_id=org_id, lens=name, bundle=bundle)
+    decision = eval_service.publish_gate(
+        session=session,
+        org_id=org_id,
+        lens=name,
+        bundle=bundle,
+        known_divergences=known_divergences,
+    )
     gate = eval_service.gate_label(decision)
     detail = eval_service.gate_decision_dict(decision)
+    if decision is not None and decision.recorded:
+        warnings.append(
+            f"eval gate: recorded the verified value of {decision.recorded} certified "
+            "answer(s) that had none — the next push grades them against it"
+        )
+    # What the file-side allow-list covered this push, each with its reason:
+    # an override nobody can see is the blanket flag by another name.
+    if decision is not None and decision.known_covered:
+        warnings += [
+            f"eval gate: known divergence covered by evals/known_divergences.yaml: {line}"
+            for line in decision.known_covered
+        ]
+    # A generation divergence under block/warn: the certified answer is the
+    # override, so the push lands with the divergence named, never silenced.
+    if decision is not None and decision.generation_divergences:
+        warnings += [
+            _degraded(
+                f"{message} — reported, not blocking (eval_gate: {bundle.config.eval_gate} "
+                "grades certified values; `eval_gate: block_generation` blocks on this, "
+                "evals/known_divergences.yaml records it as judged)"
+            )
+            for message in decision.generation_divergences
+        ]
     if decision is not None and decision.flaky:
         # Wobble is visible, never blocking: the fix for a case
         # that passes only on retry is certification, and the operator can't
@@ -843,10 +874,13 @@ def _publish_bundle(
     elif decision is not None and (
         decision.blocked or decision.regressed or decision.certified_failures or decision.failing
     ):
-        gate_report = (
+        bar = (
             f"score {decision.score} < prev {decision.prev_score}"
-            f" — failing: {', '.join(decision.failing) or 'none listed'}"
+            if decision.regressed
+            else f"score {decision.score} ({decision.baseline or 'no previous run'})"
         )
+        gate_report = f"{bar} — failing: {', '.join(decision.failing) or 'none listed'}"
+        ids = " ".join(decision.failing) or "<case ids>"
         if override_applies(decision, gate_override, allow_cases):
             # The audited one-off: publish proceeds, the gate
             # stays `block` in the file, and the override + reason + the cases
@@ -882,14 +916,16 @@ def _publish_bundle(
                 errors.append(
                     f"eval gate blocked publish: accuracy regressed ({gate_report}) — "
                     "reconcile the cases, or publish once with "
-                    "--allow-failing-cases --reason '…' (audited; the gate stays block)"
+                    f"--allow-failing-cases {ids} --reason '…' (audited; the gate stays "
+                    f"{bundle.config.eval_gate})"
                 )
             elif decision.failing:
                 errors.append(
-                    f"eval gate blocked publish: {len(decision.failing)} approved "
-                    f"case(s) failing (score {decision.score}) — fix the cases or the "
-                    "lens, park red cases as status: candidate, or publish once with "
-                    "--allow-failing-cases --reason '…' (audited; the gate stays block)"
+                    f"eval gate blocked publish: {len(decision.failing)} case(s) failing "
+                    f"({gate_report}) — fix the cases or the lens, park red cases as "
+                    "status: candidate, or publish once with "
+                    f"--allow-failing-cases {ids} --reason '…' (audited; the gate stays "
+                    f"{bundle.config.eval_gate})"
                 )
             return None, errors, [], "blocked", detail
         else:
@@ -1006,9 +1042,7 @@ def apply_lens(
     # cases kept the publish gate scoreable (publish_gate's SKIPPED fallback
     # only fires when NOTHING scores). A lens that never HAD active answers
     # (fresh lens, first applies) is the 0→0 case, never the ≥1→0 transition.
-    guard_starvation = config.eval_gate in ("block", "warn") and (
-        source.certified_answers is not None
-    )
+    guard_starvation = config.eval_gate != "off" and (source.certified_answers is not None)
     had_active = guard_starvation and _has_active_certified(session, name)
     _apply_certified_answers(
         session,
@@ -1026,7 +1060,7 @@ def apply_lens(
     if source.certified_answers is None and (orphan := certified_orphan_warning(session, name)):
         result.warnings.append(orphan)
     if had_active and not _has_active_certified(session, name):
-        if config.eval_gate == "block":
+        if eval_service.blocks(config.eval_gate):
             # The corpus IS the gate's suite: retiring the last active answer
             # under eval_gate: block would starve it — every later apply
             # publishing on a skipped gate. Blue/green: this aborts the apply.
@@ -1059,6 +1093,7 @@ def apply_lens(
         created_by=created_by,
         gate_override=gate_override,
         allow_cases=allow_cases,
+        known_divergences=eval_service.known_divergence_ids(source.known_divergences),
     )
     if errors:
         return LensApplyResult(
@@ -1133,7 +1168,7 @@ def check_lens(
     shared_relationships.update(incoming_relationships)
     profiles, dropped = _expose_profiles(session, config, incoming=incoming_profiles)
     try:
-        model, _warnings = compile_lens_model(
+        model, compile_warnings = compile_lens_model(
             config=config,
             shared_entities=shared_entities,
             shared_definitions=shared_definitions,
@@ -1149,6 +1184,10 @@ def check_lens(
         )
     except CompileError as exc:
         return [str(exc)]
+    if warnings_out is not None:
+        # The compile's own warnings (a dropped relationship, a sensitive
+        # column with no hide) are apply's warnings too; plan predicts apply.
+        warnings_out.extend(compile_warnings)
     stored_sql = {
         c.question.strip().lower(): c.expected_sql for c in eval_store.list_cases(session, name)
     }
@@ -1577,7 +1616,7 @@ def _starvation_errors(session: Session, name: str, source: LensSource) -> list[
     and a file-originated row the file no longer carries is deleted (review-origin
     rows survive). Empty when the push cannot starve anything."""
     answers = source.certified_answers
-    if source.config.eval_gate != "block" or answers is None:
+    if not eval_service.blocks(source.config.eval_gate) or answers is None:
         return []
     stored = certify_store.list_for_lens(session, name)
     if not any(certify_store.is_active(a.status) for a in stored):
@@ -1676,6 +1715,17 @@ def _refresh_samples(
             terms=_certified_terms(rendered, model),
         )
         done += 1
+        # A flag that rewrites the signed value of a certified answer says
+        # before and after, per template — the sample binding it ran and the
+        # value it replaced, so the diff is in the report, not only in git.
+        binding = ", ".join(
+            f"{slot}={value}" for slot, value in (a.sample_bindings or [{}])[0].items()
+        )
+        result.applied.append(
+            f"--refresh-samples: '{a.question}' [{binding}]: "
+            f"{format_result(a.verified_value) if a.verified_value else 'unrecorded'} -> "
+            f"{format_result(verified) if verified else 'unrecorded'}"
+        )
     result.applied.append(
         f"--refresh-samples: re-recorded the sample result of {done} of {len(stored)} "
         "template(s) whose explicit range reads inclusive"
@@ -1828,7 +1878,7 @@ def _certify_self_test(
     connector = _probe_connector(session, source.config, org_id, result, label="certify self-test")
     if connector is None:
         return len(to_test)
-    from services.evals.certified_suite import format_result, run_certified_suite
+    from services.evals.certified_suite import run_certified_suite
     from services.runtime import assembly
     from services.runtime.answer import AnswerComposer
 
@@ -2023,6 +2073,7 @@ def _cross_match_errors(
         distinguishing_tokens,
         governed_names,
         measure_names,
+        name_aliases,
         names_in,
     )
     from services.runtime.assembly import certified_bands
@@ -2035,6 +2086,7 @@ def _cross_match_errors(
     bands = certified_bands()
     names = governed_names(model)
     measures = measure_names(model)
+    aliases = name_aliases(model)
     incoming = {str(a.get("question", "")).strip().lower() for a in entries}
     seen: set[frozenset[str]] = set()
     errors: list[str] = []
@@ -2046,7 +2098,7 @@ def _cross_match_errors(
         if pair in seen or len(pair) < 2 or _sql_text(sql1) == _sql_text(sql2):
             return
         seen.add(pair)
-        n1, n2 = names_in(a1, names), names_in(a2, names)
+        n1, n2 = names_in(a1, names, aliases), names_in(a2, names, aliases)
         only1, only2 = distinguishing_tokens(a1, a2, n1 & n2)
         if n1 == n2 and (n1 & measures or score >= bands.exact) and not (only1 or only2):
             errors.append(
@@ -2451,10 +2503,14 @@ def _apply_certified_answers(
             session,
             stored.id,
             sql=new_sql,
+            # A verified value is the value of ONE sql: the file's explicit
+            # value wins; otherwise a SQL-class edit clears it (the gate's
+            # value lane records the new SQL's value on the next run, or
+            # --probe-certified does now) and any other edit keeps it.
             verified_value=(
                 answer.get("verified_value")
                 if "verified_value" in answer
-                else stored.verified_value
+                else (None if sql_edited else stored.verified_value)
             ),
             source=answer.get("source"),
             verified_by=answer.get("verified_by"),

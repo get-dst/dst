@@ -151,6 +151,40 @@ def test_the_typed_path_is_untouched() -> None:
     assert res.response.status == "ok" and res.response.clarification is None
 
 
+def test_a_qualified_table_nobody_holds_clarifies_instead_of_substituting() -> None:
+    """A question writing `legacy.orders_v1` — a table in no lens the caller
+    may use — once ran against `analytics.orders` and served the current
+    table's figure as verified under the legacy name. The rail now says the
+    lens does not hold it and what it answers from; a qualified column of a
+    held entity, and a literal the SQL actually reads, are left alone."""
+    clar = scope_rails.named_table_clarification(
+        "count the rows in legacy.orders_v1 by month, and say so if you cannot read it.",
+        _model(),
+        ORDERS_PER_DAY,
+    )
+    assert clar is not None and clar.kind == "named_table" and clar.term == "legacy.orders_v1"
+    assert clar.options == ["orders"]
+    assert clar.question == (
+        "this lens does not hold `legacy.orders_v1`; it answers from `orders` "
+        "(analytics.orders) — did you mean orders?"
+    )
+    assert (
+        scope_rails.named_table_clarification("orders.amount over 100", _model(), ORDERS_PER_DAY)
+        is None
+    )
+    assert (
+        scope_rails.named_table_clarification(
+            "rows in analytics.orders per day", _model(), ORDERS_PER_DAY
+        )
+        is None
+    )
+    # End to end: the generation path clarifies, no figure is served.
+    res = _run("how many rows are in legacy.orders_v1?", ORDERS_PER_DAY)
+    assert res.response.status == "clarification" and res.response.sql is None
+    assert res.response.clarification is not None
+    assert res.response.clarification.term == "legacy.orders_v1"
+
+
 def test_a_common_word_table_name_still_names_the_table() -> None:
     # "orders" in "purchase orders" is the table — in the normal case the SQL
     # reads it; only the mismatch clarifies
@@ -214,10 +248,12 @@ def test_qualified_names_match_as_written_and_unknown_schemas_do_not() -> None:
     )
     clar = scope_rails.named_table_clarification("rows in analytics.orders", m, CUSTOMER_COUNT)
     assert clar is not None and clar.term == "analytics.orders"
-    # a schema the lens does not hold names nothing — no guess at the bare tail
-    assert (
-        scope_rails.named_table_clarification("rows in staging.orders", m, CUSTOMER_COUNT) is None
-    )
+    # a schema the lens does not hold is not guessed at by its bare tail: the
+    # rail says the lens does not hold it, and never serves another table's
+    # figure under that name
+    clar = scope_rails.named_table_clarification("rows in staging.orders", m, CUSTOMER_COUNT)
+    assert clar is not None and clar.term == "staging.orders"
+    assert clar.question.startswith("this lens does not hold `staging.orders`")
     # a case-insensitive match, as the engine reads identifiers
     assert scope_rails.named_table_clarification("Orders by day", m, CUSTOMER_COUNT) is not None
 

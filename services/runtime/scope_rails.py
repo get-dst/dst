@@ -6,7 +6,10 @@ a declared entity, its source table, an exposed table, in this lens or in anothe
 the caller may use — and whose generated SQL does not read that table becomes a
 clarification instead of a figure. "How many events per day" on a lens with
 ``orders`` and no events table once served ``order_count`` as events: a silent
-noun swap. The match is literal and word-bounded on author-declared names (the
+noun swap. So does a question that writes a ``schema.table`` literal nobody
+holds (a legacy table outside every lens), which would otherwise be answered
+from whatever the SQL read, under the asked name. The match is literal and
+word-bounded on author-declared names (the
 ``named_values`` discipline: case-insensitive, the bare name and its regular
 plural, or the qualified name as written), so a table named after a common word
 ("orders" in "purchase orders") still names the table — in the normal case the
@@ -133,7 +136,50 @@ def named_table_clarification(
                 f"{' or '.join(reads)}, or the `{key}` table{where}?"
             ),
         )
+    # A `schema.table` literal nobody holds: not this lens, not another the
+    # caller may use. The SQL read something else, so the figure would be a
+    # substitution with the asked table's name on the headline ("legacy counts,
+    # verified", read from the current table). A qualified column of a held
+    # entity (`orders.status`) is not a table and is left alone.
+    for literal in _qualified_literals(question, model, held):
+        if literal in read_names:
+            continue
+        sources = " and ".join(
+            f"`{e.name}` ({e.source.table})" for e in model.entities if e.name in reads
+        )
+        return ClarificationRequest(
+            term=literal,
+            kind="named_table",
+            options=[*reads],
+            question=(
+                f"this lens does not hold `{literal}`; it answers from {sources} — "
+                f"did you mean {' or '.join(reads)}?"
+            ),
+        )
     return None
+
+
+_QUALIFIED = re.compile(r"(?<![\w.])([a-z_]\w*\.[a-z_]\w*)(?!\w|\.\w)", re.IGNORECASE)
+
+
+def _qualified_literals(
+    question: str, model: SemanticModel, held: Mapping[str, tuple[str, str | None]]
+) -> list[str]:
+    """The `schema.table` literals the question writes that name no held
+    table and no column of a held entity, lowercased, in question order."""
+    columns: set[str] = set()
+    for table, cols in model.allowed_columns().items():
+        tail = table.rsplit(".", 1)[-1]
+        columns |= {f"{tail}.{c}".lower() for c in cols}
+    for e in model.entities:
+        columns |= {f"{e.name}.{f.name}".lower() for f in e.fields}
+    out: list[str] = []
+    for m in _QUALIFIED.finditer(question):
+        literal = m.group(1).lower()
+        if literal in held or literal in columns or literal in out:
+            continue
+        out.append(literal)
+    return out
 
 
 # ── scoped suggestions ───────────────────────────────────────────────────────

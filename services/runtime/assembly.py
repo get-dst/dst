@@ -17,7 +17,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -27,7 +27,15 @@ from services.benchmark.contamination import normalize
 from services.certdefs import load_certified_defs, select_context
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
-from services.certify.lexical import answer_names, governed_names, lexical_mismatch, measure_names
+from services.certify.lexical import (
+    answer_names,
+    declared_units,
+    governed_names,
+    lexical_mismatch,
+    measure_names,
+    name_aliases,
+    unit_mismatch,
+)
 from services.context import store as ctx_store
 from services.contracts.lens_config import LensConfig
 from services.contracts.profile import TableProfile
@@ -375,6 +383,8 @@ def certified_lookup(
     record_to: list[DecisionRecord] | None = None,
     governed: frozenset[str] = frozenset(),
     measures: frozenset[str] = frozenset(),
+    aliases: Mapping[str, str] | None = None,
+    units: Mapping[str, str] | None = None,
 ) -> tuple[
     certify_store.CertifiedAnswer | None,
     list[SampleQuery],
@@ -400,7 +410,13 @@ def certified_lookup(
     the asked one — or, carrying none, does not say the governed words the
     asked question says — is vetoed before binding and before the
     exact/equivalent bands (the collections template must never serve an
-    invoicing question); a plain one folds as an exemplar instead.
+    invoicing question); a plain one folds as an exemplar instead. ``aliases``
+    maps the labels and aliases people call those names by to the names, so
+    a question naming a sibling metric by its label is vetoed like one naming
+    it outright; ``units`` is what the lens declares a metric is denominated
+    in, read by the unit veto: a question that says "in EUR" (or hours,
+    litres, %) never takes a hit whose words, SQL identifiers or declared
+    units report a different one — it drops to assisted.
     """
     if qvec is None:
         return None, [], "none", None, None
@@ -423,12 +439,22 @@ def certified_lookup(
             answer_names(top.resolution),
             frozenset(top.terms or ()),
             measures,
+            aliases,
         ):
             # A collections answer never serves an invoicing ask — cosine
             # cannot see the name, and neither can the bind gate: a template
             # binds its slots from the question, not the metric. Fall through:
             # a plain pair still folds as an exemplar below.
             pass
+        elif (
+            unit_reason := unit_mismatch(
+                question, top.question, top.sql, frozenset(top.terms or ()), units
+            )
+        ) is not None:
+            # "in EUR" never takes the by-currency template: the names agree,
+            # the sentences agree, the served number would be SEK. Same fall
+            # through as the lexical veto, with the reason in the log.
+            log.info("certified hit vetoed on unit for lens %s: %s", lens, unit_reason)
         elif top.slots:
             if (pair := assist_llm()) is not None:
                 bound = certified_bind(pair.llm, pair.name, question, top)
@@ -589,6 +615,8 @@ def assemble(
         record_to=decisions,
         governed=governed_names(bundle.semantic_model),
         measures=measure_names(bundle.semantic_model),
+        aliases=name_aliases(bundle.semantic_model),
+        units=declared_units(bundle.semantic_model),
     )
     if exemplars:
         model = model.model_copy(update={"sample_queries": list(model.sample_queries) + exemplars})

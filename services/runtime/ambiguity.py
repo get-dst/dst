@@ -62,6 +62,22 @@ def triggered(question: str, d: Definition) -> bool:
     return any(re.search(rf"\b{re.escape(s)}\b", q) for s in surfaces(d))
 
 
+def named(question: str, d: Definition) -> bool:
+    """Does the question NAME this definition — its term, an alias, or the
+    member it is ``about`` (``entity.member`` or a bare member name)? The gate
+    on applying a definition's predicate: a term the question never says is a
+    filter nobody asked for. The same literal word-boundary idiom as
+    ``triggered``, plus a regular plural on the surface ("active customers"
+    names "active customer"); still no judgment."""
+    q = _norm(question)
+    member = _norm((d.about or "").rpartition(".")[2])
+    return any(
+        re.search(rf"\b{re.escape(s)}(?:s|es)?\b", q) is not None
+        for s in (*surfaces(d), member)
+        if s
+    )
+
+
 def mapping_label(mapping: str) -> str:
     """The meaning half of a possible_mapping ('meaning - where it lives')."""
     head, sep, _ = mapping.rpartition(" - ")

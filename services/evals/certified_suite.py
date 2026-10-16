@@ -420,63 +420,96 @@ def _certified_projection(
     oracle_rows: list[list[Any]],
     gen_cols: list[str],
     gen_rows: list[list[Any]],
-) -> tuple[list[str], list[list[Any]], str] | None:
+) -> tuple[list[str], list[list[Any]], list[list[Any]], str] | None:
     """The CERTIFIED result on the generated projection, when the certified
-    side is the wider one: a BI-verified query certifies the label, the
+    side is at least as wide: a BI-verified query certifies the label, the
     percentage AND the count it was checked against, and generation returns
     the label and the rate. Columns both sides name pair by name; a generated
     column named on neither side must then equal exactly one remaining
     certified column value for value, row by row (the certified ``otd_pct``
     82.59 is the generated ``otd_rate`` 0.8259), rows aligned on the shared
-    columns. Returns the certified columns renamed and reordered to the
-    generated ones, the certified rows projected onto them, and the note
-    saying which columns were dropped and how the rest paired — the caller
-    compares the projected pair, so a value-equivalent pass says so. None
-    when the rule does not apply: not wider, a generated column that pairs
-    with none or with two, a row with no partner."""
+    columns — without one, the columns pair by their value multisets and the
+    caller's row diff settles the rest. Numeric columns pair first; a generated
+    LABEL column (never a number) that pairs with nothing is ignorable beside a
+    paired measure — "last full month" certified as (otd_pct, count) against a
+    generation of (created_month, otd_rate) is the same answer — and so is a
+    certified helper nobody generated. Returns the certified columns renamed
+    and reordered to the generated ones that were kept, the certified rows
+    projected onto them, the generated rows on those same columns, and the
+    note saying which columns were dropped on each side and how the rest
+    paired — the caller compares the projected pair, so a value-equivalent
+    pass says so. None when the rule does not apply: the generated side wider,
+    a generated measure that pairs with none or with two, a row with no
+    partner, or no numeric column paired at all (labels alone carry no
+    certified value)."""
     oc, gc = [c.lower() for c in oracle_cols], [c.lower() for c in gen_cols]
-    if len(oc) <= len(gc) or len(set(oc)) != len(oc) or len(set(gc)) != len(gc):
+    if len(oc) < len(gc) or len(set(oc)) != len(oc) or len(set(gc)) != len(gc):
         return None
     if not oracle_rows or len(oracle_rows) != len(gen_rows):
         return None
-    if not any(_numeric(v) for r in gen_rows for v in r):
-        return None  # labels alone carry no certified value: a measure is missing
     shared = [c for c in gc if c in oc]
     unpaired_gen = [c for c in gc if c not in oc]
     candidates = [c for c in oc if c not in gc]
+    if not unpaired_gen and not candidates:
+        return None  # the same columns on both sides: nothing to project
     pairing: dict[str, str] = {}
+    labels: list[str] = []
+
+    def _is_label(col: str) -> bool:
+        return not any(_numeric(r[gc.index(col)]) for r in gen_rows)
+
     if unpaired_gen:
-        # Align rows on the shared columns (the labels); without one there
-        # is nothing to align on beyond a single row each.
+        aligned: list[tuple[list[Any], list[Any]]] | None = None
         if shared:
+            # Align rows on the shared columns (the labels).
             key_o = [oc.index(c) for c in shared]
             key_g = [gc.index(c) for c in shared]
             by_key = {_key([r[i] for i in key_o]): r for r in oracle_rows}
             if len(by_key) != len(oracle_rows):
                 return None
-            aligned = [(by_key.get(_key([r[i] for i in key_g])), r) for r in gen_rows]
-            if any(o is None for o, _ in aligned):
+            found = [(by_key.get(_key([r[i] for i in key_g])), r) for r in gen_rows]
+            if any(o is None for o, _ in found):
                 return None
+            aligned = [(o, r) for o, r in found if o is not None]
         elif len(gen_rows) == 1:
             aligned = [(oracle_rows[0], gen_rows[0])]
-        else:
-            return None
-        for g in unpaired_gen:
+
+        def _pairs(c: str, gi: int) -> bool:
+            ci = oc.index(c)
+            if aligned is not None:
+                return all(_same(o[ci], r[gi]) for o, r in aligned)
+            remaining = [r[gi] for r in gen_rows]  # a multiset: duplicates are rows
+            for o in oracle_rows:
+                m = next((g for g in remaining if _same(o[ci], g)), None)
+                if m is None:
+                    return False
+                remaining.remove(m)
+            return not remaining
+
+        # Measures first, then labels: a label pairs by exact value, and one
+        # that matches no certified column is dropped as a label, not a miss.
+        for g in sorted(unpaired_gen, key=_is_label):
             gi = gc.index(g)
-            hits = [
-                c
-                for c in candidates
-                if c not in pairing.values()
-                and all(_same(o[oc.index(c)], r[gi]) for o, r in aligned if o is not None)
-            ]
-            if len(hits) != 1:
+            hits = [c for c in candidates if c not in pairing.values() and _pairs(c, gi)]
+            if len(hits) == 1:
+                pairing[g] = hits[0]
+            elif not hits and _is_label(g):
+                labels.append(g)
+            else:
                 return None
-            pairing[g] = hits[0]
-    order = [oc.index(pairing.get(c, c)) for c in gc]
+    kept = [c for c in gc if c not in labels]
+    if not any(_numeric(r[gc.index(c)]) for c in kept for r in gen_rows):
+        return None
+    order = [oc.index(pairing.get(c, c)) for c in kept]
     projected = [[r[i] for i in order] for r in oracle_rows]
+    gen_kept = [gc.index(c) for c in kept]
+    gen_projected = [[r[i] for i in gen_kept] for r in gen_rows]
     dropped = [c for c in oc if c not in gc and c not in pairing.values()]
-    how = "".join(f"; generated '{g}' is certified '{c}'" for g, c in pairing.items())
-    return gen_cols, projected, f"projection: certified column(s) {dropped} ignored{how}"
+    note = f"projection: certified column(s) {dropped} ignored"
+    if labels:
+        note += f"; generated label column(s) {labels} ignored"
+    note += "".join(f"; generated '{g}' is certified '{c}'" for g, c in pairing.items())
+    return [gen_cols[i] for i in gen_kept], projected, gen_projected, note
 
 
 def _compare(
@@ -498,8 +531,8 @@ def _compare(
         # The certified side carried a helper column beside the value (a
         # count next to a percentage): the comparison runs on the certified
         # columns generation returned, and the pass says what was dropped.
-        cols, rows, note = wider
-        ok, reason = _compare(cols, rows, gen_cols, gen_rows)
+        cols, rows, gen_rows, note = wider
+        ok, reason = _compare(cols, rows, cols, gen_rows)
         return ok, (f"{note}; {reason}" if reason else note) if ok else reason
     if len(oracle_cols) == 1 and len(oracle_rows) == 1 and len(gen_rows) == 1 and len(gen_cols) > 1:
         # The certified answer is one value; the generated one is a single row

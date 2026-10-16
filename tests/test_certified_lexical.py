@@ -503,3 +503,274 @@ def test_the_measure_veto_keeps_an_invoicing_ask_off_a_collections_template() ->
     assert not lexical_mismatch(
         "How much did we invoice in September 2026?", approved, names, frozenset(), terms
     )
+
+
+# ── labels, aliases and units ────────────────────────────────────────────────
+
+
+def _ar_model():
+    """Two AR metrics on one snapshot: the local-currency balance and its EUR
+    twin, named by label the way a controller says it."""
+    from services.contracts import semantic_model as sm
+
+    ar = sm.Entity(
+        name="ar_snapshot",
+        source={"connection": "warehouse", "table": "marts.ar_snapshot"},
+        default_time_field="snapshot_day",
+        fields=[
+            sm.Field(name="snapshot_day", type="date"),
+            sm.Field(name="currency", type="string"),
+            sm.Field(name="open_balance", type="number"),
+            sm.Field(name="open_balance_eur", type="number"),
+            sm.Field(name="overdue", type="boolean"),
+        ],
+        metrics=[
+            sm.Metric(name="open_ar", agg="sum", expr="ar_snapshot.open_balance"),
+            sm.Metric(
+                name="overdue_ar",
+                agg="sum",
+                expr="ar_snapshot.open_balance",
+                filters=["ar_snapshot.overdue"],
+            ),
+            sm.Metric(
+                name="overdue_ar_eur",
+                agg="sum",
+                expr="ar_snapshot.open_balance_eur",
+                filters=["ar_snapshot.overdue"],
+                label="overdue AR in EUR",
+                aliases=["overdue receivables in euros"],
+                currency="EUR",
+            ),
+        ],
+    )
+    return sm.SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[ar],
+        definitions=[
+            Definition(term="dso", body="days sales outstanding", aliases=["collection days"])
+        ],
+    )
+
+
+def test_labels_and_aliases_are_governed_names() -> None:
+    from services.certify.lexical import declared_units, name_aliases
+
+    model = _ar_model()
+    aliases = name_aliases(model)
+    assert aliases == {
+        "overdue ar in eur": "overdue_ar_eur",
+        "overdue receivables in euros": "overdue_ar_eur",
+        "collection days": "dso",
+    }
+    names = governed_names(model)
+    assert names_in("overdue AR in EUR at the end of August", names, aliases) == {
+        "overdue_ar_eur",
+        "overdue_ar",
+    }
+    assert names_in("what are our collection days", names, aliases) == {"dso"}
+    # a label is a phrasing, matched whole: its words alone name nothing
+    assert "overdue_ar_eur" not in names_in("overdue AR at month end", names, aliases)
+    assert declared_units(model) == {"overdue_ar_eur": "eur"}
+
+
+def test_a_sibling_named_by_its_label_is_a_different_governed_name() -> None:
+    """The ledger shape: "overdue AR in EUR at the end of August 2026" against
+    the template "open and overdue AR at {day} by currency", attributed to
+    open_ar/overdue_ar. The label names overdue_ar_eur, which the template
+    is not about — vetoed. The template's own wording still takes it."""
+    from services.certify.lexical import name_aliases
+
+    model = _ar_model()
+    names, measures, aliases = governed_names(model), measure_names(model), name_aliases(model)
+    approved = "open and overdue AR at {day} by currency"
+    terms = frozenset({"open_balance", "open_ar", "overdue_ar"})
+    assert lexical_mismatch(
+        "overdue AR in EUR at the end of August 2026",
+        approved,
+        names,
+        frozenset(),
+        terms,
+        measures,
+        aliases,
+    )
+    assert lexical_mismatch(
+        "overdue receivables in euros at 31 August",
+        approved,
+        names,
+        frozenset(),
+        terms,
+        measures,
+        aliases,
+    )
+    assert not lexical_mismatch(
+        "open and overdue AR at 2026-08-31 by currency",
+        approved,
+        names,
+        frozenset(),
+        terms,
+        measures,
+        aliases,
+    )
+    # the label and the name are one metric: asked by label, approved by name
+    assert not lexical_mismatch(
+        "overdue AR in EUR at 31 August",
+        "overdue_ar_eur at {day}",
+        names,
+        frozenset(),
+        frozenset({"open_balance_eur", "overdue_ar_eur"}),
+        measures,
+        aliases,
+    )
+
+
+def test_the_unit_veto_reads_question_words_against_sql_and_declarations() -> None:
+    from services.certify.lexical import unit_mismatch
+
+    by_currency = (
+        "SELECT currency, SUM(open_balance) AS open_ar FROM marts.ar_snapshot "
+        "WHERE snapshot_day = {day} AND overdue GROUP BY currency"
+    )
+    # "by currency" reports local currencies; the question said EUR
+    assert (
+        unit_mismatch(
+            "overdue AR in EUR at the end of August 2026",
+            "open and overdue AR at {day} by currency",
+            by_currency,
+        )
+        == "the question asks in eur and the certified answer reports local"
+    )
+    # a column named for the unit produces it
+    assert (
+        unit_mismatch(
+            "overdue AR in EUR at the end of August 2026",
+            "overdue AR at {day}",
+            "SELECT SUM(open_balance_eur) FROM marts.ar_snapshot WHERE snapshot_day = {day}",
+        )
+        is None
+    )
+    # the lens's own declaration on the attributed metric counts both ways
+    assert (
+        unit_mismatch(
+            "overdue AR in EUR",
+            "overdue AR at {day}",
+            "SELECT SUM(open_balance) FROM s",
+            frozenset({"overdue_ar"}),
+            {"overdue_ar": "sek"},
+        )
+        == "the question asks in eur and the certified answer reports sek"
+    )
+    assert (
+        unit_mismatch(
+            "overdue AR in EUR",
+            "overdue AR at {day}",
+            "SELECT SUM(open_balance) FROM s",
+            frozenset({"overdue_ar"}),
+            {"overdue_ar": "eur"},
+        )
+        is None
+    )
+    # other unit families, and the silences: a candidate that says nothing
+    # about the unit decides nothing, a period word is not a unit, "local"
+    # outside "local currency" is not a currency
+    assert (
+        unit_mismatch(
+            "fuel in litres per shipment",
+            "fuel per shipment",
+            "SELECT SUM(fuel_gallons)/COUNT(*) FROM s",
+        )
+        == "the question asks in litres and the certified answer reports gallons"
+    )
+    assert (
+        unit_mismatch(
+            "median transit in hours",
+            "median transit per shipment",
+            "SELECT median(transit_minutes) FROM s",
+        )
+        == "the question asks in hours and the certified answer reports minutes"
+    )
+    assert (
+        unit_mismatch(
+            "on-time share in %",
+            "on-time delivered count",
+            "SELECT COUNT(*) FROM s",
+            frozenset({"otd_count"}),
+            {"otd_count": "eur"},
+        )
+        is None
+    )
+    assert (
+        unit_mismatch("revenue in EUR this month", "revenue in {period}", "SELECT SUM(x) FROM s")
+        is None
+    )
+    assert (
+        unit_mismatch(
+            "sales at the local hub in EUR", "sales by hub", "SELECT SUM(amount_eur) FROM s"
+        )
+        is None
+    )
+    assert (
+        unit_mismatch("shipments per day", "shipments by month", "SELECT month, COUNT(*) FROM s")
+        is None
+    )
+
+
+def test_in_eur_drops_the_by_currency_template_to_assisted(monkeypatch) -> None:
+    """End to end through certified_lookup: the template binds and would have
+    served; the unit veto keeps it off the EUR ask, and the EUR twin serves."""
+    from services.certify.lexical import declared_units, name_aliases
+
+    model = _ar_model()
+    local = _Answer(
+        id="ca_local",
+        question="open and overdue AR at {day} by currency",
+        sql=(
+            "SELECT currency, SUM(open_balance) AS open_ar FROM marts.ar_snapshot "
+            "WHERE snapshot_day = {day} AND overdue GROUP BY currency"
+        ),
+        slots={"day": "date"},
+        sample_bindings=[{"day": "2026-08-31"}],
+        terms=["open_balance", "open_ar", "overdue_ar"],
+    )
+    _wire(monkeypatch, [_Hit(local)])
+    monkeypatch.setattr(assembly, "assist_llm", lambda: SimpleNamespace(llm=None, name="m"))
+    monkeypatch.setattr(assembly, "certified_bind", lambda *_a, **_k: {"day": "2026-08-31"})
+    kw = dict(
+        governed=governed_names(model),
+        measures=measure_names(model),
+        aliases=name_aliases(model),
+        units=declared_units(model),
+    )
+    top, _ex, mode, match, bound = certified_lookup(
+        "finance", [0.1], "org", "overdue AR in EUR at the end of August 2026", **kw
+    )
+    assert top is None and match is None and bound is None and mode == "none"
+    # the template's own ask, by currency, still binds and serves
+    top, _ex, mode, match, bound = certified_lookup(
+        "finance", [0.1], "org", "open and overdue AR at 2026-08-31 by currency", **kw
+    )
+    assert top is local and match == "parameterized" and bound == {"day": "2026-08-31"}
+    # a plain hit whose SQL does not produce EUR folds as an exemplar instead
+    plain = _Answer(
+        id="ca_plain",
+        question="overdue AR at the end of August 2026",
+        sql="SELECT SUM(open_balance) AS overdue_ar FROM marts.ar_snapshot WHERE overdue",
+        terms=["open_balance", "overdue_ar"],
+    )
+    _wire(monkeypatch, [_Hit(plain)])
+    top, exemplars, mode, match, _b = certified_lookup(
+        "finance", [0.1], "org", "overdue AR in EUR at the end of August 2026", **kw
+    )
+    assert top is None and mode == "assisted" and [e.sql for e in exemplars] == [plain.sql]
+    # the EUR twin, named by label and producing EUR, serves exact
+    twin = _Answer(
+        id="ca_eur",
+        question="overdue AR in EUR at the end of August 2026",
+        sql="SELECT SUM(open_balance_eur) AS overdue_ar_eur FROM marts.ar_snapshot WHERE overdue",
+        terms=["open_balance_eur", "overdue_ar_eur"],
+    )
+    _wire(monkeypatch, [_Hit(twin)])
+    top, _ex, mode, match, _b = certified_lookup(
+        "finance", [0.1], "org", "overdue AR in EUR at the end of August 2026", **kw
+    )
+    assert top is twin and mode == "certified" and match == "exact"

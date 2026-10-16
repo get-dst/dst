@@ -64,6 +64,10 @@ class DbtMeasure:
     agg: str  # dbt agg: sum | count | count_distinct | average | min | max | median | …
     expr: str | None = None  # defaults to name when absent
     agg_time_dimension: str | None = None
+    # MetricFlow's `non_additive_dimension: {name, window_choice}` — the
+    # measure is a level (a balance, a capacity) that must not be summed over
+    # time; `name` is the time dimension the latest snapshot is read at.
+    non_additive_dimension: str | None = None
 
 
 @dataclass(frozen=True)
@@ -273,6 +277,7 @@ def _parse_semantic_models(sem: dict[str, object]) -> list[DbtSemanticModel]:
                 agg=_str(m.get("agg")) or "",
                 expr=_str(m.get("expr")),
                 agg_time_dimension=_str(m.get("agg_time_dimension")),
+                non_additive_dimension=_non_additive(m),
             )
             for m in sm.get("measures", [])
             if isinstance(m, dict) and _str(m.get("name"))
@@ -292,6 +297,11 @@ def _parse_semantic_models(sem: dict[str, object]) -> list[DbtSemanticModel]:
             )
         )
     return out
+
+
+def _non_additive(measure: dict[str, object]) -> str | None:
+    nad = measure.get("non_additive_dimension")
+    return _str(nad.get("name")) if isinstance(nad, dict) else None
 
 
 def _granularity(dim: dict[str, object]) -> str | None:

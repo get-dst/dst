@@ -109,6 +109,44 @@ pinned_dimensions: ["currency"]
 - **`pinned_dimensions`**: dimensions that must be pinned to one value or
   GROUPed before any aggregate. The structural form of "never sum across
   currencies": the `aggregation_scope` serve check enforces it deterministically.
+- **`hide`**: column patterns the entity withholds from every door (fnmatch on
+  the column name, bare or as `entity.column`). A hidden column is absent from
+  the lens: generated SQL, the `sql` tool and `describe_lens` never see it, and
+  naming it is out of scope on every one of them. Plan fails on a pattern that
+  matches no field, and on a hidden column a dimension, metric, key or filter
+  still reads: hiding less than you believe is the silent miss this exists to
+  stop. Plan also warns `sensitive_columns` when an entity in scope carries a
+  column named like personal data (`personal_id`, `ssn`, `email`, `phone`,
+  `birth_date`, `date_of_birth`, `address`) with no `hide` on it and no
+  definition `about` it; the column reaching a door is a declared schema fact,
+  and the author decides whether the hide or the definition is the fix.
+
+## A declared refusal holds on every door
+
+`not_computable` in `lens.yaml` names a measure the lens must refuse rather than
+approximate: `measure`, `aliases`, an optional `route_to` and `reason`. The
+`query` door refuses a question naming any of them, deterministically, and so
+does the `sql` door: a caller-written statement that names a column the entry
+names (`birth_date` for an alias `birth date`, projected or filtered) is refused
+with the same sentence. With `row_level: true`, the listing itself is the
+measure: a statement that returns one row per entity key (a key column in its
+projection outside any aggregate; `keys:` names them, defaulting to the lens's
+entity primary keys) is refused too, whatever the columns beside it are called,
+while `COUNT(DISTINCT key)` stays a count.
+
+```yaml
+not_computable:
+  - measure: patient identifiers
+    aliases: [email, personal id, birth date, date of birth, which patients]
+    reason: "a list of identifiable people is not analytics output — ask the data owner"
+    row_level: true
+    keys: [patient_id]
+```
+
+`route_query` carries the same refusal: when it would decline and a lens the
+caller may use declares a term the question names not computable, the response
+is that lens's refusal (`routed_to.decided_by: refusal`, `answer.status:
+refused`) rather than "no lens covers this".
 
 ### Which mechanism for which problem
 

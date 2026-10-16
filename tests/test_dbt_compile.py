@@ -99,13 +99,12 @@ def test_definitions_are_dst_owned_and_skips_reported() -> None:
     defs = {d.term: d for d in res.definitions}
     # dst-owned from the moment they land — no dbt read-only tag
     assert defs["revenue"].source == "authored"
-    assert defs["revenue"].sql_expr == "SUM(orders.amount)"
-    # queryable compound metrics carry their EXPANDED aggregate as the enforceable SQL
-    assert defs["average_order_value"].sql_expr == (
-        "CAST(SUM(orders.amount) AS DOUBLE) / NULLIF(COUNT(1), 0)"
-    )
+    # The metric owns its SQL: a definition's `sql:` is a row predicate, so an
+    # aggregate there is rejected at plan. Meaning binds through `about`.
+    assert defs["revenue"].sql_expr is None and defs["revenue"].about == "orders.revenue"
+    assert defs["average_order_value"].sql_expr is None
     # cross-entity derived stays prose-only
-    assert defs["clv_per_order"].sql_expr is None
+    assert defs["clv_per_order"].sql_expr is None and defs["clv_per_order"].about is None
     # nothing dropped silently
     skipped = {(s.kind, s.name) for s in res.skipped}
     assert ("measure", "median_order_amount") in skipped
@@ -203,16 +202,16 @@ def test_measure_time_dimension_differing_from_default_becomes_override() -> Non
 
 
 def test_metric_filters_survive_import() -> None:
-    """A filtered dbt metric must keep its filter — as
-    Metric.filters on the entity AND inside the definition's sql_expr."""
+    """A filtered dbt metric must keep its filter — as Metric.filters on the
+    entity, which the definition binds to through `about` (no aggregate rides
+    a definition's `sql:`)."""
     res = _import()
     orders = next(e for e in res.entities if e.name == "orders")
     completed = next(m for m in orders.metrics if m.name == "completed_revenue")
     assert completed.filters == ["orders.status = 'completed'"]
     defs = {d.term: d for d in res.definitions}
-    assert defs["completed_revenue"].sql_expr == (
-        "SUM(CASE WHEN orders.status = 'completed' THEN orders.amount END)"
-    )
+    assert defs["completed_revenue"].about == "orders.completed_revenue"
+    assert defs["completed_revenue"].sql_expr is None
 
 
 def test_untranslatable_filter_is_reported_never_unfiltered() -> None:

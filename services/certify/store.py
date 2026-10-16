@@ -269,6 +269,21 @@ UNEMBEDDED_WARNING = (
 )
 
 
+def count_active(session: Session, lens: str) -> int:
+    """How many active answers the library lists for this lens, counted in SQL.
+    ``describe_lens`` used to count by loading every row and dropping the whole
+    lookup to 0 on the first row that failed to parse, so it said 0 while the
+    library listed five — the caller's agent then skipped it. The predicate is
+    the library's (status), not search's (embedded): an unembedded answer is
+    still listed and runnable by id."""
+    return int(
+        session.execute(
+            text("SELECT count(*) FROM certified_answer WHERE lens = :l AND status <> 'retired'"),
+            {"l": lens},
+        ).scalar_one()
+    )
+
+
 def count_unembedded(session: Session, lens: str) -> int:
     """Answers that CANNOT match, counted off the vector itself rather than off
     status (the point is not to trust the status column). Retired ones are

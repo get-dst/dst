@@ -1203,3 +1203,66 @@ def test_compare_drops_a_certified_helper_column_beside_the_value_visibly() -> N
     # two certified columns the value could be: a coincidence it cannot tell apart
     ok, _ = _compare(["a", "b", "c"], [[3, 3, "x"]], ["n", "c"], [[3, "x"]])
     assert not ok
+
+
+def test_compare_pairs_equal_width_label_against_helper_visibly() -> None:
+    """The team's "last full month by creation month" case: certified
+    (otd_pct, delivered_shipments) against generated (created_month, otd_rate)
+    — same width, one certified helper, one generated label. The rate pairs
+    with the percentage for value, both leftovers are ignored and the pass
+    names each; nothing passes on labels alone or on a value that differs."""
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["otd_pct", "delivered_shipments"],
+        [[82.59, 21588]],
+        ["created_month", "otd_rate"],
+        [["2026-09-01", 0.8259]],
+    )
+    assert ok and reason is not None
+    assert "certified column(s) ['delivered_shipments'] ignored" in reason
+    assert "generated label column(s) ['created_month'] ignored" in reason
+    assert "generated 'otd_rate' is certified 'otd_pct'" in reason
+    assert "value-equivalent:" in reason
+    # several rows with no shared label: the measures pair as multisets
+    ok, reason = _compare(
+        ["otd_pct", "delivered_shipments"],
+        [[82.59, 21588], [80.1, 200]],
+        ["created_month", "otd_rate"],
+        [["2026-08-01", 0.801], ["2026-09-01", 0.8259]],
+    )
+    assert ok and reason is not None and "generated label column(s) ['created_month']" in reason
+    # a label on both sides under different names pairs by value, not dropped
+    ok, reason = _compare(
+        ["month", "otd_pct", "cnt"],
+        [["2026-09-01", 82.59, 21588]],
+        ["created_month", "otd_rate"],
+        [["2026-09-01", 0.8259]],
+    )
+    assert ok and reason is not None
+    assert "generated 'created_month' is certified 'month'" in reason
+    assert "label column(s)" not in reason
+    # the wrong value stays a failure
+    ok, _ = _compare(
+        ["otd_pct", "delivered_shipments"],
+        [[82.59, 21588]],
+        ["created_month", "otd_rate"],
+        [["2026-09-01", 0.5]],
+    )
+    assert not ok
+    # labels alone never pass: no numeric column paired
+    ok, _ = _compare(
+        ["otd_pct", "delivered_shipments"],
+        [[82.59, 21588]],
+        ["created_month", "note"],
+        [["2026-09-01", "x"]],
+    )
+    assert not ok
+    # a generated MEASURE that pairs with nothing is a miss, not a label
+    ok, _ = _compare(
+        ["otd_pct", "delivered_shipments"],
+        [[82.59, 21588]],
+        ["created_month", "otd_rate", "extra"],
+        [["2026-09-01", 0.8259, 7]],
+    )
+    assert not ok

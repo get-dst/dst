@@ -146,7 +146,11 @@ stamps, date spans, the measured distributions), and the job commits the artifac
 so the repository stays the source of truth. The probe writes beside the drift
 baseline (`profiles/<connection>.json`) and never over it: the baseline is the
 evidence, and it advances only when a person runs `dst drift --accept` after
-reading the findings, or when `dst apply` deploys the layer against the artifact.
+reading the findings, or when `dst apply` deploys the layer against an artifact
+that carries no BREAKING finding. An apply over a breaking finding still lands
+the layer, but leaves the baseline where it was and names the findings, so the
+next `dst drift` still reports them; `dst apply --accept-drift` advances it
+anyway, and either accept prints what it signed off, table by table, old to new.
 Then `dst drift` compares the baseline against the live catalog (schema, column
 comments) and against the newest artifact (a time column's offset from the entity
 clock, a numeric mean, a value dictionary, within `probe.drift_tolerance`); only
@@ -187,7 +191,7 @@ jobs:
           git diff --cached --quiet || git commit -m "probe: refresh warehouse profile"
           git push
       - run: dst drift --dir .             # exit 1 = a declared reference broke
-      - run: dst apply --dir . --quiet     # lands the refreshed profile, advances the baseline
+      - run: dst apply --dir . --quiet     # lands the refreshed profile; advances the baseline only when drift was clean
       - run: dst test --all                # exit 4 = nothing verified: not green
 ```
 

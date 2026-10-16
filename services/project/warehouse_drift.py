@@ -256,6 +256,48 @@ def advance_baseline(
     return write_baseline(root, connection, recorded)
 
 
+def pending_findings(
+    root: Path,
+    connection: str,
+    tables: list[TableProfile],
+    project_files: dict[str, str],
+    tolerance: DriftTolerance,
+) -> list[Finding]:
+    """What `dst drift` reports when *tables* (the newest probe artifact, or
+    the live catalog) are read against the recorded baseline and the layer in
+    *project_files*. Empty when drift is not armed. `dst apply` asks this
+    before advancing the baseline: a deploy that quietly re-recorded a
+    BREAKING finding destroyed the evidence the nightly drift run had just
+    produced."""
+    from services.project.loader import split_semantic
+
+    baseline = read_baseline(root, connection)
+    if baseline is None:
+        return []
+    entities, definitions, relationships = parse_layer(split_semantic(project_files))
+    deltas = baseline_drift(baseline.tables, tables) + profile_drift(
+        baseline.tables, tables, tolerance
+    )
+    return cross_reference(
+        deltas,
+        entities,
+        definitions,
+        parse_certified(project_files),
+        relationships,
+        parse_exposes(project_files),
+    )
+
+
+def accepted_lines(findings: list[Finding]) -> list[str]:
+    """One line per finding a re-record closes — the table and its old -> new
+    change as the headline states it — so an `--accept` (or a deploy that
+    advances the baseline) says what it signed off, never only that it did."""
+    return [
+        f"  {'BREAKING ' if is_breaking(f) else ''}{_headline(f)} — accepted into the baseline"
+        for f in findings
+    ]
+
+
 def write_baseline(root: Path, connection: str, profiles: list[TableProfile]) -> Path:
     path = baseline_path(root, connection)
     path.parent.mkdir(parents=True, exist_ok=True)

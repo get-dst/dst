@@ -15,12 +15,14 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from services.api.llm import require_llm
 from services.auth.deps import get_caller
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
+from services.certify.store import CertifiedAnswer
 from services.config import settings
 from services.contracts.correction import CorrectionDelta
 from services.contracts.lens_config import LensConfig
@@ -46,7 +48,11 @@ from services.runtime.attribution import Attribution, attributed
 from services.runtime.compiler import CompileError, compile_intent
 from services.runtime.generator import FixedSQLGenerator
 from services.runtime.intent_generator import intent_term
-from services.runtime.pipeline import PipelineResult, run_query
+from services.runtime.pipeline import (
+    PipelineResult,
+    deterministic_refusal_not_computable,
+    run_query,
+)
 from services.runtime.typed_resolver import TypedIntentGenerator, sole_metric_intent
 
 log = logging.getLogger("dst")
@@ -341,18 +347,16 @@ def describe_lens_for_caller(
     how two paths drift apart."""
     bundle = _authorized_bundle(name, caller)
     sm = bundle.semantic_model
-    certified_count, certified_examples = 0, []
-    try:
-        with org_session(caller.org_id) as session:
-            entries = [
-                a
-                for a in certify_store.list_for_lens(session, name)
-                if certify_store.is_active(a.status)
-            ]
-        certified_count = len(entries)
-        certified_examples = [e.question for e in entries[:3]]
-    except Exception:
-        log.exception("certified library lookup failed for lens %s", name)
+    # The count is search's own predicate counted in SQL, so it can never say
+    # 0 while search_certified finds answers; the examples are decoration and
+    # may fail on their own without zeroing the count.
+    certified_examples: list[str] = []
+    with org_session(caller.org_id) as session:
+        certified_count = certify_store.count_active(session, name)
+        try:
+            certified_examples = [e.question for e in active_certified(session, name)[:3]]
+        except Exception:
+            log.exception("certified example lookup failed for lens %s", name)
     return describe_model(
         name,
         display_name=bundle.config.display_name,
@@ -451,6 +455,17 @@ def _authorized_connector(bundle: LensBundle, caller: CallerIdentity) -> Connect
     return resolve_connector(bundle.config.connections[0], caller.org_id, caller=caller)
 
 
+def active_certified(session: Session, lens: str) -> list[CertifiedAnswer]:
+    """The lens's certified library as callers see it: every answer that is
+    not retired. Retired answers are history (mgmt/export only), never served;
+    an unembedded one still belongs here — the door by ID works, and matching
+    (the thing it cannot do) is a different door. `describe_lens` counts this
+    list and `search_certified` lists it, so the two agree by construction."""
+    return [
+        a for a in certify_store.list_for_lens(session, lens) if certify_store.is_active(a.status)
+    ]
+
+
 def _lenses_carrying(org_id: uuid.UUID, asking_lens: str, metric: str) -> list[str]:
     """OTHER published lenses whose compiled model carries *metric* — the
     shape refusal's sibling hint ("lens 'growth' carries conversion_rate").
@@ -496,6 +511,25 @@ def exposed_tables_named(
             ):
                 hits.append((lens_name, table))
     return sorted(set(hits))
+
+
+def lens_refusal_named(question: str, caller: CallerIdentity) -> tuple[str, str] | None:
+    """``(lens, refusal)`` when a lens this caller may use declares a term the
+    question names `not_computable` — the first such lens by name, and the
+    sentence its own door would refuse with. Deterministic (the lens's own
+    word-boundary rail); a failed lookup just finds nothing."""
+    try:
+        bundles = list_published_for_org(caller.org_id)
+    except Exception:
+        log.exception("refusal lookup failed")
+        return None
+    for lens_name, _display, _desc, bundle in sorted(bundles, key=lambda b: b[0]):
+        if not authorize(caller, bundle.config)[0]:
+            continue
+        wording = deterministic_refusal_not_computable(question, bundle.semantic_model)
+        if wording:
+            return lens_name, wording
+    return None
 
 
 def tables_held_elsewhere(caller: CallerIdentity, *, exclude: str) -> dict[str, str]:
@@ -812,6 +846,16 @@ def run_lens_query(
             verified_prose=(
                 assembled.certified.verified_prose if assembled.certified is not None else None
             ),
+            # The value a human verified, and for a template the sample binding
+            # it was recorded under: the `restated` check compares against it.
+            verified_value=(
+                assembled.certified.verified_value if assembled.certified is not None else None
+            ),
+            verified_bindings=(
+                next(iter(assembled.certified.sample_bindings or []), None)
+                if assembled.certified is not None
+                else None
+            ),
             # Strict mode tightens scrutiny — judge + adversary on, so off-scope or
             # low-confidence answers get downgraded/declined more readily — regardless of
             # the explicit per-lens flags.
@@ -1094,12 +1138,7 @@ def list_certified_for_caller(
                     slots=a.slots,
                     sample_bindings=a.sample_bindings,
                 )
-                for a in certify_store.list_for_lens(session, name)
-                # The caller-facing library advertises the deterministic door —
-                # retired answers are history (mgmt/export only), never served.
-                # An unembedded one still belongs here: the door is by ID, and
-                # matching (the thing it can't do) is a different door.
-                if certify_store.is_active(a.status)
+                for a in active_certified(session, name)
             ]
     return CertifiedLibrary(
         lens=name, certified=entries, exact_band=assembly.certified_bands().exact
@@ -1208,6 +1247,8 @@ def run_certified_for_caller(
             # The door serves the same certify-time prose the matcher would —
             # verbatim, no composer call (templates render deterministically).
             verified_prose=cert.verified_prose,
+            verified_value=cert.verified_value,
+            verified_bindings=next(iter(cert.sample_bindings or []), None),
             certified_provenance=CertifiedProvenance(
                 cert_id=cert.id,
                 certified_by=cert.created_by,

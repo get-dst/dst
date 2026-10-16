@@ -338,6 +338,62 @@ def test_a_deploy_advances_the_baseline_to_the_artifact(
     assert _cli(monkeypatch, ["drift", *where]) == 0
 
 
+def test_a_deploy_leaves_the_baseline_alone_over_a_breaking_finding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The nightly job is `plan -> drift -> apply`. Drift reports a DROPPED
+    column the layer reads (BREAKING, exit 1); apply then advancing the
+    baseline to the same artifact would make the next drift say "no change"
+    and bury the breakage in the run that found it. So apply lands the layer
+    but leaves the baseline, names the findings and the two ways to accept;
+    `--accept-drift` advances and prints what it signed off, old -> new."""
+    from services.cli.main import _advance_baselines
+
+    root = _project(tmp_path)
+    where = ["--connection", "warehouse", "--dir", str(root)]
+    assert _cli(monkeypatch, ["probe", *where]) == 0
+    baseline = wd.baseline_path(root, "warehouse")
+    recorded = baseline.read_text(encoding="utf-8")
+    assert "shipped_at" in recorded
+
+    _sql(root, "ALTER TABLE ops.orders DROP COLUMN shipped_at")
+    assert _cli(monkeypatch, ["probe", *where]) == 0
+    assert _cli(monkeypatch, ["drift", *where]) == 1  # BREAKING: the definition reads it
+    capsys.readouterr()
+
+    _advance_baselines(root)
+    err = capsys.readouterr().err
+    assert baseline.read_text(encoding="utf-8") == recorded  # left alone
+    assert "left alone: 1 BREAKING finding(s)" in err
+    assert "DROPPED column `shipped_at`" in err and "--accept-drift" in err
+    assert _cli(monkeypatch, ["drift", *where]) == 1  # the evidence survives the deploy
+    capsys.readouterr()
+
+    _advance_baselines(root, accept_drift=True)
+    err = capsys.readouterr().err
+    assert "drift baseline advanced for 'warehouse' over 1 finding(s)" in err
+    assert "BREAKING ops.orders: DROPPED column `shipped_at` — accepted into the baseline" in err
+    assert "shipped_at" not in baseline.read_text(encoding="utf-8")
+    assert _cli(monkeypatch, ["drift", *where]) == 0
+
+
+def test_drift_accept_says_what_it_signed_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`dst drift --accept` with findings on the table prints each one it
+    closes, old -> new, instead of a bare exit 0."""
+    root = _project(tmp_path)
+    where = ["--connection", "warehouse", "--dir", str(root)]
+    assert _cli(monkeypatch, ["drift", "--accept", *where]) == 0
+    _sql(root, "ALTER TABLE ops.orders ADD COLUMN carrier VARCHAR")
+    capsys.readouterr()
+    assert _cli(monkeypatch, ["drift", "--accept", *where]) == 0
+    err = capsys.readouterr().err
+    assert "advanced over 1 finding(s)" in err
+    assert "ops.orders: gained column `carrier` — accepted into the baseline" in err
+    assert _cli(monkeypatch, ["drift", *where]) == 0
+
+
 def test_drift_tolerance_is_declared_in_dst_yaml() -> None:
     from services.project.schema import parse_project_yaml
 

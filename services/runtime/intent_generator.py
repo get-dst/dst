@@ -21,7 +21,9 @@ from services.contracts.protocols import (
     Message,
 )
 from services.contracts.query_intent import QueryIntent
+from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
+from services.runtime import ambiguity
 from services.runtime.compiler import CompileError, compile_intent
 
 _RULES = (
@@ -37,7 +39,12 @@ _RULES = (
     "the compiler buckets the entity's time field for you.\n"
     "When a listed definition carries a `[filter: ...]`, that filter IS the governed "
     "meaning of the term: put the term in `definitions` and the compiler applies the "
-    "predicate for you — do NOT reconstruct the condition yourself in `filters`.\n"
+    "predicate for you — do NOT reconstruct the condition yourself in `filters`. List a "
+    "definition ONLY when the question names the term, one of its aliases, or the metric "
+    "it is about; a definition the question never names is not applied.\n"
+    "A time window ('in September') is a filter on the time field. When the question "
+    "asks for metrics that read different time fields, bound ONE of those fields: the "
+    "compiler applies the window to each metric on its own time field.\n"
     "Respond with ONLY a JSON object, no prose, no code fences:\n"
     '{"entity": "<name or null>", "metrics": ["..."], "dimensions": ["..."], '
     '"definitions": ["..."], '
@@ -122,6 +129,8 @@ def serialize_layer(model: SemanticModel) -> str:
                     head = f"{m.agg} of {m.expr}"
                 if m.additivity == "level":
                     head += " [level: a snapshot — a period's figure is its last snapshot]"
+                if m.agg_time_field:
+                    head += f" [time field: {m.agg_time_field}]"
                 lines.append(f"    - {m.name}: {head}{filters}{desc}")
         lines.append("  Dimensions & fields (group / filter / order):")
         for d in e.dimensions:
@@ -181,6 +190,27 @@ def parse_intent(text: str) -> QueryIntent | None:
         return None
 
 
+def gate_definitions(question: str, intent: QueryIntent, model: SemanticModel) -> QueryIntent:
+    """The intent with every model-chosen definition the question never names
+    (term, alias, or the member it is `about`, as literal words) moved from
+    ``definitions`` to ``definitions_suggested``. The compiler applies only the
+    named ones; the suggested ones ride the resolution as a fact about the
+    answer. A predicate the caller never asked for is a silent filter."""
+    by_term = {d.term: d for d in model.definitions}
+    named = [
+        t for t in intent.definitions if t not in by_term or ambiguity.named(question, by_term[t])
+    ]
+    suggested = [t for t in intent.definitions if t not in named]
+    if not suggested:
+        return intent
+    return intent.model_copy(
+        update={
+            "definitions": named,
+            "definitions_suggested": [*intent.definitions_suggested, *suggested],
+        }
+    )
+
+
 def intent_term(intent: QueryIntent | None) -> str | None:
     """The compiler-validated term a compiled intent implements — basis provenance.
 
@@ -230,20 +260,43 @@ class IntentSQLGenerator:
         parts.append(f"Question: {question}")
         if feedback:
             parts.append(f"Your previous attempt failed and must be corrected. {feedback}")
-        res = self._llm.complete(
-            system=[system],
-            messages=[Message("user", "\n\n".join(parts))],
-            model=self.model,
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-        )
-        intent = parse_intent(res.text)
+        messages = [Message("user", "\n\n".join(parts))]
+        in_tok = out_tok = 0
+        intent: QueryIntent | None = None
         sql = ""
-        if intent is not None:
+        error: CompileError | None = None
+        # The compiler's refusal is feedback the model can act on (a window on
+        # the wrong field, a grain two metrics cannot share): one repair round
+        # before the empty SQL hands the question to the next tier.
+        for _attempt in range(2):
+            res = self._llm.complete(
+                system=[system],
+                messages=messages,
+                model=self.model,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+            in_tok += res.input_tokens
+            out_tok += res.output_tokens
+            intent = parse_intent(res.text)
+            if intent is None:
+                break
+            intent = gate_definitions(question, intent, semantic_model)
             try:
                 sql = compile_intent(intent, semantic_model)
-            except CompileError:
+                error = None
+                break
+            except CompileError as exc:
+                error = exc
                 sql = ""  # guard will reject empty SQL → pipeline escalates to raw SQL
+                messages.append(Message("assistant", res.text))
+                messages.append(
+                    Message(
+                        "user",
+                        f"That intent did not compile: {exc}. Return a corrected intent "
+                        "using only the listed names.",
+                    )
+                )
         # The compiler resolved these names or raised — they ARE the provenance.
         # Discarding them makes basis fall back to substring attribution, which
         # ties on sibling metrics and cites the wrong one.
@@ -252,6 +305,15 @@ class IntentSQLGenerator:
             definition_used=intent_term(intent) if sql else None,
             intent=intent if sql else None,
         )
-        gq.input_tokens = res.input_tokens
-        gq.output_tokens = res.output_tokens
+        if error is not None and "ask for them separately" in str(error):
+            # Two readings the compiler cannot put in one query, and the repair
+            # did not split them: ask, rather than let a raw tier guess.
+            gq.clarification = ClarificationRequest(
+                kind="unresolved_slot",
+                term="metric",
+                question=f"These cannot be computed in one query: {error}",
+                options=list(intent.metrics) if intent is not None else [],
+            )
+        gq.input_tokens = in_tok
+        gq.output_tokens = out_tok
         return gq

@@ -21,6 +21,9 @@ import re
 from dataclasses import dataclass, field
 from typing import cast
 
+import sqlglot
+from sqlglot import exp
+
 from services.contracts.semantic_model import (
     Definition,
     Dimension,
@@ -35,11 +38,9 @@ from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.dbt.artifacts import (
     DbtArtifacts,
     DbtMeasure,
-    DbtMetric,
     DbtModel,
     DbtSemanticModel,
 )
-from services.runtime.compiler import metric_sql
 
 # dbt aggregation → our AggType. Anything not here is reported as skipped (not computable
 # deterministically by the runtime metric compiler).
@@ -91,11 +92,26 @@ def _is_identifier(expr: str) -> bool:
 
 
 def _qualify(entity_name: str, expr: str) -> str:
-    """Qualify a bare column with the entity alias; leave literals/expressions as-is
-    (e.g. a ``count`` measure's ``expr`` of ``1`` must stay ``1``)."""
-    if "." in expr or not _is_identifier(expr):
+    """Qualify every bare column in a MetricFlow expression with the entity
+    alias: a bare name is ``entity.name``, and an expression (``case when status
+    in (...) then 1 else 0 end``, ``clinic_code || '|' || day``) has each of its
+    unqualified columns qualified in place — the compiled layer resolves
+    members as ``entity.column``, and a bare column inside a CASE is the
+    "column is unqualified" rejection at apply. Literals stay literals (a
+    ``count`` measure's ``expr`` of ``1`` must stay ``1``); an expression
+    sqlglot cannot parse is left as written for the author to qualify."""
+    if _is_identifier(expr):
+        return f"{entity_name}.{expr}"
+    try:
+        tree = sqlglot.parse_one(expr)
+    except Exception:  # noqa: BLE001 — unparseable stays as authored
         return expr
-    return f"{entity_name}.{expr}"
+    bare = [c for c in tree.find_all(exp.Column) if not c.table]
+    if not bare:
+        return expr
+    for column in bare:
+        column.set("table", exp.to_identifier(entity_name))
+    return tree.sql()
 
 
 def _table_name(
@@ -123,17 +139,48 @@ def _fields(model: DbtModel | None) -> list[Field]:
     ]
 
 
+def _time_column(sm: DbtSemanticModel, name: str | None) -> str | None:
+    """The COLUMN a time dimension reads: a dimension named ``invoice_day`` over
+    ``expr: day`` is the column ``day``, and a time field names a column — the
+    compiler buckets by a field, not a dimension. A dimension whose expr is not
+    a bare column, or a name that is no dimension, is kept as written."""
+    if not name:
+        return None
+    dim = next((d for d in sm.dimensions if d.name == name), None)
+    if dim is not None and dim.expr and _is_identifier(dim.expr):
+        return dim.expr
+    return name
+
+
 def _measure_metric(
-    entity_name: str, m: DbtMeasure, default_time: str | None = None
+    sm: DbtSemanticModel, m: DbtMeasure, default_time: str | None = None
 ) -> Metric | None:
+    entity_name = sm.name
     agg = _AGG_MAP.get(m.agg.strip().lower())
     if agg is None:
         return None
     expr = _qualify(entity_name, m.expr or m.name)
     # agg_time_dimension only survives as a metric-level override; the entity's
     # default_time_field covers the common case.
-    time_field = m.agg_time_dimension if m.agg_time_dimension != default_time else None
-    return Metric(name=m.name, agg=agg, expr=expr, agg_time_field=time_field)  # type: ignore[arg-type]
+    own_time = _time_column(sm, m.agg_time_dimension)
+    time_field = own_time if own_time != default_time else None
+    # A non-additive measure is a level: summing its rows over time is the
+    # "30 copies of the plan" number. It reads as a snapshot at the dimension
+    # MetricFlow names, which becomes the metric's time field when it differs
+    # from the entity's default.
+    additivity: str | None = None
+    if m.non_additive_dimension:
+        additivity = "level"
+        snapshot = _time_column(sm, m.non_additive_dimension)
+        if snapshot != default_time:
+            time_field = snapshot
+    return Metric(
+        name=m.name,
+        agg=agg,  # type: ignore[arg-type]
+        expr=expr,
+        agg_time_field=time_field,
+        additivity=additivity,  # type: ignore[arg-type]
+    )
 
 
 def _compile_entity(
@@ -142,14 +189,35 @@ def _compile_entity(
     connection: str,
     strategy: str,
     skipped: list[SkippedConstruct],
+    taken: dict[str, str],
 ) -> tuple[Entity, dict[str, DbtMeasure]]:
+    """``taken`` maps every metric name imported so far to its semantic model;
+    a measure whose name is taken is skipped, not duplicated."""
     model = artifacts.model_for(sm)
     if model is None:
         skipped.append(
             SkippedConstruct("semantic_model", sm.name, "no backing manifest model found")
         )
 
-    primary_key = [e.expr or e.name for e in sm.entities if e.type == "primary"]
+    # A key is a column. MetricFlow lets a primary entity be an expression
+    # (``clinic_code || '|' || day``); copied as a key it fails at apply as a
+    # member that does not exist. Reported, and the grain is still stated.
+    primary_key: list[str] = []
+    for e in sm.entities:
+        if e.type != "primary":
+            continue
+        key = e.expr or e.name
+        if _is_identifier(key):
+            primary_key.append(key)
+        else:
+            skipped.append(
+                SkippedConstruct(
+                    "semantic_model",
+                    sm.name,
+                    f"primary entity '{e.name}' is an expression ({key!r}), not a "
+                    "column — no primary_key written; add one if a column holds it",
+                )
+            )
 
     dimensions = [
         Dimension(
@@ -162,19 +230,35 @@ def _compile_entity(
 
     # The entity's canonical event date: the model-level default when dbt declares
     # one, else the single agg_time_dimension its measures agree on.
-    times = {m.agg_time_dimension for m in sm.measures if m.agg_time_dimension}
-    default_time = sm.agg_time_dimension or (next(iter(times)) if len(times) == 1 else None)
+    times = {_time_column(sm, m.agg_time_dimension) for m in sm.measures if m.agg_time_dimension}
+    default_time = _time_column(sm, sm.agg_time_dimension) or (
+        next(iter(times)) if len(times) == 1 else None
+    )
 
     metrics: list[Metric] = []
     supported_measures: dict[str, DbtMeasure] = {}
     for m in sm.measures:
-        metric = _measure_metric(sm.name, m, default_time)
+        if m.name in taken:
+            # One name, one meaning: a measure already imported from an earlier
+            # semantic model keeps that home; a second copy would be two
+            # entities claiming the same metric and the compile refusing both.
+            skipped.append(
+                SkippedConstruct(
+                    "measure",
+                    m.name,
+                    f"already imported from semantic model '{taken[m.name]}' — "
+                    f"the first model wins; rename it in '{sm.name}' to import both",
+                )
+            )
+            continue
+        metric = _measure_metric(sm, m, default_time)
         if metric is None:
             skipped.append(
                 SkippedConstruct("measure", m.name, f"unsupported aggregation '{m.agg}'")
             )
             continue
         supported_measures[m.name] = m
+        taken[m.name] = sm.name
         metrics.append(metric)
 
     entity = Entity(
@@ -202,13 +286,13 @@ def _compile_definitions(
     entities: list[Entity],
     compound_owner: dict[str, str],
 ) -> tuple[list[Definition], list[str]]:
-    """dbt metrics → governed Definitions, dst-owned on arrival. Simple metrics get an
-    enforceable ``sql_expr``; ratio/derived get their EXPANDED aggregate when they
-    imported as queryable compound metrics (``compound_owner``), prose-only otherwise.
-    Metric filters are part of the number: a translated filter lands inside the
-    sql_expr (CASE form); an untranslatable one strips the sql_expr and is reported
-    — an unfiltered aggregate would be the wrong number, silently."""
-    by_name = {e.name: e for e in entities}
+    """dbt metrics → governed Definitions, dst-owned on arrival. Each binds to
+    the entity metric that computes it (``about``) when one imported as
+    queryable — a compound (``compound_owner``) or the simple metric over its
+    measure — and stays prose-only otherwise. Metric filters are part of the
+    number: a translated filter rides the metric's ``filters``; an untranslatable
+    one leaves no queryable metric and is reported — an unfiltered aggregate
+    would be the wrong number, silently."""
     definitions: list[Definition] = []
     used_metric_names: list[str] = []
     for metric in artifacts.metrics:
@@ -233,20 +317,19 @@ def _compile_definitions(
         # filter we couldn't translate) — a dangling ref would just warn forever.
         queryable = not (metric.filter and filter_sql is None)
         owner: str | None = None
-        sql_expr: str | None = None
         if queryable and metric.name in compound_owner:
             owner = compound_owner[metric.name]
-            ent = by_name[owner]
-            sql_expr = metric_sql(next(m for m in ent.metrics if m.name == metric.name), ent)
         elif queryable:
-            sql_expr = _definition_sql_expr(metric, measures_by_entity, owner_of, filter_sql)
             owner = owner_of.get(metric.measure) if metric.measure else None
+        # The metric owns its SQL: the definition binds to it through `about`
+        # and carries no `sql:`. A definition's `sql:` is a row predicate ANDed
+        # into WHERE whenever a question names the term — an aggregate there
+        # is rejected at plan, and a measure's meaning is the metric anyway.
         definitions.append(
             Definition(
                 term=metric.name,
                 about=f"{owner}.{metric.name}" if owner and queryable else None,
                 body=body,
-                sql_expr=sql_expr,
             )
         )
         if metric.type in ("cumulative", "conversion"):
@@ -265,32 +348,6 @@ def _compile_definitions(
                 )
             )
     return definitions, used_metric_names
-
-
-def _definition_sql_expr(
-    metric: DbtMetric,
-    measures_by_entity: dict[str, dict[str, DbtMeasure]],
-    owner_of: dict[str, str],
-    filter_sql: str | None = None,
-) -> str | None:
-    """Enforceable SQL for a simple metric (``AGG(entity.col)``); None for ratio/derived.
-    A translated metric filter lands INSIDE the expression (CASE form) so the
-    embedded SQL carries the metric's full meaning."""
-    if metric.type != "simple" or metric.measure is None:
-        return None
-    ent_name = owner_of.get(metric.measure)
-    if ent_name is None:
-        return None
-    m = measures_by_entity[ent_name][metric.measure]
-    agg = _AGG_MAP.get(m.agg.strip().lower())
-    if agg is None:
-        return None
-    expr = _qualify(ent_name, m.expr or m.name)
-    if filter_sql:
-        expr = f"CASE WHEN {filter_sql} THEN {expr} END"
-    if agg == "count_distinct":
-        return f"COUNT(DISTINCT {expr})"
-    return f"{agg.upper()}({expr})"
 
 
 _DIMENSION_REF = re.compile(r"\{\{\s*Dimension\(\s*'(\w+)__(\w+)'\s*\)\s*\}\}")
@@ -337,6 +394,8 @@ def _relationships(semantic_models: list[DbtSemanticModel]) -> list[SharedRelati
             if right_model == sm.name or pair in seen:
                 continue
             left_col = e.expr or e.name
+            if not (_is_identifier(left_col) and _is_identifier(right_col)):
+                continue  # an expression key is no join column (reported on the entity)
             out.append(
                 SharedRelationship(
                     left=sm.name,
@@ -367,8 +426,11 @@ def import_shared_assets(
     entities: list[Entity] = []
     measures_by_entity: dict[str, dict[str, DbtMeasure]] = {}
 
+    taken: dict[str, str] = {}
     for sm in artifacts.semantic_models:
-        entity, measures = _compile_entity(sm, artifacts, connection, relation_strategy, skipped)
+        entity, measures = _compile_entity(
+            sm, artifacts, connection, relation_strategy, skipped, taken
+        )
         entities.append(entity)
         measures_by_entity[entity.name] = measures
 
@@ -419,6 +481,7 @@ def _apply_extra_metrics(
     untranslatable filters mean NO queryable metric (already reported by
     _compile_definitions) — an unfiltered stand-in would be the wrong number."""
     by_name = {e.name: e for e in entities}
+    sm_by_name = {sm.name: sm for sm in artifacts.semantic_models}
     existing: dict[str, set[str]] = {e.name: {m.name for m in e.metrics} for e in entities}
     for metric in artifacts.metrics:
         if metric.type != "simple" or metric.measure is None:
@@ -435,7 +498,7 @@ def _apply_extra_metrics(
                 continue
             filters = [translated]
         src = measures_by_entity[ent_name][metric.measure]
-        biz = _measure_metric(ent_name, src, by_name[ent_name].default_time_field)
+        biz = _measure_metric(sm_by_name[ent_name], src, by_name[ent_name].default_time_field)
         if biz is not None:
             by_name[ent_name].metrics.append(
                 Metric(
@@ -444,6 +507,7 @@ def _apply_extra_metrics(
                     expr=biz.expr,
                     filters=filters,
                     agg_time_field=biz.agg_time_field,
+                    additivity=biz.additivity,
                 )
             )
             existing[ent_name].add(metric.name)

@@ -98,6 +98,40 @@ def _seed(org: object) -> str:
 
 
 @needs_db
+def test_describe_count_is_what_search_can_find(monkeypatch: pytest.MonkeyPatch) -> None:
+    """describe's certified_count comes from the store's own count, which reads
+    the predicate search reads; a row the example lookup cannot load does not
+    drop the count to 0."""
+    org, raw = _make_org_token()
+    _seed(org)
+    try:
+        with org_session(org) as session:
+            retired = certify_store.create(
+                session,
+                "customer_value",
+                "retired one",
+                "SELECT 1",
+                _vec(1),
+                "maija",
+                status="retired",
+            )
+            assert certify_store.count_active(session, "customer_value") == 1
+            certify_store.set_status(session, retired, "active")
+            assert certify_store.count_active(session, "customer_value") == 2
+            certify_store.set_status(session, retired, "retired")
+
+        def boom(*_a: object, **_k: object) -> list[object]:
+            raise RuntimeError("row failed to load")
+
+        monkeypatch.setattr(certify_store, "list_for_lens", boom)
+        d = client.get("/v1/lenses/customer_value", headers={"Authorization": f"Bearer {raw}"})
+        assert d.status_code == 200
+        assert d.json()["certified_count"] == 1
+    finally:
+        _cleanup(org)
+
+
+@needs_db
 def test_certified_library_lists_with_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     org, raw = _make_org_token()
     cert_id = _seed(org)

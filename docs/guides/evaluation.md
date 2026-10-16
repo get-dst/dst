@@ -134,28 +134,60 @@ regression suite; `dst evals migrate` converts them into certified answers.)
 
 ## The gate on publish and apply
 
-`eval_gate: off | warn | block` per lens, default `block`: a certified answer
-gates by default, the way a dbt test blocks by default. A fresh lens with
-nothing certified publishes with a loud "gate SKIPPED" line, never a refusal.
-One shared check runs inside interactive publish *and* inside `dst apply`;
-apply cannot bypass it. A blocked publish returns `409` with the score, the
-previous score, and the failing cases. Under `warn`, the same findings surface
-loudly and publish proceeds.
+`eval_gate: off | warn | block | block_generation` per lens, default `block`:
+a certified answer gates by default, the way a dbt test blocks by default. A
+fresh lens with nothing certified publishes with a loud "gate SKIPPED" line,
+never a refusal. One shared check runs inside interactive publish *and* inside
+`dst apply`; apply cannot bypass it. A blocked publish returns `409` with the
+score, the bar it was judged against, and the failing cases. Under `warn`, the
+same findings surface loudly and publish proceeds.
 
 [![dst apply blocked by the eval gate: the certified answer diverged under a changed definition, accuracy regressed, nothing deployed](../assets/term/apply_blocked.svg)](../assets/term/apply_blocked.svg)
 
-On apply, staleness picks what to test: only active answers whose stored
-bindings disagree with the push's asset hashes run, which keeps it cheap by
-construction. A certified divergence under `block` is an error in its own
-right, not merely a score change. The audited override covers it like any
-failing case: `dst apply --allow-failing-cases certified:<answer id> --reason
-'…'` (or `--allow-case`) names the cases it covers and applies only when every
-failing case is named; bare `--allow-failing-cases` is blanket. Either way the
-apply row and the version summary record the divergence that was published
-past. And the abort is blue/green and atomic: the
-whole apply rolls back, the prior versions keep serving, and the staged eval
-run and binding re-stamps roll back with it. A rejected apply can never lower
-the gate's baseline for the next one.
+The gate grades a certified answer by its own evidence. On every push the
+**value lane** runs each active answer's approved SQL (a template's first
+sample binding) once more and compares the result to its stored
+`verified_value`: the value a `--probe-certified` recorded, the one the file
+signs, or, for an answer that has none yet, the one the gate records on its
+first run and says so. A value that moved is a *restatement* and blocks under
+`block`, naming both figures and the three ways out: write the new
+`verified_value` in `certified_answers.yaml` (a template: `dst apply
+--refresh-samples`), re-author the `sql` so it re-probes, or fix the data. The
+case set is the whole active corpus, so the score's denominator does not move
+between pushes that leave the corpus alone, and the previous score is the bar
+only when a previous run scored the same case set; otherwise the report says
+"no previous run" (or "no previous run with this case set") and never
+"regressed".
+
+The **generation lane** asks a different question, does generation still
+reproduce the approved SQL, and only for the answers whose stored bindings
+disagree with the push's asset hashes (staleness picks what to run, which
+keeps it cheap). A divergence is reported verbatim with both executed results
+and the changed asset, and the certified answer stands: under `block` the
+push lands with the divergence on the row, because the certified SQL *is* the
+override. `eval_gate: block_generation` blocks on it instead. Either way, a
+divergence a team has judged goes in `evals/known_divergences.yaml` beside
+`cases.yaml`, one entry per answer with the reason:
+
+```yaml
+- id: certified:5c1c…      # or the certified question
+  reason: the certified SQL is the override; generation reads the mart
+```
+
+The gate reads the file on every push and lists what it covered, so the
+override is never retyped on the command line. An entry with no reason covers
+nothing. Generation results ride the run under `generation:<id>` for the
+record and never move the score.
+
+The audited override still exists for a one-off: `dst apply
+--allow-failing-cases certified:<answer id> --reason '…'` (or `--allow-case`)
+names the cases it covers and applies only when every failing case is named;
+bare `--allow-failing-cases` is blanket; the flag may be repeated or take
+several ids. Either way the apply row and the version summary record what was
+published past. And the abort is blue/green and atomic: the whole apply rolls
+back, the prior versions keep serving, and the staged eval run and binding
+re-stamps roll back with it. A rejected apply can never lower the gate's
+baseline for the next one.
 
 The answers a push itself lands get fresh bindings, so the staleness selection
 never picks them. Instead, certifying tests itself: an answer the apply
@@ -180,7 +212,7 @@ design and `dst test` sweeps them unbounded.
 A configured gate that cannot score (no smart-tier model resolves, nothing to
 run) stands down **loudly**, with the reason in the publish/apply output, so a
 gate that did not run is never mistaken for a gate that passed. One starvation refuses
-to stand down at all: under `eval_gate: block`, an apply that empties the
+to stand down at all: under `eval_gate: block` (or `block_generation`), an apply that empties the
 active certified corpus — retiring the **last** active answer, or deleting its
 file entry — aborts instead of publishing over an emptied corpus. Keep at
 least one active answer, or set `eval_gate: warn`/`off` in lens.yaml and

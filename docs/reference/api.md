@@ -59,7 +59,7 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 | `POST /v1/lenses/{name}/query` | Ask: body `{"q": "..."}` → a governed answer |
 | `POST /v1/lenses/{name}/metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; same governance and receipts |
 | `GET /v1/definitions` | Look a governed term up across every lens this key may use: the approved meaning verbatim, no SQL, no warehouse (`dst define`) |
-| `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key); row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
+| `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key) where the lens's `hide` and `not_computable` refusals apply; row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
 | `GET /v1/lenses/{name}/certified` | The lens's certified library; with `?q=` results are similarity-ranked (top 5, scored) |
 | `POST /v1/lenses/{name}/certified/{cert_id}/run` | Run an approved question→SQL pair exactly as certified; zero AI SQL generation |
 | `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope; when the question names a table a lens exposes, `exposed_in` lists that lens and the reason says to ask it by name |
@@ -174,8 +174,8 @@ a URL and a `dst_` key, or via the built-in OAuth flow. Twelve tools:
 | `run_certified` | Deterministic run; a bare question auto-resolves only at or above the configured embedder's exact band (`exact_band` on the certified-library response — 0.95 by default, and embedder-relative), otherwise returns `no_exact_match` + near misses |
 | `query` | Ask a named lens |
 | `query_metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose |
-| `sql` | Run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged |
-| `route_query` | **The default door**: dst picks the lens or declines |
+| `sql` | Run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; the lens's `hide` and `not_computable` refusals apply |
+| `route_query` | **The default door**: dst picks the lens or declines; a decline a lens would refuse by declaration returns that lens's refusal |
 | `send_for_review` | Flag an answer into the human review queue |
 | `review_status` | Poll a ticket |
 | `verify_receipt` | Check a receipted number before repeating it: signature + trace cross-check |

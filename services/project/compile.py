@@ -27,6 +27,7 @@ from services.contracts.semantic_model import (
     SampleQuery,
     SemanticModel,
     SharedProvenance,
+    column_hidden,
 )
 from services.contracts.shared_semantic import (
     SharedEntity,
@@ -164,7 +165,11 @@ def compile_lens_model(
                 str(source["table"]), (default_qualifiers or {}).get(str(source.get("connection")))
             )
             entity_dict["source"] = source
-        entities.append(Entity.model_validate(entity_dict))
+        entity = Entity.model_validate(entity_dict)
+        hide_errors = _apply_hide(entity, config.name)
+        if hide_errors:
+            raise CompileError("\n".join(hide_errors))
+        entities.append(entity)
         selected_names.add(pick.name)
         consumed[f"entity/{pick.name}"] = hashes.get(f"entity/{pick.name}", "")
     # Exposed tables ride as entities of the same model — same allow-list, same
@@ -235,6 +240,7 @@ def compile_lens_model(
     # mapping onto an exposed table's column would be a "declared" reading of
     # a table that declares nothing.
     definitions = _tailor_ambiguous(definitions, [e for e in entities if not e.exposed], warnings)
+    warnings.extend(sensitive_column_warnings(entities, definitions))
 
     # Selection is a visible boundary: record the metric names the subsets
     # DROPPED (minus any a selected entity still defines) so the runtime can
@@ -277,6 +283,92 @@ def compile_lens_model(
         raise CompileError("\n".join(resolve_errors))
     warnings.extend(resolve_warnings)
     return model, warnings
+
+
+def _apply_hide(entity: Entity, lens: str) -> list[str]:
+    """Withhold the entity's `hide` columns from its fields, in place. Every
+    error names the pattern and the fix: a pattern that withholds nothing is
+    the same silent miss as an `expose:` hide that matches no column, and a
+    hidden column a dimension, metric, key or filter still reads would come
+    back through the expression — so both fail the compile rather than hide
+    less than the author believes."""
+    if not entity.hide:
+        return []
+    errors: list[str] = []
+    for pattern in entity.hide:
+        if not any(column_hidden(f.name, _one_pattern(entity, pattern)) for f in entity.fields):
+            errors.append(
+                f"lens '{lens}': entity '{entity.name}' hides '{pattern}' but no field "
+                f"matches it — fix the pattern (the column name, bare or as "
+                f"{entity.name}.column) or drop it"
+            )
+    hidden = entity.hidden_columns()
+    readers: list[tuple[str, str | None]] = [
+        *((f"dimension {d.name}", d.expr or d.name) for d in entity.dimensions),
+        *((f"metric {m.name}", m.expr) for m in entity.metrics),
+        *((f"metric {m.name} filter", f) for m in entity.metrics for f in m.filters or []),
+        ("primary_key", " ".join(entity.primary_key)),
+        ("default_time_field", entity.default_time_field),
+        ("population_filter", entity.population_filter),
+        ("pinned_dimensions", " ".join(entity.pinned_dimensions)),
+    ]
+    for label, text in readers:
+        if not text:
+            continue
+        names = set(re.findall(r"[A-Za-z_]\w*", text))
+        for column in sorted(hidden & names):
+            errors.append(
+                f"lens '{lens}': entity '{entity.name}' hides '{column}' but its {label} "
+                f"still reads it — a hidden column cannot ride an expression; drop the "
+                f"{label.split(' ')[0]} or the hide"
+            )
+    entity.fields = [f for f in entity.fields if f.name not in hidden]
+    return errors
+
+
+def _one_pattern(entity: Entity, pattern: str) -> Entity:
+    """The entity as if `hide` held only this pattern — for naming the one
+    that withholds nothing."""
+    return entity.model_copy(update={"hide": [pattern]})
+
+
+# Column names that are personal data on their face. A match is a declared
+# schema fact (the column exists and the lens reads it), never a reading of
+# prose: the warning asks for the hide or the definition that says what the
+# column is for, and goes quiet once either exists.
+_SENSITIVE = re.compile(
+    r"(?<![a-z])(personal_id|ssn|social_security(?:_number)?|email|e_mail|phone|"
+    r"mobile|birth_?date|date_of_birth|dob|address|street|postcode|zip_?code)(?![a-z])"
+)
+SENSITIVE_COLUMNS = "sensitive_columns"
+
+
+def sensitive_column_warnings(
+    entities: Sequence[Entity], definitions: Sequence[Definition]
+) -> list[str]:
+    """One `sensitive_columns` warning per entity whose in-scope fields are
+    named like personal data — personal_id, ssn, email, phone, birth_date,
+    date_of_birth, address — with no `hide` on them and no definition about
+    them (`about: entity.column`). The column reaching a door is the fact; the
+    author decides whether a hide or a definition is the fix."""
+    described = {d.about for d in definitions if d.about}
+    out: list[str] = []
+    for e in entities:
+        flagged = sorted(
+            f.name
+            for f in e.fields
+            if _SENSITIVE.search(f.name.lower())
+            and not column_hidden(f.name, e)
+            and f"{e.name}.{f.name}" not in described
+        )
+        if flagged:
+            out.append(
+                f"{SENSITIVE_COLUMNS}: entity '{e.name}' serves {', '.join(flagged)} on every "
+                "door with no `hide:` and no definition about them — hide the column(s) "
+                f"(`hide: [{flagged[0]}]` in the entity file) or declare a definition with "
+                f"`about: {e.name}.{flagged[0]}` saying what they are for"
+            )
+    return out
 
 
 def _mapping_ref(mapping: str) -> str | None:

@@ -73,6 +73,78 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.11.0] — 2026-10-16
+
+No schema change. Behaviour changes: the publish gate grades certified answers by their
+stored value, not by whether generation reproduces them (`eval_gate: block_generation`
+restores the old blocking); `dst apply` no longer advances the drift baseline over a
+breaking finding (`--accept-drift`); a definition the question never named is not applied.
+New files and keys: `evals/known_divergences.yaml`, entity `hide:`, `not_computable`
+`row_level`/`keys`, metric `label`/`aliases` in the veto.
+
+### Added
+
+- **A certified answer that moved says so.** Every certified serve compares the live result
+  with the value stored at certify time (`restated` check); a move caps the grade at
+  partial, adds a `RESTATED: … moved from X to Y since it was verified on <date>` line, and
+  composes over today's rows instead of serving the certify-time sentence.
+- **`hide:` on an entity** withholds columns from every door, generated SQL included; plan
+  fails on a hide that matches nothing or that an expression still reads. A plan warning
+  `sensitive_columns` names in-scope columns that look like personal data with no hide and
+  no definition about them.
+- **Declared refusals hold on every door.** A lens's `not_computable` applies to
+  caller-written SQL with the same wording; `row_level: true` and `keys:` refuse listings
+  per entity key. `route_query` returns a lens's declared refusal instead of "not covered"
+  when a lens the caller may use declares the named term not computable.
+- **`evals/known_divergences.yaml`** (`id:` or `question:` plus `reason:`) covers judged
+  generation divergences file-side; the apply report lists each one it covered.
+- **A unit veto on certified matches.** A question that names a currency, a duration unit or
+  a percent against a hit whose question, SQL or declared `currency`/`format` reports a
+  different unit drops to assisted. Labels and aliases are governed names in the veto.
+- **A level metric by month is read, not summed, on the generated rail too**: the prompt
+  states the per-bucket rule and a new `level_grain` check fails a SUM over a level metric
+  bucketed wider than its snapshot grain.
+- **Shares, deltas and ratios the question asked for are graded as derived**, one division
+  or subtraction of result values, named in the grounding reason.
+- **`dst apply --accept-drift`**; `dst drift --accept` and `--refresh-samples` print old → new.
+
+### Changed
+
+- **The publish gate grades certified answers by their stored value.** A restated value
+  blocks under `block`, naming both figures; generation divergence is reported, never
+  blocking unless `eval_gate: block_generation`. The previous score is the bar only when a
+  previous run scored the same case set; the denominator is the active corpus.
+- **`dst apply` advances the drift baseline only over a clean artifact.** With a breaking
+  finding it lands the layer, leaves the baseline alone and names the findings.
+- **Certified answers carry their definitions** on the basis line, `definition_used` and
+  the ledger, the same as generated answers.
+- **"Data as of" never lies ahead of the clock**: a future newest time value dates the
+  answer to today and says how far the rows run.
+
+### Fixed
+
+- **A definition the question never named is no longer applied**; an unnamed model pick is
+  reported as `definition_suggested` and not compiled.
+- **Metrics on different time fields each take the window on their own field**; the
+  compiler feeds its refusal back for one repair and clarifies when the readings cannot
+  share a query.
+- **Honest partial reasons on approved and counted SQL**: `window_applied`,
+  `aggregation_scope` and `metric_filter_waived` no longer fire on certified snapshot SQL,
+  on COUNTs, or on columns whose metric declares its currency.
+- **A `schema.table` literal no lens holds clarifies** instead of being answered from
+  another table under that name.
+- **A definition `sql:` the parser cannot read is an error**; `FILTER (WHERE …)` and window
+  functions are aggregates, not predicates.
+- **`describe_lens.certified_count` is counted in SQL** by the library's own predicate and
+  can no longer read 0 while the library lists answers.
+- **`dst import dbt` MetricFlow output applies**: qualified expressions, no expression
+  primary keys, time dimensions resolved to columns, definitions bound by `about` without
+  aggregate `sql:`, duplicate measures deduped with a note, `non_additive_dimension` →
+  `additivity: level`.
+- **`dst test` passes a certified result of the same width as the generated one** when the
+  measures pair by value, and **a serve compiled from a governed metric grades on that
+  metric** instead of `partial` for "no semantic check confirmed".
+
 ## [0.10.3] — 2026-10-16
 
 No schema change.

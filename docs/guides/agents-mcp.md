@@ -42,10 +42,10 @@ Twelve tools (`services/mcp/server.py`):
 
 | Tool | What it does |
 |---|---|
-| `route_query` | **the default door**: dst picks the lens or declines; on a decline you get `covered: false` with a reason and nearest miss, never a wrong-lens guess |
+| `route_query` | **the default door**: dst picks the lens or declines; on a decline you get `covered: false` with a reason and nearest miss, never a wrong-lens guess — or, when a lens you may use declares the named thing not computable, that lens's refusal (`decided_by: refusal`, `answer.status: refused`) |
 | `query` | ask a named lens |
 | `query_metrics` | ask with a structured intent (metrics, dimensions, filters) instead of prose |
-| `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; takes `purpose` like the other asking tools |
+| `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; honours the lens's `hide` and `not_computable` refusals (code `refused`, the same sentence `query` answers with); takes `purpose` like the other asking tools |
 | `list_lenses` / `describe_lens` | what this caller may see: schema, definitions, certified count |
 | `lookup_definition` | a governed term's approved meaning verbatim; no SQL, no warehouse call |
 | `search_certified` | similarity-ranked [certified answers](../concepts/certified.md) |

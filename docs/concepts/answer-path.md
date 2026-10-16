@@ -26,7 +26,13 @@ The stages, in order:
    a metric this lens leaves out. Then the SQL is produced: with a
    [typed-decision provider](typed-decisions.md), every slot of the answer is
    decided over the semantic model and the SQL is compiled from the decisions;
-   otherwise the model writes SQL against that curated context.
+   otherwise the model writes SQL against that curated context. Two rules the
+   compiler holds on every compiled answer: a definition's predicate is applied
+   only when the question names the term, one of its aliases, or the metric it
+   is `about` (a definition the model wanted but the question never named is
+   reported on the resolution as `definition_suggested`, not applied); and when
+   the metrics asked for read different time fields, each takes the stated
+   window on its own field, inside its own aggregate.
 4. **Guard.** The SQL is parsed and checked before it runs: single-statement
    and read-only, inside the lens's scope.
 5. **Execute** against the warehouse, row-capped at execution. The connection

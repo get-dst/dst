@@ -641,6 +641,12 @@ async def sql(
     — name the columns (describe_lens lists them). `truncated: true` means the
     cap cut the result off, so do not read it as the whole story.
 
+    The lens's refusals and hides hold here too: a column the lens hides is out
+    of scope however it is named, and a statement that names a column a
+    `not_computable` entry covers, or lists rows per entity key where the entry
+    is row-level, is refused (code 'refused') with the same sentence `query`
+    answers with — relay it, do not rephrase the SQL around it.
+
     Args:
         lens: the lens name from list_lenses.
         sql: one SELECT statement over that lens's tables.
@@ -684,7 +690,12 @@ async def route_query(
     is NO governed answer; tell the user the question is uncovered (do not fabricate
     one). request_id is the recorded decision's id, the handle to quote about it.
     A routed lens that REFUSES (answer.status == "refused") is an outcome, not an
-    error: the reason is inside answer.answer — relay it.
+    error: the reason is inside answer.answer — relay it. A decline can carry a
+    lens's refusal the same way: when a lens you may use declares the thing the
+    question names not computable, the response is that lens's refusal
+    (covered: true, routed_to.decided_by == "refusal", answer.status ==
+    "refused") rather than "not covered" — relay the reason and where it says
+    to ask instead.
 
     Args:
         question: the user's natural-language question, as asked.

@@ -73,6 +73,21 @@ _RULES = (
     '{"sql": "<sql>", "definition_used": "<term or null>", "rationale": "<short>"}'
 )
 
+# The level rule, stated per bucket: rides the prompt only when the model
+# declares a level metric. A trend over a stock is the latest snapshot inside
+# EACH bucket; one MAX(day) for the whole series collapses every month to the
+# last day, and SUM adds every snapshot of the bucket.
+_LEVEL_RULE = (
+    "Level metrics (marked [level]) are snapshots of a stock: a period's figure is "
+    "the LAST snapshot inside that period. For a trend by month/quarter/year, read "
+    "the latest snapshot INSIDE EACH BUCKET — restrict rows with "
+    "<entity>.<time> = (SELECT MAX(l.<time>) FROM <table> AS l WHERE "
+    "date_trunc(<bucket>, l.<time>) = date_trunc(<bucket>, <entity>.<time>)) and "
+    "aggregate the snapshot's rows at that date. Never SUM a level metric across "
+    "the snapshot rows of a bucket, and never pin one MAX(<time>) for the whole "
+    "series (that collapses every bucket to the latest day)."
+)
+
 # Per-dialect hints appended to the system prompt so generated SQL matches the
 # warehouse's syntax. Keyed by SemanticModel.dialect (== the sqlglot dialect name).
 _DIALECT_NOTES: dict[str, str] = {
@@ -235,7 +250,7 @@ def serialize_model(m: SemanticModel) -> str:
             if metric.agg_time_field:
                 line += f" [time: {metric.agg_time_field}]"
             if metric.additivity == "level":
-                line += " [level: a snapshot — take the period's LAST snapshot, never a sum]"
+                line += " [level: a snapshot — read the LAST snapshot in each period, never a sum]"
             if metric.description:
                 line += f"  # {metric.description}"
             lines.append(line)
@@ -243,6 +258,8 @@ def serialize_model(m: SemanticModel) -> str:
                 lines.append(
                     f"    metric {metric.name} REQUIRES filters: {' AND '.join(metric.filters)}"
                 )
+    if any(metric.additivity == "level" for e in m.entities for metric in e.metrics):
+        lines += ["", _LEVEL_RULE]
     if m.joins:
         lines += ["", "Joins:"] + [
             f"- {j.on} ({j.type}{', ' + j.relationship if j.relationship else ''})" for j in m.joins

@@ -274,7 +274,7 @@ _COLLAPSED: dict[str, str] = {
     "definition_not_enforceable": (
         "{n} definitions have no `sql:` expression in their frontmatter (prose-only — "
         "they guide prose answers but can't be enforced or verified in generated SQL; "
-        "add `sql:` to make definition_applied checkable): {subjects}"
+        "add a `sql:` predicate to make definition_applied checkable): {subjects}"
     ),
     "definition_about_dangling": (
         "{n} definitions are about a member that is not in this lens's compiled model: {subjects}"
@@ -478,8 +478,12 @@ def _predicate_shape(expr: exp.Expression) -> str | None:
     if isinstance(expr, exp.Cast) and not isinstance(expr.to.this, str):
         if expr.to.this != exp.DataType.Type.BOOLEAN:
             return f"a cast to {expr.to.sql()}"
-    if isinstance(expr, exp.AggFunc):
+    if isinstance(expr, exp.AggFunc | exp.Filter):
+        # `COUNT(*) FILTER (WHERE …)` parses as a Filter around the aggregate;
+        # it is one all the same.
         return "an aggregate"
+    if isinstance(expr, exp.Window):
+        return "a window function"
     if isinstance(expr, exp.Case):
         branches = [i.args.get("true") for i in expr.args.get("ifs", [])]
         branches.append(expr.args.get("default"))
@@ -489,6 +493,15 @@ def _predicate_shape(expr: exp.Expression) -> str | None:
             for b in present
         ):
             return "a CASE that yields numbers or strings, not true/false"
+    # A comparison OVER an aggregate or a window (`COUNT(*) FILTER (WHERE …) >
+    # 0`) is a HAVING-shaped condition, not a per-row one: WHERE cannot hold it.
+    for node in expr.walk():
+        if node is expr:
+            continue
+        if isinstance(node, exp.AggFunc | exp.Filter):
+            return "a comparison over an aggregate"
+        if isinstance(node, exp.Window):
+            return "a comparison over a window function"
     return None
 
 
@@ -526,11 +539,27 @@ def definition_sql_shape(
         )
     try:
         tree = sqlglot.parse_one(f"SELECT 1 WHERE {sql_expr}", read=dialect)
-    except Exception:  # noqa: BLE001 — an unparseable predicate is its own lint
-        return None
-    where = tree.args.get("where")
+        where = tree.args.get("where")
+    except Exception as exc:  # noqa: BLE001 — whatever the parser raised, the fix is the same
+        where = None
+        parse_error: str | None = str(exc).splitlines()[0] if str(exc) else "parse error"
+    else:
+        parse_error = None
     if where is None:
-        return None
+        # Unparseable is not passable: the expression is ANDed into WHERE as
+        # written, so what the validator cannot read, the warehouse will — a
+        # silent pass here used to let an aggregate through on dialects whose
+        # parser rejects `FILTER (WHERE …)`.
+        return Issue(
+            severity="error",
+            code="definition_not_predicate",
+            message=f"definition '{d.term}': `sql:` expression {sql_expr!r} could not be "
+            f"parsed as a boolean predicate ({parse_error or 'no WHERE clause'}) — it is "
+            "ANDed into WHERE whenever a question names the term, so it must be "
+            "something that is true or false per row (a comparison, IN, IS, a boolean "
+            "column); an aggregate, `FILTER (WHERE …)` or a window function is not one.",
+            subject=d.term,
+        )
     shape = _predicate_shape(where.this)
     if shape is None:
         return None
@@ -764,8 +793,8 @@ def _check_bundle(
                     # grepping for a key their files don't use.
                     message=f"definition '{d.term}' has no `sql:` expression in its "
                     "frontmatter (alias sql_expr); it guides prose answers but can't "
-                    "be enforced or verified in generated SQL — add one to make "
-                    "definition_applied checkable",
+                    "be enforced or verified in generated SQL — add one (a boolean "
+                    "predicate, not an aggregate) to make definition_applied checkable",
                     subject=d.term,
                 )
             )

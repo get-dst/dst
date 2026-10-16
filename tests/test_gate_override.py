@@ -96,3 +96,36 @@ def test_the_cli_flag_takes_the_case_ids_it_covers(monkeypatch) -> None:
     assert "override_reason" not in _params()
     bare = argparse.Namespace(allow_failing_cases=[], allow_case=None, reason="", timeout=1.0)
     assert cli._apply(bare) == 2
+
+
+def test_the_cli_flag_repeated_per_id_keeps_every_id(monkeypatch) -> None:
+    """``--allow-failing-cases A --allow-failing-cases B`` used to keep only
+    B (nargs='*' replaces); both spellings now carry every id."""
+    import sys
+
+    from services.cli import main as cli
+
+    seen: list[list[str]] = []
+
+    def _capture(args: object) -> int:
+        seen.append(list(getattr(args, "allow_failing_cases", None) or []))
+        return 0
+
+    monkeypatch.setattr(cli, "_apply", _capture)
+    for argv in (
+        [
+            "dst",
+            "apply",
+            "--allow-failing-cases",
+            "certified:a",
+            "--allow-failing-cases",
+            "certified:b",
+            "--reason",
+            "r",
+        ],
+        ["dst", "apply", "--allow-failing-cases", "certified:a", "certified:b", "--reason", "r"],
+        ["dst", "apply", "--allow-failing-cases", "--reason", "r"],
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        assert cli.main() == 0
+    assert seen == [["certified:a", "certified:b"], ["certified:a", "certified:b"], []]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import decimal
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
@@ -19,7 +19,7 @@ import sqlglot
 from sqlglot import expressions as exp
 
 from services.contracts.resolution import DecisionRecord
-from services.contracts.semantic_model import SemanticModel
+from services.contracts.semantic_model import Entity, SemanticModel
 from services.contracts.verification import (
     CheckStatus,
     Grade,
@@ -203,9 +203,19 @@ def _definition_applied(
     definition_used: str | None,
     sql: str,
     certification: str = "none",
+    compiled_metrics: Sequence[str] = (),
 ) -> VerificationCheck:
     """A definition is *applied* only when its sql_expr is in the executed SQL —
     'a definition exists' is exactly the signal the binary badge over-trusted.
+
+    A COMPILED serve passes on the metric it was compiled from. The sole-metric
+    door and typed serving hand the compiler a governed metric name and the SQL
+    is the model's own expression, no generator in between — "what is the MRR
+    today" served `mrr_eur` by construction and still graded `partial` for "no
+    semantic check confirmed the answer", because this check only knew how to
+    find a DEFINITION's sql_expr in generated SQL. The names came from the
+    model: that is the confirmation. A departure from an enforceable definition
+    the SQL engages still fails first.
 
     A certified serve abstains instead of failing. This check asks whether
     GENERATION honoured a definition, and a certified answer is not generated:
@@ -222,6 +232,15 @@ def _definition_applied(
             status="skip",
             reason="certified: the SQL is human-approved, not generated from the definition",
         )
+    if compiled_metrics:
+        departed = _departed_definitions(question, semantic_model, sql)
+        if not departed:
+            named = ", ".join(f"'{m}'" for m in compiled_metrics)
+            return VerificationCheck(
+                name="definition_applied",
+                status="pass",
+                reason=f"compiled from governed metric {named}: the SQL is the model's own",
+            )
     enforceable = {d.term: d.sql_expr for d in semantic_model.definitions if d.sql_expr}
     if not enforceable:
         return VerificationCheck(
@@ -348,7 +367,152 @@ def _snapshot_pin_only(sql: str, dialect: str | None, time_fields: set[str]) -> 
     return pins > 0
 
 
-def _window_applied(question: str, sql: str, model: SemanticModel) -> VerificationCheck:
+def _level_columns(entity: Entity) -> dict[str, str]:
+    """Aggregated column -> snapshot time field, for every level metric of
+    *entity* that aggregates one plain column (``entity.col`` or ``col``)."""
+    out: dict[str, str] = {}
+    for m in entity.metrics:
+        if m.additivity != "level" or not m.expr:
+            continue
+        time_field = m.agg_time_field or entity.default_time_field
+        if not time_field or not re.fullmatch(r"[\w.]+", m.expr):
+            continue
+        out[m.expr.rpartition(".")[2].lower()] = time_field.lower()
+    return out
+
+
+def _aggregates_only_levels(sql: str, model: SemanticModel) -> bool:
+    """True when every aggregate the statement projects (the pin's own
+    ``MAX(time_field)`` subselect aside) is over a declared level metric's
+    column — the shape the latest snapshot legitimately answers."""
+    levels = {col for e in model.entities for col in _level_columns(e)}
+    if not levels:
+        return False
+    try:
+        tree = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001
+        return False
+    if not isinstance(tree, exp.Expression):
+        return False
+    seen = False
+    for agg in tree.find_all(exp.AggFunc):
+        if agg.find_ancestor(exp.Predicate) is not None:
+            continue  # the snapshot pin's scalar subselect
+        cols = {c.name.lower() for c in agg.find_all(exp.Column)}
+        if not cols or not cols <= levels:
+            return False
+        seen = True
+    return seen
+
+
+_BUCKET_UNITS = frozenset({"week", "month", "quarter", "year"})
+
+
+def _bucket_units(tree: exp.Expression, time_field: str) -> set[str]:
+    """The calendar units the statement buckets *time_field* into —
+    DATE_TRUNC/TIMESTAMP_TRUNC or EXTRACT over it, week or wider."""
+    units: set[str] = set()
+    for node in tree.find_all(exp.DateTrunc, exp.TimestampTrunc, exp.Extract):
+        if isinstance(node, exp.Extract):
+            unit, operand = node.name, node.expression
+        else:
+            unit_node = node.args.get("unit")
+            unit, operand = (unit_node.name if unit_node is not None else ""), node.this
+        if operand is None:
+            continue
+        over = {c.name.lower() for c in operand.find_all(exp.Column)}
+        if isinstance(operand, exp.Column):
+            over = {operand.name.lower()}
+        if time_field in over and unit.lower() in _BUCKET_UNITS:
+            units.add(unit.lower())
+    return units
+
+
+def _latest_per_bucket(tree: exp.Expression, time_field: str) -> bool:
+    """Does the statement pick the latest snapshot per bucket — a ``MAX(time_field)``
+    subselect (the compiler's form), or a window ordered by the time field
+    (the ROW_NUMBER / QUALIFY idiom)?"""
+    for mx in tree.find_all(exp.Max):
+        if any(c.name.lower() == time_field for c in mx.find_all(exp.Column)):
+            return True
+    for win in tree.find_all(exp.Window):
+        order = win.args.get("order")
+        if order is not None and any(
+            c.name.lower() == time_field for c in order.find_all(exp.Column)
+        ):
+            return True
+    return False
+
+
+def _level_grain(sql: str, model: SemanticModel, certification: str = "none") -> VerificationCheck:
+    """Is a level metric read as the latest snapshot per time bucket?
+
+    A stock (ARR, headcount, a balance) is declared ``additivity: level``: a
+    month's figure is the month's LAST snapshot. SUM over its column grouped
+    by a month/quarter/year bucket of the snapshot field adds every snapshot
+    in the bucket — thirty daily balances served as one monthly balance, a
+    well-formed query over well-formed rows that no other check can see.
+    Deterministic and model-declared: fires only on SUM over a declared level
+    column, a bucket wider than a day over its time field, and no
+    latest-per-bucket selection anywhere in the statement. Certified SQL is
+    approved as meaning what it says and is not re-read here."""
+    if certification == "certified":
+        return VerificationCheck(
+            name="level_grain", status="skip", reason="certified SQL: approval binds the reading"
+        )
+    levels = {col: (e, tf) for e in model.entities for col, tf in _level_columns(e).items()}
+    if not levels:
+        return VerificationCheck(
+            name="level_grain", status="skip", reason="no level metric in the model"
+        )
+    try:
+        tree = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001
+        return VerificationCheck(name="level_grain", status="skip", reason="SQL did not parse")
+    if not isinstance(tree, exp.Expression) or tree.find(exp.Group) is None:
+        return VerificationCheck(
+            name="level_grain", status="skip", reason="no grouped aggregate in this query"
+        )
+    summed = [
+        (col, e, tf)
+        for col, (e, tf) in levels.items()
+        if any(
+            any(c.name.lower() == col for c in sm.find_all(exp.Column))
+            for sm in tree.find_all(exp.Sum)
+        )
+    ]
+    if not summed:
+        return VerificationCheck(
+            name="level_grain", status="skip", reason="no level metric is summed here"
+        )
+    for col, entity, time_field in summed:
+        units = _bucket_units(tree, time_field)
+        # A table whose declared grain IS the bucket ("one row per customer per
+        # month") holds one snapshot per bucket: nothing to collapse.
+        units -= {u for u in units if u in (entity.grain or "").lower()}
+        if not units or _latest_per_bucket(tree, time_field):
+            continue
+        unit = sorted(units)[0]
+        return VerificationCheck(
+            name="level_grain",
+            status="fail",
+            reason=(
+                f"'{col}' is a level metric (a snapshot) but the SQL SUMs it per "
+                f"{unit} over '{time_field}' — that adds every snapshot in the "
+                f"{unit}; read the latest snapshot inside each {unit} instead "
+                f"({time_field} = (SELECT MAX({time_field}) … in the same {unit}))"
+            ),
+        )
+    return VerificationCheck(name="level_grain", status="pass")
+
+
+def _window_applied(
+    question: str,
+    sql: str,
+    model: SemanticModel,
+    certification: str = "none",
+    certified_question: str | None = None,
+) -> VerificationCheck:
     """Did the question's time window reach the SQL at all?
 
     The highest-severity wrong-answer shape observed: "last month" generated
@@ -366,6 +530,17 @@ def _window_applied(question: str, sql: str, model: SemanticModel) -> Verificati
         return VerificationCheck(
             name="window_applied", status="skip", reason="the question states no time window"
         )
+    if certification == "certified" and certified_question is not None:
+        # Approval vouches for the SQL's meaning, the window included — when
+        # the approved question states the SAME window as the ask (a snapshot
+        # table's approved SQL legitimately carries no date handling at all).
+        # A fuzzy match onto another window keeps the deterministic read below.
+        if temporal_terms(certified_question) == terms:
+            return VerificationCheck(
+                name="window_applied",
+                status="pass",
+                reason="certified SQL: the approved question states the asked window",
+            )
     time_fields = {e.default_time_field for e in model.entities if e.default_time_field}
     time_fields |= {
         f.name
@@ -393,6 +568,23 @@ def _window_applied(question: str, sql: str, model: SemanticModel) -> Verificati
             and not _SQL_DATE_EVIDENCE.search(sql)
             and _snapshot_pin_only(sql, model.dialect, time_fields)
         ):
+            # The one pin that IS the period's figure: a level metric (a
+            # stock, read as its latest snapshot) asked for the CURRENT
+            # period — the latest snapshot lies inside the stated window, and
+            # freshness_check owns how old it is. A flow (churn, bookings)
+            # summed from one day still fails, as does any past period.
+            today = _lens_today(model.timezone)
+            ranges = window_ranges(terms, today)
+            current = bool(ranges) and all(lo <= today <= hi for lo, hi in ranges)
+            if current and _aggregates_only_levels(sql, model):
+                return VerificationCheck(
+                    name="window_applied",
+                    status="pass",
+                    reason=(
+                        "the SQL pins the latest snapshot of a level metric, which is "
+                        "the stated current period's figure"
+                    ),
+                )
             stated = ", ".join(sorted(terms))
             return VerificationCheck(
                 name="window_applied",
@@ -791,17 +983,50 @@ def _population_declared(sql: str, model: SemanticModel) -> VerificationCheck:
 _AGG_FN = re.compile(r"\b(SUM|AVG|MIN|MAX)\s*\(", re.IGNORECASE)
 
 
+def _denominating_aggregates(sql: str, model: SemanticModel) -> list[set[str]] | None:
+    """The column sets of every aggregate whose result a pinned dimension
+    denominates. COUNTs are left out (a row
+    count is in no currency), and so is a scalar subselect inside a predicate
+    (the latest-snapshot pin's ``MAX(time_field)`` aggregates nothing the
+    answer states). None when the SQL does not parse."""
+    try:
+        tree = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(tree, exp.Expression):
+        return None
+    out: list[set[str]] = []
+    for agg in tree.find_all(exp.AggFunc):
+        if isinstance(agg, exp.Count) or agg.find_ancestor(exp.Predicate) is not None:
+            continue
+        out.append({c.name.lower() for c in agg.find_all(exp.Column)})
+    return out
+
+
+def _declared_currency_columns(entity: Entity) -> set[str]:
+    """Columns a metric of *entity* declares a currency for — a SUM over them
+    is denominated by the author, not by a currency row dimension."""
+    return {
+        m.expr.rpartition(".")[2].lower()
+        for m in entity.metrics
+        if m.currency and m.expr and re.fullmatch(r"[\w.]+", m.expr)
+    }
+
+
 def _aggregation_scope(sql: str, model: SemanticModel) -> VerificationCheck:
     """Does an aggregate over an entity respect its pinned dimensions?
     (The structured half of prose like 'never sum across currencies'.)
 
     Coarse and false-positive-safe, the population_declared idiom: fires only
-    when the SQL aggregates, reads an entity with declared pinned_dimensions,
-    and a pinned dimension appears NOWHERE in the statement — a SUM with no
-    currency reference at all is a number denominated in nothing, and reads
-    as if it were in the reader's own currency. Any mention
-    (grouped, filtered, projected) passes; only total absence fails, toward
-    partial, with the reason saying what the figure actually is."""
+    when the SQL aggregates a VALUE (SUM/AVG/MIN/MAX — never a COUNT, which is
+    denominated in nothing by nature), reads an entity with declared
+    pinned_dimensions, and a pinned dimension appears NOWHERE in the
+    statement — a SUM with no currency reference at all is a number
+    denominated in nothing, and reads as if it were in the reader's own
+    currency. Any mention (grouped, filtered, projected) passes; so does an
+    aggregate over a column whose metric declares its currency (the author
+    said what it is in); only total absence fails, toward partial, with the
+    reason saying what the figure actually is."""
     if not _AGG_FN.search(sql):
         return VerificationCheck(
             name="aggregation_scope", status="skip", reason="no aggregate in this query"
@@ -818,6 +1043,21 @@ def _aggregation_scope(sql: str, model: SemanticModel) -> VerificationCheck:
             status="skip",
             reason="no entity with pinned_dimensions in this query",
         )
+    aggregates = _denominating_aggregates(sql, model)
+    if aggregates is not None:
+        if not aggregates:
+            return VerificationCheck(
+                name="aggregation_scope",
+                status="skip",
+                reason="only counts (or a snapshot pin) aggregate here — nothing denominated",
+            )
+        declared = set().union(*(_declared_currency_columns(e) for e in scoped))
+        if declared and all(cols and cols <= declared for cols in aggregates):
+            return VerificationCheck(
+                name="aggregation_scope",
+                status="pass",
+                reason="every aggregate is over a column whose metric declares its currency",
+            )
     missing = [
         (e.name, d) for e in scoped for d in e.pinned_dimensions if d and not _touches(d, sql)
     ]
@@ -998,6 +1238,127 @@ def clock_years(timezone: str | None) -> tuple[int, int]:
     return (now.year, now.year - 1)
 
 
+def _printed_decimals(want: float) -> int:
+    """How many decimals the stored value prints with: 82.59 -> 2, 7 -> 0. The
+    certified value is the stated precision; a served value that rounds to it
+    at that precision has not moved."""
+    if isinstance(want, int):
+        return 0
+    text = repr(float(want))
+    if "e" in text or "." not in text:
+        return 0
+    return len(text.split(".")[1].rstrip("0"))
+
+
+def _as_number(v: object) -> decimal.Decimal | None:
+    """A cell as a number when it is one. The store writes Decimal cells as
+    text, so a numeric-looking string counts; bools never do."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, int | float | decimal.Decimal):
+        return decimal.Decimal(str(v))
+    if isinstance(v, str):
+        try:
+            return decimal.Decimal(v.strip())
+        except (decimal.InvalidOperation, ValueError):
+            return None
+    return None
+
+
+def _cell_moved(want: object, got: object) -> bool:
+    """Did one cell move beyond the stored value's printed precision? Numbers
+    compare numerically at that precision; everything else compares as text."""
+    w, g = _as_number(want), _as_number(got)
+    if w is not None and g is not None:
+        decimals = _printed_decimals(float(w) if not isinstance(want, int) else want)
+        return round(float(g), decimals) != round(float(w), decimals)
+    return str(want) != str(got)
+
+
+def _cell_text(v: object) -> str:
+    return "null" if v is None else str(v)
+
+
+def restatement(
+    verified_value: Mapping[str, object], result: QueryResult
+) -> tuple[str, str] | None:
+    """``(old, new)`` when the executed result differs from the value stored at
+    certify time beyond its printed precision; None when it stands. A scalar
+    summary (``{"value": x}``) compares the one cell; a table summary compares
+    the stored rows (the store keeps a capped sample, so a longer result is
+    compared on its first rows) cell by cell, order-insensitively."""
+    if "value" in verified_value:
+        cell = result.rows[0][0] if result.rows and result.rows[0] else None
+        old = verified_value["value"]
+        if len(result.rows) != 1 or len(result.columns) != 1 or _cell_moved(old, cell):
+            new = (
+                _cell_text(cell)
+                if len(result.rows) == 1 and len(result.columns) == 1
+                else f"a {len(result.rows)}-row, {len(result.columns)}-column result"
+            )
+            return _cell_text(old), new
+        return None
+    stored_rows = verified_value.get("rows")
+    if not isinstance(stored_rows, list):
+        return None
+    live = [list(r) for r in result.rows[: len(stored_rows)]]
+    if len(live) != len(stored_rows):
+        return f"{len(stored_rows)} rows", f"{len(result.rows)} rows"
+    key = lambda row: [_cell_text(c) for c in row]  # noqa: E731
+    for want, got in zip(sorted(stored_rows, key=key), sorted(live, key=key), strict=True):
+        if len(want) != len(got):
+            return f"{len(want)} columns", f"{len(got)} columns"
+        for i, (w, g) in enumerate(zip(want, got, strict=True)):
+            if _cell_moved(w, g):
+                col = result.columns[i] if i < len(result.columns) else f"column {i + 1}"
+                return f"{col} {_cell_text(w)}", f"{col} {_cell_text(g)}"
+    return None
+
+
+def restated_check(
+    verified_value: Mapping[str, object] | None,
+    result: QueryResult,
+    *,
+    skip_reason: str | None = None,
+) -> tuple[VerificationCheck, tuple[str, str] | None]:
+    """The ``restated`` check for a certified serve: does the executed result
+    still say what it said when a human verified it? A fail caps the grade at
+    partial and keeps the certify-time prose off the wire. No stored value is
+    a SKIP with its reason, never a pass — the pass has to be earned."""
+    if skip_reason is not None:
+        return VerificationCheck(name="restated", status="skip", reason=skip_reason), None
+    if not verified_value:
+        return (
+            VerificationCheck(
+                name="restated",
+                status="skip",
+                reason="no verified value was stored when this answer was certified",
+            ),
+            None,
+        )
+    if "error" in verified_value:
+        return (
+            VerificationCheck(
+                name="restated",
+                status="skip",
+                reason="the certify-time execution errored, so there is no value to compare",
+            ),
+            None,
+        )
+    moved = restatement(verified_value, result)
+    if moved is None:
+        return VerificationCheck(name="restated", status="pass"), None
+    old, new = moved
+    return (
+        VerificationCheck(
+            name="restated",
+            status="fail",
+            reason=f"the result moved from {old} to {new} since this answer was verified",
+        ),
+        moved,
+    )
+
+
 def build_report(
     *,
     question: str,
@@ -1018,6 +1379,14 @@ def build_report(
     as_of_table: str | None = None,
     entity_coverage: Mapping[str, EntityCoverage] | None = None,
     profile_stale: bool = False,
+    # The governed metrics a compiled intent named, when the SQL was compiled
+    # from the model (sole-metric door, typed serving) rather than generated.
+    compiled_metrics: Sequence[str] = (),
+    # A certified serve's ``restated`` check (restated_check), appended as built.
+    restated: VerificationCheck | None = None,
+    # The approved question behind a certified serve: window_applied passes on
+    # approved SQL only when it states the asked window.
+    certified_question: str | None = None,
 ) -> VerificationReport:
     numeric_status: CheckStatus
     if composed:
@@ -1074,9 +1443,12 @@ def build_report(
     has_rows = any(any(v is not None for v in row) for row in result.rows)
     checks = [
         VerificationCheck(name="numeric_grounding", status=numeric_status, reason=numeric_reason),
-        _definition_applied(question, semantic_model, definition_used, sql, certification),
+        _definition_applied(
+            question, semantic_model, definition_used, sql, certification, compiled_metrics
+        ),
         _intent_alignment(question, sql, semantic_model.dialect),
-        _window_applied(question, sql, semantic_model),
+        _window_applied(question, sql, semantic_model, certification, certified_question),
+        _level_grain(sql, semantic_model, certification),
         _zero_ratio_plausibility(sql, result),
         _all_ones_ratio(sql, result),
         _ratio_population(sql, semantic_model.dialect),
@@ -1128,6 +1500,8 @@ def build_report(
                 ),
             )
         )
+    if restated is not None:
+        checks.append(restated)
     return _with_grade(checks, certification, numeric_status, composed=composed)
 
 

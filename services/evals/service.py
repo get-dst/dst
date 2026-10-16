@@ -5,20 +5,34 @@ gate-decision logic (``gate_decision``) is split out so it's unit-testable witho
 connector, or model.
 
 The certified corpus IS the gate's regression suite (the value-case/snapshot
-plane it replaced has been removed). On apply, the ACTIVE
-certified answers whose bindings the push's changed asset hashes invalidate
-(the staleness system as test selection) run through the certified suite
-against the CANDIDATE bundle; their results — plus the behavioral shape pins —
-fold into one persisted regression run. A diverging answer becomes a verbatim
-divergence error; a passing one re-stamps its bindings to current hashes
-(re-verify through evidence). Everything stages on the caller's session —
-blue/green rolls the run AND the re-stamps back with an aborted apply.
+plane it replaced has been removed). Two lanes on apply:
+
+* The VALUE lane grades every ACTIVE certified answer by its own evidence: its
+  approved SQL (sample-bound for a template) runs once more and must return
+  the stored ``verified_value``. A restated value fails — the signed figure
+  moved under the answer. An answer with no stored value gets it recorded
+  now. The case set is the whole active corpus, so the score's denominator is
+  stable across pushes, and a passing answer re-stamps its bindings to the
+  current asset hashes (re-verify through evidence).
+* The GENERATION lane runs only the answers whose bindings the push's changed
+  asset hashes invalidate (staleness as test selection) through the certified
+  suite against the CANDIDATE bundle: does generation still reproduce the
+  approved SQL? A divergence is REPORTED, verbatim, naming both results. It
+  blocks only under ``eval_gate: block_generation``; under ``block`` the
+  certified answer is the override and the push lands. The file-side
+  allow-list ``evals/known_divergences.yaml`` (id + reason) covers the
+  divergences a team has judged, so the override is not retyped per push.
+
+Both lanes plus the behavioral shape pins fold into one persisted regression
+run. Everything stages on the caller's session — blue/green rolls the run AND
+the re-stamps back with an aborted apply.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,29 +41,72 @@ from sqlalchemy.orm import Session
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
 from services.certify.bindings import restamp_bindings
+from services.certify.generate import _value_summary
+from services.connectors.tagging import query_context
 from services.contracts.errors import ProviderError
 from services.contracts.eval import EvalCase, EvalResult
 from services.contracts.protocols import Connector
 from services.evals import store
 from services.evals.certified_suite import (
+    _ROW_CAP,
     CertifiedCaseResult,
+    _compare,
     _render_template_case,
     format_result,
     run_certified_suite,
 )
-from services.evals.runner import RunOutcome, _finish, run_behavioral, run_health
+from services.evals.runner import (
+    REPORTED_PREFIX,
+    RunOutcome,
+    _finish,
+    run_behavioral,
+    run_health,
+)
 from services.lenses.connections import ConnectionUnavailable, resolve_connector
 from services.lenses.store import LensBundle, bundle_fingerprint
 from services.llm.registry import ResolvedModel
 from services.project.plan import stale_certified
 from services.runtime import assembly
 from services.runtime.answer import AnswerComposer
+from services.runtime.bounded import ApplyStepTimeout
+from services.runtime.pipeline import _jsonable
 from services.semantic import store as semantic_store
 
 log = logging.getLogger("dst")
 
 # A score drop beyond this (absolute, on a 0–1 score) counts as a regression.
 REGRESSION_EPS = 1e-9
+
+#: The gate modes that refuse a publish. ``block`` blocks on a restated
+#: certified value, a failing behavioral pin or a score regression;
+#: ``block_generation`` adds a generation divergence to that list.
+BLOCKING_GATES = ("block", "block_generation")
+
+
+def blocks(gate: str) -> bool:
+    return gate in BLOCKING_GATES
+
+
+def known_divergence_ids(entries: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """``evals/known_divergences.yaml`` as a lookup: the key an entry names
+    (``id: certified:<answer id>``, ``generation:<answer id>`` or the bare id,
+    or ``question: <the certified question>``), lowercased -> its reason. An
+    entry with no reason is not an allow: nobody downstream can tell a judged
+    divergence from a silenced one."""
+    out: dict[str, str] = {}
+    for entry in entries:
+        reason = str(entry.get("reason") or "").strip()
+        if not reason:
+            continue
+        for key in ("id", "question"):
+            raw = str(entry.get(key) or "").strip().lower()
+            if raw:
+                out[raw.removeprefix("certified:").removeprefix("generation:")] = reason
+    return out
+
+
+def _known_reason(known: Mapping[str, str], answer: certify_store.CertifiedAnswer) -> str | None:
+    return known.get(answer.id.lower()) or known.get(answer.question.strip().lower())
 
 
 def _connector_for(session: Session, org_id: uuid.UUID | str, connection: str) -> Connector:
@@ -188,6 +245,16 @@ class GateDecision:
     # Case ids that passed only on retry — wobble, not failure:
     # never blocks, always surfaced (the fix for wobble is certification).
     flaky: list[str] = field(default_factory=list)
+    # Verbatim generation divergences that do NOT block under this gate
+    # (eval_gate: block): reported on the row, the certified answer stands.
+    generation_divergences: list[str] = field(default_factory=list)
+    # ``generation:<id> — reason`` for each divergence evals/known_divergences.yaml
+    # covered on this run — what the apply report lists.
+    known_covered: list[str] = field(default_factory=list)
+    # Why the previous score is, or is not, the bar: "no previous run" / "no
+    # previous run with this case set" / "previous run <id>".
+    baseline: str = ""
+    recorded: int = 0
 
 
 def gate_label(decision: GateDecision | None) -> str | None:
@@ -226,6 +293,9 @@ def gate_decision_dict(decision: GateDecision | None) -> dict[str, object] | Non
         "skip_reason": decision.skip_reason,
         "certified_failures": list(decision.certified_failures),
         "flaky": list(decision.flaky),
+        "generation_divergences": list(decision.generation_divergences),
+        "known_covered": list(decision.known_covered),
+        "baseline": decision.baseline,
         "detail": decision.detail,
     }
 
@@ -244,7 +314,7 @@ def gate_decision(
     additional signal for score drops the failing list can't see (e.g. a
     certified-suite case that stopped being selected)."""
     regressed = prev_score is not None and score is not None and score < prev_score - REGRESSION_EPS
-    blocked = gate == "block" and (regressed or bool(failing))
+    blocked = blocks(gate) and (regressed or bool(failing))
     return GateDecision(
         gated=True,
         blocked=blocked,
@@ -261,6 +331,7 @@ def publish_gate(
     org_id: uuid.UUID | str,
     lens: str,
     bundle: LensBundle,
+    known_divergences: Mapping[str, str] | None = None,
 ) -> GateDecision | None:
     """The publish-time gate check, shared by the interactive publish endpoint and
     apply's publish/recompile paths (review wave 2 — apply must not bypass it).
@@ -311,7 +382,12 @@ def publish_gate(
         )
     try:
         decision = evaluate_publish(
-            session=session, org_id=org_id, lens=lens, bundle=bundle, resolved=pair
+            session=session,
+            org_id=org_id,
+            lens=lens,
+            bundle=bundle,
+            resolved=pair,
+            known_divergences=known_divergences,
         )
     except ProviderError as exc:
         # The model provider failed mid-suite. Degrade loudly, never sink the
@@ -378,6 +454,140 @@ def _divergence_error(
     )
 
 
+@dataclass
+class CertifiedLane:
+    results: list[EvalResult] = field(default_factory=list)
+    # Verbatim messages: a certified value that moved (or SQL that no longer
+    # runs) — errors under any blocking gate.
+    restated: list[str] = field(default_factory=list)
+    # Verbatim generation divergences the allow-list does NOT cover.
+    divergences: list[str] = field(default_factory=list)
+    # ``case id — reason`` for every divergence the allow-list covered.
+    known_covered: list[str] = field(default_factory=list)
+    corpus_alive: bool = False
+    recorded: int = 0  # answers whose verified value was recorded on this run
+
+
+def _oracle_sql(a: certify_store.CertifiedAnswer, dialect: str) -> tuple[str | None, str | None]:
+    """The executable witness of an answer — its SQL, or a template's first
+    sample binding rendered — or (None, why not)."""
+    if a.slots:
+        rendered = _render_template_case(a, dialect)
+        if rendered is None:
+            return None, "template slots/sample_bindings failed validation — re-certify"
+        return rendered[0], None
+    if certify_binding.placeholders_in(a.sql):
+        return None, "the stored SQL carries {placeholders} but the row has no slots — re-certify"
+    return a.sql, None
+
+
+def _as_table(summary: Mapping[str, Any]) -> tuple[list[str], list[list[Any]]]:
+    if set(summary) == {"value"}:
+        return ["value"], [[summary["value"]]]
+    return list(summary.get("columns") or []), [list(r) for r in summary.get("rows") or []]
+
+
+def _restated(question: str, stored: dict[str, Any], now: dict[str, Any]) -> str:
+    return (
+        f"certified '{question}' restated: stored verified value {format_result(stored)}, "
+        f"its approved SQL now returns {format_result(now)} — accept it by writing the new "
+        "verified_value in certified_answers.yaml (a template: `dst apply "
+        "--refresh-samples`), re-author the sql to re-probe it, or fix the data"
+    )
+
+
+def _value_lane(
+    *,
+    session: Session,
+    connector: Connector,
+    lens: str,
+    bundle: LensBundle,
+    active: list[certify_store.CertifiedAnswer],
+    hashes: dict[str, str],
+) -> CertifiedLane:
+    """Every active answer against its own stored value. One warehouse query
+    per answer, no model: the lane is the gate's stable denominator."""
+    lane = CertifiedLane(corpus_alive=True)
+    dialect = bundle.semantic_model.dialect
+    for a in active:
+        case_id = f"certified:{a.id}"
+        oracle_sql, why = _oracle_sql(a, dialect)
+        if oracle_sql is None:
+            lane.restated.append(f"certified '{a.question}' cannot run: {why}")
+            lane.results.append(
+                EvalResult(
+                    run_id="",
+                    case_id=case_id,
+                    question=a.question,
+                    passed=False,
+                    grade="errored",
+                    reason=why,
+                )
+            )
+            continue
+        try:
+            with query_context(purpose="eval", lens=lens):
+                got = connector.execute(oracle_sql, read_only=True, row_limit=_ROW_CAP)
+        except ApplyStepTimeout:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a broken oracle fails its case, not the run
+            lane.restated.append(
+                f"certified '{a.question}' no longer runs: {exc} — fix the sql or retire the answer"
+            )
+            lane.results.append(
+                EvalResult(
+                    run_id="",
+                    case_id=case_id,
+                    question=a.question,
+                    passed=False,
+                    grade="errored",
+                    reason=f"certified SQL failed to execute: {exc}",
+                    actual_sql=oracle_sql,
+                )
+            )
+            continue
+        rows = [[_jsonable(v) for v in row] for row in got.rows]
+        now = _value_summary(got.columns, rows)
+        stored = a.verified_value
+        if stored is None:
+            certify_store.update(session, a.id, sql=a.sql, verified_value=now)
+            lane.recorded += 1
+            passed: bool = True
+            reason: str | None = "verified value recorded on this run (none was stored)"
+        else:
+            want_cols, want_rows = _as_table(stored)
+            passed, reason = _compare(want_cols, want_rows, *_as_table(now))
+            if not passed:
+                lane.restated.append(_restated(a.question, stored, now))
+        if passed:
+            _questions, changed = stale_certified([(a.question, a.bindings)], hashes)
+            if changed:
+                # Re-verified by evidence: the approved SQL still returns the
+                # signed value on the candidate layer, so the bindings move to
+                # the current hashes (rolled back with an aborted apply).
+                certify_store.update(
+                    session,
+                    a.id,
+                    sql=a.sql,
+                    verified_value=stored if stored else now,
+                    bindings=restamp_bindings(oracle_sql, a.bindings, bundle.semantic_model),
+                )
+        lane.results.append(
+            EvalResult(
+                run_id="",
+                case_id=case_id,
+                question=a.question,
+                passed=passed,
+                grade="pass" if passed else "fail",
+                checks={} if passed else {"wrong_at": "value"},
+                reason=reason,
+                actual_sql=oracle_sql,
+                actual_value=format_result(now),
+            )
+        )
+    return lane
+
+
 def _certified_gate(
     *,
     session: Session,
@@ -385,38 +595,44 @@ def _certified_gate(
     lens: str,
     bundle: LensBundle,
     resolved: ResolvedModel,
-) -> tuple[list[EvalResult], list[str], bool]:
-    """The certified corpus as gate cases, binding-scoped.
-
-    Selection is the staleness system: only ACTIVE answers whose stored bindings
-    disagree with the current asset hashes (the push's changes, post-upsert) run
-    — cheap by construction; `dst test` is the full-corpus sweep. Each
-    selected answer runs through the certified suite against the CANDIDATE
-    bundle. A GREEN answer is re-verified by evidence: its bindings re-stamp to
-    current hashes on this session (rolled back with an aborted apply); a
-    diverging one becomes a verbatim divergence message.
-
-    Returns (suite results as EvalResults, divergence messages, corpus_alive) —
-    ``corpus_alive`` says the lens HAS active certified answers, so an empty
-    selection means "nothing this push touches", not an inert seatbelt.
-    """
+    known: Mapping[str, str] | None = None,
+) -> CertifiedLane:
+    """The certified corpus as gate cases: the value lane over every active
+    answer, then the generation lane over the answers whose stored bindings
+    disagree with the current asset hashes (the push's changes, post-upsert —
+    cheap by construction; `dst test` is the full sweep). A generation result
+    rides the run under ``generation:<id>`` and never moves the score; a
+    divergence the allow-list covers is listed as covered, with its reason."""
     active = [
         a for a in certify_store.list_for_lens(session, lens) if certify_store.is_active(a.status)
     ]
     if not active:
-        return [], [], False
+        return CertifiedLane()
+    config = bundle.config
+    if not config.connections:
+        # Nothing can execute the approved SQL: the gate stands down loudly
+        # (publish_gate turns this into the warehouse-unavailable skip).
+        raise ConnectionUnavailable("the lens declares no connection to run certified SQL on")
+    connector = _connector_for(session, org_id, config.connections[0])
     hashes = semantic_store.asset_hashes(session)
     affected: list[tuple[certify_store.CertifiedAnswer, list[str]]] = []
     for a in active:
         _questions, changed = stale_certified([(a.question, a.bindings)], hashes)
         if changed:
             affected.append((a, changed))
+    lane = _value_lane(
+        session=session,
+        connector=connector,
+        lens=lens,
+        bundle=bundle,
+        active=active,
+        hashes=hashes,
+    )
     if not affected:
-        return [], [], True
-    config = bundle.config
+        return lane
     assemble_for, generators_for = assembly.eval_harness(bundle, org_id, resolved)
     outcome = run_certified_suite(
-        connector=_connector_for(session, org_id, config.connections[0]),
+        connector=connector,
         lens=lens,
         answers=[a for a, _changed in affected],
         assemble_for=assemble_for,
@@ -425,29 +641,20 @@ def _certified_gate(
         model_name=resolved.name,
     )
     by_id = {r.answer_id: r for r in outcome.results}
-    results: list[EvalResult] = []
-    failures: list[str] = []
     for a, changed in affected:
         r = by_id[a.id]
-        if r.passed:
-            # Templates re-stamp from the RENDERED sample-bound SQL — raw
-            # {placeholder} SQL never parses.
-            rendered = _render_template_case(a, bundle.semantic_model.dialect) if a.slots else None
-            certify_store.update(
-                session,
-                a.id,
-                sql=a.sql,
-                verified_value=a.verified_value,
-                bindings=restamp_bindings(
-                    rendered[0] if rendered else a.sql, a.bindings, bundle.semantic_model
-                ),
-            )
-        else:
-            failures.append(_divergence_error(a.question, r, changed, a.sample_bindings))
-        results.append(
+        case_id = f"{REPORTED_PREFIX}{a.id}"
+        if not r.passed:
+            message = _divergence_error(a.question, r, changed, a.sample_bindings)
+            reason = _known_reason(known or {}, a)
+            if reason is not None:
+                lane.known_covered.append(f"{case_id} — {reason}")
+            else:
+                lane.divergences.append(message)
+        lane.results.append(
             EvalResult(
                 run_id="",
-                case_id=f"certified:{a.id}",
+                case_id=case_id,
                 question=a.question,
                 passed=r.passed,
                 grade="pass" if r.passed else ("errored" if "error" in r.oracle_result else "fail"),
@@ -458,7 +665,7 @@ def _certified_gate(
                 actual_sql=r.generated_sql,
             )
         )
-    return results, failures, True
+    return lane
 
 
 def _behavioral_gate(
@@ -494,6 +701,28 @@ def _behavioral_gate(
     return outcome.results
 
 
+def previous_baseline(
+    session: Session, lens: str, case_ids: Iterable[str]
+) -> tuple[float | None, str]:
+    """The previous regression run's score as the bar, and why: only a run
+    over the SAME case set compares — a score over a different selection is
+    a different fraction, and "regressed" against it was noise ("0.4 < prev
+    0.75" with the same four red answers). Generation lane cases are not part
+    of the identity: they are reported, never scored."""
+    prev = store.last_run(session, lens, "regression")
+    if prev is None:
+        return None, "no previous run"
+    wanted = {c for c in case_ids if not c.startswith(REPORTED_PREFIX)}
+    had = {
+        r.case_id
+        for r in store.list_results(session, prev.id)
+        if not r.case_id.startswith(REPORTED_PREFIX)
+    }
+    if had != wanted:
+        return None, "no previous run with this case set"
+    return prev.score, f"previous run {prev.id}"
+
+
 def evaluate_publish(
     *,
     session: Session,
@@ -501,24 +730,30 @@ def evaluate_publish(
     lens: str,
     bundle: LensBundle,
     resolved: ResolvedModel,
+    known_divergences: Mapping[str, str] | None = None,
 ) -> GateDecision:
     """Run the regression gate for a draft about to publish."""
     gate = bundle.config.eval_gate
     if gate == "off":
         return GateDecision(gated=False, detail="gate off")
-    # Baseline = the last PERSISTED regression run, read before this run is
-    # recorded. Apply is blue/green: a blocked publish aborts the whole apply
-    # and its create_run rolls back with it, so persisted runs only ever come
-    # from applies that fully published (or an operator's explicit `evals run`)
-    # — a failing attempt can never lower the bar for the next one. No
-    # flag/join needed; atomicity IS the filter.
-    prev = store.last_run_score(session, lens, "regression")
-    certified_results, certified_failures, corpus_alive = _certified_gate(
-        session=session, org_id=org_id, lens=lens, bundle=bundle, resolved=resolved
+    lane = _certified_gate(
+        session=session,
+        org_id=org_id,
+        lens=lens,
+        bundle=bundle,
+        resolved=resolved,
+        known=known_divergences,
     )
     behavioral_results = _behavioral_gate(
         session=session, org_id=org_id, lens=lens, bundle=bundle, resolved=resolved
     )
+    scored = lane.results + behavioral_results
+    # Baseline = the last PERSISTED regression run over the same case set, read
+    # before this run is recorded. Apply is blue/green: a blocked publish aborts
+    # the whole apply and its create_run rolls back with it, so persisted runs
+    # only ever come from applies that fully published (or an operator's
+    # explicit `evals run`) — a failing attempt can never lower the bar.
+    prev, baseline = previous_baseline(session, lens, (r.case_id for r in scored))
     outcome = build_and_run(
         session=session,
         org_id=org_id,
@@ -526,18 +761,9 @@ def evaluate_publish(
         bundle=bundle,
         mode="regression",
         resolved=resolved,
-        extra_results=certified_results + behavioral_results,
+        extra_results=scored,
     )
     if outcome is None:
-        if corpus_alive:
-            # The corpus exists; this push touched no answer's bindings — test
-            # selection selected zero, which is a quiet pass, not an inert gate.
-            return GateDecision(
-                gated=True,
-                score=None,
-                prev_score=prev,
-                detail="no binding-affected certified answers this push — nothing to re-test",
-            )
         # "empty suite" while hundreds of cases exist sends an operator hunting
         # a file-ingest bug: candidates are not scored, and the detail must say
         # how many are parked rather than implying absence.
@@ -554,8 +780,22 @@ def evaluate_publish(
             skip_reason="empty suite" if not candidates else "no approved cases",
             detail=f"no active certified answers and no approved behavioral cases{parked}",
         )
-    failing = [r.case_id for r in outcome.results if not r.passed]
+    failing = [
+        r.case_id
+        for r in outcome.results
+        if not r.passed and not r.case_id.startswith(REPORTED_PREFIX)
+    ]
+    if gate == "block_generation":
+        covered = {c.split(" — ", 1)[0] for c in lane.known_covered}
+        failing += [
+            r.case_id
+            for r in outcome.results
+            if not r.passed and r.case_id.startswith(REPORTED_PREFIX) and r.case_id not in covered
+        ]
     decision = gate_decision(gate=gate, score=outcome.run.score, prev_score=prev, failing=failing)
+    decision.baseline = baseline
+    decision.recorded = lane.recorded
+    decision.known_covered = lane.known_covered
     # Pass-on-retry cases: a different fact from a clean pass —
     # surfaced so wobble is visible and certifiable, never a phantom failure.
     from services.evals.runner import FLAKY_PREFIX
@@ -563,10 +803,16 @@ def evaluate_publish(
     decision.flaky = [
         r.case_id for r in outcome.results if r.passed and (r.reason or "").startswith(FLAKY_PREFIX)
     ]
-    decision.certified_failures = certified_failures
-    if certified_failures and gate == "block":
-        # A certified divergence blocks in its own right (decision 3): the apply
-        # aborts until the definition is fixed or the answer re-certified/retired
-        # in the same push — baseline machinery untouched for everything else.
+    # A restated certified value is an error in its own right under any
+    # blocking gate: the signed figure moved, and the apply aborts until the
+    # value is re-accepted or the data fixed. A generation divergence is the
+    # same kind of error only under block_generation; under block (and warn)
+    # it is reported, verbatim, and the certified answer stands.
+    decision.certified_failures = list(lane.restated)
+    if gate == "block_generation":
+        decision.certified_failures += lane.divergences
+    else:
+        decision.generation_divergences = lane.divergences
+    if decision.certified_failures and blocks(gate):
         decision.blocked = True
     return decision

@@ -134,3 +134,34 @@ def test_the_served_freshness_reason_names_the_table_the_stamp_names() -> None:
     # the in-band note carries the same table and date; the stamp is not
     # repeated after it
     assert "Note: data in orders is as of 2020-01-08" in res.response.answer
+
+
+def test_a_future_newest_time_value_dates_the_answer_to_today() -> None:
+    """A bookings table whose newest row lies ahead of the clock is "as of"
+    today, never the future date: the stamp, the freshness read and the
+    prose all clamp, and the hidden horizon is said beside the stamp."""
+    from services.lenses.profile_enrich import clamp_as_of, lens_today
+
+    model = jaffle_customer_value().model_copy(update={"stale_after_days": 3})
+    today = lens_today(model.timezone).isoformat()
+    ahead = "2099-11-30"
+    assert clamp_as_of(ahead, lens_today(model.timezone)) == (today, ahead)
+    assert clamp_as_of("2026-06-08", lens_today(model.timezone)) == ("2026-06-08", None)
+    res = run_query(
+        question="how many?",
+        lens_name="customer_value",
+        org_id="o",
+        caller="a",
+        semantic_model=model,
+        connector=FakeConnector(result=QueryResult(columns=["n"], rows=[[42]])),
+        generator=FixedSQLGenerator("SELECT count(*) AS n FROM orders"),
+        composer=AnswerComposer(ScriptedLLM(["There are 42 orders."])),
+        data_as_of=ahead,
+        table_as_of={"customers": "2026-06-01", "orders": ahead},
+    )
+    assert res.response.answer is not None
+    assert f"(data as of {today}, orders; rows dated to {ahead})" in res.response.answer
+    assert res.response.data_as_of == today
+    assert res.response.verification is not None
+    check = res.response.verification.check("freshness")
+    assert check is not None and check.status == "pass"

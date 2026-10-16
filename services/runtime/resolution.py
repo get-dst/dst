@@ -98,6 +98,18 @@ def from_intent(
     slots += [Slot(kind="metric", name=m, source="declared") for m in intent.metrics]
     slots += [Slot(kind="definition", name=d, source="declared") for d in intent.definitions]
     slots += [Slot(kind="dimension", name=d, source="declared") for d in intent.dimensions]
+    # Metrics on different time fields each take the window on their own
+    # field (compiler: _per_metric_windows); the ledger says so per metric.
+    entity = next((e for e in model.entities if e.name == intent.entity), None)
+    per_metric: dict[str, str] = {}
+    if entity is not None:
+        fields = {
+            m.name: m.agg_time_field or entity.default_time_field
+            for m in entity.metrics
+            if m.name in intent.metrics
+        }
+        if len(set(fields.values())) > 1:
+            per_metric = {m: f for m, f in fields.items() if f}
     slots += [Slot(kind="dimension", name=f, source="declared") for f in intent.fields]
     supplied_cols = {s.lower() for s in (supplied or [])}
     if intent.grain:
@@ -129,6 +141,17 @@ def from_intent(
             # The filter restates a governed predicate (the entity's population
             # filter, a definition): it IS that meaning, not an invented filter.
             continue
+        if per_metric and field in per_metric.values():
+            for metric, own in per_metric.items():
+                slots.append(
+                    Slot(
+                        kind="window",
+                        name=own,
+                        source="inferred",
+                        value=f"{own} {f.op} {f.value!r} ({metric})",
+                    )
+                )
+            continue
         if field.lower() in time_fields:
             slots.append(Slot(kind="window", name=field, source="inferred", value=text))
             continue
@@ -146,7 +169,12 @@ def from_intent(
         if field.lower() in supplied_cols:
             source = "supplied"
         slots.append(Slot(kind="filter", name=field, source=source, value=text))  # type: ignore[arg-type]
-    return Resolution(method="construction", slots=slots, tag=derive_tag(slots))
+    return Resolution(
+        method="construction",
+        slots=slots,
+        tag=derive_tag(slots),
+        definition_suggested=list(intent.definitions_suggested),
+    )
 
 
 LEVEL_READING = "latest snapshot in the window"

@@ -42,6 +42,7 @@ and not expanded); table-scope + read-only execution are the backstop there.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import sqlglot
 from sqlglot import exp
@@ -345,6 +346,67 @@ def entities_read(sql: str | None, model: SemanticModel) -> list[Entity]:
             if all(e.name != o.name for o in out):
                 out.append(e)
     return out
+
+
+def _as_words(name: str) -> str:
+    return " ".join(name.lower().replace("_", " ").replace("-", " ").split())
+
+
+def not_computable_hit(sql: str, model: SemanticModel) -> dict[str, Any] | None:
+    """The `not_computable` entry a caller-written statement runs into, or None.
+
+    The governed door refuses a QUESTION that names a declared not-computable
+    measure; this is the same rail for a statement, where the only names are
+    columns. Two shapes hit: a column the entry names — its measure or an
+    alias, underscores read as spaces, so `birth_date` is 'birth date' —
+    anywhere in the statement (projected or filtered: a filter on it is a
+    lookup); and, for an entry declared ``row_level``, a key column in the
+    outer projection outside any aggregate — one row per key IS the listing
+    the entry refuses, whatever the columns beside it are called. The keys are
+    the entry's own or the lens's entity primary keys. Unparseable SQL hits
+    nothing: the guard proper refuses it first."""
+    if not model.not_computable:
+        return None
+    try:
+        stmt = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001 — the guard's parse names the fault
+        return None
+    named = {
+        _as_words(c.name) for c in stmt.find_all(exp.Column) if not isinstance(c.this, exp.Star)
+    }
+    projections: list[Any] = _output_projections(stmt) or []  # type: ignore[arg-type]
+    row_keys = {
+        c.name.lower()
+        for proj in projections
+        for c in proj.find_all(exp.Column)
+        if not isinstance(c.this, exp.Star) and not _under_aggregate(c, proj)
+    }
+    entity_keys = {k.lower() for e in model.entities for k in e.primary_key}
+    for entry in model.not_computable:
+        aliases = entry.get("aliases")
+        surfaces = {
+            _as_words(str(s))
+            for s in [entry.get("measure") or "", *(aliases if isinstance(aliases, list) else [])]
+            if str(s).strip()
+        }
+        if surfaces & named:
+            return entry
+        if entry.get("row_level"):
+            keys = {str(k).lower() for k in entry.get("keys") or []} or entity_keys
+            if keys & row_keys:
+                return entry
+    return None
+
+
+def _under_aggregate(col: exp.Column, projection: exp.Expression) -> bool:
+    """Is the column inside an aggregate within this projection? `COUNT(DISTINCT
+    patient_id)` is a count, not a listing; bare `patient_id` is the listing."""
+    node: Any = col.parent
+    while node is not None and node is not projection.parent:
+        if isinstance(node, exp.AggFunc):
+            return True
+        node = node.parent
+    return False
 
 
 def _lens_names(model: SemanticModel) -> set[str]:

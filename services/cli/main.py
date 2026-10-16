@@ -1530,13 +1530,24 @@ def _drift_one(
         written = wd.advance_baseline(
             root, args.connection, current, artifact.tables if artifact else None
         )
-        if written is not None and not findings and not args.as_json:
+        if written is not None and not args.as_json:
             rel = written.relative_to(root) if written.is_relative_to(root) else written
-            print(
-                f"note: baseline for '{args.connection}' re-recorded with the newest "
-                f"probe's measured facts -> {rel}",
-                file=sys.stderr,
-            )
+            if findings:
+                # What was signed off, table by table, old -> new: an accept
+                # that closes findings in silence is the evidence gone.
+                print(
+                    f"note: baseline for '{args.connection}' advanced over "
+                    f"{len(findings)} finding(s) -> {rel}:",
+                    file=sys.stderr,
+                )
+                for line in wd.accepted_lines(findings):
+                    print(line, file=sys.stderr)
+            else:
+                print(
+                    f"note: baseline for '{args.connection}' re-recorded with the newest "
+                    f"probe's measured facts -> {rel}",
+                    file=sys.stderr,
+                )
         return 0, payload
     return wd.exit_code(findings), payload
 
@@ -3450,23 +3461,48 @@ def _apply(args: argparse.Namespace) -> int:
     # to CI/agents.
     ok = all(r.get("action") != "rejected" and not r.get("errors") for r in out)
     if ok:
-        _advance_baselines(Path(getattr(args, "dir", ".") or "."))
+        _advance_baselines(
+            Path(getattr(args, "dir", ".") or "."),
+            accept_drift=bool(getattr(args, "accept_drift", False)),
+        )
     return 0 if ok else 1
 
 
-def _advance_baselines(root: Path) -> None:
+def _advance_baselines(root: Path, *, accept_drift: bool = False) -> None:
     """A deploy is the moment the layer was reviewed against the warehouse as
     the probe artifact records it, so the drift baseline advances to that
     artifact here — the one other moment besides `dst drift --accept`. Only
     when the recorded facts actually differ: a deploy that moved nothing
-    leaves no timestamp-only commit."""
+    leaves no timestamp-only commit. And only when the artifact carries no
+    BREAKING finding against the baseline, or `--accept-drift` was passed:
+    a CI job that runs drift and then apply must not have apply bury the
+    breakage drift just reported. The layer still lands either way; what is
+    left alone is the baseline, and the report says so and why."""
     from services.project import probe as probe_artifact
     from services.project import warehouse_drift as wd
 
+    project_files: dict[str, str] | None = None
     for path in sorted((root / wd.BASELINE_DIR).glob(f"*{probe_artifact.PROBE_SUFFIX}")):
         try:
             artifact = probe_artifact.parse_probe(path.read_text(encoding="utf-8"), str(path))
         except (ValueError, OSError):
+            continue
+        if project_files is None:
+            project_files = _read_project(root)
+        findings = wd.pending_findings(
+            root, artifact.connection, artifact.tables, project_files, _drift_tolerance(root)
+        )
+        breaking = [f for f in findings if wd.is_breaking(f)]
+        if breaking and not accept_drift:
+            print(
+                f"drift baseline for '{artifact.connection}' left alone: {len(breaking)} "
+                "BREAKING finding(s) against the pushed artifact — review with `dst drift`, "
+                "then `dst drift --accept` or `dst apply --accept-drift` once reviewed:",
+                file=sys.stderr,
+            )
+            for finding in breaking:
+                for line in wd.render(finding):
+                    print("  " + line, file=sys.stderr)
             continue
         # The same merge `dst drift --accept` performs: the artifact's catalog
         # with its measured facts, and the prior baseline's facts for columns
@@ -3474,7 +3510,14 @@ def _advance_baselines(root: Path) -> None:
         written = wd.advance_baseline(root, artifact.connection, artifact.tables, artifact.tables)
         if written is not None:
             rel = written.relative_to(root) if written.is_relative_to(root) else written
-            print(f"drift baseline advanced for '{artifact.connection}' -> {rel}", file=sys.stderr)
+            over = f" over {len(findings)} finding(s)" if findings else ""
+            print(
+                f"drift baseline advanced for '{artifact.connection}'{over} -> {rel}"
+                + (":" if findings else ""),
+                file=sys.stderr,
+            )
+            for line in wd.accepted_lines(findings):
+                print(line, file=sys.stderr)
 
 
 def _semantic(args: argparse.Namespace) -> int:
@@ -5251,7 +5294,12 @@ def _evals_gate(args: argparse.Namespace) -> int:
         print(f"{style.accent('lens ' + args.lens)}: gate {painted}")
         if d.get("score") is not None:
             prev = d.get("prev_score")
-            print(f"  score {d['score']}" + (f" (prev {prev})" if prev is not None else ""))
+            bar = (
+                f" (prev {prev})"
+                if prev is not None
+                else f" ({d.get('baseline') or 'no previous run'})"
+            )
+            print(f"  score {d['score']}{bar}")
         for q in d.get("failing") or []:
             print(f"  {style.bad('failing:')} {q}")
         for m in d.get("certified_failures") or []:
@@ -7023,7 +7071,15 @@ def main() -> int:
                 help="re-record the sample result of every stored template whose explicit "
                 "start/end binding reads inclusive since 0.10.0 (the certify self-test "
                 "names them): executes the sample-bound SQL once more and re-stamps "
-                "verified value, bindings and terms",
+                "verified value, bindings and terms; prints old -> new per template",
+            )
+            p.add_argument(
+                "--accept-drift",
+                action="store_true",
+                help="advance the drift baseline to the pushed probe artifact even when "
+                "it carries BREAKING findings against the recorded baseline; without "
+                "it a clean apply still lands the layer but leaves the baseline alone "
+                "and names the findings (same act as `dst drift --accept`)",
             )
             p.add_argument(
                 "--json",
@@ -7050,6 +7106,7 @@ def main() -> int:
             p.add_argument(
                 "--allow-failing-cases",
                 nargs="*",
+                action="extend",
                 metavar="CASE_ID",
                 help="publish once past a gate block WITHOUT editing eval_gate in the "
                 "file — audited: requires --reason, which lands in the version history "

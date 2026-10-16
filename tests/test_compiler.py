@@ -961,3 +961,210 @@ def test_an_unknown_additivity_is_rejected_where_plan_and_apply_validate() -> No
                 ],
             }
         )
+
+
+# ── two metrics, two time fields: each takes the window on its own field ─────
+
+
+def _two_clock_model() -> SemanticModel:
+    invoices = Entity(
+        name="invoices",
+        source=EntitySource(connection="jaffle", table="invoices"),
+        default_time_field="invoice_date",
+        fields=[
+            Field(name="invoice_date", type="date"),
+            Field(name="paid_date", type="date"),
+            Field(name="amount", type="number"),
+            Field(name="paid_amount", type="number"),
+        ],
+        metrics=[
+            Metric(name="invoiced", agg="sum", expr="invoices.amount"),
+            Metric(
+                name="collected",
+                agg="sum",
+                expr="invoices.paid_amount",
+                agg_time_field="paid_date",
+            ),
+        ],
+    )
+    return SemanticModel(lens="t", dialect="duckdb", entities=[invoices])
+
+
+_SEPTEMBER = [
+    IntentFilter(field="paid_date", op=">=", value="2026-09-01"),
+    IntentFilter(field="paid_date", op="<=", value="2026-09-30"),
+]
+
+
+def test_each_metric_takes_the_window_on_its_own_time_field() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="invoices", metrics=["invoiced", "collected"], filters=_SEPTEMBER),
+        _two_clock_model(),
+    )
+    assert "SUM(CASE WHEN invoices.invoice_date >= '2026-09-01'" in sql
+    assert "invoices.invoice_date <= '2026-09-30' THEN invoices.amount END) AS invoiced" in sql
+    assert "SUM(CASE WHEN invoices.paid_date >= '2026-09-01'" in sql
+    assert "invoices.paid_date <= '2026-09-30' THEN invoices.paid_amount END) AS collected" in sql
+    assert "WHERE" not in sql  # the window moved inside the aggregates
+
+
+def test_the_two_windows_yield_different_values() -> None:
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE invoices AS SELECT * FROM (VALUES "
+        "(DATE '2026-09-10', DATE '2026-10-05', 100, 100), "  # invoiced Sep, collected Oct
+        "(DATE '2026-08-20', DATE '2026-09-15', 40, 40), "  # invoiced Aug, collected Sep
+        "(DATE '2026-09-25', DATE '2026-09-28', 7, 7)"  # both in Sep
+        ") t(invoice_date, paid_date, amount, paid_amount)"
+    )
+    sql = compile_intent(
+        QueryIntent(entity="invoices", metrics=["invoiced", "collected"], filters=_SEPTEMBER),
+        _two_clock_model(),
+    )
+    assert con.execute(sql).fetchone() == (107, 47)
+
+
+def test_one_metric_keeps_a_plain_where_window() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="invoices", metrics=["invoiced"], filters=_SEPTEMBER),
+        _two_clock_model(),
+    )
+    assert "WHERE invoices.paid_date >= '2026-09-01'" in sql and "CASE" not in sql
+
+
+def test_a_metric_without_a_time_field_cannot_take_its_own_window() -> None:
+    model = _two_clock_model()
+    model.entities[0].default_time_field = None
+    with pytest.raises(CompileError, match="invoiced has none to place the window on"):
+        compile_intent(
+            QueryIntent(entity="invoices", metrics=["invoiced", "collected"], filters=_SEPTEMBER),
+            model,
+        )
+
+
+def test_per_metric_windows_ride_the_ledger_per_metric() -> None:
+    from services.runtime.resolution import from_intent
+
+    res = from_intent(
+        QueryIntent(entity="invoices", metrics=["invoiced", "collected"], filters=_SEPTEMBER),
+        _two_clock_model(),
+        None,
+    )
+    windows = {(s.name, s.value) for s in res.slots if s.kind == "window"}
+    assert ("invoice_date", "invoice_date >= '2026-09-01' (invoiced)") in windows
+    assert ("paid_date", "paid_date >= '2026-09-01' (collected)") in windows
+
+
+def test_the_compile_refusal_is_fed_back_to_the_generator_once() -> None:
+    class Recording(ScriptedLLM):
+        def __init__(self, responses: list[str]) -> None:
+            super().__init__(responses)
+            self.turns: list[int] = []
+
+        def complete(self, *, messages: list[object], **kw: object) -> object:  # type: ignore[override]
+            self.turns.append(len(messages))
+            return super().complete(messages=messages, **kw)  # type: ignore[arg-type]
+
+    # First try: a grain two time fields cannot share; the repair drops the grain.
+    bad = '{"entity": "invoices", "metrics": ["invoiced", "collected"], "grain": "month"}'
+    good = '{"entity": "invoices", "metrics": ["invoiced", "collected"]}'
+    llm = Recording([bad, good])
+    gq = IntentSQLGenerator(llm).generate(
+        question="invoiced and collected",
+        semantic_model=_two_clock_model(),
+        prose_context=[],
+        dialect="duckdb",
+    )
+    assert "AS invoiced" in gq.sql and "AS collected" in gq.sql
+    assert llm.turns == [1, 3]  # the second call carries the refusal as feedback
+
+
+def test_an_unrepaired_split_refusal_clarifies() -> None:
+    bad = '{"entity": "invoices", "metrics": ["invoiced", "collected"], "grain": "month"}'
+    gq = IntentSQLGenerator(ScriptedLLM([bad])).generate(
+        question="invoiced and collected by month",
+        semantic_model=_two_clock_model(),
+        prose_context=[],
+        dialect="duckdb",
+    )
+    assert gq.sql == "" and gq.clarification is not None
+    assert "disagree about which time field" in gq.clarification.question
+
+
+# ── a definition the question never names is suggested, not applied ──────────
+
+
+def _defined_model() -> SemanticModel:
+    model = _two_clock_model()
+    model.definitions = [
+        Definition(
+            term="large account",
+            aliases=["key account"],
+            body="invoices over a threshold",
+            about="invoices.invoiced",
+            sql_expr="invoices.amount > 1000",
+        ),
+        Definition(
+            term="disputed",
+            body="invoices under dispute",
+            sql_expr="invoices.amount < 0",
+        ),
+    ]
+    return model
+
+
+_PICKS_DISPUTED = (
+    '{"entity": "invoices", "metrics": ["invoiced"], "definitions": ["disputed"], '
+    '"filters": [{"field": "invoice_date", "op": ">=", "value": "2026-10-01"}]}'
+)
+
+
+def test_a_definition_the_question_never_names_is_not_compiled() -> None:
+    from services.runtime.resolution import from_intent
+
+    gq = IntentSQLGenerator(ScriptedLLM([_PICKS_DISPUTED])).generate(
+        question="invoiced October",
+        semantic_model=_defined_model(),
+        prose_context=[],
+        dialect="duckdb",
+    )
+    assert "amount < 0" not in gq.sql and "invoice_date >= '2026-10-01'" in gq.sql
+    assert gq.intent is not None and gq.intent.definitions == []
+    res = from_intent(gq.intent, _defined_model(), None)
+    assert res.definition_suggested == ["disputed"]
+    assert not [s for s in res.slots if s.kind == "definition"]
+
+
+@pytest.mark.parametrize("question", ["disputed invoiced in October", "Disputed invoices, October"])
+def test_a_definition_the_question_names_is_applied(question: str) -> None:
+    gq = IntentSQLGenerator(ScriptedLLM([_PICKS_DISPUTED])).generate(
+        question=question,
+        semantic_model=_defined_model(),
+        prose_context=[],
+        dialect="duckdb",
+    )
+    assert "(invoices.amount < 0)" in gq.sql
+    assert gq.intent is not None and gq.intent.definitions == ["disputed"]
+    assert gq.intent.definitions_suggested == []
+
+
+def test_naming_the_alias_or_the_about_metric_counts_as_naming() -> None:
+    picks = '{"entity": "invoices", "metrics": ["invoiced"], "definitions": ["large account"]}'
+    for question in ("key account invoiced", "invoiced for large accounts?", "invoiced total"):
+        gq = IntentSQLGenerator(ScriptedLLM([picks])).generate(
+            question=question,
+            semantic_model=_defined_model(),
+            prose_context=[],
+            dialect="duckdb",
+        )
+        assert "amount > 1000" in gq.sql, question
+    gq = IntentSQLGenerator(ScriptedLLM([picks])).generate(
+        question="total collected",
+        semantic_model=_defined_model(),
+        prose_context=[],
+        dialect="duckdb",
+    )
+    assert "amount > 1000" not in gq.sql
+    assert gq.intent is not None and gq.intent.definitions_suggested == ["large account"]

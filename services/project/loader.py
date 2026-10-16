@@ -2,7 +2,8 @@
 
 Pure (``{path: content}`` in, no filesystem) so the CLI, the mgmt endpoints, and
 tests all share one implementation. Managed paths: lens.yaml, queries.yaml,
-definitions/*.md (lens-LOCAL terms), certified_answers.yaml, evals/cases.yaml.
+definitions/*.md (lens-LOCAL terms), certified_answers.yaml, evals/cases.yaml,
+evals/known_divergences.yaml.
 README.md, compiled.yaml, audit/*, and certified/* (certified-definition pages —
 export-only in v1) are runtime outputs the loader ignores.
 
@@ -30,7 +31,13 @@ from services.semantic.files import (
     page_to_definition,
 )
 
-MANAGED_EXACT = ("lens.yaml", "queries.yaml", "certified_answers.yaml", "evals/cases.yaml")
+MANAGED_EXACT = (
+    "lens.yaml",
+    "queries.yaml",
+    "certified_answers.yaml",
+    "evals/cases.yaml",
+    "evals/known_divergences.yaml",
+)
 
 # queries.yaml has no model of its own (its two keys land on different objects),
 # so its top level gets the unknown-key rule by hand.
@@ -175,6 +182,10 @@ class LensSource:
     # win: file-originated answers absent from it delete on apply).
     certified_answers: list[dict[str, Any]] | None = None
     eval_cases: list[dict[str, Any]] = field(default_factory=list)
+    # evals/known_divergences.yaml: certified answers generation is not
+    # expected to reproduce, each with a reason — the publish gate reports
+    # those divergences as covered instead of blocking on them.
+    known_divergences: list[dict[str, Any]] = field(default_factory=list)
     # Keys that parsed but are read by nothing — apply surfaces these as
     # warnings. A real key that does nothing is not an error (projects author
     # them, the server's own render emits some), but it must not be silent.
@@ -228,6 +239,9 @@ def load_lens_source(files: dict[str, str]) -> LensSource:
         sample_queries=sample_queries,
         certified_answers=certified_answers,
         eval_cases=_yaml_list(files.get("evals/cases.yaml"), "evals/cases.yaml"),
+        known_divergences=_yaml_list(
+            files.get("evals/known_divergences.yaml"), "evals/known_divergences.yaml"
+        ),
         notes=notes,
     )
 

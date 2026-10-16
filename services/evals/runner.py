@@ -78,11 +78,19 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
+#: Case ids under this prefix ride a run for the record and never move its
+#: score: the generation lane of the publish gate (does generation still
+#: reproduce a certified answer?) is reported, not graded — the certified
+#: answer is the override.
+REPORTED_PREFIX = "generation:"
+
+
 def _finish(lens: str, mode: str, results: list[EvalResult]) -> RunOutcome:
-    passed = sum(1 for r in results if r.passed)
-    errored = sum(1 for r in results if r.grade == "errored")
-    failed = len(results) - passed - errored
-    total = len(results)
+    scored = [r for r in results if not r.case_id.startswith(REPORTED_PREFIX)]
+    passed = sum(1 for r in scored if r.passed)
+    errored = sum(1 for r in scored if r.grade == "errored")
+    failed = len(scored) - passed - errored
+    total = len(scored)
     run = EvalRun(
         id="er_" + uuid.uuid4().hex[:12],
         lens=lens,

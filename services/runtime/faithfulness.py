@@ -626,7 +626,11 @@ def numeric_check(
     direct match ("51.9%" is the rendering of 0.5192…; "42%" is not a rendering of
     0.41); a plain number never scales. Multiples and "N% less/more" comparisons
     are derived, not data claims, and are skipped. A bare rate with no backing
-    still fails. No numeric claims at all is reported as skip (`no_numeric_claims`).
+    still fails — unless the QUESTION asked for a share, a delta or a ratio: then
+    a claim that is exactly (to its printed precision) one division or
+    subtraction of two result values grounds, and the pass names the
+    derivation (``derivation``). No numeric claims at all is reported as skip
+    (`no_numeric_claims`).
 
     ``truncated`` = the caller's result window is SHORT of the query's full result
     (the pipeline's row cap bit). The rows a soft-skipped derivation would rest on
@@ -718,6 +722,12 @@ def numeric_check(
                 and _BARE_YEAR.fullmatch(m.group(1)) is not None
             )
         )
+        if not grounded and not truncated and _ARITHMETIC_ASK.search(question_text):
+            derived = derivation(value, kind, m.group(1), result)
+            if derived is not None:
+                grounded_any = True
+                count_reasons.append(derived)
+                continue
         if not grounded:
             if not truncated and kind == "percent" and _CHANGE_CUE.search(answer_text[: m.start()]):
                 # "down 12% vs June" over two period cells: derived arithmetic,
@@ -745,6 +755,59 @@ def numeric_check(
     if not grounded_any:
         return "skip", "only_derived_claims"
     return "pass", ("; ".join(count_reasons) if count_reasons else None)
+
+
+# The question asked for arithmetic over the rows: a share, a delta, a ratio.
+# Only then does a claim get to ground as ONE division or subtraction of two
+# result values — the composer was asked to compute it, so the figure is the
+# answer, not an invention; without the ask, derived figures stay ungrounded.
+_ARITHMETIC_ASK = re.compile(
+    r"\b(share|shares|proportion|percentage of|percent of|fraction|ratio|rate of"
+    r"|delta|difference|change|growth|increase|decrease|gap|vs\.?|versus|compared)\b",
+    re.IGNORECASE,
+)
+# Pairs considered for a derivation — bounded so a wide result stays cheap.
+_DERIVE_CELL_CAP = 64
+
+
+def _printed_decimals(claim: str) -> int:
+    """How many decimals the claim is written with — the precision a
+    derivation must be exact to."""
+    body = claim.replace(",", "").replace(" ", "")
+    return len(body.split(".")[1]) if "." in body else 0
+
+
+def derivation(value: float, kind: str, claim: str, result: QueryResult) -> str | None:
+    """The one division or subtraction of two result values that renders the
+    claim exactly to its printed precision, named — or None. A plain claim may
+    be ``a - b`` or ``a / b``; a '%'-marked claim ``a / b`` or ``(a - b) / b``
+    in percent space. Column totals count as values, so "share of the total"
+    grounds against the rows' own sum."""
+    cells = [v for v, _ in _cells(result)[:_DERIVE_CELL_CAP]]
+    pool = cells + _column_totals(result)[: len(result.columns)]
+    if len(pool) < 2:
+        return None
+    nd = _printed_decimals(claim)
+    tol = 0.5 * 10**-nd + 1e-9
+
+    def exact(candidate: float) -> bool:
+        return bool(abs(candidate - value) <= tol)
+
+    for i, a in enumerate(pool):
+        for j, b in enumerate(pool):
+            if i == j:
+                continue
+            if kind == "plain":
+                if exact(a - b):
+                    return f"{claim} = {_significant(a)} - {_significant(b)}"
+                if b and exact(a / b):
+                    return f"{claim} = {_significant(a)} / {_significant(b)}"
+            elif kind == "percent" and b:
+                if exact(a / b * 100):
+                    return f"{claim}% = {_significant(a)} / {_significant(b)}"
+                if exact((a - b) / b * 100):
+                    return f"{claim}% = ({_significant(a)} - {_significant(b)}) / {_significant(b)}"
+    return None
 
 
 def _count_elsewhere(value: float, result: QueryResult) -> str | None:

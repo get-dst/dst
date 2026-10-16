@@ -13,7 +13,7 @@ import functools
 import re
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -30,7 +30,7 @@ from services.contracts.protocols import (
     LLMProvider,
     QueryGenerator,
 )
-from services.contracts.resolution import DecisionRecord, Resolution
+from services.contracts.resolution import DecisionRecord, Resolution, Slot
 from services.contracts.response import (
     CertifiedProvenance,
     ClarificationRequest,
@@ -38,10 +38,18 @@ from services.contracts.response import (
     QueryResponse,
     TruncationInfo,
 )
-from services.contracts.semantic_model import SemanticModel
+from services.contracts.semantic_model import Definition, SemanticModel
 from services.contracts.trace import TraceLog
+from services.contracts.verification import VerificationCheck
 from services.lenses.profile_age import ProfileAge
-from services.lenses.profile_enrich import EntityCoverage, ReadTable, scope_as_of
+from services.lenses.profile_enrich import (
+    EntityCoverage,
+    ReadTable,
+    clamp_as_of,
+    clamp_table_as_of,
+    lens_today,
+    scope_as_of,
+)
 from services.observability import cost
 from services.reviews.judge import judge_trace, judge_typed
 from services.reviews.store import Trace as ReviewTrace
@@ -181,6 +189,12 @@ def _nc_surfaces(entry: dict[str, object]) -> list[str]:
     aliases = entry.get("aliases")
     alias_list = [str(a) for a in aliases] if isinstance(aliases, list) else []
     return [s.replace("_", " ").lower().strip() for s in [measure, *alias_list] if s.strip()]
+
+
+def not_computable_refusal(entry: dict[str, object]) -> str:
+    """The sentence a `not_computable` entry refuses with — the one wording
+    every door uses (`query`, the `sql` door, a router decline)."""
+    return _nc_refusal(entry)
 
 
 def _nc_refusal(entry: dict[str, object]) -> str:
@@ -504,6 +518,35 @@ def _parsed_columns(expr: str) -> list[exp.Column]:
     return list(tree.find_all(exp.Column)) if tree is not None else []
 
 
+def certified_definitions(
+    sql: str, columns: Sequence[str], model: SemanticModel
+) -> list[Definition]:
+    """The definitions a certified serve must disclose: those ``about`` a
+    column the approved SQL touches on an entity it reads, plus those the
+    served columns bind to (``governing_definitions``, the composer's own
+    rail). Attribution by expression still runs first; this is the floor for
+    pages that carry no expression and would otherwise reach nobody."""
+    tables = {e.name.lower(): e.source.table.lower() for e in model.entities}
+    sql_l = sql.lower()
+
+    def reads(d: Definition) -> bool:
+        head, dot, member = (d.about or "").rpartition(".")
+        if not dot or not head.strip() or not member.strip():
+            return False
+        table = tables.get(head.strip().lower())
+        if table is None:
+            return False
+        return (
+            re.search(rf"\b{re.escape(table)}\b", sql_l) is not None
+            or re.search(rf"\b{re.escape(head.strip().lower())}\b", sql_l) is not None
+        ) and verification._touches(member.strip(), sql)
+
+    out = [d for d in model.definitions if reads(d)]
+    seen = {d.term for d in out}
+    out.extend(d for d in governing_definitions(model, columns) if d.term not in seen)
+    return out
+
+
 def run_query(
     *,
     question: str,
@@ -526,6 +569,12 @@ def run_query(
     certified_provenance: CertifiedProvenance | None = None,
     certified_question: str | None = None,
     verified_prose: str | None = None,
+    # The result the approved SQL produced when a human verified it (the
+    # store's verified_value summary), and for a template the sample binding
+    # that result was recorded under. The `restated` check compares the live
+    # result against it; None = nothing stored, the check abstains.
+    verified_value: Mapping[str, object] | None = None,
+    verified_bindings: Mapping[str, object] | None = None,
     inline_judge_llm: LLMProvider | None = None,
     judge_model: str = "claude-sonnet-4-6",
     adversary_llm: LLMProvider | None = None,
@@ -1475,6 +1524,32 @@ def run_query(
         if nc_column is not None:
             return _trace_failure("refused", guard.sql, nc_column)
 
+    # Before any prose: has the approved SQL's result MOVED since a human
+    # verified it? Certify-time prose describes the value of that day; served
+    # over a different value it is yesterday's sentence under today's badge.
+    # The check fails loud (grade at most partial, a RESTATED line, no
+    # verbatim prose); a template compares only when it serves the sample
+    # binding its value was recorded under, and abstains otherwise.
+    restated_check: VerificationCheck | None = None
+    restated: tuple[str, str] | None = None
+    if certification == "certified":
+        skip_reason: str | None = None
+        if certified_match == "parameterized":
+            bound = (
+                {k: str(v) for k, v in (certified_provenance.bound_values or {}).items()}
+                if certified_provenance is not None
+                else {}
+            )
+            sample = {k: str(v) for k, v in (verified_bindings or {}).items()}
+            if not sample or bound != sample:
+                skip_reason = (
+                    "a template's verified value was recorded for its sample binding; "
+                    "this serve bound other values, so there is nothing to compare"
+                )
+        restated_check, restated = verification.restated_check(
+            verified_value, served, skip_reason=skip_reason
+        )
+
     # On a certified serve, no model writes the answer. ``static_prose``
     # names why numeric_grounding SKIPS (there is no free prose to catch
     # inventing); the badge is the static certified state, and the text is
@@ -1516,12 +1591,14 @@ def run_query(
             "deterministic certified render — the answer text was written by code "
             "from the result rows, no prose was composed"
         )
-    elif certification == "certified" and verified_prose is not None:
+    elif certification == "certified" and verified_prose is not None and restated is None:
         # A fixed certified answer serves its certify-time prose VERBATIM: the
         # English was composed once from the executed result when a human
         # certified it, and re-composing per request is where the ~6s and the
         # badge wobble lived. No composer call, no reconcile —
-        # the stored prose already went through both at certify time.
+        # the stored prose already went through both at certify time. A
+        # result that moved since (`restated`) falls through to the composer:
+        # the stored sentence states the old number.
         ans = AnswerResult(
             text=verified_prose,
             no_answer_reason=decline_reason(verified_prose),
@@ -1666,16 +1743,31 @@ def run_query(
     # answer, a dimension only when nothing else was read, and the lens-wide
     # floor stands only when no table resolves (the as-of stamp and the
     # freshness check below read the same date).
+    # A newest time value ahead of the clock (future bookings, forecast rows)
+    # is clamped to today before anything reads it: the as-of stamp, the
+    # freshness check and the prose all date from the clamped value, and the
+    # horizon the clamp hid is said beside it.
+    today = lens_today(semantic_model.timezone)
     as_of_table: str | None = None
+    as_of_horizon: str | None = None
+    if data_as_of:
+        data_as_of, as_of_horizon = clamp_as_of(str(data_as_of), today)
     if table_as_of:
         read = [
             ReadTable(table=e.source.table, name=e.name, dated=bool(e.default_time_field))
             for e in sql_guard.entities_read(guard.sql, semantic_model)
         ]
-        scoped, as_of_table = scope_as_of(table_as_of, read)
+        clamped_as_of, horizons = clamp_table_as_of(table_as_of, today)
+        scoped, as_of_table = scope_as_of(clamped_as_of, read)
         if scoped is not None:
             data_as_of = scoped
+            as_of_horizon = next(
+                (horizons.get(t.table) for t in read if t.name == as_of_table), None
+            )
 
+    # A compiled serve (the sole-metric door, typed serving) carries the
+    # metric names the compiler was handed; definition_applied passes on them.
+    compiled_metrics = list(gen.intent.metrics) if gen.intent is not None else []
     report = verification.build_report(
         question=question,
         sql=guard.sql,
@@ -1693,6 +1785,9 @@ def run_query(
         as_of_table=as_of_table,
         entity_coverage=entity_coverage,
         profile_stale=profile_age is not None and profile_age.stale,
+        compiled_metrics=compiled_metrics,
+        restated=restated_check,
+        certified_question=certified_question,
     )
     # Figure gate: a composed answer whose numeric_grounding check FAILS
     # is an invented figure on its way to a caller. Retry composition ONCE with
@@ -1765,6 +1860,8 @@ def run_query(
                     composed=True,
                     investigation=investigation,
                     entity_coverage=entity_coverage,
+                    compiled_metrics=compiled_metrics,
+                    certified_question=certified_question,
                 )
                 regate = regraded.check("numeric_grounding")
                 if regate is None or regate.status != "fail":
@@ -2041,6 +2138,14 @@ def run_query(
         (c for c in report.checks if c.name == "freshness" and c.status == "fail"),
         None,
     )
+    if restated is not None:
+        answer_text += (
+            f" This answer's result has changed since it was verified (from {restated[0]} "
+            f"to {restated[1]})."
+            if consumer
+            else f" Note: the certified result moved from {restated[0]} to {restated[1]} "
+            "since this answer was verified; the figures above are today's."
+        )
     if stale is not None and stale.reason:
         answer_text += (
             f" The data is from {spoken_date(str(data_as_of)[:10])} and may be out of date."
@@ -2073,10 +2178,14 @@ def run_query(
         stamp = spoken_date(as_of_day) if consumer else as_of_day
         if stamp not in answer_text:
             of_table = f", {as_of_table}" if as_of_table else ""
+            ahead = ""
+            if as_of_horizon:
+                to = spoken_date(as_of_horizon) if consumer else as_of_horizon
+                ahead = f"; rows dated to {to}"
             answer_text += (
-                f" (as of {stamp}{of_table})"
+                f" (as of {stamp}{of_table}{ahead})"
                 if consumer
-                else f" (data as of {as_of_day}{of_table})"
+                else f" (data as of {as_of_day}{of_table}{ahead})"
             )
 
     data = DataPayload(
@@ -2113,6 +2222,31 @@ def run_query(
                 f"on {certified_provenance.certified_at[:10]}; "
                 "served from approved SQL, no AI generation."
             )
+    if certification == "certified":
+        # Disclosure rides the certified answer too: the definitions written
+        # over what the approved SQL reads (`about` a column it touches) or
+        # over the columns it serves name the governed meaning on the basis
+        # line, in `definition_used` and on the ledger, exactly as a generated
+        # answer's do. Approval vouches for the SQL, not for the reader
+        # knowing which meaning of "revenue" it computes.
+        governed = certified_definitions(guard.sql, served.columns, semantic_model)
+        if definition_used is None and governed:
+            definition_used = governed[0].term
+        basis = [
+            line
+            for term in dict.fromkeys([definition_used, *(d.term for d in governed)])
+            if term and (line := _basis_line(term, semantic_model))
+        ]
+        if basis:
+            trust_summary = (
+                f"{trust_summary} {' '.join(basis)}" if trust_summary else " ".join(basis)
+            )
+        on_ledger = {slot.name for slot in ledger.slots if slot.kind == "definition"}
+        ledger.slots.extend(
+            Slot(kind="definition", name=d.term, source="certified", value=d.sql_expr or d.about)
+            for d in governed
+            if d.term not in on_ledger
+        )
     if scopes:
         scope_line = "Population: " + "; ".join(scopes) + "."
         trust_summary = f"{trust_summary} {scope_line}" if trust_summary else scope_line
@@ -2151,6 +2285,17 @@ def run_query(
     for item in declined:
         what, _, why = item.partition(": ")
         degraded_notes.append(f"answered the rest: {what} is {why}")
+    if restated is not None:
+        # Same idiom: the approved SQL's result is not the one a human verified.
+        old, new = restated
+        when = (
+            f" since it was verified on {certified_provenance.certified_at[:10]}"
+            if certified_provenance is not None and certified_provenance.certified_at
+            else " since it was verified"
+        )
+        degraded_notes.append(
+            f"RESTATED: this certified answer's result moved from {old} to {new}{when}"
+        )
     if profile_age is not None and profile_age.stale:
         # Same idiom again: the facts behind this answer (data_as_of, the
         # dictionaries, the date span) are older than the project allows, and

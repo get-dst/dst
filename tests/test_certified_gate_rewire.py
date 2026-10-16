@@ -138,7 +138,7 @@ def _files(
     entity_tweak: str | None = None,
     cases: list[dict[str, object]] | None = None,
     resolve_ambiguity: bool = False,
-    gate: Literal["off", "warn", "block"] = "block",
+    gate: Literal["off", "warn", "block", "block_generation"] = "block",
 ) -> dict[str, str]:
     """The jaffle project with eval_gate: block and NO sample queries (a sample
     embedding the old definition logic would trip the stale-sample gate first —
@@ -247,9 +247,10 @@ def test_divergence_message_verbatim_shape() -> None:
 @needs_db
 def test_unrelated_change_tests_nothing(org, monkeypatch) -> None:
     """Binding-scoped selection: the answer binds customers (+ its definition);
-    an ORDERS edit must not run it — the scripted garbage LLM would abort the
-    apply if the suite consumed it. No run is recorded either (nothing scored,
-    the baseline machinery stays untouched)."""
+    an ORDERS edit must not run generation on it — the scripted garbage LLM
+    would abort the apply if the suite consumed it. The value lane still
+    grades the answer against its stored value on every push (one query, no
+    model), so a run IS recorded, over the same case set each time."""
     oid, headers = org
     _gate_llm(monkeypatch, ["GARBAGE ;;;"])
     out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
@@ -263,14 +264,21 @@ def test_unrelated_change_tests_nothing(org, monkeypatch) -> None:
     assert not any(e.get("errors") for e in out)
     assert not any(e.get("action") == "aborted" for e in out)
     with org_session(oid) as s:
-        assert eval_store.list_runs(s, "customer_value") == []
+        runs = eval_store.list_runs(s, "customer_value")
+        assert [r.score for r in runs] == [1.0, 1.0]
+        case_sets = [{r.case_id for r in eval_store.list_results(s, run.id)} for run in runs]
+        assert case_sets[0] == case_sets[1] and all(
+            c.startswith("certified:") for c in case_sets[0]
+        )
 
 
 @needs_db
 def test_acceptance_flow_certify_break_abort_retire_green(org, monkeypatch) -> None:
-    """The end-to-end gate path: certify → break the definition → the apply
-    aborts with the verbatim divergence naming BOTH executed results and the
-    changed definition (blue/green: nothing lands, the staged run rolls back)
+    """The end-to-end gate path: certify → break the definition → under
+    eval_gate: block_generation the apply aborts with the verbatim divergence
+    naming BOTH executed results and the changed definition (blue/green:
+    nothing lands, the staged run rolls back; under plain block the same
+    divergence is reported and the certified answer stands, see below)
     → retiring the LAST active answer under block aborts too (gate starvation)
     → the escape hatch, eval_gate: warn in the same push, publishes with the
     loud gate-SKIPPED warning."""
@@ -294,7 +302,9 @@ def test_acceptance_flow_certify_break_abort_retire_green(org, monkeypatch) -> N
     #    to the > 2 SQL, twice — the suite re-runs a divergence once), the
     #    certified SQL still says the old one: forced human choice.
     _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
-    broken = _files([{"question": _Q, "sql": _SQL}], broken_definition=True)
+    broken = _files(
+        [{"question": _Q, "sql": _SQL}], broken_definition=True, gate="block_generation"
+    )
     out = _apply(headers, broken)
     row = next(e for e in out if e.get("lens") == "customer_value")
     assert row["action"] == "rejected"
@@ -309,7 +319,9 @@ def test_acceptance_flow_certify_break_abort_retire_green(org, monkeypatch) -> N
         # run rolled back with it — the baseline cannot be lowered by a failure.
         asset = semantic_store.get_asset(s, "definition", "repeat_customer")
         assert asset is not None and asset.body["sql_expr"] == "customers.number_of_orders > 1"
-        assert eval_store.list_runs(s, "customer_value") == []
+        # only the certifying push's value-lane run persists; the aborted
+        # push's staged run rolled back with it
+        assert [r.score for r in eval_store.list_runs(s, "customer_value")] == [1.0]
 
     # 3) Retiring the answer in the same push WAS the green path — but it is
     #    the lens's LAST active answer and the gate is block: publishing would
@@ -416,7 +428,7 @@ def test_false_pass_never_severs_the_definition_binding(org, monkeypatch) -> Non
     n_old = _jaffle_scalar(_SQL)
     n_new = _jaffle_scalar(_BROKEN_SQL)
     _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
-    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}], gate="block_generation"))
     row = next(e for e in out if e.get("lens") == "customer_value")
     assert row["action"] == "rejected"
     assert any(f"certified SQL → {n_old}, generated → {n_new}" in e for e in row["errors"])
@@ -454,7 +466,7 @@ def test_retiring_alongside_a_definition_change_never_severs_bindings(org, monke
         assert stored.status == "retired"
         assert stored.bindings == before  # frozen, not recomputed
 
-    # Reactivate (gate back to block) while the definition is STILL broken:
+    # Reactivate (gate to block_generation) while the definition is STILL broken:
     # the frozen bindings disagree with current hashes, so the answer is
     # selected and diverges — a status-only edit is never self-tested, so the
     # script is consumed by the GATE alone.
@@ -462,7 +474,9 @@ def test_retiring_alongside_a_definition_change_never_severs_bindings(org, monke
     n_new = _jaffle_scalar(_BROKEN_SQL)
     _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
     reactivated = _files(
-        [{"question": _Q, "sql": _SQL, "status": "active"}], broken_definition=True
+        [{"question": _Q, "sql": _SQL, "status": "active"}],
+        broken_definition=True,
+        gate="block_generation",
     )
     out = _apply(headers, reactivated)
     row = next(e for e in out if e.get("lens") == "customer_value")
@@ -500,7 +514,14 @@ def test_green_run_restamps_bindings_and_clears_the_plan_flag(org, monkeypatch) 
             "definition/repeat_customer": hashes["definition/repeat_customer"],
         }  # …to current hashes
         runs = eval_store.list_runs(s, "customer_value")
-        assert [r.score for r in runs] == [1.0]  # the suite's run persisted with the publish
+        # the suite's run persisted with the publish (and the first apply's
+        # value-lane run before it); the edited push carries the generation
+        # lane's result for the record, outside the score
+        assert [r.score for r in runs] == [1.0, 1.0]
+        assert {r.case_id.split(":")[0] for r in eval_store.list_results(s, runs[0].id)} == {
+            "certified",
+            "generation",
+        }
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": edited}).json()
     assert not any(e.get("certified") for e in plan)  # the re-verify flag cleared
 
@@ -1020,9 +1041,10 @@ def test_the_override_without_a_reason_is_refused(org) -> None:
 
 @needs_db
 def test_the_override_covers_a_certified_divergence_and_says_so(org, monkeypatch) -> None:
-    """A certified divergence fails like any case (id ``certified:<answer id>``):
-    the blanket override publishes past it and the apply row records the
-    divergence it covered; a named override that does not name it still blocks."""
+    """Under block_generation a divergence fails like any case (id
+    ``generation:<answer id>``): the blanket override publishes past it and
+    the apply row records the divergence it covered; a named override that
+    does not name it still blocks."""
     oid, headers = org
     _gate_llm(monkeypatch, [_SQL, "There are that many."])
     out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
@@ -1034,7 +1056,11 @@ def test_the_override_covers_a_certified_divergence_and_says_so(org, monkeypatch
         "/mgmt/project/apply",
         headers=headers,
         params={"allow_case": ["c-other"], "override_reason": "unrelated"},
-        json={"files": _files([{"question": _Q, "sql": _SQL}], broken_definition=True)},
+        json={
+            "files": _files(
+                [{"question": _Q, "sql": _SQL}], broken_definition=True, gate="block_generation"
+            )
+        },
     )
     row = next(e for e in r.json() if e.get("lens") == "customer_value")
     assert row["action"] == "rejected" and any("diverged" in e for e in row["errors"])
@@ -1043,7 +1069,7 @@ def test_the_override_covers_a_certified_divergence_and_says_so(org, monkeypatch
     _gate_llm(monkeypatch, [_BROKEN_SQL, "There are fewer."])
     r = _apply_override(
         headers,
-        _files([{"question": _Q, "sql": _SQL}], broken_definition=True),
+        _files([{"question": _Q, "sql": _SQL}], broken_definition=True, gate="block_generation"),
         "intended behaviour change: the definition moved",
     )
     row = next(e for e in r.json() if e.get("lens") == "customer_value")  # type: ignore[union-attr]
@@ -1052,3 +1078,166 @@ def test_the_override_covers_a_certified_divergence_and_says_so(org, monkeypatch
         "diverged" in w and "published anyway by --allow-failing-cases" in w
         for w in row.get("warnings", [])
     ), row
+
+
+# ── the value lane, the generation lane, the allow-list, the baseline ────────
+
+
+@needs_db
+def test_a_restated_certified_value_blocks_and_the_file_accepts_it(org, monkeypatch) -> None:
+    """The value lane: a certified answer passes when its approved SQL still
+    returns its stored verified value. A value the file signs that the SQL no
+    longer returns (the restatement shape: the number moved under the answer)
+    aborts the apply naming both; writing the current value accepts it. No
+    generation runs for any of it — the scripted garbage would abort."""
+    oid, headers = org
+    n_now = _jaffle_scalar(_SQL)
+    stale = {"value": int(n_now) + 7}
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL, "verified_value": stale}]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["action"] == "rejected"
+    assert (
+        f"certified '{_Q}' restated: stored verified value {stale['value']}, its approved "
+        f"SQL now returns {n_now} — accept it by writing the new verified_value in "
+        "certified_answers.yaml (a template: `dst apply --refresh-samples`), re-author the "
+        "sql to re-probe it, or fix the data"
+    ) in row["errors"]
+    assert any("--allow-failing-cases certified:" in e for e in row["errors"])
+    assert out[-1]["scope"] == "apply" and out[-1]["action"] == "aborted"
+
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    accepted = {"value": int(n_now)}
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL, "verified_value": accepted}]))
+    assert not any(e.get("errors") for e in out), out
+    with org_session(oid) as s:
+        assert certify_store.list_for_lens(s, "customer_value")[0].verified_value == accepted
+        runs = eval_store.list_runs(s, "customer_value")
+        assert [r.score for r in runs] == [1.0]
+
+
+@needs_db
+def test_generation_divergence_under_block_is_reported_and_stops_recurring(
+    org, monkeypatch
+) -> None:
+    """Under eval_gate: block the certified answer is the override: a
+    definition change that makes generation diverge lands, the divergence is
+    on the row verbatim with the way to block on it or record it, and the
+    answer's bindings re-stamp on its value pass — so the NEXT push does not
+    run generation on it again (the garbage script would abort if it did)."""
+    oid, headers = org
+    n_old = _jaffle_scalar(_SQL)
+    n_new = _jaffle_scalar(_BROKEN_SQL)
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
+    assert not any(e.get("errors") for e in out)
+
+    _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}], broken_definition=True))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["action"] == "updated", row
+    assert not any(e.get("action") == "aborted" for e in out)
+    reported = next(w for w in row["warnings"] if "diverged" in w)
+    assert f"certified SQL → {n_old}, generated → {n_new}" in reported
+    assert "reported, not blocking (eval_gate: block grades certified values" in reported
+    assert "block_generation" in reported and "known_divergences.yaml" in reported
+    with org_session(oid) as s:
+        stored = certify_store.list_for_lens(s, "customer_value")[0]
+        hashes = semantic_store.asset_hashes(s)
+        assert stored.bindings == {
+            "entity/customers": hashes["entity/customers"],
+            "definition/repeat_customer": hashes["definition/repeat_customer"],
+        }
+        run = eval_store.list_runs(s, "customer_value")[0]
+        assert run.score == 1.0  # generation is reported, never scored
+        by_case = {r.case_id.split(":")[0]: r.passed for r in eval_store.list_results(s, run.id)}
+        assert by_case == {"certified": True, "generation": False}
+
+    # Nothing changed: the same answer is not re-run, the push is clean.
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}], broken_definition=True))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert not row.get("errors") and not any("diverged" in w for w in row["warnings"])
+
+
+@needs_db
+def test_known_divergences_file_covers_a_divergence_and_the_report_lists_it(
+    org, monkeypatch
+) -> None:
+    """evals/known_divergences.yaml (id + reason) is the file-side override:
+    under block_generation a covered divergence does not block, the apply
+    report says what was covered and why; an entry with no reason covers
+    nothing, and the question form names the answer as well as its id."""
+    oid, headers = org
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}], gate="block_generation"))
+    assert not any(e.get("errors") for e in out)
+    with org_session(oid) as s:
+        cert_id = certify_store.list_for_lens(s, "customer_value")[0].id
+
+    def _with(entries: list[dict[str, object]]) -> dict[str, str]:
+        files = _files(
+            [{"question": _Q, "sql": _SQL}], broken_definition=True, gate="block_generation"
+        )
+        files["lenses/customer_value/evals/known_divergences.yaml"] = yaml.safe_dump(entries)
+        return files
+
+    _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
+    out = _apply(headers, _with([{"id": f"certified:{cert_id}"}]))  # no reason: no allow
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["action"] == "rejected" and any("diverged" in e for e in row["errors"])
+
+    _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
+    out = _apply(
+        headers,
+        _with([{"id": f"certified:{cert_id}", "reason": "the certified SQL is the override"}]),
+    )
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["action"] == "updated", row
+    assert (
+        "eval gate: known divergence covered by evals/known_divergences.yaml: "
+        f"generation:{cert_id} — the certified SQL is the override"
+    ) in row["warnings"]
+    assert row["gate_detail"]["known_covered"] == [
+        f"generation:{cert_id} — the certified SQL is the override"
+    ]
+
+    # the question form, on a lens that was not told the id
+    _gate_llm(monkeypatch, [_SQL, "compose"])  # a definition revert re-selects it
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}], gate="block_generation"))
+    assert not any(e.get("errors") for e in out)
+    _gate_llm(monkeypatch, [_BROKEN_SQL, "compose", _BROKEN_SQL, "compose"])
+    out = _apply(headers, _with([{"question": _Q, "reason": "judged"}]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["action"] == "updated", row
+    assert any("known divergence covered" in w and "judged" in w for w in row["warnings"])
+
+
+@needs_db
+def test_prev_score_compares_only_the_same_case_set(org, monkeypatch) -> None:
+    """The bar is the previous run over the SAME case set: a run that scored
+    a different selection is a different fraction, and "regressed" against
+    it was noise. The denominator is the active corpus, stable across pushes
+    that do not change it."""
+    oid, headers = org
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["gate_detail"]["baseline"] == "no previous run"
+    assert row["gate_detail"]["prev_score"] is None
+
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["gate_detail"]["baseline"].startswith("previous run ")
+    assert row["gate_detail"]["prev_score"] == 1.0
+
+    second = {"question": "How many customers are there?", "sql": "SELECT count(*) FROM customers"}
+    _gate_llm(monkeypatch, ["GARBAGE ;;;"])
+    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}, second]))
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert row["gate_detail"]["baseline"] == "no previous run with this case set"
+    assert row["gate_detail"]["prev_score"] is None and not row["gate_detail"]["regressed"]
+    with org_session(oid) as s:
+        runs = eval_store.list_runs(s, "customer_value")
+        assert [r.passed for r in runs] == [2, 1, 1]

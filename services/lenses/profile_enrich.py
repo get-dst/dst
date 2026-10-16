@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from zoneinfo import ZoneInfo
 
 from services.contracts.profile import TableProfile, TimeCoverage, prompt_values
 from services.contracts.semantic_model import SemanticModel
@@ -203,6 +204,44 @@ def data_as_of(
 
     stamps = [s for p in profiles if p.table in tables and (s := stamp(p)) is not None]
     return min(stamps) if stamps else None
+
+
+def lens_today(timezone: str | None) -> date:
+    """Today on the lens clock (UTC when the lens declares no timezone)."""
+    try:
+        return datetime.now(ZoneInfo(timezone)).date() if timezone else datetime.now(UTC).date()
+    except Exception:
+        return datetime.now(UTC).date()
+
+
+def clamp_as_of(stamp: str, today: date) -> tuple[str, str | None]:
+    """``(as-of date, the future date it hid)``. A time column whose newest value
+    lies ahead of the clock — bookings, scheduled deliveries, forecast rows —
+    does not make the data fresher than today: "data as of" is a freshness
+    claim, and the newest row a loader can have written is dated today at the
+    latest. The hidden horizon is returned so the answer can still say how far
+    ahead the rows run; a stamp on or before today passes through untouched."""
+    try:
+        when = date.fromisoformat(stamp[:10])
+    except ValueError:
+        return stamp, None
+    if when <= today:
+        return stamp, None
+    return today.isoformat(), when.isoformat()
+
+
+def clamp_table_as_of(
+    stamps: Mapping[str, str], today: date
+) -> tuple[dict[str, str], dict[str, str]]:
+    """`clamp_as_of` over a table -> as-of map: the clamped map and, per
+    table that was clamped, the future date its rows run to."""
+    clamped: dict[str, str] = {}
+    horizons: dict[str, str] = {}
+    for table, stamp in stamps.items():
+        clamped[table], ahead = clamp_as_of(stamp, today)
+        if ahead is not None:
+            horizons[table] = ahead
+    return clamped, horizons
 
 
 def table_as_of(

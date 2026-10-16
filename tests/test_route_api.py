@@ -347,3 +347,81 @@ def test_degraded_decline_carries_the_marker_to_envelope_and_row(
         assert row is not None and row[0] is False and row[1] == "DECIDER_DOWN"
     finally:
         _cleanup(org)
+
+
+@needs_db
+def test_a_decline_a_lens_would_refuse_returns_that_lens_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router declined "which patients no-showed, with their emails" as
+    "no governed lens covers this", while the lens that holds the data would
+    have refused it by declaration, naming where to ask instead. The refusal
+    is the governed answer: deterministic (the lens's own word-boundary rail),
+    status refused, the decision's id as the handle."""
+    from services.contracts.lens_config import NotComputable
+    from services.db.session import org_session
+    from services.lenses import store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    org, raw = _make_org_token()
+    bundle = jaffle_customer_value_bundle()
+    entry = NotComputable(
+        measure="customer identifiers",
+        aliases=["email", "email addresses", "which customers"],
+        reason="a list of identifiable customers is not analytics output — ask the data owner",
+    )
+    bundle.config.not_computable = [entry]
+    bundle.semantic_model.not_computable = [entry.model_dump(mode="json")]
+    with org_session(org) as session:
+        store.create_lens(session, bundle)
+        store.publish(session, "customer_value")
+
+    def boom(*a: object, **k: object) -> QueryResponse:  # the pipeline must NOT run
+        raise AssertionError("run_lens_query must not be called on a decline")
+
+    decision = RouteDecision(
+        False, None, 0.4, [("customer_value", 0.4)], "no governed lens covers this (llm)"
+    )
+    monkeypatch.setattr("services.api.route._route", lambda caller, q: decision)
+    monkeypatch.setattr("services.api.route.run_lens_query", boom)
+    try:
+        r = client.post(
+            "/v1/query",
+            json={"q": "which customers ordered the most? give me their email addresses"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["covered"] is True
+        assert body["routed_to"] == {
+            "lens": "customer_value",
+            "score": 0.4,
+            "decided_by": "refusal",
+        }
+        answer = body["answer"]
+        assert answer["status"] == "refused"
+        assert answer["answer"].startswith("this lens cannot compute customer identifiers")
+        assert "ask the data owner" in answer["answer"]
+        # the handle is the persisted decision's id, routed to the refusing lens
+        eng = create_engine(settings.database_admin_url)
+        with eng.connect() as c:
+            row = c.execute(
+                text(
+                    "SELECT routed_lens, covered, id FROM routing_decision "
+                    "WHERE org_id = :o ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"o": org},
+            ).first()
+        assert row is not None and row[0] == "customer_value" and row[1] is True
+        assert answer["request_id"] == str(row[2])
+        # a question naming nothing the lens refuses still declines honestly
+        r = client.post(
+            "/v1/query", json={"q": "open tickets?"}, headers={"Authorization": f"Bearer {raw}"}
+        )
+        assert r.json()["covered"] is False and "answer" not in r.json()
+    finally:
+        eng = create_engine(settings.database_admin_url)
+        with eng.begin() as c:
+            for table in ("lens_version", "lens"):
+                c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
+        _cleanup(org)

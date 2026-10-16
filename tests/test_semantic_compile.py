@@ -473,3 +473,108 @@ def test_missing_connection_names_the_file_that_needs_the_edit(monkeypatch) -> N
         apply_mod._lens_dialect(None, named)
     # ...but a name that IS listed and does not resolve really is dst.yaml's.
     assert "dst.yaml" in str(exc.value) and "'wh'" in str(exc.value)
+
+
+# ── hide on an entity ─────────────────────────────────────────────────────────
+
+PATIENTS = SharedEntity.model_validate(
+    {
+        "name": "patients",
+        "source": {"connection": "wh", "table": "staging.patients"},
+        "primary_key": ["patient_id"],
+        "default_time_field": "registered_at",
+        "fields": [
+            {"name": "patient_id", "type": "string"},
+            {"name": "birth_date", "type": "date"},
+            {"name": "email", "type": "string"},
+            {"name": "city", "type": "string"},
+            {"name": "registered_at", "type": "timestamp"},
+        ],
+        "dimensions": [{"name": "city", "type": "string"}],
+        "metrics": [
+            {"name": "patient_count", "agg": "count_distinct", "expr": "patients.patient_id"}
+        ],
+    }
+)
+
+
+def _compile_patients(**update: object) -> tuple[SemanticModel, list[str]]:
+    entity = PATIENTS.model_copy(update=update)
+    config = LensConfig.model_validate(
+        {
+            "name": "px",
+            "display_name": "px",
+            "connections": ["wh"],
+            "select": {"entities": ["patients"], "definitions": []},
+        }
+    )
+    return compile_lens_model(
+        config=config,
+        shared_entities={"patients": entity},
+        shared_definitions={},
+        shared_relationships={},
+        local_definitions=[],
+        use_when=[],
+        sample_queries=[],
+        dialect="duckdb",
+    )
+
+
+def test_hide_withholds_the_column_on_every_door() -> None:
+    model, warnings = _compile_patients(hide=["birth_date", "patients.email"])
+    patients = model.entities[0]
+    assert [f.name for f in patients.fields] == ["patient_id", "city", "registered_at"]
+    assert patients.hide == ["birth_date", "patients.email"]
+    # the allow-list the guard enforces is the same subtraction
+    assert model.allowed_columns()["staging.patients"] == {"patient_id", "city", "registered_at"}
+    # hidden columns raise no sensitive-column warning
+    assert not any("sensitive_columns" in w for w in warnings)
+
+
+def test_a_hide_that_matches_nothing_fails_the_compile_by_name() -> None:
+    with pytest.raises(CompileError) as exc:
+        _compile_patients(hide=["birth_date", "ssn"])
+    assert "hides 'ssn' but no field matches it" in str(exc.value)
+
+
+def test_a_hidden_column_an_expression_still_reads_fails_the_compile() -> None:
+    with pytest.raises(CompileError) as exc:
+        _compile_patients(hide=["patient_id"])
+    msg = str(exc.value)
+    assert "hides 'patient_id' but its metric patient_count still reads it" in msg
+    assert "primary_key still reads it" in msg
+
+
+def test_sensitive_columns_in_scope_warn_until_hidden_or_defined() -> None:
+    _model, warnings = _compile_patients()
+    [warning] = [w for w in warnings if w.startswith("sensitive_columns")]
+    assert "entity 'patients' serves birth_date, email" in warning
+    assert "hide: [birth_date]" in warning and "about: patients.birth_date" in warning
+    # a definition ABOUT the column (a declared fact, not prose) is the other way out
+    entity = PATIENTS
+    config = LensConfig.model_validate(
+        {
+            "name": "px",
+            "display_name": "px",
+            "connections": ["wh"],
+            "select": {"entities": ["patients"], "definitions": ["birth_date"]},
+        }
+    )
+    about = Definition(
+        term="birth_date", body="Shown as age bands only.", about="patients.birth_date"
+    )
+    _model, warnings = compile_lens_model(
+        config=config,
+        shared_entities={"patients": entity},
+        shared_definitions={"birth_date": about},
+        shared_relationships={},
+        local_definitions=[],
+        use_when=[],
+        sample_queries=[],
+        dialect="duckdb",
+    )
+    [warning] = [w for w in warnings if w.startswith("sensitive_columns")]
+    assert (
+        "serves email " in warning
+        and "birth_date" not in warning.split("serves")[1].split(" on")[0]
+    )

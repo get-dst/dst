@@ -42,6 +42,13 @@ class QueryIntent(BaseModel):
         "being reconstructed (or guessed) by the model — the serialize_layer prompt renders "
         "sql_expr only as prose, so a metric lens could never apply an edited predicate",
     )
+    definitions_suggested: list[str] = PField(
+        default_factory=list,
+        description="definitions the generator chose that the question never named (no "
+        "term, alias or `about` metric in its words) — recorded on the resolution as "
+        "definition_suggested and NOT compiled: a predicate nobody asked for is a "
+        "silent filter",
+    )
     grain: TimeGrain | None = PField(
         default=None,
         description="bucket the entity's time field to this period and group by it — "

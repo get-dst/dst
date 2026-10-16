@@ -26,8 +26,10 @@ Two scopes, one door:
     row cap are the guarantees.
   * ``lens`` — the SERVING probe, any authorized caller, and what the MCP tool
     uses. Guarded against the lens's compiled model exactly like generated SQL:
-    the allow-list holds, and `SELECT *` stays refused because a star is how a
-    column the lens does not expose would come back.
+    the allow-list holds (an entity's `hide` is absent from it), `SELECT *` stays
+    refused because a star is how a column the lens does not expose would come
+    back, and the lens's `not_computable` refusals apply to the statement the
+    way they apply to a question.
 
 The lens scope takes its connector from `_authorized_connector` rather than
 resolving one itself: this door once shipped reaching past the authorization gate
@@ -64,6 +66,7 @@ from services.observability import cost
 from services.observability.logger import log_trace
 from services.runtime import scope_rails, sql_guard
 from services.runtime.bounded import WarehouseTimeout, warehouse_bounded
+from services.runtime.pipeline import not_computable_refusal
 
 log = logging.getLogger("dst")
 
@@ -155,6 +158,14 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         wh = ", ".join(sorted({e.source.connection for e in bundle.semantic_model.entities}))
         scope_model = bundle.semantic_model
         guard = sql_guard.check(body.sql, bundle.semantic_model)
+        # The lens's declared refusals hold on this door too: a statement that
+        # names a column a `not_computable` entry names, or lists rows per
+        # entity key where the entry is row-level, is refused with the same
+        # sentence `query` would answer with. One rule, every door — the
+        # governed path refusing a birth date while this one served it was
+        # the same lens saying two things.
+        if guard.ok and (hit := sql_guard.not_computable_hit(body.sql, bundle.semantic_model)):
+            guard = sql_guard.GuardResult(False, reason=not_computable_refusal(hit))
         # Kept only when the lens sets `logging.log_purpose`, exactly as on /query:
         # the probe behind an authoring decision is the read whose "why" explains it.
         purpose = _logged_purpose(body.purpose, bundle.config)

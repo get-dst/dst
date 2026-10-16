@@ -332,3 +332,60 @@ def test_purpose_is_kept_on_the_lens_door_only_when_the_lens_opts_in(org_admin) 
     r = _probe(raw, connection="jaffle", sql="SELECT 1 AS n", purpose=why)
     assert r.status_code == 200, r.text
     assert stored(request_id=r.json()["request_id"]) is None
+
+
+@needs_db
+def test_lens_door_honours_the_lens_refusals_and_hides(org_admin) -> None:
+    """The governed door refused a per-person listing and a birth date; this
+    door served both, because the allow-list was all it checked. One
+    `not_computable`, every door — with the sentence `query` answers with — and
+    an entity's `hide` is absent from the allow-list here too."""
+    from services.contracts.lens_config import NotComputable
+
+    _org, raw = org_admin
+    ah = {"Authorization": f"Bearer {raw}"}
+    bundle = jaffle_customer_value_bundle()
+    bundle.config.access.allow = [AccessRule(caller="agent1")]
+    entry = NotComputable(
+        measure="customer identifiers",
+        aliases=["customer name", "which customers"],
+        reason="a list of identifiable customers is not analytics output — ask the data owner",
+        row_level=True,
+    )
+    bundle.config.not_computable = [entry]
+    bundle.semantic_model.not_computable = [entry.model_dump(mode="json")]
+    customers = next(e for e in bundle.semantic_model.entities if e.name == "customers")
+    customers.hide = ["customer_lifetime_value"]
+    customers.fields = [f for f in customers.fields if f.name != "customer_lifetime_value"]
+    assert (
+        client.post("/mgmt/lenses", json=bundle.model_dump(mode="json"), headers=ah).status_code
+        == 201
+    )
+    assert client.post("/mgmt/lenses/customer_value/publish", headers=ah).status_code == 200
+    assert client.post("/mgmt/callers", json={"name": "agent1"}, headers=ah).status_code == 201
+    key = client.post("/mgmt/callers/agent1/keys", headers=ah).json()["key"]
+
+    # a column the entry names, and one row per key: refused with the query wording
+    for sql in (
+        "SELECT customer_id, customer_name FROM customers LIMIT 3",
+        "SELECT customer_id, number_of_orders FROM customers ORDER BY 2 DESC LIMIT 10",
+        "SELECT o.order_id, o.amount, c.customer_name FROM orders o "
+        "JOIN customers c ON o.customer_id = c.customer_id WHERE c.customer_id = 1",
+    ):
+        r = _probe(key, lens="customer_value", sql=sql)
+        assert r.status_code == 400, (sql, r.text)
+        detail = r.json()["detail"]
+        assert detail.startswith("SQL refused: this lens cannot compute customer identifiers")
+        assert "ask the data owner" in detail
+    # a count over the key is analytics, and still serves
+    ok = _probe(
+        key, lens="customer_value", sql="SELECT count(DISTINCT customer_id) AS n FROM customers"
+    )
+    assert ok.status_code == 200, ok.text
+    # the hidden column is out of scope however it is named
+    for sql in (
+        "SELECT customer_lifetime_value FROM customers",
+        "SELECT c.customer_lifetime_value FROM customers c",
+    ):
+        r = _probe(key, lens="customer_value", sql=sql)
+        assert r.status_code == 400 and "out of lens scope" in r.json()["detail"], r.text

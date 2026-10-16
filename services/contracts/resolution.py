@@ -80,6 +80,9 @@ class Resolution(BaseModel):
     # deterministic parse, or a caller-supplied binding, and no raw-SQL
     # escalation ran. None on answers served before typed serving existed.
     typed: bool | None = None
+    # Definitions the generator wanted to apply that the question never named
+    # (by term, alias or the metric it is `about`): surfaced here, never compiled.
+    definition_suggested: list[str] = Field(default_factory=list)
 
 
 def derive_tag(slots: list[Slot], certification: str = "none") -> Tag:

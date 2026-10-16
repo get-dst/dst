@@ -27,7 +27,9 @@ answer came from is not a log you dig up afterwards. It is part of the output.
   input always grades the same: every number in the answer traceable to the
   rows, the definition applied, the SQL matching the question's intent, the
   result not cut short, the data fresh enough, a ratio not pinned to 1 on
-  every row. An answer read from an exposed table (one with no governed
+  every row, a level metric (a balance, headcount, ARR) read as the latest
+  snapshot inside each period rather than summed across its snapshots. An
+  answer read from an exposed table (one with no governed
   definitions) grades at most `partial`, with the check `governed_read` naming
   the ungoverned read. A `partial` grade always says why: `partial_reason` on
   the report names the check that capped it, or the abstention that kept it
@@ -91,7 +93,11 @@ reports `skip` — never a pass it didn't earn.
 Know how `data_as_of` is measured before you set the contract. It is the
 **oldest last-update among the tables the answer's SQL actually read**, and
 the answer names that table on its stamp (`data as of 2026-10-14, orders`):
-one table read, that table; several, the oldest of them. Only tables whose
+one table read, that table; several, the oldest of them. A time column whose
+newest value lies ahead of the clock (bookings, scheduled deliveries) never
+dates an answer to the future: the stamp clamps to today and says how far the
+rows run (`data as of 2026-10-14, bookings; rows dated to 2026-11-30`), and
+the freshness check reads the clamped date. Only tables whose
 entity declares a `default_time_field` date an answer; a dimension or
 reference table (a country lookup that legitimately has not changed in
 months) dates one only when it is the only table read, so a join to it never

@@ -117,3 +117,44 @@ def test_describe_unknown_lens_404() -> None:
         assert r.status_code == 404
     finally:
         _cleanup(org)
+
+
+@needs_db
+def test_describe_counts_the_library_search_lists() -> None:
+    """`describe_lens` said certified_count 0 while `search_certified` listed
+    five, and the agent reading the count never looked. The two read one list."""
+    from services.certify import store as certify_store
+
+    org, raw = _make_org_token()
+    _seed_published(org)
+    headers = {"Authorization": f"Bearer {raw}"}
+    try:
+        with org_session(org) as session:
+            for i in range(5):
+                certify_store.create(
+                    session,
+                    "customer_value",
+                    f"how many customers ordered {i} times?",
+                    f"SELECT count(*) AS n FROM customers WHERE number_of_orders = {i}",
+                    None,  # unembedded: listed by the library, counted by describe
+                    "tester",
+                )
+            retired = certify_store.create(
+                session,
+                "customer_value",
+                "a retired one",
+                "SELECT 1 AS n",
+                None,
+                "tester",
+            )
+            certify_store.set_status(session, retired, "retired")
+        described = client.get("/v1/lenses/customer_value", headers=headers).json()
+        library = client.get("/v1/lenses/customer_value/certified", headers=headers).json()
+        assert len(library["certified"]) == 5
+        assert described["certified_count"] == len(library["certified"])
+        assert len(described["certified_examples"]) == 3
+    finally:
+        admin = create_engine(settings.database_admin_url)
+        with admin.begin() as c:
+            c.execute(text("DELETE FROM certified_answer WHERE org_id = :o"), {"o": org})
+        _cleanup(org)

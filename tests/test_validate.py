@@ -338,6 +338,47 @@ def test_validate_rejects_a_literal_and_a_numeric_case_as_predicates() -> None:
     assert terms == {"one", "flag"}
 
 
+def test_validate_rejects_filter_aggregates_windows_and_unparseable_sql() -> None:
+    """`COUNT(DISTINCT …) FILTER (WHERE …)` and `SUM(…) FILTER (WHERE …)` are
+    aggregates whatever the parser calls them, a window function is no
+    per-row condition, a comparison over either is HAVING-shaped, and an
+    expression the parser cannot read fails loud naming it — never a silent
+    pass that the apply report later contradicts."""
+    bundle = jaffle_customer_value_bundle()
+    bundle.semantic_model.definitions += [
+        Definition(
+            term="active_customer",
+            body="x",
+            sql_expr="COUNT(DISTINCT orders.customer_id) FILTER (WHERE orders.amount > 0)",
+        ),
+        Definition(
+            term="collected",
+            body="x",
+            sql_expr="SUM(orders.amount) FILTER (WHERE orders.status = 'paid')",
+        ),
+        Definition(
+            term="first_order",
+            body="x",
+            sql_expr="ROW_NUMBER() OVER (PARTITION BY orders.customer_id ORDER BY orders.amount)",
+        ),
+        Definition(
+            term="repeat",
+            body="x",
+            sql_expr="COUNT(*) FILTER (WHERE orders.status = 'paid') > 1",
+        ),
+        Definition(term="broken", body="x", sql_expr="orders.amount > 1 AND"),
+    ]
+    report = validate_bundle(bundle, [], [])
+    by_term = {i.subject: i for i in report.issues if i.code == "definition_not_predicate"}
+    assert set(by_term) == {"active_customer", "collected", "first_order", "repeat", "broken"}
+    assert "an aggregate" in by_term["active_customer"].message
+    assert "window" in by_term["first_order"].message
+    assert "over an aggregate" in by_term["repeat"].message
+    assert "could not be parsed" in by_term["broken"].message
+    assert "'orders.amount > 1 AND'" in by_term["broken"].message
+    assert all(i.severity == "error" for i in by_term.values())
+
+
 def test_validate_accepts_real_predicates() -> None:
     bundle = jaffle_customer_value_bundle()
     bundle.semantic_model.definitions += [

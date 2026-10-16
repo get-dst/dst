@@ -1782,3 +1782,55 @@ def test_a_single_row_ratio_of_one_fails_when_both_sides_share_the_filter() -> N
     )
     assert _all_ones_ratio(honest, one).status == "skip"
     assert _all_ones_ratio(pinned, QueryResult(columns=["rate"], rows=[[0.8]])).status == "skip"
+
+
+def test_compiled_metric_serve_passes_definition_applied() -> None:
+    """ "What is the MRR today" served by the sole-metric door: the SQL is the
+    model's own metric expression, no generator in between. The lens has an
+    enforceable definition the SQL never engages, so definition_applied used
+    to skip ("no enforceable definition was relevant"), intent_alignment
+    abstains too, and the compiled answer graded `partial` for "no semantic
+    check confirmed the answer". Compiled from a governed metric IS the
+    confirmation: the check passes on the metric and says so."""
+    sm = SemanticModel(
+        lens="customer_success",
+        dialect="duckdb",
+        definitions=[
+            Definition(
+                term="paused_customer",
+                body="a customer whose subscription is paused",
+                sql_expr="status = 'paused'",
+            )
+        ],
+    )
+    kwargs = dict(
+        question="what is the MRR today",
+        sql="SELECT SUM(mrr_eur) AS mrr_eur FROM marts.fct_mrr_daily WHERE day = '2026-10-16'",
+        answer_text="MRR as of today (2026-10-16) is EUR 1,353,002.33.",
+        result=QueryResult(columns=["mrr_eur"], rows=[[1353002.33]]),
+        semantic_model=sm,
+        definition_used="mrr_eur",
+        truncated=False,
+        certification="none",
+    )
+    generated = build_report(**kwargs)
+    assert generated.grade == "partial"
+    assert generated.partial_reason is not None
+    assert generated.partial_reason.startswith("no semantic check confirmed the answer")
+    compiled = build_report(**kwargs, compiled_metrics=["mrr_eur"])
+    applied = compiled.check("definition_applied")
+    assert applied is not None and applied.status == "pass"
+    assert applied.reason == "compiled from governed metric 'mrr_eur': the SQL is the model's own"
+    assert compiled.grade == "verified", compiled.partial_reason
+    # a compiled serve that departs from an enforceable definition still fails
+    departed = build_report(
+        **{
+            **kwargs,
+            "question": "MRR of paused customers today",
+            "sql": "SELECT SUM(mrr_eur) AS mrr_eur FROM marts.fct_mrr_daily "
+            "WHERE day = '2026-10-16' AND status = 'on_hold'",
+        },
+        compiled_metrics=["mrr_eur"],
+    )
+    applied = departed.check("definition_applied")
+    assert applied is not None and applied.status == "fail", applied.reason

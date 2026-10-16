@@ -69,6 +69,12 @@ _CONDITION_HOMES = (exp.Where, exp.Having, exp.Qualify)
 _AggKey = tuple[type[exp.Expression], bool, str]
 
 
+def _star(canon: str | None) -> str | None:
+    """``COUNT(*)`` and ``COUNT(1)`` (how a bare ``agg: count`` metric
+    expands) are the same row count: one canonical form for both."""
+    return "*" if canon == "1" else canon
+
+
 def _cleared(
     frag_conjs: list[tuple[str, list[str]]], satisfied: set[str], today: date | None = None
 ) -> bool:
@@ -615,7 +621,7 @@ def metric_filter_findings(
                 if len(canon_inner_node.expressions) != 1:
                     continue
                 canon_inner_node = canon_inner_node.expressions[0]
-            canon_inner = _canon(canon_inner_node, entity, {}, True, strict=True)
+            canon_inner = _star(_canon(canon_inner_node, entity, {}, True, strict=True))
             if canon_inner is None:
                 continue
 
@@ -657,7 +663,7 @@ def metric_filter_findings(
                     fw = node.parent.expression
                     if isinstance(fw, exp.Where):
                         guard_conds = [*guard_conds, *_conjuncts(fw.this)]
-                cand = _canon(inner, entity, alias_map, sole_source, strict=True)
+                cand = _star(_canon(inner, entity, alias_map, sole_source, strict=True))
                 if cand is None or cand != canon_inner:
                     continue  # not (provably) this group — under-detect, never guess
                 satisfied = global_conds | lenient(guard_conds, entity, sole_source)
@@ -679,6 +685,13 @@ def metric_filter_findings(
                     if picked is not None:
                         members = [picked]
                     elif all(_name_signal(m, qtokens) == 0 for m, _f in twins):
+                        if canon_inner == "*":
+                            # A bare row count carries no expression to match:
+                            # it is the table's row count, which a filtered
+                            # count metric claims only when the question
+                            # names it. Attributing every row count to every
+                            # count metric waived (and capped) plain totals.
+                            continue
                         target = findings.waived
                 for metric, fcs in members:
                     for frag, conjs in fcs:

@@ -40,6 +40,7 @@ from services.api.query import (
     AnswerFormat,
     exposed_hint,
     exposed_tables_named,
+    lens_refusal_named,
     run_lens_query,
 )
 from services.auth.deps import get_caller
@@ -316,7 +317,9 @@ async def just_ask(
     governed, provenance-stamped) or declines with the uncovered envelope. A routed
     lens's own refusal rides the envelope as ``answer.status == "refused"`` with the
     reason in ``answer.answer`` — the direct door's ``status``/``answer``, one level
-    down."""
+    down. A decline the router would have made where a lens the caller may use
+    declares the named term not computable returns that lens's refusal the same
+    way (``decided_by == "refusal"``), never the uncovered envelope."""
     # Off the event loop: routing makes blocking embedder + decider calls over sync httpx.
     decision = await asyncio.to_thread(_route, caller, body.q)
 
@@ -352,6 +355,21 @@ async def just_ask(
         if decision.alternatives
         else None
     )
+    # A lens the caller may use would REFUSE this question by declaration — a
+    # `not_computable` term it names. That refusal is the governed answer, and
+    # its wording (the reason, where to ask instead) is what the caller needs;
+    # "no lens covers this" would hide it. Deterministic: the same word-boundary
+    # match the lens's own door runs, no model consulted.
+    refusal = await asyncio.to_thread(lens_refusal_named, body.q, caller)
+    if refusal is not None:
+        lens, wording = refusal
+        decision_id = _persist(caller, body.q, lens, decision.score, True, decision=decision)
+        return RoutedAnswer(
+            routed_to=RouteProvenance(lens=lens, score=decision.score, decided_by="refusal"),
+            answer=QueryResponse(
+                lens=lens, status="refused", answer=wording, request_id=decision_id
+            ),
+        )
     decision_id = _persist(
         caller, body.q, None, decision.score, False, degraded=decision.degraded, decision=decision
     )

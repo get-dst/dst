@@ -77,7 +77,13 @@ def _resolve_entity(model: SemanticModel, name: str | None, metrics: list[str]) 
     raise CompileError("ambiguous entity — specify one")
 
 
-def metric_sql(metric: Metric, entity: Entity, *, inline_filters: bool = True) -> str:
+def metric_sql(
+    metric: Metric,
+    entity: Entity,
+    *,
+    inline_filters: bool = True,
+    where: Sequence[str] = (),
+) -> str:
     """The full SQL aggregate expression for a metric, expanded against its entity.
 
     Simple: ``AGG(expr)``, filters inlined as CASE WHEN when ``inline_filters``
@@ -86,9 +92,12 @@ def metric_sql(metric: Metric, entity: Entity, *, inline_filters: bool = True) -
     Ratio/derived expand each referenced sibling metric recursively; references
     ALWAYS inline their filters (a shared WHERE would poison the other operand),
     and a ratio wraps as CAST(num AS DOUBLE) / NULLIF(denom, 0). Unknown
-    references and reference cycles raise CompileError.
+    references and reference cycles raise CompileError. ``where`` are extra
+    conditions this one metric is restricted to (its own time window, when
+    the selected metrics read different time fields); they ride inside the
+    aggregate exactly like its filters.
     """
-    return _expand(metric, {m.name: m for m in entity.metrics}, [], (), inline_filters)
+    return _expand(metric, {m.name: m for m in entity.metrics}, list(where), (), inline_filters)
 
 
 def _ref(name: str, by_name: dict[str, Metric], owner: str) -> Metric:
@@ -576,6 +585,52 @@ def _predicate(col: str, f: IntentFilter, dialect: str, zone: str = "") -> str:
     raise CompileError(f"unsupported operator '{f.op}'")
 
 
+def _effective_time_field(entity: Entity, metric: Metric) -> str | None:
+    return metric.agg_time_field or entity.default_time_field
+
+
+def _per_metric_windows(
+    intent: QueryIntent, entity: Entity, metrics: Sequence[Metric]
+) -> tuple[dict[str, str], list[IntentFilter]]:
+    """``({metric: its time field}, window filters)`` when the selected metrics
+    read DIFFERENT time fields and the intent bounds one of them — "invoiced
+    vs collected in September" is a window on each metric's own date, not one
+    date for both. One shared WHERE on either field counts the other metric
+    over the wrong period (invoices collected in September instead of invoices
+    raised in it), silently. The window filters are lifted out of the WHERE
+    and re-placed inside each aggregate on that metric's own field. Empty when
+    the metrics agree, or no filter bounds a time field."""
+    fields = {m.name: _effective_time_field(entity, m) for m in metrics}
+    if len(set(fields.values())) < 2:
+        return {}, []
+    bounded = {f.field.rpartition(".")[2] for f in intent.filters} & {
+        f for f in fields.values() if f
+    }
+    if not bounded:
+        return {}, []
+    missing = sorted(m for m, f in fields.items() if not f)
+    if missing:
+        raise CompileError(
+            f"metrics read different time fields, and {', '.join(missing)} has none to "
+            "place the window on — add `agg_time_field:` to the metric or "
+            "`default_time_field:` to the entity"
+        )
+    for name, field in fields.items():
+        assert field is not None
+        if not any(f.name == field for f in entity.fields):
+            raise CompileError(
+                f"metric '{name}' names '{field}' as its time field, but entity "
+                f"'{entity.name}' has no such field — fix default_time_field/agg_time_field"
+            )
+    window = [
+        f
+        for f in intent.filters
+        if f.field.rpartition(".")[2] in bounded
+        and (f.field.partition(".")[0] == entity.name or "." not in f.field)
+    ]
+    return {m: f for m, f in fields.items() if f}, window
+
+
 def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # Before resolving anything: an empty intent has no entity to be ambiguous
     # about, and "ambiguous entity" is a confusing way to say "you asked for nothing".
@@ -599,7 +654,12 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # every filter, and a shared WHERE would leak into its operands.
     filter_sets = {tuple(metrics_by[m].filters) for m in intent.metrics}
     compound = any(metrics_by[m].type != "simple" for m in intent.metrics)
-    mixed = len(filter_sets) > 1 or compound
+    # Metrics on different time fields each take the window inside their own
+    # aggregate (see _per_metric_windows), which is the CASE form as well.
+    window_fields, window_filters = _per_metric_windows(
+        intent, entity, [metrics_by[m] for m in intent.metrics]
+    )
+    mixed = len(filter_sets) > 1 or compound or bool(window_fields)
     shared_metric_filters = list(next(iter(filter_sets))) if intent.metrics and not mixed else []
 
     # Every identifier this function emits is quoted when a bare emission would be
@@ -657,9 +717,22 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     for f, (_owner, expr) in zip(intent.fields, field_exprs, strict=True):
         # A listing projects members row by row: no aggregation, no GROUP BY.
         select.append(f"{expr} AS {quote_ident(f, dialect)}")
+    # A bound on a timestamp is a moment in the lens's declared clock; an
+    # undeclared clock is never invented, and the literal then stays plain.
+    zone = model.timezone if dialect in _ZONED_DIALECTS else ""
     for m in intent.metrics:
+        own_window = [
+            _predicate(
+                _qualify(entity, window_fields[m], dialect),
+                f,
+                dialect,
+                zone if _member_type(entity, window_fields[m]) == "timestamp" else "",
+            )
+            for f in window_filters
+            if m in window_fields
+        ]
         select.append(
-            f"{metric_sql(metrics_by[m], entity, inline_filters=mixed)} "
+            f"{metric_sql(metrics_by[m], entity, inline_filters=mixed, where=own_window)} "
             f"AS {quote_ident(m, dialect)}"
         )
 
@@ -713,15 +786,14 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # normalized text: dropping an exact duplicate can never change semantics.
     predicates: list[str] = []
     seen_predicates: set[str] = set()
-    # A bound on a timestamp is a moment in the lens's declared clock; an
-    # undeclared clock is never invented, and the literal then stays plain.
-    zone = model.timezone if dialect in _ZONED_DIALECTS else ""
+    lifted = {id(f) for f in window_filters}
     for pred in (
         [
             _predicate(
                 expr, f, dialect, zone if _member_type(owner, f.field) == "timestamp" else ""
             )
             for f, (owner, expr) in zip(intent.filters, filter_exprs, strict=True)
+            if id(f) not in lifted
         ]
         + [f"({expr})" for expr in definition_exprs]
         + [f"({f})" for f in shared_metric_filters]

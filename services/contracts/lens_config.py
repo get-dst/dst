@@ -242,6 +242,22 @@ class NotComputable(Authored):
         default="",
         description="optional: why it cannot be computed here (rides the refusal)",
     )
+    # The `sql` door reads the same entries: a statement naming a column the
+    # measure or an alias names (`birth_date` for 'birth date') is refused with
+    # the same wording `query` uses. `row_level` widens that to the listing
+    # itself: a statement that returns one row per entity key — a key column in
+    # its projection outside any aggregate — is the measure, whatever the
+    # columns beside it are called.
+    row_level: bool = Field(
+        default=False,
+        description="the measure is the per-row listing itself: caller-written SQL "
+        "that projects an entity key (one row per key) is refused too",
+    )
+    keys: StrList = Field(
+        default_factory=list,
+        description="with row_level: the key columns a per-row listing is keyed by "
+        "(e.g. ['patient_id']); defaults to the primary keys of the lens's entities",
+    )
 
 
 class ExposeGrant(Authored):
@@ -404,14 +420,17 @@ class LensConfig(Authored):
     access: AccessConfig = Field(default_factory=AccessConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
-    # Eval regression gate at publish: "off" = no gate; "warn" =
-    # run + surface a regression but publish anyway; "block" = refuse publish on a
-    # score regression or certified divergence. Blocking by default, the way a
-    # dbt test blocks by default — safe on a fresh lens because an empty corpus
-    # or an unservable model degrades to a LOUD skip, never a brick;
+    # Eval regression gate at publish: "off" = no gate; "warn" = run + surface
+    # findings but publish anyway; "block" = refuse publish on a restated
+    # certified value, a failing behavioral pin or a score regression — a
+    # generation divergence is reported, the certified answer stands;
+    # "block_generation" = block on a generation divergence too (the ones
+    # evals/known_divergences.yaml covers excepted). Blocking by default, the
+    # way a dbt test blocks by default — safe on a fresh lens because an empty
+    # corpus or an unservable model degrades to a LOUD skip, never a brick;
     # the cost of the default only starts once something is certified, which is
     # exactly when the guarantee must fire.
-    eval_gate: Literal["off", "warn", "block"] = "block"
+    eval_gate: Literal["off", "warn", "block", "block_generation"] = "block"
     # Auto-flag low-confidence served answers into the review queue, tagged
     # origin=ai — the queue watches the lens, not just its callers. Refusals,
     # clarifications, and certified answers are never flagged.

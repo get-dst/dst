@@ -42,6 +42,41 @@ def governed_names(model: SemanticModel) -> frozenset[str]:
     return frozenset(n.strip().lower() for n in names if n and n.strip())
 
 
+def name_aliases(model: SemanticModel) -> dict[str, str]:
+    """What people CALL a governed name -> the name: a metric's ``label`` and
+    ``aliases``, a definition's ``aliases``. The typed rails read these word
+    for word; the veto must too, or a question that names ``overdue_ar_eur``
+    by its label "overdue AR in EUR" names nothing and takes the sibling's
+    template. First declaration wins a contested phrasing."""
+    out: dict[str, str] = {}
+    for e in model.entities:
+        for m in e.metrics:
+            for phrase in (m.label, *m.aliases):
+                key = (phrase or "").strip().lower()
+                if key and key != m.name.lower():
+                    out.setdefault(key, m.name.lower())
+    for d in model.definitions:
+        for phrase in d.aliases:
+            key = (phrase or "").strip().lower()
+            if key and key != d.term.lower():
+                out.setdefault(key, d.term.lower())
+    return out
+
+
+def declared_units(model: SemanticModel) -> dict[str, str]:
+    """metric name -> the unit its author declared: an ISO currency code
+    (lowercased) or ``percent``. The only unit facts the lens states outright;
+    everything else the unit veto reads off column names."""
+    out: dict[str, str] = {}
+    for e in model.entities:
+        for m in e.metrics:
+            if m.currency:
+                out[m.name.lower()] = m.currency.strip().lower()
+            elif m.format == "percent":
+                out[m.name.lower()] = "percent"
+    return out
+
+
 def measure_names(model: SemanticModel) -> frozenset[str]:
     """The metric names and definition terms alone — the names that make two
     questions the same question when both carry them."""
@@ -121,13 +156,20 @@ def _distinctive(name: str, names: frozenset[str]) -> list[str]:
     return [w for w in words if len(_stem(w)) >= _MIN_STEM and _stem(w) not in others]
 
 
-def names_in(text: str, names: frozenset[str]) -> frozenset[str]:
+def names_in(
+    text: str, names: frozenset[str], aliases: Mapping[str, str] | None = None
+) -> frozenset[str]:
     """The governed names the text carries: the whole name as whole words
-    (inflections folded), or one of its distinctive words."""
+    (inflections folded), or one of its distinctive words, or one of the
+    phrasings ``aliases`` maps to it (a label, an alias — whole words, no
+    distinctive-word reading: a phrasing is the author's exact wording)."""
     found = {n for n in names if _pattern(n).search(text)}
     for n in names - found:
         if any(_compile([w]).search(text) for w in _distinctive(n, names)):
             found.add(n)
+    for phrase, name in (aliases or {}).items():
+        if name in names and name not in found and _pattern(phrase).search(text):
+            found.add(name)
     return frozenset(found)
 
 
@@ -180,18 +222,25 @@ def spoken_words(text: str, names: frozenset[str]) -> frozenset[str]:
     return frozenset(out)
 
 
-def measures_said(text: str, measures: frozenset[str]) -> frozenset[str]:
+def measures_said(
+    text: str, measures: frozenset[str], aliases: Mapping[str, str] | None = None
+) -> frozenset[str]:
     """The metrics and definitions a question could mean by the words it says:
     every measure one of whose words (four letters or more, by inflection) the
-    text carries. "did we invoice" says ``invoiced_eur`` and ``invoice_count``;
+    text carries, and every measure one of whose labels or aliases the text
+    says whole. "did we invoice" says ``invoiced_eur`` and ``invoice_count``;
     it says nothing of ``collected_eur``. Looser than ``names_in`` on purpose:
     this is the asked side's reach, compared against what a candidate is
     attributed to carry."""
-    return frozenset(
+    said = {
         m
         for m in measures
         if any(len(_stem(w)) >= _MIN_STEM and _compile([w]).search(text) for w in _words(m))
-    )
+    }
+    for phrase, name in (aliases or {}).items():
+        if name in measures and _pattern(phrase).search(text):
+            said.add(name)
+    return frozenset(said)
 
 
 def lexical_mismatch(
@@ -201,6 +250,7 @@ def lexical_mismatch(
     approved_names: frozenset[str] = frozenset(),
     approved_terms: frozenset[str] = frozenset(),
     measures: frozenset[str] = frozenset(),
+    aliases: Mapping[str, str] | None = None,
 ) -> bool:
     """True when the asked question names a governed metric/definition the
     approved answer is not about: an invoicing question must not take a
@@ -222,9 +272,9 @@ def lexical_mismatch(
     invoice" against a template attributed to ``collected_eur``."""
     if not names:
         return False
-    a = names_in(asked, names)
+    a = names_in(asked, names, aliases)
     if a:
-        b = names_in(approved, names) | approved_names | (approved_terms & names)
+        b = names_in(approved, names, aliases) | approved_names | (approved_terms & names)
         if b:
             if a - b:
                 return True
@@ -235,6 +285,162 @@ def lexical_mismatch(
                 return True
     if not measures:
         return False
-    said = measures_said(asked, measures)
-    carried_measures = (names_in(approved, measures) | approved_names | approved_terms) & measures
+    said = measures_said(asked, measures, aliases)
+    carried_measures = (
+        names_in(approved, measures, aliases) | approved_names | approved_terms
+    ) & measures
     return bool(said and carried_measures and not (said & carried_measures))
+
+
+# ── the unit veto ────────────────────────────────────────────────────────────
+#
+# A question that says "in EUR" against a template that reports every balance
+# in its own currency sits inside the exact band (the sentences agree) and the
+# names agree (both say overdue AR); only the unit differs, and the served
+# number is SEK under a question that said EUR. Units are read as declared
+# facts: the words the question says, the words the approved question and its
+# SQL's identifiers say, the currency or percent format the lens declares on
+# the metrics the answer is attributed to. Each group folds its synonyms to
+# one spelling; a group the candidate says nothing about is left to the score
+# (false positives are forbidden), and a candidate that reports BY currency
+# is read as saying "local currency". Deterministic, no model.
+
+_UNIT_GROUPS: dict[str, dict[str, str]] = {
+    "currency": {
+        **{
+            c: c
+            for c in (
+                "eur usd gbp sek nok dkk chf jpy pln czk huf cad aud nzd cny inr brl zar "
+                "isk ron bgn try mxn sgd hkd krw"
+            ).split()
+        },
+        "euro": "eur",
+        "euros": "eur",
+        "€": "eur",
+        "dollar": "usd",
+        "dollars": "usd",
+        "$": "usd",
+        "pound": "gbp",
+        "pounds": "gbp",
+        "£": "gbp",
+        "krona": "sek",
+        "kronor": "sek",
+        "krone": "nok",
+        "kroner": "nok",
+        "local": "local",
+    },
+    "duration": {
+        "second": "seconds",
+        "seconds": "seconds",
+        "minute": "minutes",
+        "minutes": "minutes",
+        "min": "minutes",
+        "mins": "minutes",
+        "hour": "hours",
+        "hours": "hours",
+        "hr": "hours",
+        "hrs": "hours",
+        # days/weeks/months are left out on purpose: "this month" against a
+        # template whose SQL filters a `day` column is a period, not a unit.
+    },
+    "volume": {
+        "litre": "litres",
+        "litres": "litres",
+        "liter": "litres",
+        "liters": "litres",
+        "ltr": "litres",
+        "ml": "millilitres",
+        "millilitre": "millilitres",
+        "millilitres": "millilitres",
+        "milliliter": "millilitres",
+        "milliliters": "millilitres",
+        "gallon": "gallons",
+        "gallons": "gallons",
+    },
+    "share": {
+        "%": "percent",
+        "percent": "percent",
+        "percentage": "percent",
+        "pct": "percent",
+        "perc": "percent",
+    },
+}
+# What the candidate side says that reads as a unit without being one of the
+# words above: a result reported BY currency is in local currency.
+_UNIT_HINTS: dict[str, tuple[str, str]] = {
+    "currency": ("currency", "local"),
+    "currencies": ("currency", "local"),
+}
+_UNIT_TOKEN = re.compile(r"[a-z]+|[€$£%]")
+
+
+def _unit_words(text: str) -> dict[str, set[str]]:
+    """group -> the folded unit words *text* says: "in EUR" says currency eur,
+    "local currency" says currency local, "hours" says duration hours."""
+    out: dict[str, set[str]] = {}
+    lowered = text.lower()
+    tokens = _UNIT_TOKEN.findall(lowered)
+    for group, words in _UNIT_GROUPS.items():
+        said = {words[t] for t in tokens if t in words}
+        if group == "currency" and "local" in said and "local currency" not in lowered:
+            said.discard("local")  # "local hub" is not a currency
+        if said:
+            out[group] = said
+    return out
+
+
+def _unit_hints(text: str) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for t in _UNIT_TOKEN.findall(text.lower()):
+        if t in _UNIT_HINTS:
+            group, word = _UNIT_HINTS[t]
+            out.setdefault(group, set()).add(word)
+    return out
+
+
+def _identifier_words(sql: str) -> str:
+    """The SQL's identifiers as words: ``amount_local`` says "amount local",
+    ``fuel_litres`` says litres — a column name is the author's declaration of
+    what it holds. String literals are left out (a `WHERE currency = 'EUR'`
+    filter is read on its own below)."""
+    without_literals = re.sub(r"'[^']*'", " ", sql)
+    return re.sub(r"[_.]", " ", " ".join(re.findall(r"[A-Za-z_][\w.]*", without_literals)))
+
+
+def unit_mismatch(
+    asked: str,
+    approved: str,
+    approved_sql: str,
+    approved_terms: frozenset[str] = frozenset(),
+    units: Mapping[str, str] | None = None,
+) -> str | None:
+    """Why the candidate does not produce the unit the question asked for, or
+    None. For every unit group the question names (currency, duration,
+    volume, share) the candidate's own words — its approved question, the
+    identifiers and literals of its SQL, the units the lens declares on the
+    measures it is attributed to, "by currency" read as local — are
+    collected; a group the candidate says nothing about decides nothing, and
+    a group where the candidate says a different unit and never the asked
+    one is the mismatch, named."""
+    asked_units = _unit_words(asked)
+    if not asked_units:
+        return None
+    literals = " ".join(re.findall(r"'([^']*)'", approved_sql))
+    candidate = _unit_words(f"{approved} {_identifier_words(approved_sql)} {literals}")
+    for group, words in _unit_hints(approved).items():
+        candidate.setdefault(group, set()).update(words)
+    for term in approved_terms:
+        declared = (units or {}).get(term.lower())
+        if declared is None:
+            continue
+        group = "share" if declared == "percent" else "currency"
+        candidate.setdefault(group, set()).add(declared)
+    for group, wanted in asked_units.items():
+        have = candidate.get(group)
+        if not have or wanted & have:
+            continue
+        return (
+            f"the question asks in {'/'.join(sorted(wanted))} and the certified answer "
+            f"reports {'/'.join(sorted(have))}"
+        )
+    return None

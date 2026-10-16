@@ -69,6 +69,28 @@ certified the pair, and when. Never improve a verified query unless it is wrong,
 and then certify the correction and say why: an approved pair is a promise about a
 number, and a silent rewrite breaks the promise whether or not it changes the number.
 
+## What a certified serve still checks
+
+Approval vouches for the SQL, not for the warehouse standing still. Every
+certified answer stores the value its SQL produced when it was verified, and
+every serve runs a `restated` check against it: the live result is compared
+with the stored one cell by cell, numbers at the precision the stored value
+prints with. When the result has moved, the check fails, the grade caps at
+`partial`, a `RESTATED` line on `degraded` names the old value, the new one and
+the date it was verified, and the prose composed at certify time is not
+served — the answer is written over today's rows instead (or served as rows
+only, when no prose was asked for). A template compares only when it serves
+the sample binding its value was recorded under; with other bound values, or
+with no stored value at all, the check abstains and says why. It never passes
+on nothing.
+
+A certified answer also discloses what governs it. The definitions written
+`about:` a column the approved SQL reads, and the metric or definition the SQL
+computes, ride the certified answer the way they ride a generated one: on the
+basis line after the provenance ("Computed as `net_revenue` — …"), in
+`definition_used`, and on the resolution ledger. Two people holding different
+certified numbers for "revenue" each hold a line saying which meaning theirs is.
+
 ## Templates: one entry for a question family
 
 A certified answer can carry `{slot}` placeholders in both the question and
