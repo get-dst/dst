@@ -742,7 +742,13 @@ def run_lens_query(
         # before any model writes a reading of it. Typed serving already does
         # this through its decisions; without a decider the text decides, and
         # only when the text leaves nothing open.
-        intent = sole_metric_intent(q, assembled.model)
+        intent = sole_metric_intent(
+            q,
+            assembled.model,
+            period_fields=assembled.period_fields,
+            domains=assembled.value_domains,
+            today=assembly.business_today_date(assembled.model.timezone),
+        )
         if intent is not None:
             try:
                 sql = compile_intent(intent, assembled.model)

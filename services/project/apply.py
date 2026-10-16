@@ -937,6 +937,7 @@ def apply_lens(
     *,
     org_id: uuid.UUID | str,
     probe_certified: bool = False,
+    refresh_samples: bool = False,
     created_by: str = "",
     gate_override: str | None = None,
     allow_cases: frozenset[str] | None = None,
@@ -1010,7 +1011,14 @@ def apply_lens(
     )
     had_active = guard_starvation and _has_active_certified(session, name)
     _apply_certified_answers(
-        session, name, source, result, model, org_id=org_id, probe=probe_certified
+        session,
+        name,
+        source,
+        result,
+        model,
+        org_id=org_id,
+        probe=probe_certified,
+        refresh_samples=refresh_samples,
     )
     # A push managing this lens WITHOUT a certified_answers.yaml leaves any
     # server-side file-managed answers serving — say so with the remedy
@@ -1609,6 +1617,71 @@ def _certified_terms(sql: str, model: SemanticModel) -> list[str]:
         return []
 
 
+def _reads_inclusive(sample_bindings: list[dict[str, Any]] | None) -> bool:
+    """Does one of the template's sample bindings carry an explicit
+    ``start/end`` range that reads like an exclusive end? Such a binding
+    parses differently since explicit ranges became inclusive (0.10.0): its
+    sample result moved with the release, not with the warehouse."""
+    return any(
+        isinstance(v, str) and certify_binding.explicit_range_note(v) is not None
+        for b in sample_bindings or []
+        for v in b.values()
+    )
+
+
+def _refresh_samples(
+    session: Session,
+    source: LensSource,
+    result: LensApplyResult,
+    model: SemanticModel,
+    stored: list[certify_store.CertifiedAnswer],
+    *,
+    org_id: uuid.UUID | str,
+) -> None:
+    """`dst apply --refresh-samples`: re-record the sample result of every
+    stored template whose explicit-range binding reads inclusive now —
+    execute the sample-bound SQL once more (read-only, row-capped), store the
+    value it returns as ``verified_value``, and re-stamp bindings and terms
+    from the SQL as it renders today. Said in the applied count; a failed
+    execution warns and leaves the row as it was."""
+    connector = _probe_connector(session, source.config, org_id, result)
+    done = 0
+    for a in stored:
+        rendered, errors = _template_gate_sql(
+            {"slots": a.slots, "sample_bindings": a.sample_bindings}, a.question, a.sql, model
+        )
+        if rendered is None:
+            result.warnings.append(
+                f"certified answer '{a.question}' sample not re-recorded: " + "; ".join(errors)
+            )
+            continue
+        verified = a.verified_value
+        if connector is not None:
+            try:
+                probed = connector.execute(rendered, read_only=True, row_limit=_MAX_ROWS)
+                verified = _value_summary(probed.columns, probed.rows)
+            except ApplyStepTimeout:
+                raise
+            except Exception as exc:  # noqa: BLE001 — advisory, the row stays as it was
+                result.warnings.append(
+                    _degraded(f"certified answer '{a.question}' sample re-record failed: {exc}")
+                )
+                continue
+        certify_store.update(
+            session,
+            a.id,
+            sql=a.sql,
+            verified_value=verified,
+            bindings=certified_bindings(rendered, model),
+            terms=_certified_terms(rendered, model),
+        )
+        done += 1
+    result.applied.append(
+        f"--refresh-samples: re-recorded the sample result of {done} of {len(stored)} "
+        "template(s) whose explicit range reads inclusive"
+    )
+
+
 def _probe_noop(pre_existing: int) -> str:
     """--probe-certified probes NEW entries only; saying so when zero qualify
     kills the ordering trap (answers landed by an earlier apply leave nothing
@@ -2179,6 +2252,7 @@ def _apply_certified_answers(
     *,
     org_id: uuid.UUID | str = "",
     probe: bool = False,
+    refresh_samples: bool = False,
 ) -> None:
     """Upsert certified_answers.yaml keyed by question: unseen questions embed +
     insert (skipped with a warning when no embedder key, as before), an edited
@@ -2220,6 +2294,7 @@ def _apply_certified_answers(
     _gate_dialect_pins(session, source, result, model, existing, org_id=org_id, probe=probe)
     fresh: list[dict[str, Any]] = []
     changed: list[tuple[certify_store.CertifiedAnswer, dict[str, Any]]] = []
+    refreshed: list[certify_store.CertifiedAnswer] = []
     unchanged = 0
     result.errors.extend(_cross_match_errors(session, name, source, model, result.warnings))
     result.warnings.extend(_binding_range_warnings(source))
@@ -2269,6 +2344,9 @@ def _apply_certified_answers(
             changed.append((stored, answer))
         else:
             unchanged += 1
+            if refresh_samples and stored.slots and _reads_inclusive(stored.sample_bindings):
+                refreshed.append(stored)
+                continue
             if not stored.bindings or stored.terms is None:
                 stored_gated, stored_errors = _template_gate_sql(
                     {"slots": stored.slots, "sample_bindings": stored.sample_bindings},
@@ -2296,6 +2374,8 @@ def _apply_certified_answers(
     # warning here; the follow-up decision made files WIN — file-originated
     # entries absent from the push now DELETE below, and review-origin
     # survivors are the server-only idiom, not orphans to warn about.)
+    if refreshed:
+        _refresh_samples(session, source, result, model, refreshed, org_id=org_id)
     reauthored: list[str] = []
     for stored, answer in changed:
         new_sql = str(answer.get("sql", ""))

@@ -12,6 +12,8 @@ takes the usual path.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,6 +23,7 @@ from services.contracts.fakes import fake_llm_providers
 from services.contracts.protocols import LLMResult
 from services.lenses.demo import jaffle_customer_value
 from services.router import RouteDecision
+from services.runtime import timewindow
 from services.runtime.typed_resolver import sole_metric_intent
 from tests.test_embedder_degraded import _dead_embedder
 from tests.test_query_api import _cleanup, _make_org_token, _seed_lens, needs_db
@@ -47,10 +50,46 @@ def test_a_bare_metric_question_settles_to_its_intent(question: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("question", "window"),
+    [
+        ("What is the revenue in September?", ("2026-09-01", "2026-09-30")),  # a bare month
+        ("revenue for Q3 2026", ("2026-07-01", "2026-09-30")),
+        ("What was our revenue last month", ("2026-09-01", "2026-09-30")),
+        ("revenue during 2025", ("2025-01-01", "2025-12-31")),
+    ],
+)
+def test_a_metric_with_a_stated_period_compiles_the_window(
+    question: str, window: tuple[str, str]
+) -> None:
+    """ "What is the on-time delivery rate in September" names one metric and
+    a period, nothing else: the period is the one slot the text settles on
+    its own, through the same window reading typed serving uses. A bare month
+    is the most recent one on or before the lens clock."""
+    intent = sole_metric_intent(question, MODEL, today=date(2026, 10, 16))
+    assert intent is not None and intent.metrics == ["revenue"]
+    assert [(f.field, f.op, f.value) for f in intent.filters] == [
+        ("order_date", ">=", window[0]),
+        ("order_date", "<=", window[1]),
+    ]
+
+
+def test_a_bare_month_is_placed_on_or_before_today() -> None:
+    assert timewindow.place_bare_month("revenue in september", date(2026, 3, 1)) == (
+        "revenue in september 2025"
+    )
+    assert timewindow.place_bare_month("revenue in may", date(2026, 10, 1)) == "revenue in may"
+    # two bare months are two readings — left for the usual path to ask about
+    assert (
+        sole_metric_intent("revenue in September and October", MODEL, today=date(2026, 10, 16))
+        is None
+    )
+
+
+@pytest.mark.parametrize(
     "question",
     [
         "What is the revenue by status?",  # a breakdown
-        "revenue last month",  # a period
+        "revenue last month in Finland",  # a period and a value
         "revenue in Finland",  # a value
         "top 5 customers by revenue",  # a listing and a limit
         "revenue per month",  # over time

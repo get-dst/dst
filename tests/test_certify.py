@@ -175,6 +175,36 @@ def test_certified_store_search_and_delete() -> None:
         _cleanup(org)
 
 
+@needs_db
+def test_search_hits_carry_the_terms_and_ledger_the_veto_reads() -> None:
+    """The lexical veto reads a hit's stored terms and resolution ledger at
+    serve. A search that loaded only the serving columns handed it None for
+    both, so the attribution stored at apply never reached the serve and a
+    collections template took an invoicing question."""
+    org = _org()
+    try:
+        with org_session(org) as s:
+            store.create(
+                s,
+                "finance",
+                "how much invoiced revenue did we collect in {period}",
+                "SELECT sum(amount_eur) FROM invoices WHERE paid_at >= {period.start}",
+                _vec(0),
+                "admin",
+                slots={"period": {"type": "date_range"}},
+                sample_bindings=[{"period": "2026-Q3"}],
+                terms=["amount_eur", "collected_eur"],
+            )
+        with org_session(org) as s:
+            (hit,) = store.search(s, "finance", _vec(0), k=5)
+        assert hit.answer.terms == ["amount_eur", "collected_eur"]
+        assert hit.answer.slots == {"period": {"type": "date_range"}}
+        assert hit.answer.sample_bindings == [{"period": "2026-Q3"}]
+        assert hit.answer.resolution is None  # loaded, just not stamped yet
+    finally:
+        _cleanup(org)
+
+
 def test_certified_equivalence_is_a_measured_decision_under_the_policy() -> None:
     """On the seam: the approved SQL serves only on a measured `act` for
     `equivalent`; a decision the policy cannot act on falls through to

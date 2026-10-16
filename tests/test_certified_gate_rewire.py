@@ -232,6 +232,16 @@ def test_divergence_message_verbatim_shape() -> None:
         "(definition repeat_customer changed this push) — "
         "fix the definition, or re-certify/retire the answer"
     )
+    # A template whose sample binding is an explicit range that reads like an
+    # exclusive end names the release that changed its sample result, and the
+    # verb that re-records it. A binding that reads as meant adds nothing.
+    hinted = _divergence_error("Q", r, ["entity/invoices"], [{"period": "2026-01-01/2026-07-01"}])
+    assert "the sample result changed because explicit ranges are inclusive since 0.10.0" in hinted
+    assert "period = 2026-01-01/2026-07-01 covers its end day too" in hinted
+    assert "`dst apply --refresh-samples`" in hinted
+    assert "entity invoices changed this push" in hinted
+    plain = _divergence_error("Q", r, ["entity/invoices"], [{"period": "2026-Q3"}])
+    assert "inclusive" not in plain
 
 
 @needs_db

@@ -27,7 +27,7 @@ from services.benchmark.contamination import normalize
 from services.certdefs import load_certified_defs, select_context
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
-from services.certify.lexical import answer_names, governed_names, lexical_mismatch
+from services.certify.lexical import answer_names, governed_names, lexical_mismatch, measure_names
 from services.context import store as ctx_store
 from services.contracts.lens_config import LensConfig
 from services.contracts.profile import TableProfile
@@ -374,6 +374,7 @@ def certified_lookup(
     exclude_id: str | None = None,
     record_to: list[DecisionRecord] | None = None,
     governed: frozenset[str] = frozenset(),
+    measures: frozenset[str] = frozenset(),
 ) -> tuple[
     certify_store.CertifiedAnswer | None,
     list[SampleQuery],
@@ -421,6 +422,7 @@ def certified_lookup(
             governed,
             answer_names(top.resolution),
             frozenset(top.terms or ()),
+            measures,
         ):
             # A collections answer never serves an invoicing ask — cosine
             # cannot see the name, and neither can the bind gate: a template
@@ -586,6 +588,7 @@ def assemble(
         exclude_id=exclude_certified_id,
         record_to=decisions,
         governed=governed_names(bundle.semantic_model),
+        measures=measure_names(bundle.semantic_model),
     )
     if exemplars:
         model = model.model_copy(update={"sample_queries": list(model.sample_queries) + exemplars})

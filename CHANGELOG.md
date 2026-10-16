@@ -73,6 +73,33 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.10.3] — 2026-10-16
+
+No schema change.
+
+### Fixed
+
+- **A question naming one governed metric and a period compiles on every door.** "On-time
+  delivery rate in September" or "revenue for Q3 2026" is served by the compiler with the
+  window; a bare month is the most recent one on or before the lens clock.
+- **Certified lookups read a hit's stored terms and resolution ledger.** They were not loaded
+  at serve, so the lexical veto had nothing to compare. Attribution now names the metric a raw
+  aggregate is, including filtered siblings over one column, and a measure veto keeps an asked
+  metric off a template attributed to another one.
+- **`dst test` passes a certified result that carries helper columns** beside the value
+  generation returned, projecting onto the generated columns and reporting the dropped
+  columns and the value equivalence in prose and `--json`.
+- **`dst drift --accept` re-records the baseline on a quiet warehouse** whenever the recorded
+  facts differ; `dst apply`'s advance uses the same merge, and a catalog-only artifact never
+  nulls a measured fact.
+- **`dst apply --probe-certified` prints `probed N of N`** on the lens row.
+
+### Added
+
+- **`dst apply --refresh-samples`** re-records the sample results of templates whose explicit
+  ranges read inclusive since 0.10.0; the certify self-test names that cause when a sample
+  changed.
+
 ## [0.10.2] — 2026-10-16
 
 Schema change: migration 0069 adds `certified_answer.terms`, backfilled on the next publish.

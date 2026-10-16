@@ -408,9 +408,101 @@ _FRAME_WORDS = frozenset(
     "what is the our total overall how much many show me give tell please number figure "
     "value of all and whats s were are was do we have i want need know can you it".split()
 )
+# The prepositions a period rides in on: "in September", "for Q3 2026",
+# "during last month". Admitted only beside a window the text states.
+_WINDOW_FRAME_WORDS = frozenset("in for during over within".split())
 
 
-def sole_metric_intent(question: str, model: SemanticModel) -> QueryIntent | None:
+def window_filters(
+    question: str,
+    entity: Entity,
+    metrics: list[str],
+    *,
+    period_field: str | None,
+    today: date,
+) -> list[IntentFilter]:
+    """The filters a question's stated window compiles to on this entity's
+    time field — the one window reading every structured door shares. Raises
+    ``_Clarify`` when the window cannot be placed (an unplaced month, no time
+    field, two periods)."""
+    terms = timewindow.temporal_terms(question)
+    # A month the question names that no window term carries would be
+    # served as the OTHER months alone (or as all time) — a silently wrong
+    # period. Ask for the period instead; never drop a stated month.
+    if unplaced := timewindow.unplaced_months(question, terms):
+        raise _Clarify(
+            ClarificationRequest(
+                kind="unresolved_slot",
+                term="window",
+                question="Which period exactly? The question names "
+                f"{', '.join(unplaced)} in a way the window could not place — "
+                f"supply the period as a binding ({GRAMMAR['date_range']}).",
+                options=[GRAMMAR["date_range"]],
+            )
+        )
+    if not terms:
+        return []
+    field_name = entity.default_time_field
+    for m in entity.metrics:
+        if m.name in metrics and m.agg_time_field:
+            field_name = m.agg_time_field
+    period = None if field_name else period_field
+    if period is not None:
+        field_name = period
+    if not field_name:
+        raise _Clarify(
+            ClarificationRequest(
+                kind="unresolved_slot",
+                term="window",
+                question="The question states a time window, but this entity declares no "
+                "time field to apply it to.",
+                options=[GRAMMAR["date_range"]],
+            )
+        )
+    ranges = timewindow.window_ranges(terms, today)
+    if len(ranges) != 1:
+        raise _Clarify(
+            ClarificationRequest(
+                kind="unresolved_slot",
+                term=field_name,
+                question="Which period exactly? Supply it as a binding for "
+                f"'{field_name}' ({GRAMMAR['date_range']}).",
+                options=[GRAMMAR["date_range"]],
+            )
+        )
+    start, end = ranges[0]
+    if period is not None:
+        # The profiled month form: one month is an equality (the SQL a
+        # human certifies reads `month = '2026-08'`), a span is bound
+        # inclusively on both ends.
+        first, last = start.strftime("%Y-%m"), end.strftime("%Y-%m")
+        if first == last:
+            return [IntentFilter(field=field_name, op="=", value=first)]
+        return [
+            IntentFilter(field=field_name, op=">=", value=first),
+            IntentFilter(field=field_name, op="<=", value=last),
+        ]
+    if _field_type(entity, field_name) == "timestamp":
+        # `<= '2026-09-30'` on a timestamp is midnight: the last day's rows
+        # after 00:00 fall out. The bound is the first day after the window.
+        return [
+            IntentFilter(field=field_name, op=">=", value=start.isoformat()),
+            IntentFilter(field=field_name, op="<", value=(end + timedelta(days=1)).isoformat()),
+        ]
+    return [
+        IntentFilter(field=field_name, op=">=", value=start.isoformat()),
+        IntentFilter(field=field_name, op="<=", value=end.isoformat()),
+    ]
+
+
+def sole_metric_intent(
+    question: str,
+    model: SemanticModel,
+    *,
+    period_fields: dict[str, str] | None = None,
+    domains: dict[str, list[str]] | None = None,
+    today: date | None = None,
+) -> QueryIntent | None:
     """The structured intent for a question that names exactly one governed
     metric word for word and asks for nothing else: no breakdown, no filter,
     no period, no limit. Read off the text alone (``named_options``), with
@@ -420,7 +512,12 @@ def sole_metric_intent(question: str, model: SemanticModel) -> QueryIntent | Non
 
     A question this plain is the structured door's own case: the compiler
     computes it deterministically, and a generated reading of it can only be
-    equal or wrong."""
+    equal or wrong.
+
+    A stated period is the one slot the text settles on its own: "in
+    September", "for Q3 2026", "last month" compile through the same window
+    reading typed serving uses (``window_filters``), on the entity's time
+    field. A bare month is the most recent one on or before ``today``."""
     governed = model.model_copy(update={"entities": [e for e in model.entities if not e.exposed]})
     if not governed.entities:
         return None
@@ -434,14 +531,38 @@ def sole_metric_intent(question: str, model: SemanticModel) -> QueryIntent | Non
         return None
     text = _as_words(question)
     residue = re.sub(rf"(?<!\w){re.escape(surface)}(?!\w)", " ", text, count=1)
-    if any(word not in _FRAME_WORDS for word in residue.split()):
+    windowed = timewindow.place_bare_month(residue, today or date.today())
+    spans = timewindow.temporal_spans(windowed)
+    for a, b in reversed(spans):
+        windowed = f"{windowed[:a]} {windowed[b:]}"
+    frame = _FRAME_WORDS | _WINDOW_FRAME_WORDS if spans else _FRAME_WORDS
+    if any(word not in frame for word in windowed.split()):
         return None
     bare = name.rsplit(".", 1)[-1]
-    owners = [e.name for e in governed.entities if any(m.name == bare for m in e.metrics)]
-    entity = name.rsplit(".", 1)[0] if "." in name else (owners[0] if len(owners) == 1 else None)
+    owners = [e for e in governed.entities if any(m.name == bare for m in e.metrics)]
+    entity = (
+        next((e for e in governed.entities if e.name == name.rsplit(".", 1)[0]), None)
+        if "." in name
+        else (owners[0] if len(owners) == 1 else None)
+    )
     if entity is None:
         return None
-    return QueryIntent(entity=entity, metrics=[name])
+    filters: list[IntentFilter] = []
+    if spans:
+        period = (period_fields or {}).get(entity.name) or period_field(entity, domains or {})
+        try:
+            filters = window_filters(
+                timewindow.place_bare_month(question, today or date.today()),
+                entity,
+                [bare],
+                period_field=period,
+                today=today or date.today(),
+            )
+        except _Clarify:
+            return None  # the window did not settle; the usual path asks or reads it
+        if not filters:
+            return None
+    return QueryIntent(entity=entity.name, metrics=[name], filters=filters)
 
 
 def by_dimension(question: str, dims: list[Option]) -> tuple[str | None, str]:
@@ -1911,74 +2032,9 @@ class TypedResolver:
         return None
 
     def _window(self, question: str, entity: Entity, metrics: list[str]) -> list[IntentFilter]:
-        terms = timewindow.temporal_terms(question)
-        # A month the question names that no window term carries would be
-        # served as the OTHER months alone (or as all time) — a silently wrong
-        # period. Ask for the period instead; never drop a stated month.
-        if unplaced := timewindow.unplaced_months(question, terms):
-            raise _Clarify(
-                ClarificationRequest(
-                    kind="unresolved_slot",
-                    term="window",
-                    question="Which period exactly? The question names "
-                    f"{', '.join(unplaced)} in a way the window could not place — "
-                    f"supply the period as a binding ({GRAMMAR['date_range']}).",
-                    options=[GRAMMAR["date_range"]],
-                )
-            )
-        if not terms:
-            return []
-        field_name = entity.default_time_field
-        for m in entity.metrics:
-            if m.name in metrics and m.agg_time_field:
-                field_name = m.agg_time_field
-        period = None if field_name else self._period_field(entity)
-        if period is not None:
-            field_name = period
-        if not field_name:
-            raise _Clarify(
-                ClarificationRequest(
-                    kind="unresolved_slot",
-                    term="window",
-                    question="The question states a time window, but this entity declares no "
-                    "time field to apply it to.",
-                    options=[GRAMMAR["date_range"]],
-                )
-            )
-        ranges = timewindow.window_ranges(terms, self._today)
-        if len(ranges) != 1:
-            raise _Clarify(
-                ClarificationRequest(
-                    kind="unresolved_slot",
-                    term=field_name,
-                    question="Which period exactly? Supply it as a binding for "
-                    f"'{field_name}' ({GRAMMAR['date_range']}).",
-                    options=[GRAMMAR["date_range"]],
-                )
-            )
-        start, end = ranges[0]
-        if period is not None:
-            # The profiled month form: one month is an equality (the SQL a
-            # human certifies reads `month = '2026-08'`), a span is bound
-            # inclusively on both ends.
-            first, last = start.strftime("%Y-%m"), end.strftime("%Y-%m")
-            if first == last:
-                return [IntentFilter(field=field_name, op="=", value=first)]
-            return [
-                IntentFilter(field=field_name, op=">=", value=first),
-                IntentFilter(field=field_name, op="<=", value=last),
-            ]
-        if _field_type(entity, field_name) == "timestamp":
-            # `<= '2026-09-30'` on a timestamp is midnight: the last day's rows
-            # after 00:00 fall out. The bound is the first day after the window.
-            return [
-                IntentFilter(field=field_name, op=">=", value=start.isoformat()),
-                IntentFilter(field=field_name, op="<", value=(end + timedelta(days=1)).isoformat()),
-            ]
-        return [
-            IntentFilter(field=field_name, op=">=", value=start.isoformat()),
-            IntentFilter(field=field_name, op="<=", value=end.isoformat()),
-        ]
+        return window_filters(
+            question, entity, metrics, period_field=self._period_field(entity), today=self._today
+        )
 
     @staticmethod
     def _better(entity: Entity, metrics: list[str]) -> str | None:

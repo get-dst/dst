@@ -1522,13 +1522,20 @@ def _drift_one(
             f"layer reads{verdict}. Re-record with `dst drift --accept` once reviewed."
         )
     if args.accept:
-        if findings:
-            # Nothing changed means nothing to accept: re-recording anyway would put a
-            # timestamp-only commit in the history of a file whose history IS the point.
-            wd.write_baseline(
-                root,
-                args.connection,
-                wd.accepted_tables(current, artifact.tables if artifact else None, baseline.tables),
+        # Re-record from the live catalog and the newest artifact whenever the
+        # recorded facts differ — a finding is one reason, a probe that measured
+        # what the baseline holds as null is another ("no change" used to skip
+        # both, and a baseline never gained its means and offsets). An
+        # identical baseline is left alone: no timestamp-only commit.
+        written = wd.advance_baseline(
+            root, args.connection, current, artifact.tables if artifact else None
+        )
+        if written is not None and not findings and not args.as_json:
+            rel = written.relative_to(root) if written.is_relative_to(root) else written
+            print(
+                f"note: baseline for '{args.connection}' re-recorded with the newest "
+                f"probe's measured facts -> {rel}",
+                file=sys.stderr,
             )
         return 0, payload
     return wd.exit_code(findings), payload
@@ -3230,9 +3237,14 @@ def _summarize_apply(out: list[dict[str, Any]], quiet: bool = False) -> None:
             # away: files-win removal of a certified answer printed only
             # "updated", and the operator's sole evidence lived in --json.
             # The server emits "deleted N" only when N > 0, so this is quiet
-            # on every non-deleting apply — and it survives --quiet.
+            # on every non-deleting apply — and it survives --quiet. The
+            # --probe-certified count ("probed N of N") is the other staged
+            # line a human must see on the lens row, not only in --json.
             for a in entry.get("applied") or []:
-                if "deleted" in str(a):
+                staged = str(a)
+                if "deleted" in staged or staged.startswith(
+                    ("--probe-certified", "--refresh-samples")
+                ):
                     if quiet and not loud:
                         print(f"{label}: {a}")
                     else:
@@ -3311,6 +3323,8 @@ def _apply(args: argparse.Namespace) -> int:
     params: dict[str, str | list[str]] = {}
     if getattr(args, "probe_certified", False):
         params["probe_certified"] = "true"
+    if getattr(args, "refresh_samples", False):
+        params["refresh_samples"] = "true"
     if getattr(args, "require_gates", False):
         params["require_gates"] = "true"
     if selected := [n for n in (getattr(args, "lens", None) or []) if n.strip()]:
@@ -3454,8 +3468,11 @@ def _advance_baselines(root: Path) -> None:
             artifact = probe_artifact.parse_probe(path.read_text(encoding="utf-8"), str(path))
         except (ValueError, OSError):
             continue
-        if wd.baseline_changed(root, artifact.connection, artifact.tables):
-            written = wd.write_baseline(root, artifact.connection, artifact.tables)
+        # The same merge `dst drift --accept` performs: the artifact's catalog
+        # with its measured facts, and the prior baseline's facts for columns
+        # this artifact did not measure — never a null written over a number.
+        written = wd.advance_baseline(root, artifact.connection, artifact.tables, artifact.tables)
+        if written is not None:
             rel = written.relative_to(root) if written.is_relative_to(root) else written
             print(f"drift baseline advanced for '{artifact.connection}' -> {rel}", file=sys.stderr)
 
@@ -6999,6 +7016,14 @@ def main() -> int:
                 "stored are not re-probed (re-author sql, or run `dst test` for a "
                 "sweep); opt-in: costs one warehouse query per answer; a probe failure "
                 "warns and stores the answer anyway",
+            )
+            p.add_argument(
+                "--refresh-samples",
+                action="store_true",
+                help="re-record the sample result of every stored template whose explicit "
+                "start/end binding reads inclusive since 0.10.0 (the certify self-test "
+                "names them): executes the sample-bound SQL once more and re-stamps "
+                "verified value, bindings and terms",
             )
             p.add_argument(
                 "--json",

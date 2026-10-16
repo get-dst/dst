@@ -249,3 +249,23 @@ def test_quiet_apply_caps_the_lens_list_per_warning(capsys) -> None:
     out = capsys.readouterr().out
     assert out.count(note) == 1
     assert "+3 more" in out
+
+
+def test_the_probe_count_prints_on_the_lens_row(capsys) -> None:
+    """`--probe-certified` says what it executed: the "probed N of N" line the
+    server stages under `applied` must reach the plain report on the lens
+    row, not only --json."""
+    from services.cli.main import _summarize_apply
+
+    _summarize_apply(
+        [
+            {
+                "lens": "operations",
+                "action": "created",
+                "version": 1,
+                "applied": ["--probe-certified: probed 9 of 9 new certified answer(s)"],
+            }
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "lens operations" in out and "probed 9 of 9 new certified answer(s)" in out

@@ -180,30 +180,61 @@ def spoken_words(text: str, names: frozenset[str]) -> frozenset[str]:
     return frozenset(out)
 
 
+def measures_said(text: str, measures: frozenset[str]) -> frozenset[str]:
+    """The metrics and definitions a question could mean by the words it says:
+    every measure one of whose words (four letters or more, by inflection) the
+    text carries. "did we invoice" says ``invoiced_eur`` and ``invoice_count``;
+    it says nothing of ``collected_eur``. Looser than ``names_in`` on purpose:
+    this is the asked side's reach, compared against what a candidate is
+    attributed to carry."""
+    return frozenset(
+        m
+        for m in measures
+        if any(len(_stem(w)) >= _MIN_STEM and _compile([w]).search(text) for w in _words(m))
+    )
+
+
 def lexical_mismatch(
     asked: str,
     approved: str,
     names: frozenset[str],
     approved_names: frozenset[str] = frozenset(),
     approved_terms: frozenset[str] = frozenset(),
+    measures: frozenset[str] = frozenset(),
 ) -> bool:
     """True when the asked question names a governed metric/definition the
     approved answer is not about: an invoicing question must not take a
-    collections answer. Both naming governed names, the sets must agree.
-    ``approved_names`` are names the approved answer carries beyond its
-    wording (its resolution ledger); ``approved_terms`` is what attribution
-    stored for its SQL at apply — governed names and the columns it
-    aggregates. An approved answer that carries no governed name at all is
-    read word by word: every governed word the asked question says must
-    appear, by inflection, in the approved question or in its terms."""
+    collections answer. A governed name the asked question carries that the
+    approved answer does not is a mismatch; a name the approved answer carries
+    beyond the asked one is not (its attribution names the metric its SQL
+    computes, which the question rarely spells). ``approved_names`` are names
+    the approved answer carries beyond its wording (its resolution ledger);
+    ``approved_terms`` is what attribution stored for its SQL at apply —
+    governed names and the columns it aggregates. An approved answer that
+    carries no governed name at all is read word by word: every governed word
+    the asked question says must appear, by inflection, in the approved
+    question or in its terms.
+
+    ``measures`` (the metric and definition names alone) adds the measure
+    veto: when the asked question's words reach some measures and the
+    candidate is attributed to others, with none in common, the candidate
+    computes a figure the question did not ask for — "how much did we
+    invoice" against a template attributed to ``collected_eur``."""
     if not names:
         return False
     a = names_in(asked, names)
-    if not a:
+    if a:
+        b = names_in(approved, names) | approved_names | (approved_terms & names)
+        if b:
+            if a - b:
+                return True
+        else:
+            carried = {_stem(w) for w in _TOKEN.findall(approved.lower())}
+            carried |= {_stem(w) for t in approved_terms for w in _words(t)}
+            if any(stem not in carried for stem in spoken_words(asked, a)):
+                return True
+    if not measures:
         return False
-    b = names_in(approved, names) | approved_names | (approved_terms & names)
-    if b:
-        return a != b
-    carried = {_stem(w) for w in _TOKEN.findall(approved.lower())}
-    carried |= {_stem(w) for t in approved_terms for w in _words(t)}
-    return any(stem not in carried for stem in spoken_words(asked, a))
+    said = measures_said(asked, measures)
+    carried_measures = (names_in(approved, measures) | approved_names | approved_terms) & measures
+    return bool(said and carried_measures and not (said & carried_measures))

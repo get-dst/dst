@@ -20,9 +20,11 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
+from services.certify import binding as certify_binding
 from services.certify import store as certify_store
 from services.certify.bindings import restamp_bindings
 from services.contracts.errors import ProviderError
@@ -339,14 +341,39 @@ def publish_gate(
     return decision
 
 
-def _divergence_error(question: str, result: CertifiedCaseResult, changed: list[str]) -> str:
+def _divergence_error(
+    question: str,
+    result: CertifiedCaseResult,
+    changed: list[str],
+    sample_bindings: list[dict[str, Any]] | None = None,
+) -> str:
     """Decision 3, verbatim shape: both executed values, the asset that moved,
-    and the forced human choice — fix the definition, or re-certify/retire."""
+    and the forced human choice — fix the definition, or re-certify/retire.
+    A template whose sample binding is an explicit ``start/end`` range names
+    the likeliest cause first: explicit ranges are inclusive since 0.10.0, so
+    the certified side now covers the end day too while generation reads the
+    same period end-exclusive — the sample result changed with the release,
+    not with the asset. The line says how to re-record it."""
     what = ", ".join(k.replace("/", " ", 1) for k in changed)
+    inclusive = [
+        f"{slot} = {value}"
+        for binding in sample_bindings or []
+        for slot, value in binding.items()
+        if isinstance(value, str) and certify_binding.explicit_range_note(value) is not None
+    ]
+    cause = (
+        (
+            f" — the sample result changed because explicit ranges are inclusive since "
+            f"0.10.0 ({'; '.join(inclusive)} covers its end day too); re-record the sample "
+            "with `dst apply --refresh-samples`, or bind the range to the last day meant"
+        )
+        if inclusive
+        else ""
+    )
     return (
         f"certified '{question}' diverged: certified SQL → "
         f"{format_result(result.oracle_result)}, generated → "
-        f"{format_result(result.generated_result)} ({what} changed this push) — "
+        f"{format_result(result.generated_result)} ({what} changed this push){cause} — "
         "fix the definition, or re-certify/retire the answer"
     )
 
@@ -416,7 +443,7 @@ def _certified_gate(
                 ),
             )
         else:
-            failures.append(_divergence_error(a.question, r, changed))
+            failures.append(_divergence_error(a.question, r, changed, a.sample_bindings))
         results.append(
             EvalResult(
                 run_id="",

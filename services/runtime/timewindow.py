@@ -113,6 +113,43 @@ def temporal_terms(text: str) -> frozenset[str]:
     return frozenset(out)
 
 
+def temporal_spans(text: str) -> list[tuple[int, int]]:
+    """The character spans of every window phrase ``temporal_terms`` reads off
+    the text, so a caller can blank them and judge what the question says
+    besides its period."""
+    spans = [m.span() for m in _SPAN.finditer(text)]
+    for m in _TEMPORAL.finditer(text):
+        if not any(a <= m.start() < b for a, b in spans):
+            spans.append(m.span())
+    return sorted(spans)
+
+
+def bare_months(text: str) -> list[tuple[int, int]]:
+    """The spans of month names the text states without a year or a span —
+    "in September" — which ``temporal_terms`` does not read as a window. A
+    bare "may" is the modal verb and is never one."""
+    covered = temporal_spans(text)
+    return [
+        m.span()
+        for m in _MONTH_WORD.finditer(text)
+        if m.group("month").lower() != "may" and not any(a <= m.start() < b for a, b in covered)
+    ]
+
+
+def place_bare_month(text: str, today: date) -> str:
+    """The text with its one bare month name given the year of its most recent
+    occurrence on or before ``today``'s month — "in September" asked in
+    October 2026 is September 2026; asked in March 2026 it is September 2025.
+    Unchanged when the text states no bare month, or more than one."""
+    spans = bare_months(text)
+    if len(spans) != 1:
+        return text
+    a, b = spans[0]
+    month = _MONTH_NUM[text[a:b].lower()]
+    year = today.year if month <= today.month else today.year - 1
+    return f"{text[:b]} {year}{text[b:]}"
+
+
 def unplaced_months(text: str, terms: frozenset[str]) -> list[str]:
     """Month names the question states that no term carries — "January and
     August 2026" parses August 2026 and drops January; served as August alone

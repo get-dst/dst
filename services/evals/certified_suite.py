@@ -415,6 +415,70 @@ def _projection(
     )
 
 
+def _certified_projection(
+    oracle_cols: list[str],
+    oracle_rows: list[list[Any]],
+    gen_cols: list[str],
+    gen_rows: list[list[Any]],
+) -> tuple[list[str], list[list[Any]], str] | None:
+    """The CERTIFIED result on the generated projection, when the certified
+    side is the wider one: a BI-verified query certifies the label, the
+    percentage AND the count it was checked against, and generation returns
+    the label and the rate. Columns both sides name pair by name; a generated
+    column named on neither side must then equal exactly one remaining
+    certified column value for value, row by row (the certified ``otd_pct``
+    82.59 is the generated ``otd_rate`` 0.8259), rows aligned on the shared
+    columns. Returns the certified columns renamed and reordered to the
+    generated ones, the certified rows projected onto them, and the note
+    saying which columns were dropped and how the rest paired — the caller
+    compares the projected pair, so a value-equivalent pass says so. None
+    when the rule does not apply: not wider, a generated column that pairs
+    with none or with two, a row with no partner."""
+    oc, gc = [c.lower() for c in oracle_cols], [c.lower() for c in gen_cols]
+    if len(oc) <= len(gc) or len(set(oc)) != len(oc) or len(set(gc)) != len(gc):
+        return None
+    if not oracle_rows or len(oracle_rows) != len(gen_rows):
+        return None
+    if not any(_numeric(v) for r in gen_rows for v in r):
+        return None  # labels alone carry no certified value: a measure is missing
+    shared = [c for c in gc if c in oc]
+    unpaired_gen = [c for c in gc if c not in oc]
+    candidates = [c for c in oc if c not in gc]
+    pairing: dict[str, str] = {}
+    if unpaired_gen:
+        # Align rows on the shared columns (the labels); without one there
+        # is nothing to align on beyond a single row each.
+        if shared:
+            key_o = [oc.index(c) for c in shared]
+            key_g = [gc.index(c) for c in shared]
+            by_key = {_key([r[i] for i in key_o]): r for r in oracle_rows}
+            if len(by_key) != len(oracle_rows):
+                return None
+            aligned = [(by_key.get(_key([r[i] for i in key_g])), r) for r in gen_rows]
+            if any(o is None for o, _ in aligned):
+                return None
+        elif len(gen_rows) == 1:
+            aligned = [(oracle_rows[0], gen_rows[0])]
+        else:
+            return None
+        for g in unpaired_gen:
+            gi = gc.index(g)
+            hits = [
+                c
+                for c in candidates
+                if c not in pairing.values()
+                and all(_same(o[oc.index(c)], r[gi]) for o, r in aligned if o is not None)
+            ]
+            if len(hits) != 1:
+                return None
+            pairing[g] = hits[0]
+    order = [oc.index(pairing.get(c, c)) for c in gc]
+    projected = [[r[i] for i in order] for r in oracle_rows]
+    dropped = [c for c in oc if c not in gc and c not in pairing.values()]
+    how = "".join(f"; generated '{g}' is certified '{c}'" for g, c in pairing.items())
+    return gen_cols, projected, f"projection: certified column(s) {dropped} ignored{how}"
+
+
 def _compare(
     oracle_cols: list[str],
     oracle_rows: list[list[Any]],
@@ -430,6 +494,13 @@ def _compare(
     if projected is not None:
         ok, reason = _compare(oracle_cols, oracle_rows, gen_cols, gen_rows)
         return ok, (f"{projected}; {reason}" if reason else projected) if ok else reason
+    if (wider := _certified_projection(oracle_cols, oracle_rows, gen_cols, gen_rows)) is not None:
+        # The certified side carried a helper column beside the value (a
+        # count next to a percentage): the comparison runs on the certified
+        # columns generation returned, and the pass says what was dropped.
+        cols, rows, note = wider
+        ok, reason = _compare(cols, rows, gen_cols, gen_rows)
+        return ok, (f"{note}; {reason}" if reason else note) if ok else reason
     if len(oracle_cols) == 1 and len(oracle_rows) == 1 and len(gen_rows) == 1 and len(gen_cols) > 1:
         # The certified answer is one value; the generated one is a single row
         # carrying it beside label columns ('7.41', True for "the current patch").

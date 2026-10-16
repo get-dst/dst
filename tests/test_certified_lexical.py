@@ -401,3 +401,105 @@ def test_no_embedder_measures_nothing(monkeypatch) -> None:
         ]
     )
     assert apply_mod._cross_match_errors(None, "customer_value", source, MODEL) == []  # type: ignore[arg-type]
+
+
+def _invoices_model():
+    """Two metrics over one column that differ by filter alone, beside a count
+    that ties with another entity's (as a real finance layer has them)."""
+    from services.contracts import semantic_model as sm
+
+    invoices = sm.Entity(
+        name="invoices",
+        source={"connection": "warehouse", "table": "marts.fct_invoices"},
+        default_time_field="invoice_date",
+        fields=[
+            sm.Field(name="invoice_date", type="date"),
+            sm.Field(name="paid_at", type="date"),
+            sm.Field(name="amount_eur", type="number"),
+            sm.Field(name="status", type="string"),
+        ],
+        metrics=[
+            sm.Metric(
+                name="collected_eur",
+                agg="sum",
+                expr="invoices.amount_eur",
+                filters=["invoices.status = 'paid'"],
+                agg_time_field="paid_at",
+            ),
+            sm.Metric(name="invoiced_eur", agg="sum", expr="invoices.amount_eur"),
+            sm.Metric(name="invoice_count", agg="count"),
+        ],
+    )
+    customers = sm.Entity(
+        name="customers",
+        source={"connection": "warehouse", "table": "marts.dim_customers"},
+        fields=[sm.Field(name="customer_id", type="string")],
+        metrics=[sm.Metric(name="customer_count", agg="count")],
+    )
+    return sm.SemanticModel(
+        lens="finance",
+        dialect="duckdb",
+        entities=[invoices, customers],
+        definitions=[
+            Definition(
+                term="collected_revenue",
+                body="cash basis",
+                sql_expr="SUM(invoices.amount_eur) FILTER (WHERE invoices.status = 'paid')",
+            )
+        ],
+    )
+
+
+_COLLECTIONS_SQL = (
+    "select round(sum(amount_eur), 2) as collected_eur, count(*) as paid_invoices "
+    "from marts.fct_invoices where status = 'paid' "
+    "and paid_at >= date '2026-01-01' and paid_at < date '2026-07-01'"
+)
+
+
+def test_terms_name_the_metric_a_raw_aggregate_is() -> None:
+    """``SUM(amount_eur)`` under ``WHERE status = 'paid'`` is collected_eur, not
+    the unfiltered invoiced_eur the column alone would equally name; the same
+    sum without the filter is invoiced_eur."""
+    from services.runtime.resolution import governed_terms
+
+    model = _invoices_model()
+    assert governed_terms(_COLLECTIONS_SQL, model) == ["amount_eur", "collected_eur"]
+    unfiltered = (
+        "select round(sum(amount_eur), 2) as invoiced_eur from marts.fct_invoices "
+        "where invoice_date >= date '2026-09-01' and invoice_date < date '2026-10-01'"
+    )
+    assert governed_terms(unfiltered, model) == ["amount_eur", "invoiced_eur"]
+
+
+def test_the_measure_veto_keeps_an_invoicing_ask_off_a_collections_template() -> None:
+    """ "How much did we invoice in September 2026?" says invoiced_eur or
+    invoice_count by its words; a template attributed to collected_eur computes
+    neither — vetoed. The template's own wording, and a cash question, still
+    take it: the asked words reach collected_eur too."""
+    model = _invoices_model()
+    names, measures = governed_names(model), measure_names(model)
+    approved = "how much invoiced revenue did we collect in {period}"
+    terms = frozenset({"amount_eur", "collected_eur"})
+    assert lexical_mismatch(
+        "How much did we invoice in September 2026?", approved, names, frozenset(), terms, measures
+    )
+    assert lexical_mismatch(
+        "how many invoices did we issue in Q3 2026", approved, names, frozenset(), terms, measures
+    )
+    assert not lexical_mismatch(
+        "how much invoiced revenue did we collect in Q3 2026",
+        approved,
+        names,
+        frozenset(),
+        terms,
+        measures,
+    )
+    assert not lexical_mismatch(
+        "how much cash did we collect in September", approved, names, frozenset(), terms, measures
+    )
+    # Without the measure set (or without terms) the veto has nothing to read:
+    # the asked and approved questions both say "invoice", and agree.
+    assert not lexical_mismatch(
+        "How much did we invoice in September 2026?", approved, names, frozenset(), terms
+    )

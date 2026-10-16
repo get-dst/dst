@@ -246,34 +246,20 @@ def search(
 ) -> list[CertifiedHit]:
     """Active answers only: a retired answer is history — it must never be served
     on an exact match nor fed to the generator as an exemplar."""
+    # The whole row, not a serving subset: the lexical veto reads a hit's
+    # resolution ledger and stored terms, and a hit loaded without them is
+    # vetoed on its question alone — the attribution stored at apply never
+    # reached the serve.
     rows = session.execute(
         text(
-            "SELECT id, lens, question, sql, created_by, created_at, "
-            "slots, sample_bindings, verified_prose, "
-            "1 - (embedding <=> CAST(:q AS vector)) AS score "
+            f"SELECT {_COLS}, 1 - (embedding <=> CAST(:q AS vector)) AS score "
             "FROM certified_answer WHERE lens = :l AND embedding IS NOT NULL "
             "AND status = 'active' "
             "ORDER BY embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
         {"q": _vec(query_embedding), "l": lens, "k": k},
     ).all()
-    return [
-        CertifiedHit(
-            CertifiedAnswer(
-                str(r[0]),
-                r[1],
-                r[2],
-                r[3],
-                r[4],
-                r[5].isoformat(),
-                slots=_verified(r[6]),
-                sample_bindings=_jsonlist(r[7]),
-                verified_prose=r[8],
-            ),
-            float(r[9]),
-        )
-        for r in rows
-    ]
+    return [CertifiedHit(_row(r), float(r[17])) for r in rows]
 
 
 #: The one sentence every surface says about that condition (`dst apply`,

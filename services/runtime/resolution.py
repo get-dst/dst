@@ -604,7 +604,57 @@ def governed_terms(sql: str, model: SemanticModel, dialect: str | None = None) -
             except Exception:  # noqa: BLE001 — an unreadable aggregate names no column
                 continue
             out.update(c.name.lower() for c in node.find_all(exp.Column) if c.name)
+            out.update(_metrics_over(node, sql, model, read))
     return sorted(n for n in out if n)
+
+
+def _metrics_over(agg: exp.Expr, sql: str, model: SemanticModel, dialect: str) -> set[str]:
+    """The declared metric a raw aggregate IS, read off its column and the
+    SQL's own predicates: ``SUM(amount_eur)`` under ``WHERE status = 'paid'``
+    is ``collected_eur`` (sum of amount_eur filtered to paid) and not its
+    unfiltered sibling ``invoiced_eur``, though the two share the column.
+    Among the metrics aggregating that column with that function on a present
+    entity, those whose every filter the SQL states qualify, and the most
+    filtered of them name the aggregate. Empty when none qualifies."""
+    if not isinstance(agg, exp.AggFunc) or not isinstance(agg.this, exp.Column):
+        return set()
+    column = agg.this.name.lower()
+    func = agg.sql_name().lower()
+    try:
+        stated = {
+            _canon(p)
+            for w in sqlglot.parse_one(sql, read=dialect).find_all(exp.Where)
+            for p in _split_and(w.this)
+        }
+    except Exception:  # noqa: BLE001 — unreadable SQL states no predicate
+        return set()
+    ranked: list[tuple[int, str]] = []
+    for e in model.entities:
+        if not _entity_present(e, sql):
+            continue
+        for m in e.metrics:
+            if m.type != "simple" or not m.expr or (m.agg or "").lower() != func:
+                continue
+            if _bare_name(m.expr) != column:
+                continue
+            filters = [c for f in m.filters if (c := _canon_text(f, dialect))]
+            if len(filters) < len(m.filters) or any(c not in stated for c in filters):
+                continue
+            ranked.append((len(filters), m.name))
+    if not ranked:
+        return set()
+    best = max(n for n, _ in ranked)
+    return {name.strip().lower() for n, name in ranked if n == best}
+
+
+def _bare_name(expr: str) -> str:
+    """``invoices.amount_eur`` → ``amount_eur``; a non-column expression is
+    returned whole (it names no column)."""
+    try:
+        node = sqlglot.parse_one(expr)
+    except Exception:  # noqa: BLE001
+        return expr.strip().lower()
+    return node.name.lower() if isinstance(node, exp.Column) else expr.strip().lower()
 
 
 # ── certified overlay ────────────────────────────────────────────────────────

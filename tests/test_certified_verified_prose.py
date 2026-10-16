@@ -441,3 +441,52 @@ def test_frame_caps_rows_and_says_so() -> None:
     frame = certified_frame("numbers?", result, jaffle_customer_value(), max_rows=3)
     assert "(showing the first 3 of 10 rows)" in frame
     assert "\n9" not in frame
+
+
+@needs_db
+def test_refresh_samples_re_records_a_template_whose_range_reads_inclusive(org) -> None:
+    """A template bound `2018-01-01/2018-02-01` was certified when that range
+    read end-exclusive; since explicit ranges are inclusive its sample result
+    moved with the release. `dst apply --refresh-samples` executes the
+    sample-bound SQL once more and re-records the value, bindings and terms;
+    an apply without the flag leaves the stored sample as it was."""
+    oid, headers = org
+    template = {
+        "question": "how many orders were placed in {period}",
+        "sql": "SELECT count(*) AS orders FROM orders "
+        "WHERE order_date >= {period.start} AND order_date < {period.end}",
+        "slots": {"period": {"type": "date_range"}},
+        "sample_bindings": [{"period": "2018-01-01/2018-02-01"}],
+        "verified_value": {"columns": ["orders"], "rows": [[-1]]},  # the pre-release sample
+    }
+
+    def stored() -> certify_store.CertifiedAnswer:
+        with org_session(oid) as s:
+            return next(
+                a
+                for a in certify_store.list_for_lens(s, "customer_value")
+                if a.question == template["question"]
+            )
+
+    row = _apply(headers, _files([template]))
+    assert not row.get("errors"), row
+    stale = {"columns": ["orders"], "rows": [[-1]]}
+    assert stored().verified_value == stale
+
+    row = _apply(headers, _files([template]))  # unchanged: the sample stays
+    assert stored().verified_value == stale
+
+    out = client.post(
+        "/mgmt/project/apply",
+        headers=headers,
+        params={"refresh_samples": "true"},
+        json={"files": _files([template])},
+    ).json()
+    row = next(e for e in out if e.get("lens") == "customer_value")
+    assert not row.get("errors"), row
+    assert any(
+        "--refresh-samples: re-recorded the sample result of 1 of 1" in a for a in row["applied"]
+    )
+    refreshed = stored()
+    assert refreshed.verified_value not in (stale, None)  # the sample as the warehouse answers it
+    assert refreshed.terms is not None and "orders" in refreshed.sql

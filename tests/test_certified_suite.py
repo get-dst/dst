@@ -1153,3 +1153,53 @@ def test_dst_test_prints_and_reports_the_lenient_reason(org, monkeypatch, capsys
     assert rc == 0
     (row,) = report["results"]
     assert row["verdict"] == "pass" and "value-equivalent" in str(row["reason"])
+
+
+def test_compare_drops_a_certified_helper_column_beside_the_value_visibly() -> None:
+    """A BI-verified query certifies the label, the percentage and the count it
+    was checked against; generation returns the label and the rate. The count
+    is dropped, the rate pairs with the percentage value for value, and the
+    pass says both — in prose and in --json, never a silent green."""
+    from services.evals.certified_suite import _compare
+
+    ok, reason = _compare(
+        ["service_level", "otd_pct", "delivered_shipments"],
+        [["economy", 82.75, 13093], ["express", 82.61, 16592], ["standard", 82.48, 36546]],
+        ["service_level", "otd_rate"],
+        [["economy", 0.8275414343542351], ["express", 0.8260607521697203], ["standard", 0.8248]],
+    )
+    assert ok and reason is not None
+    assert "certified column(s) ['delivered_shipments'] ignored" in reason
+    assert "generated 'otd_rate' is certified 'otd_pct'" in reason
+    assert "value-equivalent:" in reason
+    # the one-row period template: the same two columns against a single value
+    ok, reason = _compare(
+        ["otd_pct", "delivered_shipments"], [[82.59, 21588]], ["otd_rate"], [[0.8259]]
+    )
+    assert ok and reason is not None and "value-equivalent:" in reason
+    # the generated column named as the certified one: a name-subset projection
+    ok, reason = _compare(
+        ["collected_eur", "paid_invoices"],
+        [[6072368.15, 3000]],
+        ["collected_eur"],
+        [[6072368.148148]],
+    )
+    assert ok and reason == "projection: certified column(s) ['paid_invoices'] ignored"
+    # a value that is not the certified one stays a failure, said as values
+    ok, reason = _compare(
+        ["collected_eur", "paid_invoices"],
+        [[6083835.93, 3018]],
+        ["collected_eur"],
+        [[6072368.148148]],
+    )
+    assert not ok and reason == "generated 6072368.148148 vs certified 6083835.93"
+    ok, _ = _compare(
+        ["service_level", "otd_pct", "delivered_shipments"],
+        [["economy", 82.75, 13093]],
+        ["service_level", "otd_rate"],
+        [["economy", 0.5]],
+    )
+    assert not ok
+    # two certified columns the value could be: a coincidence it cannot tell apart
+    ok, _ = _compare(["a", "b", "c"], [[3, 3, "x"]], ["n", "c"], [[3, "x"]])
+    assert not ok

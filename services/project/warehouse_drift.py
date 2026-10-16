@@ -234,6 +234,28 @@ def baseline_changed(root: Path, connection: str, profiles: list[TableProfile]) 
     return before != after
 
 
+def advance_baseline(
+    root: Path,
+    connection: str,
+    live: list[TableProfile],
+    probed: list[TableProfile] | None,
+) -> Path | None:
+    """The one way a baseline moves forward, for `dst drift --accept` and for
+    `dst apply`'s advance alike: the live catalog's schema with the newest
+    probe artifact's measured facts laid over it (``accepted_tables``), and
+    the facts the prior baseline held for whatever the artifact did not
+    measure. Written only when the recorded facts differ — a quiet warehouse
+    whose baseline already says this leaves no timestamp-only commit — and a
+    baseline with a null fact beside a measured one IS a difference, so a
+    probe's first measurements reach the committed file on the next accept
+    or deploy. Returns the path written, or None when nothing moved."""
+    prior = read_baseline(root, connection)
+    recorded = accepted_tables(live, probed, prior.tables if prior else None)
+    if not baseline_changed(root, connection, recorded):
+        return None
+    return write_baseline(root, connection, recorded)
+
+
 def write_baseline(root: Path, connection: str, profiles: list[TableProfile]) -> Path:
     path = baseline_path(root, connection)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,15 +314,21 @@ def accepted_tables(
     for table in live:
         columns = []
         for column in table.columns:
-            seen = _facts(measured, table.table, column.name) or _facts(
-                kept, table.table, column.name
-            )
+            newest = _facts(measured, table.table, column.name)
+            prior_facts = _facts(kept, table.table, column.name)
+            seen = newest or prior_facts
             if seen is None:
                 columns.append(column)
                 continue
-            columns.append(
-                column.model_copy(update={f: getattr(seen, f) for f in _MEASURED_FIELDS})
-            )
+            update = {f: getattr(seen, f) for f in _MEASURED_FIELDS}
+            if newest is not None and prior_facts is not None:
+                # An artifact that lists the column without measuring it (a
+                # catalog-only pass) carries null for the numbers; the prior
+                # baseline's number stands — a null is never written over it.
+                for f in ("mean", "time_offset_seconds"):
+                    if update[f] is None:
+                        update[f] = getattr(prior_facts, f)
+            columns.append(column.model_copy(update=update))
         out.append(table.model_copy(update={"columns": columns}))
     return out
 

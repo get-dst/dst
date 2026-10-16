@@ -478,6 +478,54 @@ def test_accept_keeps_the_measured_facts_so_a_later_shift_fires(
     assert "SHIFTED `shipped_at`" in out and "2h -> 5h" in out and "1 BREAKING" in out
 
 
+def test_accept_on_a_quiet_warehouse_picks_up_the_facts_a_null_baseline_lacks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A baseline advanced from an artifact without measured facts (or
+    recorded before probes measured them) holds `mean` and
+    `time_offset_seconds` as null. A later probe measures them; nothing else
+    moved, so drift reports no change — and `--accept` must still re-record,
+    or the file never gains the facts `column_shifted` diffs against. An
+    identical baseline is left byte for byte."""
+    root = _project(tmp_path)
+    where = ["--connection", "warehouse", "--dir", str(root)]
+    assert _cli(monkeypatch, ["probe", *where]) == 0
+    baseline = wd.baseline_path(root, "warehouse")
+    recorded = json.loads(baseline.read_text(encoding="utf-8"))
+    for column in recorded["tables"][0]["columns"]:
+        column["mean"] = None
+        column["time_offset_seconds"] = None
+    baseline.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    capsys.readouterr()
+    assert _cli(monkeypatch, ["drift", "--accept", *where]) == 0
+    err = capsys.readouterr().err
+    assert "no change in 'warehouse'" in err and "re-recorded with the newest probe" in err
+    after = json.loads(baseline.read_text(encoding="utf-8"))
+    shipped = next(c for c in after["tables"][0]["columns"] if c["name"] == "shipped_at")
+    assert shipped["time_offset_seconds"] == 7_200.0
+    text_after = baseline.read_text(encoding="utf-8")
+    assert _cli(monkeypatch, ["drift", "--accept", *where]) == 0
+    assert baseline.read_text(encoding="utf-8") == text_after  # quiet: no timestamp-only rewrite
+
+
+def test_advance_baseline_is_the_one_path_for_accept_and_deploy(tmp_path: Path) -> None:
+    """`dst apply`'s advance merges like `--accept`: an artifact that measured
+    nothing never writes a null over the number the prior baseline holds, and
+    a measured fact beside a null one is a change worth writing."""
+    live = _table(_column("shipped_at"))
+    probed = _table(_column("shipped_at", time_offset_seconds=7_200.0))
+    assert wd.advance_baseline(tmp_path, "warehouse", live, None) is not None  # armed
+    assert wd.advance_baseline(tmp_path, "warehouse", live, probed) is not None  # the fact lands
+    assert (
+        wd.read_baseline(tmp_path, "warehouse").tables[0].columns[0].time_offset_seconds == 7_200.0
+    )
+    assert wd.advance_baseline(tmp_path, "warehouse", live, live) is None  # factless artifact: kept
+    assert (
+        wd.read_baseline(tmp_path, "warehouse").tables[0].columns[0].time_offset_seconds == 7_200.0
+    )
+    assert wd.advance_baseline(tmp_path, "warehouse", live, probed) is None  # identical: untouched
+
+
 def test_accepted_tables_merge_artifact_and_prior_facts_by_table_name() -> None:
     """The artifact's facts land on the live column however the table is
     qualified; a column the artifact did not measure keeps the facts the

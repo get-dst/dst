@@ -574,6 +574,9 @@ def apply_project(
     org_id: uuid.UUID = Depends(get_admin_org),
     identity: AdminIdentity = Depends(get_admin_identity),
     probe_certified: bool = Query(default=False),
+    # Re-record the sample result of stored templates whose explicit-range
+    # binding reads inclusive since 0.10.0 (`dst apply --refresh-samples`).
+    refresh_samples: bool = Query(default=False),
     require_gates: bool = Query(default=False),
     # The transient, audited escape from a failing-case block.
     # A reason is MANDATORY — the override without one is refused, because
@@ -609,6 +612,7 @@ def apply_project(
             org_id,
             identity,
             probe_certified=probe_certified,
+            refresh_samples=refresh_samples,
             require_gates=require_gates,
             gate_override=gate_override,
             allow_cases=allow_cases,
@@ -634,6 +638,7 @@ def _apply(
     probe_certified: bool,
     require_gates: bool,
     gate_override: str | None,
+    refresh_samples: bool = False,
     allow_cases: frozenset[str] | None,
     only: frozenset[str] | None = None,
 ) -> list[dict[str, object]]:
@@ -771,7 +776,7 @@ def _apply(
     # and republishes stale lenses whether or not the push carried them.
     # --probe-certified is an explicit ask to (re)walk the certified surface —
     # its "probed 0 new entries" note must not be skipped away.
-    inputs_touched = bool(conn_applied or profile_applied or probe_certified)
+    inputs_touched = bool(conn_applied or profile_applied or probe_certified or refresh_samples)
     # The lenses nothing in this push changes: managed files that match the
     # DB (plan's own comparison), and no reason to recompile either way.
     same_files: set[str] = set()
@@ -818,6 +823,7 @@ def _apply(
             source,
             org_id=org_id,
             probe_certified=probe_certified,
+            refresh_samples=refresh_samples,
             created_by=identity.actor,
             gate_override=gate_override,
             allow_cases=allow_cases,
