@@ -73,6 +73,45 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.12.0] — 2026-10-18
+
+No schema change. New fields: definition `period:`, metric `period_weight:`; new checks
+`definition_period`, `grain_applied`, `row_conservation`; `dst init` compose project names are
+now unique per directory.
+
+### Added
+
+- **Definitions ride the certified rail.** A definition with `sql:` and `period:` about an
+  entity fails `definition_period` on certified SQL that reads past it: the grade is at most
+  partial, the answer carries `DEFINITION NOT APPLIED: <term>` on every surface, and
+  `dst plan` and `dst apply` warn `certified_ignores_definition` naming both.
+- **A question that says monthly, weekly or by month pins that grain** on DATE columns too,
+  and `grain_applied` fails a result not bucketed at the asked unit.
+- **`row_conservation`**: a UNION ALL over one keyed table that yields more rows than
+  distinct keys grades partial naming both counts.
+- **A ratio across additivities** (a level over a flow) compiles when the metric declares
+  `period_weight: weeks|days`.
+- **The dbt import warns `join_cardinality`** when the probe shows a 2:1 key mapping on a
+  relationship, and writes `schema.alias` on every path.
+
+### Changed
+
+- **Certify-time prose is composed over the whole result** and stored with its row count;
+  prose composed over a sample never serves verbatim (`SAMPLED`), and a changed row count
+  counts as restated.
+- **A certified basis names only the definitions whose member the SQL reads** or whose
+  metric it computes.
+- **`dst init` derives a unique compose project name**; `dst dev` refuses a database whose
+  encryption key does not match, naming the project; `--daemon` exits non-zero with the
+  log tail when the child dies.
+
+### Fixed
+
+- **A `NO_ANSWER` anywhere in the composer's prose is a decline**, never a verified answer.
+- **A generated literal on a column a selected metric's own filter governs is dropped** and
+  recorded on the ledger as `literal_dropped`.
+- `sample_queries` shape and template slot casts are documented.
+
 ## [0.11.2] — 2026-10-17
 
 No schema change.

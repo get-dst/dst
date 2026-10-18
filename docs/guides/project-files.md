@@ -36,6 +36,35 @@ Only *managed* paths participate in plan/apply: `lens.yaml`, `queries.yaml`,
 under `semantic/`, never under `lenses/`, and each [lens](../concepts/lens.md) selects
 from them in its `lens.yaml`.
 
+## `queries.yaml`: use_when and sample_queries
+
+```yaml
+use_when:
+  - revenue, VAT, medical vs retail split, payers, revenue per clinic
+sample_queries:
+  - question: net revenue per clinic in September 2026
+    sql: >
+      SELECT clinic_code, SUM(revenue_eur) FROM marts.fct_revenue_daily
+      WHERE day >= '2026-09-01' AND day < '2026-10-01' GROUP BY 1
+```
+
+`use_when` is a list of strings the router anchors on. `sample_queries` is a
+list of `{question, sql}` pairs — both keys required, the SQL in the lens's
+dialect (`services/contracts/semantic_model.py`, `SampleQuery`); a bare string
+is rejected at plan with "valid dictionary", a pair without `sql` with "sql:
+required". They reach the raw-SQL prompt as worked examples and `dst test` can
+run them.
+
+### Template slots render as typed literals
+
+A certified template's `{slot}` renders as a proper literal for the dialect —
+`'2026-09-01'` for a date or a date_range bound, `42` for a number, `'EUR'` for
+an enum. A function that needs a typed argument still needs the cast the
+warehouse would need for any string literal: DuckDB's `date_diff('day',
+{period.start}, day)` is a binder error, `date_diff('day', CAST({period.start}
+AS DATE), day)` runs. Comparisons (`day >= {period.start}`) need none. The eval
+gate at apply catches the uncast form; the cast is yours to write.
+
 ## Secrets discipline
 
 Secrets never appear in files. A connection declares `secret_env: DST_API_KEY_BIGQUERY`
@@ -157,6 +186,7 @@ refused`) rather than "no lens covers this".
 | summed across currencies / entities that must not mix | `pinned_dimensions` | yes; serve check |
 | a metric served without its defining constraint | `filters:` on the metric | yes; filter guard |
 | a term's meaning never checkable in answers | `sql:` on the definition (alias `sql_expr`) | yes; definition_applied check + generation grounding |
+| a rule on one period (a duplicated export month) that certified SQL reads past | `sql:` + `period:` on a definition `about:` the entity | yes; definition_period check on every certified serve, `certified_ignores_definition` at plan/apply |
 | a term with two meanings silently guessed | `status: ambiguous` + `aliases` | yes; clarifies instead |
 | a metric nobody says by its identifier (`otd_rate`) resolved to a sibling | `label:` / `aliases:` on the metric | yes; the question names it word for word, and a bare metric question compiles without a decision |
 | a metric that must never serve from this lens | leave it out of `select:` | yes; refusal |
@@ -232,6 +262,38 @@ The answer discloses the reading (a `Reading applied:` sentence naming the metri
 the ledger carries it as a declared window slot, so a snapshot read as a total
 is never silent. "At the end of August 2026" and "as of 2026-08-31" are windows
 the parser already understands: the month, and the day.
+
+### A ratio across additivities: `period_weight`
+
+Utilisation is scheduled appointments (a flow, summed over the month) over
+slot capacity per week (a level: the month's plan, repeated on every day)
+times the weeks in the month. A level beside a flow is refused in one intent,
+but a **ratio metric** can declare how the level is weighted:
+
+```yaml
+metrics:
+  - name: planned_capacity_slots
+    agg: max
+    expr: clinic_capacity_daily.slot_capacity_per_week
+    additivity: level
+  - name: scheduled_appointments
+    agg: sum
+    expr: clinic_capacity_daily.scheduled_appointments
+  - name: utilisation
+    type: ratio
+    numerator: scheduled_appointments
+    denominator: planned_capacity_slots
+    period_weight: weeks        # weeks | days
+```
+
+The compiler sums the flow over the window, reads the level at the window's
+latest snapshot (the same correlated pin a level metric uses on its own) and
+multiplies it by the window's length — `days / 7` for `weeks`, `days` for
+`days` — as a number in the served SQL, so the weight is visible on every
+answer. Exactly one operand must be a level. The window must be bounded on
+both ends ("in September 2026"); an open window has no length, and a trend
+(`grain`) is one window at a time — both are refused with the reason, never
+guessed.
 
 ## Freshness is a declared contract
 

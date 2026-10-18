@@ -249,3 +249,61 @@ def test_probe_fails_loudly_on_an_empty_warehouse(
     assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 1
     assert "listed no tables" in capsys.readouterr().err
     assert not probe.probe_path(root, "warehouse").exists()
+
+
+def test_join_cardinality_lint_names_the_counts_from_the_probe() -> None:
+    """A fact table carrying 28 clinic codes (legacy before a rename, current
+    after) joined to a dimension holding 14: invisible in the SQL and the
+    files, visible where the probe's distinct counts meet."""
+    from services.contracts.semantic_model import Entity, Join, SemanticModel
+
+    def _table(name: str, column: str, distinct: int, *, exact: bool = True) -> TableProfile:
+        return TableProfile(
+            connection="wh",
+            table=name,
+            columns=[
+                ColumnProfile(
+                    name=column, type="VARCHAR", distinct_count=distinct, distinct_is_exact=exact
+                )
+            ],
+        )
+
+    model = SemanticModel(
+        lens="ops",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="appointments",
+                source=EntitySource(connection="wh", table="marts.fct_appointments"),
+            ),
+            Entity(name="clinics", source=EntitySource(connection="wh", table="marts.dim_clinic")),
+        ],
+        joins=[
+            Join(
+                left="appointments",
+                right="clinics",
+                on="appointments.clinic_code = clinics.clinic_code",
+                type="left",
+                relationship="many_to_one",
+            )
+        ],
+    )
+    profiles = {
+        "marts.fct_appointments": _table("marts.fct_appointments", "clinic_code", 28),
+        "marts.dim_clinic": _table("marts.dim_clinic", "clinic_code", 14),
+    }
+    [warning] = probe.join_cardinality_warnings(model, profiles)
+    assert warning.startswith("join_cardinality: appointments.clinic_code holds 28 distinct values")
+    assert "clinics.clinic_code only 14" in warning and "at least 14 key(s)" in warning
+    # the healthy shape, a sampled (lower-bound) count, and a non-equi key lint nothing
+    profiles["marts.fct_appointments"] = _table("marts.fct_appointments", "clinic_code", 14)
+    assert probe.join_cardinality_warnings(model, profiles) == []
+    profiles["marts.fct_appointments"] = _table(
+        "marts.fct_appointments", "clinic_code", 28, exact=False
+    )
+    assert probe.join_cardinality_warnings(model, profiles) == []
+    model.joins[
+        0
+    ].on = "appointments.clinic_code IN (clinics.clinic_code, clinics.legacy_clinic_code)"
+    profiles["marts.fct_appointments"] = _table("marts.fct_appointments", "clinic_code", 28)
+    assert probe.join_cardinality_warnings(model, profiles) == []

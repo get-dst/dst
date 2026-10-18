@@ -572,3 +572,19 @@ def test_demo_init_says_whether_certified_matching_is_on(
     )
     _init(tmp_path / "second", warehouse="demo")
     assert "embeddings: local, in-process (certified matching on)" in capsys.readouterr().out
+
+
+def test_compose_project_name_is_salted_with_the_path(tmp_path: Path) -> None:
+    """Two projects named alike on one host shared `dst-kuura_pgdata`, and the
+    second refused to start on the first one's encryption sentinel."""
+    from services.cli.init import compose_project_name
+
+    a = _init(tmp_path / "one", name="kuura")
+    b = _init(tmp_path / "two", name="kuura")
+    names = [
+        re.search(r"^name: (\S+)$", (root / "docker-compose.yml").read_text(), re.M).group(1)  # type: ignore[union-attr]
+        for root in (a, b)
+    ]
+    assert all(re.fullmatch(r"dst-kuura-[0-9a-f]{8}", n) for n in names), names
+    assert names[0] != names[1]
+    assert names[0] == compose_project_name("kuura", a)

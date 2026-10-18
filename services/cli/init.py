@@ -17,6 +17,17 @@ from pathlib import Path
 WAREHOUSES = ("demo", "duckdb", "postgres", "bigquery", "snowflake", "none")
 
 
+def compose_project_name(name: str, root: Path) -> str:
+    """``dst-<name>-<hash>``: the project's name plus eight hex characters of
+    its absolute path, so two projects that share a name on one host never
+    share a compose project — and with it a Postgres volume written under
+    another DST_SECRET_KEY."""
+    import hashlib
+
+    digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"dst-{name}-{digest}"
+
+
 def agent_files(root: Path, name: str, api_port: int) -> list[tuple[Path, str]]:
     """The agent-facing scaffold — AGENTS.md and the seven skills — as
     ``(path, content)``.
@@ -403,8 +414,11 @@ def run_init(args: argparse.Namespace) -> int:
     (root / "docker-compose.yml").write_text(
         # Explicit project name: compose otherwise derives it from the dir
         # basename, and two same-named checkouts on one host steal each
-        # other's containers.
-        f"name: dst-{name}\n"
+        # other's containers. The name alone is not enough either: a second
+        # `dst init kuura` on the same machine reused the first one's
+        # `dst-kuura_pgdata` volume and refused to start on its sentinel, so
+        # the absolute path salts it.
+        f"name: {compose_project_name(name, root)}\n"
         "services:\n"
         "  db:\n"
         "    image: pgvector/pgvector:pg16\n"

@@ -5,7 +5,7 @@ biased hard against false positives — a legal grouping must never be blocked."
 from __future__ import annotations
 
 from services.contracts.semantic_model import Entity, EntitySource, Field, SemanticModel
-from services.runtime.time_guard import asked_period, raw_timestamp_groupings
+from services.runtime.time_guard import asked_period, grain_applied, raw_timestamp_groupings
 
 
 def _model(*, time_type: str = "timestamp") -> SemanticModel:
@@ -107,3 +107,43 @@ def test_asked_period_reads_the_question() -> None:
     assert asked_period("quarterly bookings by segment") == "quarter"
     assert asked_period("annual revenue") == "year"
     assert asked_period("sessions over time") == "month"  # the default
+
+
+def test_date_column_raw_grouped_under_a_monthly_ask_is_flagged() -> None:
+    """A DATE column is legal daily grain — until the question asks a coarser
+    unit. 'one row per month' served 273 daily rows under `verified`."""
+    sql = "SELECT started_at, count(*) FROM analytics.sessions GROUP BY started_at"
+    model = _model(time_type="date")
+    assert raw_timestamp_groupings(sql, model, question="sessions by month in 2026") == [
+        ("sessions", "started_at")
+    ]
+    assert raw_timestamp_groupings(sql, model, question="sessions per day in 2026") == []
+    assert raw_timestamp_groupings(sql, model, question="daily sessions by month") == []
+    assert raw_timestamp_groupings(sql, model, question="sessions in 2026") == []
+
+
+def test_date_column_grouped_raw_beside_its_own_bucket_is_flagged_without_a_question() -> None:
+    """GROUP BY DATE_TRUNC('month', d), d — the bucket is a no-op, at any grain."""
+    sql = (
+        "SELECT DATE_TRUNC('month', started_at) AS m, started_at, count(*) "
+        "FROM analytics.sessions GROUP BY DATE_TRUNC('month', started_at), started_at"
+    )
+    assert raw_timestamp_groupings(sql, _model(time_type="date")) == [("sessions", "started_at")]
+
+
+def test_grain_applied_reads_the_rows_not_the_sql() -> None:
+    from datetime import date, timedelta
+
+    daily = [[date(2026, 1, 1) + timedelta(days=i), i] for i in range(273)]
+    check = grain_applied("VAT by month, one row per month", ["day", "vat"], daily, "none")
+    assert check.status == "fail" and "273 distinct dates across 9 month(s)" in (check.reason or "")
+    monthly = [[f"2026-{m:02d}-01", m] for m in range(1, 10)]
+    assert grain_applied("VAT by month", ["day_month", "vat"], monthly, "none").status == "pass"
+    # one month-end label per bucket, jittered per group, is one row per bucket
+    ends = [[date(2026, m, 28), m] for m in range(1, 10)] + [
+        [date(2026, m, 27), m] for m in range(1, 10)
+    ]
+    assert grain_applied("MRR per month", ["month_end", "mrr"], ends, "none").status == "pass"
+    assert grain_applied("VAT in September", ["day", "vat"], daily, "none").status == "skip"
+    assert grain_applied("VAT by month", ["vat"], [[1.0]], "none").status == "skip"
+    assert grain_applied("VAT by month", ["day", "vat"], daily, "certified").status == "skip"

@@ -23,6 +23,7 @@ Apply ingests the artifact into the store the runtime already reads
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +31,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from services.contracts.profile import SampleWindow, TableProfile, is_temporal_type
+from services.contracts.semantic_model import SemanticModel
 from services.contracts.shared_semantic import SharedEntity
 from services.project.warehouse_drift import BASELINE_DIR, connection_slug, same_table
 
@@ -237,3 +239,51 @@ def _days(delta: timedelta) -> str:
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+_EQUI_JOIN = re.compile(
+    r"^\s*(?P<lt>[A-Za-z_][\w]*)\.(?P<lc>[A-Za-z_][\w]*)\s*=\s*"
+    r"(?P<rt>[A-Za-z_][\w]*)\.(?P<rc>[A-Za-z_][\w]*)\s*$"
+)
+
+
+def join_cardinality_warnings(sm: SemanticModel, profiles: Mapping[str, TableProfile]) -> list[str]:
+    """One warning per many_to_one join whose key column holds MORE distinct
+    values on the many side than the one side it points at, read from the
+    probe's exact distinct counts: every key the one side lacks drops its rows
+    from the join. The clinic-code shape — a fact table carrying 28 codes
+    (legacy before a rename, current after) against a dimension holding 14 —
+    is invisible in the SQL and in the files; the probe's dictionaries are
+    the one place the counts meet. ``profiles`` is keyed by table name as
+    the probe names it. Nothing to lint without exact counts on both sides."""
+    out: list[str] = []
+    sources = {e.name: e.source.table for e in sm.entities}
+    for join in sm.joins:
+        if join.relationship != "many_to_one":
+            continue
+        m = _EQUI_JOIN.match(join.on)
+        if m is None:
+            continue
+        sides = {m.group("lt"): m.group("lc"), m.group("rt"): m.group("rc")}
+        if join.left not in sides or join.right not in sides:
+            continue
+        counts: dict[str, int] = {}
+        for entity, column in sides.items():
+            table = next(
+                (p for t, p in profiles.items() if same_table(t, sources.get(entity, ""))), None
+            )
+            col = next((c for c in table.columns if c.name == column), None) if table else None
+            if col is None or col.distinct_count is None or not col.distinct_is_exact:
+                break
+            counts[entity] = col.distinct_count
+        else:
+            many, one = counts[join.left], counts[join.right]
+            if many > one:
+                out.append(
+                    f"join_cardinality: {join.left}.{sides[join.left]} holds {many} distinct "
+                    f"values but {join.right}.{sides[join.right]} only {one} — at least "
+                    f"{many - one} key(s) on the many side match nothing, and their rows drop "
+                    f"from every join through this relationship (a key that changed over "
+                    f"time? join on both codes, or carry the old ones in {join.right})"
+                )
+    return out

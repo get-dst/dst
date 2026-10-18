@@ -49,6 +49,14 @@ class QueryIntent(BaseModel):
         "definition_suggested and NOT compiled: a predicate nobody asked for is a "
         "silent filter",
     )
+    literals_dropped: list[str] = PField(
+        default_factory=list,
+        description="literal filters the generator added on a column a selected metric's "
+        "own filters (or its CASE conditions) already govern — 'completed visits' as "
+        "status = 'completed' beside the metric's status IN ('completed', 'billed'). "
+        "The metric's predicate wins, the literal is dropped at compile and recorded "
+        "on the ledger as literal_dropped: the extra predicate silently halves a count",
+    )
     grain: TimeGrain | None = PField(
         default=None,
         description="bucket the entity's time field to this period and group by it — "

@@ -528,7 +528,8 @@ def _modernised(stored: dict[str, Any], now: dict[str, Any]) -> dict[str, Any] |
         return None
     if set(stored) == {"value"}:
         return {"value": rows[0][0]}
-    return {"columns": want_cols, "rows": rows}
+    # Everything else the store recorded (the probe's row_count) rides along.
+    return {**stored, "columns": want_cols, "rows": rows}
 
 
 def _value_lane(

@@ -2128,6 +2128,9 @@ def _serve_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+_STARTUP_FAILED = "Application startup failed"
+
+
 def _serve_daemon(args: argparse.Namespace) -> int:
     """`dst serve --daemon`: run the same command detached, pid in
     .dst/serve.pid, output in .dst/serve.log; return once /health answers or
@@ -2156,16 +2159,34 @@ def _serve_daemon(args: argparse.Namespace) -> int:
     pidfile.write_text(f"{child.pid}\n")
     port = args.port or 8000
     url = f"http://{args.host}:{port}"
+
+    def failed(what: str) -> int:
+        pidfile.unlink(missing_ok=True)
+        tail = logfile.read_text(errors="replace").splitlines()[-20:]
+        print(f"background server {what}:", file=sys.stderr)
+        print("\n".join(tail), file=sys.stderr)
+        return 1
+
     for _ in range(240):
         if child.poll() is not None:
-            pidfile.unlink(missing_ok=True)
-            tail = logfile.read_text(errors="replace").splitlines()[-20:]
-            print(f"background server exited with {child.returncode}:", file=sys.stderr)
-            print("\n".join(tail), file=sys.stderr)
-            return 1
+            return failed(f"exited with {child.returncode}")
+        # A startup that failed inside uvicorn does not always end the
+        # process: a thread the failed lifespan left behind keeps the
+        # interpreter alive, and the pid polled as "running" for ten minutes
+        # while the log already held the traceback. The log is the signal.
+        if _STARTUP_FAILED in logfile.read_text(errors="replace"):
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+            return failed("failed to start")
         if _wait_for_health(url, tries=1, delay=0):
             break
         time.sleep(0.5)
+    else:
+        child.terminate()
+        return failed("did not answer /health in time")
     print(f"serving in the background — {url} (pid {child.pid}, log {logfile})", flush=True)
     return 0
 
@@ -2252,7 +2273,15 @@ def _serve(args: argparse.Namespace) -> int:
     url = f"http://{args.host}:{args.port}"
     print(f"waiting for server at {url} ... (ready when /health answers)", flush=True)
     _announce_ready(url)
-    uvicorn.run("services.app:app", host=args.host, port=args.port, reload=args.reload)
+    try:
+        uvicorn.run("services.app:app", host=args.host, port=args.port, reload=args.reload)
+    except SystemExit as exc:
+        # uvicorn exits 3 when the lifespan failed. A non-daemon thread the
+        # failed startup left behind would keep the interpreter alive past
+        # that, so the exit is forced once the log is flushed.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exc.code if isinstance(exc.code, int) else 1)
     return 0
 
 
@@ -2324,8 +2353,49 @@ def _dev(args: argparse.Namespace) -> int:
         else:
             print("error: database did not become ready after 60s", file=sys.stderr)
             return 1
+    mismatch = _sentinel_mismatch()
+    if mismatch:
+        print(mismatch, file=sys.stderr)
+        return 1
     _migrate(args)
     return _serve(args)
+
+
+def _compose_project(compose_dir: Path | None = None) -> str | None:
+    """The ``name:`` of the project's docker-compose.yml, when there is one."""
+    path = (compose_dir or Path.cwd()) / "docker-compose.yml"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("name:"):
+                return line.partition(":")[2].strip().strip("'\"") or None
+    except OSError:
+        return None
+    return None
+
+
+def _sentinel_mismatch() -> str | None:
+    """The refusal for a database whose encryption sentinel DST_SECRET_KEY does
+    not decrypt, naming the compose project the volume belongs to — else None
+    (a matching key, a fresh database, or no sentinel table yet). The server
+    would refuse the same way in its lifespan, but from inside uvicorn that
+    refusal left a hung child behind `--daemon`; here it is a line and exit 1
+    before anything starts."""
+    from services.security.sentinel import WrongEncryptionKey, verify_or_install
+
+    try:
+        verify_or_install()
+    except WrongEncryptionKey as exc:
+        project = _compose_project()
+        where = f"compose project '{project}' (its pgdata volume)" if project else "this database"
+        return (
+            f"error: {exc}\nThe data in {where} was written under another DST_SECRET_KEY — "
+            "most likely a different project's volume. Point DATABASE_URL at this project's "
+            "own database (a unique compose `name:` gives it its own volume), restore the "
+            "key that wrote it, or `docker compose down -v` to start over."
+        )
+    except Exception:  # noqa: BLE001 — no table yet, or no crypto configured: nothing to check
+        return None
+    return None
 
 
 def _env_dirs(args: argparse.Namespace) -> tuple[str]:

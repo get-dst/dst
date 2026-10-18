@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -91,7 +91,9 @@ def metric_sql(
     would intersect them — completed AND returned = zero rows, silently).
     Ratio/derived expand each referenced sibling metric recursively; references
     ALWAYS inline their filters (a shared WHERE would poison the other operand),
-    and a ratio wraps as CAST(num AS DOUBLE) / NULLIF(denom, 0). Unknown
+    and a ratio wraps as CAST(num AS DOUBLE) / NULLIF(denom, 0); a ratio with
+    ``period_weight`` expands to that plain shape too (the weighted form needs
+    the intent's window — compile_intent emits it). Unknown
     references and reference cycles raise CompileError. ``where`` are extra
     conditions this one metric is restricted to (its own time window, when
     the selected metrics read different time fields); they ride inside the
@@ -130,6 +132,12 @@ def _expand(
     filters = [*inherited, *metric.filters]
     if metric.type == "ratio":
         assert metric.numerator is not None and metric.denominator is not None
+        # A period-weighted ratio expands here as the plain ratio of its
+        # operands: this is the SHAPE lints and the filter guard recognise
+        # a metric by, never the served SQL — compile_intent routes the
+        # metric through _weighted_ratio_sql, where the window gives the
+        # weight and the snapshot pin. (Raising here rejected the lens at
+        # apply, from the parse lint that only wanted the shape.)
         num = _expand(_ref(metric.numerator, by_name, metric.name), by_name, filters, seen, True)
         den = _expand(_ref(metric.denominator, by_name, metric.name), by_name, filters, seen, True)
         return f"CAST({num} AS DOUBLE) / NULLIF({den}, 0)"
@@ -656,6 +664,206 @@ def _per_metric_windows(
     return {m: f for m, f in fields.items() if f}, window
 
 
+def _governed_columns(metric: Metric, by_name: dict[str, Metric], dialect: str) -> set[str]:
+    """The bare column names a metric's meaning already conditions on: every
+    column in its ``filters`` and in the WHEN conditions of its ``expr``, and
+    the same for the sibling metrics a ratio or derived metric expands."""
+    cols: set[str] = set()
+    for frag in metric.filters:
+        try:
+            cols |= {
+                c.name.lower() for c in sqlglot.parse_one(frag, read=dialect).find_all(exp.Column)
+            }
+        except Exception:  # noqa: BLE001 — an unparseable fragment governs nothing we can name
+            pass
+    if metric.expr and metric.type == "simple":
+        try:
+            tree = sqlglot.parse_one(metric.expr, read=dialect)
+        except Exception:  # noqa: BLE001
+            tree = None
+        if tree is not None:
+            for when in tree.find_all(exp.If):
+                cols |= {c.name.lower() for c in when.this.find_all(exp.Column)}
+    refs = [metric.numerator, metric.denominator] if metric.type == "ratio" else []
+    if metric.type == "derived" and metric.expr:
+        refs = _PLACEHOLDER.findall(metric.expr)
+    for ref in refs:
+        sibling = by_name.get(ref or "")
+        if sibling is not None and sibling is not metric:
+            cols |= _governed_columns(sibling, by_name, dialect)
+    return cols
+
+
+def prefer_weighted_ratio(intent: QueryIntent, model: SemanticModel) -> QueryIntent:
+    """The intent with a level and a flow replaced by the period-weighted
+    ratio metric declared over exactly those two — "utilisation" asked as
+    scheduled appointments and slot capacity. The model names the operands
+    the question spells out; the compiler refuses a level beside a flow;
+    the author declared how they meet. Deterministic, before that refusal."""
+    if len(intent.metrics) != 2:
+        return intent
+    try:
+        entity = _resolve_entity(model, intent.entity, intent.metrics)
+    except CompileError:
+        return intent
+    asked = set(intent.metrics)
+    for m in entity.metrics:
+        if m.type == "ratio" and m.period_weight and {m.numerator, m.denominator} == asked:
+            return intent.model_copy(update={"metrics": [m.name]})
+    return intent
+
+
+def govern_literals(intent: QueryIntent, model: SemanticModel) -> QueryIntent:
+    """The intent with every equality/IN literal dropped whose column a
+    selected metric already governs, each recorded in ``literals_dropped``.
+
+    "completed visits" compiled to ``status = 'completed'`` beside the metric's
+    own ``status IN ('completed', 'billed')``: the question word became a second
+    predicate on the governed column, and a count halved in silence. The
+    metric's predicate IS the definition of the figure, so a literal on the
+    same column is not a narrowing the caller chose but the generator restating
+    the metric in its own words — it is dropped, and the ledger says so
+    (``literal_dropped``), never silently either way. Columns are matched by
+    bare name on the base entity; a literal qualified with another entity is
+    left alone (it filters a joined dimension, which a metric never governs).
+    Comparison operators are kept: ``amount > 100`` on a filtered column is a
+    different kind of ask."""
+    if not intent.metrics or not intent.filters:
+        return intent
+    try:
+        entity = _resolve_entity(model, intent.entity, intent.metrics)
+    except CompileError:
+        return intent
+    by_name = {m.name: m for m in entity.metrics}
+    governed: dict[str, list[str]] = {}
+    for name in intent.metrics:
+        metric = by_name.get(name)
+        if metric is None:
+            continue
+        for col in _governed_columns(metric, by_name, model.dialect):
+            governed.setdefault(col, []).append(name)
+    if not governed:
+        return intent
+    kept: list[IntentFilter] = []
+    dropped: list[str] = []
+    for f in intent.filters:
+        owner, _, col = f.field.rpartition(".")
+        if f.op in ("=", "in") and (not owner or owner == entity.name) and col.lower() in governed:
+            value = f.value if isinstance(f.value, list) else [f.value]
+            literal = f"{col} {'IN' if f.op == 'in' else '='} {', '.join(_lit(v) for v in value)}"
+            dropped.append(f"{literal} (governed by {', '.join(governed[col.lower()])})")
+            continue
+        kept.append(f)
+    if not dropped:
+        return intent
+    return intent.model_copy(
+        update={"filters": kept, "literals_dropped": [*intent.literals_dropped, *dropped]}
+    )
+
+
+def _window_days(window: Sequence[IntentFilter], field: str) -> int:
+    """The number of days the intent's bounds on *field* span, inclusive of
+    both ends — the fact a period weight is multiplied from. Refuses an open
+    window: "weeks in the period" needs a period."""
+    lo: date | None = None
+    hi: date | None = None
+    for f in window:
+        value = _as_day(f.value)
+        if value is None:
+            continue
+        if f.op in (">=", "="):
+            lo = value if lo is None else max(lo, value)
+        elif f.op == ">":
+            lo = value + timedelta(days=1) if lo is None else max(lo, value + timedelta(days=1))
+        if f.op in ("<=", "="):
+            hi = value if hi is None else min(hi, value)
+        elif f.op == "<":
+            hi = value - timedelta(days=1) if hi is None else min(hi, value - timedelta(days=1))
+    if lo is None or hi is None or hi < lo:
+        raise CompileError(
+            f"a period-weighted ratio needs a window bounded on both ends on '{field}' "
+            "(the weight is the period's length) — ask for a period, e.g. 'in September 2026'"
+        )
+    return (hi - lo).days + 1
+
+
+def _as_day(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.strip()).date()
+        except ValueError:
+            try:
+                return date.fromisoformat(value.strip()[:10])
+            except ValueError:
+                return None
+    return None
+
+
+def _weighted_ratio_sql(
+    metric: Metric,
+    entity: Entity,
+    intent: QueryIntent,
+    filter_owners: Sequence[Entity],
+    dialect: str,
+    zone: str,
+) -> str:
+    """A ratio across additivities, compiled as the handbook writes it: the
+    flow operand summed over the window, the level operand read at the
+    window's latest snapshot and multiplied by the declared period weight
+    (``weeks`` = days / 7, ``days``). Utilisation = scheduled appointments /
+    (slots per week x weeks in the month). The snapshot pin is the same
+    correlated subquery a level metric reads through on its own, and the
+    weight is a number computed here from the intent's bounds, so the served
+    SQL shows it — nothing is left for a reader to reconstruct."""
+    assert metric.numerator is not None and metric.denominator is not None
+    by_name = {m.name: m for m in entity.metrics}
+    num = _ref(metric.numerator, by_name, metric.name)
+    den = _ref(metric.denominator, by_name, metric.name)
+    levels = [m for m in (num, den) if m.additivity == "level"]
+    if len(levels) != 1:
+        raise CompileError(
+            f"metric '{metric.name}' is period-weighted, so exactly one of its operands "
+            "must be a level (additivity: level) and the other a flow — "
+            f"{num.name} and {den.name} are "
+            + ("both levels" if len(levels) == 2 else "both flows")
+        )
+    level = levels[0]
+    if intent.grain:
+        raise CompileError(
+            f"metric '{metric.name}' is period-weighted and reads one window at a time — "
+            "ask for one period, not a trend"
+        )
+    field = level.agg_time_field or entity.default_time_field
+    if not field or not any(f.name == field for f in entity.fields):
+        raise CompileError(
+            f"metric '{metric.name}' weights level '{level.name}' by the period, which "
+            "needs a time field — add `default_time_field:` to the entity or "
+            "`agg_time_field:` to the metric"
+        )
+    window = [
+        f
+        for f, owner in zip(intent.filters, filter_owners, strict=True)
+        if owner is entity and f.field.rpartition(".")[2] == field
+    ]
+    days = _window_days(window, field)
+    weight = f"({days} / 7.0)" if metric.period_weight == "weeks" else str(days)
+    # The pin's literals are zoned only for a timestamp field, as the WHERE's are.
+    pin_zone = zone if _member_type(entity, field) == "timestamp" else ""
+    pin = _latest_snapshot(entity, field, window, None, dialect, pin_zone)
+    assert level.agg is not None and level.expr is not None
+    conds = " AND ".join([pin, *metric.filters, *level.filters])
+    level_sql = f"{_AGG[level.agg]}(CASE WHEN {conds} THEN {level.expr} END) * {weight}"
+    flow = num if level is den else den
+    flow_sql = _expand(flow, by_name, list(metric.filters), (metric.name,), True)
+    if level is den:
+        return f"CAST({flow_sql} AS DOUBLE) / NULLIF({level_sql}, 0)"
+    return f"CAST({level_sql} AS DOUBLE) / NULLIF({flow_sql}, 0)"
+
+
 def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # Before resolving anything: an empty intent has no entity to be ambiguous
     # about, and "ambiguous entity" is a confusing way to say "you asked for nothing".
@@ -664,6 +872,7 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     if intent.fields and intent.metrics:
         raise CompileError("a listing (fields) and an aggregate (metrics) cannot mix")
 
+    intent = govern_literals(prefer_weighted_ratio(intent, model), model)
     entity = _resolve_entity(model, intent.entity, intent.metrics)
     metrics_by = {m.name: m for m in entity.metrics}
 
@@ -756,6 +965,12 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
             for f in window_filters
             if m in window_fields
         ]
+        if metrics_by[m].type == "ratio" and metrics_by[m].period_weight:
+            weighted = _weighted_ratio_sql(
+                metrics_by[m], entity, intent, [o for o, _ in filter_exprs], dialect, zone
+            )
+            select.append(f"{weighted} AS {quote_ident(m, dialect)}")
+            continue
         select.append(
             f"{metric_sql(metrics_by[m], entity, inline_filters=mixed, where=own_window)} "
             f"AS {quote_ident(m, dialect)}"

@@ -1312,10 +1312,39 @@ def test_without_a_fallback_the_composer_decline_still_refuses() -> None:
     assert res.trace.status == "refused"
 
 
-def test_composer_decline_marker_only_at_the_start() -> None:
-    """Only the reply's own leading marker is a decline; prose that mentions the
-    words mid-sentence is an answer."""
-    llm = ScriptedLLM([_GOOD, "There are 100 customers (NO_ANSWER: none needed)."])
+def test_composer_decline_marker_anywhere_is_a_decline() -> None:
+    """The marker ANYWHERE in the reply is a decline — the composer explained
+    the mismatch first and declined on the second paragraph, and the
+    explanation served as a `verified` answer. The live shape: 'first-ever
+    visit in 2026' answered with every patient seen in 2026, then NO_ANSWER."""
+    llm = ScriptedLLM(
+        [
+            _GOOD,
+            "The SQL counts all distinct customers, not customers whose first order "
+            "was this year, so it does not answer the question.\n\n"
+            "NO_ANSWER: the query has no logic excluding customers with earlier orders.",
+        ]
+    )
+
+    res = run_query(
+        question="How many customers placed their first-ever order this year?",
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=_conn(),
+        generator=GroundedSQLGenerator(llm),
+        composer=AnswerComposer(llm),
+    )
+
+    assert res.trace.status == "refused"
+    assert "no logic excluding customers with earlier orders" in res.response.answer
+    assert res.response.verification is None or res.response.verification.grade != "verified"
+
+
+def test_prose_about_a_missing_answer_is_not_a_decline() -> None:
+    """The words, not the marker: prose saying no answer was needed is an answer."""
+    llm = ScriptedLLM([_GOOD, "There are 100 customers; no answer beyond that is needed."])
 
     res = run_query(
         question="How many customers are there?",

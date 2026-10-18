@@ -11,7 +11,8 @@ from __future__ import annotations
 import decimal
 import re
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,7 @@ import sqlglot
 from sqlglot import expressions as exp
 
 from services.contracts.resolution import DecisionRecord
-from services.contracts.semantic_model import Entity, SemanticModel
+from services.contracts.semantic_model import Definition, Entity, SemanticModel
 from services.contracts.verification import (
     CheckStatus,
     Grade,
@@ -29,7 +30,7 @@ from services.contracts.verification import (
 from services.contracts.warehouse import QueryResult
 from services.lenses.profile_age import STALE_REASON
 from services.lenses.profile_enrich import EntityCoverage
-from services.runtime import adversary, faithfulness, sql_canon
+from services.runtime import adversary, faithfulness, sql_canon, time_guard
 from services.runtime.answer import grounding_notes
 from services.runtime.canon import canon_cell
 from services.runtime.timewindow import (
@@ -985,6 +986,264 @@ def _predicate_in_sql(expr: str, sql: str, dialect: str | None) -> bool:
     return bool(want & have)
 
 
+def period_dates(period: str) -> tuple[date, date] | None:
+    """The inclusive date span a definition's ``period`` names: 'YYYY-MM' is
+    the month, 'YYYY' the year, 'YYYY-MM-DD/YYYY-MM-DD' both ends as written.
+    None for a shape the contract did not admit (never raises on a serve)."""
+    text = period.strip()
+    try:
+        if "/" in text:
+            lo, hi = text.split("/", 1)
+            return date.fromisoformat(lo), date.fromisoformat(hi)
+        if len(text) == 7:
+            first = date.fromisoformat(f"{text}-01")
+            return first, (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(
+                days=1
+            )
+        if len(text) == 4:
+            year = int(text)
+            return date(year, 1, 1), date(year, 12, 31)
+    except ValueError:
+        return None
+    return None
+
+
+_DATE_LITERAL = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_YEAR_LITERAL = re.compile(r"(?<![\d.])((?:19|20)\d{2})(?![\d-])")
+
+
+def served_window(sql: str) -> tuple[date, date] | None:
+    """The span of dates the SQL's own literals bound: the earliest and latest
+    date literal it carries; with none, the years it names (Jan 1 to Dec 31);
+    with neither, None — an unbounded read, which overlaps every period."""
+    found: list[date] = []
+    for raw in _DATE_LITERAL.findall(sql):
+        try:
+            found.append(date.fromisoformat(raw))
+        except ValueError:
+            continue
+    if found:
+        return min(found), max(found)
+    years = [int(y) for y in _YEAR_LITERAL.findall(sql)]
+    if years:
+        return date(min(years), 1, 1), date(max(years), 12, 31)
+    return None
+
+
+def _term_named(d: Definition, question: str) -> bool:
+    """Does the question name this term, by its identifier or an alias —
+    ``_departed_definitions``'s idiom (word boundary, underscores read as
+    spaces, an optional plural), the one deterministic surface signal."""
+    q = question.lower().replace("_", " ")
+    for raw in (d.term, *d.aliases):
+        term = raw.replace("_", " ").lower().strip()
+        if term and re.search(rf"\b{re.escape(term)}s?\b", q) is not None:
+            return True
+    return False
+
+
+def ignored_definitions(
+    sql: str, model: SemanticModel, question: str = ""
+) -> list[tuple[Definition, str]]:
+    """The rules this SQL reads past: every definition carrying a ``sql:``
+    predicate, ``about`` an entity the SQL reads, whose predicate the SQL does
+    not apply (parsed containment, ``_predicate_in_sql``) — a PERIOD rule
+    while the SQL's own window overlaps its period, a rule with no period
+    when *question* names the term (a term's predicate governs the questions
+    that ask for the term, as on the generated rail; a period's governs every
+    read of its dates). Each pair carries the one-line reason. Deterministic:
+    no model, and a window the SQL does not state is an overlap, never a
+    pass."""
+    out: list[tuple[Definition, str]] = []
+    window = served_window(sql)
+    for d in model.definitions:
+        predicate = (d.sql_expr or "").strip()
+        head = (d.about or "").partition(".")[0].strip()
+        if not predicate or not head or d.status == "ambiguous":
+            continue
+        if not d.period and not _term_named(d, question):
+            continue
+        entity = next((e for e in model.entities if e.name.lower() == head.lower()), None)
+        if entity is None:
+            continue
+        if not (_touches(entity.source.table, sql) or _touches(entity.name, sql)):
+            continue
+        if _predicate_in_sql(predicate, sql, model.dialect):
+            continue
+        span = period_dates(d.period) if d.period else None
+        if span is not None and window is not None and (window[1] < span[0] or window[0] > span[1]):
+            continue
+        over = (
+            f"over {span[0].isoformat()} to {span[1].isoformat()}"
+            if span is not None
+            else "for a question naming the term"
+        )
+        out.append(
+            (
+                d,
+                f"reads `{entity.name}` {over} without the definition's predicate ({predicate})",
+            )
+        )
+    return out
+
+
+def definition_period_check(ignored: Sequence[tuple[Definition, str]]) -> VerificationCheck:
+    """The certified serve's ``definition_period`` check: pass when every
+    period rule on the entities the approved SQL reads is applied or out of
+    window; fail naming each term it reads past. Approval vouches for the
+    SQL's meaning on the day it was written, not for a rule declared on a
+    period it spans — the rule rides every rail, the certified one included."""
+    if not ignored:
+        return VerificationCheck(name="definition_period", status="pass")
+    return VerificationCheck(
+        name="definition_period",
+        status="fail",
+        reason="; ".join(f"`{d.term}` {why}" for d, why in ignored),
+    )
+
+
+@dataclass(frozen=True)
+class ConservationPlan:
+    """The two counts that decide ``row_conservation`` for one UNION ALL CTE
+    over one source table: the rows the CTE yields, and the distinct declared
+    keys of the table under the OR of every filter the branches apply."""
+
+    cte: str
+    entity: str
+    keys: tuple[str, ...]
+    produced_sql: str
+    distinct_sql: str
+
+
+def _union_branches(node: exp.Expression) -> list[exp.Expression] | None:
+    """The leaves of a UNION ALL chain; None when any join in the chain is a
+    distinct UNION (which cannot re-add a row) or a leaf is not a SELECT."""
+    if isinstance(node, exp.Union):
+        if node.args.get("distinct", True):
+            return None
+        left = _union_branches(cast(exp.Expression, node.left))
+        right = _union_branches(cast(exp.Expression, node.right))
+        return None if left is None or right is None else left + right
+    return [node] if isinstance(node, exp.Select) else None
+
+
+def _table_key(table: exp.Table) -> str:
+    return ".".join(p for p in (table.catalog, table.db, table.name) if p).lower()
+
+
+def row_conservation_plan(
+    sql: str, model: SemanticModel
+) -> ConservationPlan | VerificationCheck | None:
+    """Does the SQL carry the shape that double-counts — a UNION ALL CTE whose
+    branches all read ONE source table and project the same columns (no
+    literal tagging a branch)? None when no CTE has it. The plan when the
+    entity declares a primary key; a SKIP naming the entity when it does not
+    (the check cannot count keys it was never told). The generated
+    de-duplication that kept May's single rows in one branch and re-added
+    every May row in the other served 1.5x under `partial` with a generic
+    reason; the shape is the tell, and counting is the proof."""
+    try:
+        stmt = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:
+        return None
+    if stmt is None:
+        return None
+    with_clause = stmt.args.get("with_")
+    if with_clause is None:
+        return None
+    ctes: dict[str, exp.Expression] = {
+        cte.alias_or_name.lower(): cte.this for cte in with_clause.expressions
+    }
+    entities = {e.source.table.lower(): e for e in model.entities}
+
+    def scans(node: exp.Expression, seen: set[str]) -> list[exp.Select] | None:
+        """Every SELECT in *node* (CTE references followed) that reads a
+        physical table directly; None when a table is not the model's."""
+        out: list[exp.Select] = []
+        for select in node.find_all(exp.Select):
+            source = select.args.get("from_")
+            if source is None or not isinstance(source.this, exp.Table):
+                continue
+            name = source.this.name.lower()
+            if name in ctes and not source.this.db:
+                if name in seen:
+                    continue
+                inner = scans(ctes[name], seen | {name})
+                if inner is None:
+                    return None
+                out.extend(inner)
+                continue
+            out.append(select)
+        return out
+
+    for name, body in ctes.items():
+        branches = _union_branches(body)
+        if branches is None or len(branches) < 2:
+            continue
+        names = [tuple(e.alias_or_name.lower() for e in b.expressions) for b in branches]
+        if len(set(names)) != 1 or any(
+            isinstance(e.unalias(), exp.Literal) for b in branches for e in b.expressions
+        ):
+            continue
+        read = scans(body, {name})
+        if not read:
+            continue
+        tables = {_table_key(cast(exp.Table, s.args["from_"].this)) for s in read}
+        if len(tables) != 1:
+            continue
+        table = tables.pop()
+        entity = entities.get(table)
+        if entity is None:
+            continue
+        if not entity.primary_key:
+            return VerificationCheck(
+                name="row_conservation",
+                status="skip",
+                reason=f"`{name}` unions rows of `{entity.name}` from one table, but the "
+                "entity declares no primary_key to count them by",
+            )
+        filters = [
+            _strip_refs(cast(exp.Expression, s.args["where"].this).copy())
+            for s in read
+            if s.args.get("where") is not None
+        ]
+        produced = exp.select(exp.func("COUNT", exp.Star())).from_(name)
+        produced.set("with_", with_clause.copy())
+        keyed = exp.select(*entity.primary_key).from_(table).distinct()
+        if filters:
+            keyed = keyed.where(exp.or_(*(exp.paren(f) for f in filters)))
+        distinct = exp.select(exp.func("COUNT", exp.Star())).from_(keyed.subquery("k"))
+        return ConservationPlan(
+            cte=name,
+            entity=entity.name,
+            keys=tuple(entity.primary_key),
+            produced_sql=produced.sql(dialect=model.dialect),
+            distinct_sql=distinct.sql(dialect=model.dialect),
+        )
+    return None
+
+
+def row_conservation_check(
+    plan: ConservationPlan, produced: int, distinct: int
+) -> VerificationCheck:
+    """``row_conservation``: a union over one table may not yield more rows
+    than the table has distinct keys under the same filters. Fails naming
+    both counts — the reason `partial` carries."""
+    if produced > distinct:
+        return VerificationCheck(
+            name="row_conservation",
+            status="fail",
+            reason=f"`{plan.cte}` yields {produced:,} rows from `{plan.entity}`, whose distinct "
+            f"({', '.join(plan.keys)}) keys number {distinct:,} under the same filters — "
+            "the union re-adds rows the other branch already kept",
+        )
+    return VerificationCheck(
+        name="row_conservation",
+        status="pass",
+        reason=f"`{plan.cte}` yields {produced:,} rows over {distinct:,} distinct keys",
+    )
+
+
 def _population_declared(sql: str, model: SemanticModel) -> VerificationCheck:
     """Does the SQL apply the population bound of every scoped entity it reads?
 
@@ -1371,6 +1630,11 @@ def restatement(
     stored_rows = verified_value.get("rows")
     if not isinstance(stored_rows, list):
         return None
+    # The full count, when the probe fetched the whole result: a result that
+    # gained or lost rows has moved even when its first rows stand.
+    stored_count = verified_value.get("row_count")
+    if isinstance(stored_count, int) and stored_count != len(result.rows):
+        return f"{stored_count} rows", f"{len(result.rows)} rows"
     live = [list(r) for r in result.rows[: len(stored_rows)]]
     if len(live) != len(stored_rows):
         return f"{len(stored_rows)} rows", f"{len(result.rows)} rows"
@@ -1383,6 +1647,24 @@ def restatement(
                 col = result.columns[i] if i < len(result.columns) else f"column {i + 1}"
                 return f"{col} {_cell_text(w)}", f"{col} {_cell_text(g)}"
     return None
+
+
+def prose_sampled(verified_value: Mapping[str, object] | None, result: QueryResult) -> str | None:
+    """Why the certify-time prose must NOT serve verbatim over this result: it
+    was composed over a stored SAMPLE shorter than the result (an answer
+    certified before the probe fetched the whole result records no
+    ``row_count``), so its sentences describe part of what the rows say.
+    None when the prose covers the result — a scalar, a full row count on
+    record, or a sample as long as the result."""
+    if not verified_value or "value" in verified_value or "row_count" in verified_value:
+        return None
+    stored_rows = verified_value.get("rows")
+    if not isinstance(stored_rows, list) or len(stored_rows) >= len(result.rows):
+        return None
+    return (
+        f"the certify-time prose was composed over a {len(stored_rows)}-row sample of a "
+        f"{len(result.rows)}-row result"
+    )
 
 
 def restated_check(
@@ -1457,6 +1739,10 @@ def build_report(
     # The approved question behind a certified serve: window_applied passes on
     # approved SQL only when it states the asked window.
     certified_question: str | None = None,
+    # A certified serve's ``definition_period`` check (definition_period_check).
+    definition_period: VerificationCheck | None = None,
+    # The generated path's ``row_conservation`` check (row_conservation_check).
+    row_conservation: VerificationCheck | None = None,
 ) -> VerificationReport:
     numeric_status: CheckStatus
     if composed:
@@ -1519,6 +1805,7 @@ def build_report(
         _intent_alignment(question, sql, semantic_model.dialect),
         _window_applied(question, sql, semantic_model, certification, certified_question),
         _level_grain(sql, semantic_model, certification, question),
+        time_guard.grain_applied(question, result.columns, result.rows, certification),
         _zero_ratio_plausibility(sql, result),
         _all_ones_ratio(sql, result),
         _ratio_population(sql, semantic_model.dialect),
@@ -1572,6 +1859,10 @@ def build_report(
         )
     if restated is not None:
         checks.append(restated)
+    if definition_period is not None:
+        checks.append(definition_period)
+    if row_conservation is not None:
+        checks.append(row_conservation)
     return _with_grade(checks, certification, numeric_status, composed=composed)
 
 

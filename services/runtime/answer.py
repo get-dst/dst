@@ -121,8 +121,6 @@ _CONSUMER_SYSTEM = (
 # The composer's own decline, parsed like the generator's `no_answer`: the one
 # stage that sees the rows beside the question says they do not answer it, and
 # that verdict must reach the status, not just the prose.
-_NO_ANSWER = "NO_ANSWER:"
-
 _DEFS_HEADER = "Definitions governing the result columns (they decide what the values mean):"
 
 _NOTES_HEADER = (
@@ -137,15 +135,24 @@ _CONSUMER_NOTES_HEADER = (
 )
 
 
+# The marker ANYWHERE in the prose, in every form the composer has written it:
+# leading, after a paragraph explaining why, inside markdown emphasis
+# (`**NO_ANSWER:**`), with or without the colon. Matching only a LEADING
+# marker graded a mid-prose decline `verified` (the composer explained the
+# mismatch first, then declined — and the explanation served as the answer).
+_NO_ANSWER_RE = re.compile(r"\bNO_ANSWER\b[*_]*\s*:?[*_]*\s*(?P<reason>[^\n]*)", re.IGNORECASE)
+
+
 def decline_reason(text: str) -> str | None:
-    """The composer's decline, if ``text`` is one: a reply whose own leading
-    marker is NO_ANSWER. One parser for every prose that can carry the marker
-    — a fresh composition and a certified answer's stored prose alike — so a
-    decline never serves as an answer on any path."""
-    text = text.strip()
-    if not text.upper().startswith(_NO_ANSWER):
+    """The composer's decline, if ``text`` carries one: the NO_ANSWER marker
+    anywhere in the prose, whatever surrounds it. One parser for every prose
+    that can carry the marker — a fresh composition and a certified answer's
+    stored prose alike — so a decline never serves as an answer on any path."""
+    found = _NO_ANSWER_RE.search(text)
+    if found is None:
         return None
-    return text[len(_NO_ANSWER) :].strip() or "the result does not answer the question"
+    reason = found.group("reason").strip().strip("*_—–- ").strip()
+    return reason or "the result does not answer the question"
 
 
 @dataclass

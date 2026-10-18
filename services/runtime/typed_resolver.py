@@ -52,7 +52,14 @@ from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.runtime import ambiguity, decision_policy, reading, timewindow, typed_health
-from services.runtime.compiler import CompileError, compile_intent, is_predicate, metric_sql
+from services.runtime.compiler import (
+    CompileError,
+    compile_intent,
+    govern_literals,
+    is_predicate,
+    metric_sql,
+    prefer_weighted_ratio,
+)
 from services.runtime.intent_generator import intent_term
 from services.runtime.option_sets import option_sets
 
@@ -2127,6 +2134,9 @@ class TypedIntentGenerator:
                 sql="", no_answer_reason=res.decline or "did not type", decisions=res.decisions
             )
         try:
+            res.intent = govern_literals(
+                prefer_weighted_ratio(res.intent, semantic_model), semantic_model
+            )
             sql = compile_intent(res.intent, semantic_model)
         except CompileError as exc:
             return GeneratedQuery(

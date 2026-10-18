@@ -84,12 +84,42 @@ the sample binding its value was recorded under; with other bound values, or
 with no stored value at all, the check abstains and says why. It never passes
 on nothing.
 
+The prose a certified answer serves verbatim is composed, at certify time, over
+the whole result (up to the composer's 200-row budget) and stored with the
+result's row count. A result past that budget stores no prose and composes per
+request. On a serve, a row count that differs from the stored one is a moved
+result (`restated` fails, as above); prose from an answer certified before the
+row count was recorded, over a result longer than its stored sample, is not
+served either — the answer composes afresh or serves rows only, with a
+`SAMPLED` line on `degraded` saying so. A sentence written over five rows never
+describes fourteen.
+
 A certified answer also discloses what governs it. The definitions written
-`about:` a column the approved SQL reads, and the metric or definition the SQL
-computes, ride the certified answer the way they ride a generated one: on the
+`about:` a column the approved SQL reads, a dimension whose columns it reads,
+or a metric it computes (or whose every column it reads — the de-duplication
+shape), ride the certified answer the way they ride a generated one: on the
 basis line after the provenance ("Computed as `net_revenue` — …"), in
-`definition_used`, and on the resolution ledger. Two people holding different
-certified numbers for "revenue" each hold a line saying which meaning theirs is.
+`definition_used`, and on the resolution ledger, one line per term. Reading a
+table does not engage every metric declared on it: a median over appointments
+does not cite the no-show-rate page. Two people holding different certified
+numbers for "revenue" each hold a line saying which meaning theirs is.
+
+Definitions ride the certified rail as rules, too. A definition `about:` an
+entity that carries a `sql:` predicate and a `period:` (`2026-05`, `2026`, or
+`2026-05-01/2026-05-31`) is a rule on those dates — a billing export loaded
+twice in one month, a migration week. Certified SQL that reads the entity over
+a window overlapping the period without applying the predicate (compared as
+parsed expressions, not text) fails `definition_period`: the grade caps at
+`partial`, a `DEFINITION NOT APPLIED: <term>` line rides `degraded` and the
+answer text, and the basis names the definition. Outside the period the rule
+is silent; with no `period:` it governs the certified answers whose question
+names the term, as a term's predicate does on the generated rail. `dst plan`
+and `dst apply`
+run the same check over every active certified answer and warn
+`certified_ignores_definition`, naming the answer and the definition, so the
+rule is known before the answer serves below `verified`. Approval vouches for
+the SQL's meaning on the day it was written, not for a rule declared on a
+period it spans.
 
 ## Templates: one entry for a question family
 

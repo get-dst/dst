@@ -118,3 +118,81 @@ def test_lifespan_names_the_signal_and_hands_it_on(
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+
+
+def test_daemon_child_whose_startup_failed_is_ended_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The lifespan refused (wrong DST_SECRET_KEY), uvicorn logged the failure,
+    and a thread left behind kept the child alive: the parent polled a live
+    pid for ten minutes. The log is the signal."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["dst", "dev", "--daemon"])
+    (tmp_path / ".dst").mkdir()
+    log = tmp_path / ".dst" / "serve.log"
+    log.write_text("WrongEncryptionKey: DST_SECRET_KEY does not decrypt this database's sentinel\n")
+
+    class _Hung(_Child):
+        ended: list[str] = []
+
+        def terminate(self) -> None:
+            self.ended.append("terminate")
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def popen(cmd: list[str], **kw: object) -> _Hung:
+        log.write_text(log.read_text() + "ERROR:    Application startup failed. Exiting.\n")
+        return _Hung()
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    monkeypatch.setattr(cli, "_wait_for_health", lambda url, **kw: False)
+    args = argparse.Namespace(host="127.0.0.1", port=8124, reload=False, daemon=True, stop=False)
+    assert cli._serve_daemon(args) == 1
+    err = capsys.readouterr().err
+    assert "failed to start" in err and "WrongEncryptionKey" in err
+    assert _Hung.ended == ["terminate"]
+    assert not (tmp_path / ".dst" / "serve.pid").exists()
+
+
+def test_daemon_that_never_answers_health_is_a_failure_not_a_serving_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["dst", "serve", "--daemon"])
+
+    class _Quiet(_Child):
+        def terminate(self) -> None:
+            self.returncode = -15
+
+    monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: _Quiet())
+    monkeypatch.setattr(cli, "_wait_for_health", lambda url, **kw: False)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    args = argparse.Namespace(host="127.0.0.1", port=8125, reload=False, daemon=True, stop=False)
+    assert cli._serve_daemon(args) == 1
+    out = capsys.readouterr()
+    assert "did not answer /health" in out.err and "serving in the background" not in out.out
+
+
+def test_dev_refuses_a_database_written_under_another_key_naming_the_compose_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.security import sentinel
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text("name: dst-kuura-0badc0de\nservices: {}\n")
+
+    def refuse() -> None:
+        raise sentinel.WrongEncryptionKey(
+            "DST_SECRET_KEY does not decrypt this database's sentinel"
+        )
+
+    monkeypatch.setattr(sentinel, "verify_or_install", refuse)
+    message = cli._sentinel_mismatch()
+    assert message is not None
+    assert "compose project 'dst-kuura-0badc0de'" in message and "another DST_SECRET_KEY" in message
+    # no sentinel table yet (a fresh database) is nothing to refuse
+    monkeypatch.setattr(
+        sentinel, "verify_or_install", lambda: (_ for _ in ()).throw(RuntimeError("no table"))
+    )
+    assert cli._sentinel_mismatch() is None

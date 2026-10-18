@@ -283,6 +283,17 @@ class Metric(Authored):
         "default_time_field). The author's judgment — the product never guesses one.",
     )
 
+    period_weight: Literal["weeks", "days"] | None = PField(
+        default=None,
+        description="ratio only: lets a flow and a level meet in one ratio by weighting "
+        "the level with the window's length — utilisation = scheduled appointments "
+        "(a flow, summed over the period) / planned slots per week (a level, read at "
+        "the period's latest snapshot) x weeks in the period. `weeks` multiplies the "
+        "level by the window's days / 7, `days` by its days; the window must be bounded "
+        "on both ends, and the compiler refuses an open or bucketed one. The author's "
+        "judgment — the product never guesses a weight.",
+    )
+
     @field_validator("additivity", mode="before")
     @classmethod
     def _additivity_enum(cls, v: object) -> object:
@@ -322,6 +333,13 @@ class Metric(Authored):
             # COUNT(CASE WHEN … THEN expr END): a real engine rejects `*` there
             # ("STAR expression is only allowed as the root element").
             self.expr = "1"
+        if self.period_weight is not None and self.type != "ratio":
+            raise ValueError(
+                f"metric '{self.name}' sets `period_weight:` but is not a ratio — it "
+                "weights a ratio's level operand by the period's length: write "
+                "type: ratio, numerator: <flow metric>, denominator: <level metric>, "
+                "period_weight: weeks"
+            )
         if self.type == "simple" and (self.agg is None or self.expr is None):
             raise ValueError(
                 f"simple metric '{self.name}' needs keys `agg:` and `expr:` — "
@@ -479,6 +497,11 @@ class Join(Authored):
         return _restore_on_key(data)
 
 
+# The shapes a definition's `period` may take; the dates they span are read by
+# services.runtime.verification.period_dates.
+PERIOD_SHAPE = re.compile(r"\d{4}(-\d{2}(-\d{2}/\d{4}-\d{2}-\d{2})?)?")
+
+
 class Definition(Authored):
     term: str = PField(
         description="the term this page defines, e.g. active_customer "
@@ -491,6 +514,17 @@ class Definition(Authored):
         "'entity' or 'entity.member' (a field, dimension, or metric)",
     )
     sql_expr: str | None = None  # makes the definition enforceable in generated SQL
+    # A rule on a PERIOD: the `sql:` predicate governs reads of the entity this
+    # page is `about` over these dates (a duplicated billing export in one
+    # month, a migration week). Certified SQL that reads the entity over a
+    # window overlapping the period without the predicate serves below
+    # `verified`, naming the term; outside the period the rule is silent.
+    # No period = the predicate governs every read.
+    period: str | None = PField(
+        default=None,
+        description="the dates the `sql:` rule governs: 'YYYY-MM', 'YYYY', or "
+        "'YYYY-MM-DD/YYYY-MM-DD' (both ends inclusive)",
+    )
     # "shared" = compiled from the project's shared semantic layer; "dbt" survives as an
     # inert legacy tag so pre-import bundles still validate.
     source: Literal["authored", "org_standard", "shared", "dbt"] = "authored"
@@ -558,6 +592,18 @@ class Definition(Authored):
     sources: StrList = PField(
         default_factory=list, description="underlying tables this term is computed from"
     )
+
+    @field_validator("period")
+    @classmethod
+    def _period_shape(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        text = str(v).strip()
+        if not PERIOD_SHAPE.fullmatch(text):
+            raise ValueError(
+                f"period {text!r} must be 'YYYY-MM', 'YYYY' or 'YYYY-MM-DD/YYYY-MM-DD'"
+            )
+        return text
 
 
 class SampleQuery(Authored):

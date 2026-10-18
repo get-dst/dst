@@ -174,6 +174,7 @@ def from_intent(
         slots=slots,
         tag=derive_tag(slots),
         definition_suggested=list(intent.definitions_suggested),
+        literal_dropped=list(intent.literals_dropped),
     )
 
 

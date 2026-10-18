@@ -24,7 +24,15 @@ from services.db import embedding_meta
 from services.llm.assist import complete_json
 from services.runtime import sql_guard
 
+# The stored SAMPLE of a verified result: enough rows for `restated` to compare
+# cell by cell, never the prose's evidence.
 _MAX_ROWS = 5
+# The result the certify-time PROSE is composed over — the whole result up to
+# this cap (the composer's own row budget). Prose composed over the 5-row
+# sample served "the five clinics" verbatim over a 14-row result, `verified`;
+# a result past the cap stores no prose at all, since no sentence composed over
+# part of it can speak for the rest.
+_PROSE_ROWS = 200
 
 _SYSTEM = (
     "You write a single representative analytical question for a governed metric, and the "
@@ -68,13 +76,22 @@ def _cell(value: object) -> object:
     return str(value)
 
 
-def _value_summary(columns: list[str], rows: list[list[object]]) -> dict[str, Any]:
+def _value_summary(
+    columns: list[str], rows: list[list[object]], *, exact_count: bool = False
+) -> dict[str, Any]:
+    """The verified value as stored: one cell for a scalar, else the first
+    ``_MAX_ROWS`` rows as a sample. ``exact_count`` records the result's full
+    row count beside the sample — only when the probe fetched the whole
+    result, so a serve can tell a result that grew from one that stands."""
     if len(rows) == 1 and len(rows[0]) == 1:
         return {"value": _cell(rows[0][0])}
-    return {
+    summary: dict[str, Any] = {
         "columns": columns,
         "rows": [[_cell(c) for c in r] for r in rows[:_MAX_ROWS]],
     }
+    if exact_count:
+        summary["row_count"] = len(rows)
+    return summary
 
 
 def _draft(

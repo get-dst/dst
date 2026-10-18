@@ -54,7 +54,9 @@ def test_imports_tables_columns_and_grain_from_dbt() -> None:
     by_name = {e.name: e for e in res.entities}
     assert set(by_name) == {"orders", "customers"}
     orders = by_name["orders"]
-    assert orders.source.table == "orders" and orders.primary_key == ["order_id"]
+    # the schema dbt built the model in rides the table name on every import
+    # path — a bare alias resolves only in the connection's default schema
+    assert orders.source.table == "main.orders" and orders.primary_key == ["order_id"]
     assert orders.grain == "one row per order"
     assert any(f.name == "amount" for f in orders.fields)
     # one relationship per pair, FK side left, cardinality declared
@@ -119,7 +121,7 @@ def test_imported_metric_runs_on_jaffle() -> None:
     """The payoff: import -> select-all compile -> runtime compiler + guard -> real rows."""
     sm = _model()
     assert sm.dialect == "duckdb"
-    assert sm.allowed_tables() == {"orders", "customers"}
+    assert sm.allowed_tables() == {"main.orders", "main.customers"}
     intent = QueryIntent(
         entity="orders",
         metrics=["revenue"],

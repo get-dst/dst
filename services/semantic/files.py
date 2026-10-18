@@ -42,6 +42,7 @@ def definition_to_page(d: Definition) -> str:
             metric=d.term,
             about=d.about,
             sql=d.sql_expr,
+            period=d.period,
             body=d.body,
             status=d.status,
             possible_mappings=d.possible_mappings,
@@ -79,6 +80,7 @@ def page_to_definition(
         body=page.body,
         about=page.about,
         sql_expr=page.sql,
+        period=page.period,
         source=source,  # type: ignore[arg-type]
         status=page.status,
         possible_mappings=page.possible_mappings,

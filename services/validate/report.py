@@ -434,7 +434,9 @@ def definition_double_truth(d: Definition, entities: Sequence[Entity]) -> Issue 
     claims that can silently drift apart (the double-truth smell). Exempt:
     about pointing at a metric — there the metric owns the SQL and the
     definition mirrors it by construction (the dbt-import pattern)."""
-    if not (d.sql_expr or "").strip() or not d.about:
+    if not (d.sql_expr or "").strip() or not d.about or d.period:
+        # A period rule is deliberately both: the predicate IS the rule, and
+        # `about` names the entity whose reads it governs.
         return None
     entity_name, _, member = d.about.partition(".")
     entity = next((e for e in entities if e.name == entity_name), None)

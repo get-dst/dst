@@ -98,6 +98,12 @@ class CertifiedDefinition(Authored):
         description="optional binding to the semantic object this term explains: "
         "'entity' or 'entity.member'",
     )
+    period: str | None = Field(
+        default=None,
+        description="the dates the `sql:` rule governs ('YYYY-MM', 'YYYY' or "
+        "'YYYY-MM-DD/YYYY-MM-DD'): certified SQL reading the `about` entity over "
+        "them without the predicate serves below verified (Definition.period)",
+    )
     status: Literal["active", "ambiguous"] = Field(
         default="active",
         description="'ambiguous' makes the system ask which meaning is intended "

@@ -37,6 +37,11 @@ DuckDB example lens; default yes), `--db-port` (default 5432), `--api-port`
 (default 8000, written to `.env` as `DST_URL`), `--yes` (accept defaults, no
 prompts).
 
+The scaffolded `docker-compose.yml` carries a project `name:` of
+`dst-<name>-<8 hex chars of the absolute path>`, so two projects that share a
+name on one machine never share a Postgres volume (a volume written under
+another project's `DST_SECRET_KEY` refuses to start).
+
 **`--skills-only` refreshes an existing project.** `AGENTS.md` and
 `.claude/skills/` are a snapshot taken at init: a skill improved in a later
 release never reaches a project that was scaffolded before it, and neither
@@ -55,6 +60,11 @@ used as-is; otherwise the project's `docker-compose.yml` is brought up and waite
 connecting. Flags: `--host` (default 127.0.0.1), `--port` (default: the port in
 `DST_URL`, else 8000), `--daemon` (background mode, as for `dst serve`).
 
+Before migrating, `dst dev` checks the database's encryption sentinel: a
+database written under another `DST_SECRET_KEY` (most often another project's
+compose volume) is refused with exit 1 and a message naming the compose
+project, instead of a traceback from inside the server.
+
 ### `dst serve`
 
 Run the API via uvicorn; serves the built dashboard same-origin when present (source
@@ -64,8 +74,9 @@ serves the API only. Flags: `--host`, `--port`, `--reload`, `--daemon`, `--stop`
 **Background mode.** `dst serve --daemon` (and `dst dev --daemon`) starts the same
 server detached from the terminal, writes its pid to `.dst/serve.pid` and its output
 to `.dst/serve.log` in the current project, and returns once `/health` answers; if
-the server dies before that, the exit code and the last lines of the log are printed
-instead. `dst serve --stop` sends SIGTERM to the recorded pid, waits for it to exit
+the server dies before that, or its log records a failed startup, or `/health`
+never answers, the command exits 1 with the last lines of the log instead — it
+never reports a server that is not serving. `dst serve --stop` sends SIGTERM to the recorded pid, waits for it to exit
 and removes the pidfile; a stale pidfile (the process is gone) is cleared, not obeyed.
 Whichever way it runs, the server logs the signal that ends it (`received SIGTERM;
 shutting down`), so a server that disappeared says why in `serve.log`.

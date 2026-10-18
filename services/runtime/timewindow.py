@@ -135,7 +135,10 @@ _ADVERB_UNIT = {"weekly": "week", "monthly": "month", "quarterly": "quarter", "y
 def breakdown_unit(text: str) -> str | None:
     """The calendar unit a question asks a breakdown by (week, month, quarter,
     year), or None when it asks for one figure. Deterministic: the phrase
-    alone, no reading of the rest of the sentence."""
+    alone, no reading of the rest of the sentence. A bare adverb before a
+    noun is NOT read ("monthly recurring revenue" names a metric, not a
+    series) — only "by/per <unit>" phrases and a trailing or punctuated
+    adverb count."""
     m = _BREAKDOWN.search(text)
     if m is None:
         return None

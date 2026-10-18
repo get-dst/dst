@@ -921,16 +921,26 @@ def test_a_level_metric_grouped_by_its_own_month_column_is_each_months_last_snap
 
 
 def test_a_level_asked_per_month_gets_the_grain_the_model_forgot() -> None:
-    from services.runtime.intent_generator import gate_level_grain
+    from services.runtime.intent_generator import gate_grain as gate_level_grain
 
     model = _snapshot_model()
     bare = QueryIntent(entity="arr_snapshots", metrics=["arr"], filters=_Q3)
     assert gate_level_grain("ARR at month end, per month, in Q3", bare, model).grain == "month"
     assert gate_level_grain("ARR each quarter", bare, model).grain == "quarter"
     assert gate_level_grain("What is our ARR today?", bare, model).grain is None
-    # a flow asked per month is the intent model's call, not the gate's
-    flow = QueryIntent(entity="arr_snapshots", metrics=["bookings"], filters=_Q3)
-    assert gate_level_grain("bookings per month", flow, model).grain is None
+    # the asked unit is a rail for a flow too, and the raw date column beside
+    # the bucket (GROUP BY DATE_TRUNC('month', d), d — every day served under
+    # a "monthly" ask) gives way to it
+    flow = QueryIntent(
+        entity="arr_snapshots", metrics=["bookings"], dimensions=["snapshot_date"], filters=_Q3
+    )
+    gated = gate_level_grain("bookings per month", flow, model)
+    assert gated.grain == "month" and gated.dimensions == []
+    assert compile_intent(gated, model).split("GROUP BY")[1].count("snapshot_date") == 1
+    # a unit the question states wins over the one the model picked
+    weekly = flow.model_copy(update={"grain": "week"})
+    assert gate_level_grain("bookings by month", weekly, model).grain == "month"
+    assert gate_level_grain("bookings in Q3", weekly, model).grain == "week"
     sql = compile_intent(gate_level_grain("ARR per month in Q3", bare, model), model)
     rows = sorted(_snapshot_warehouse().execute(sql).fetchall())
     assert [(r[0].month, r[1]) for r in rows] == [(7, 150), (8, 170), (9, 195)]
@@ -1221,3 +1231,331 @@ def test_naming_the_alias_or_the_about_metric_counts_as_naming() -> None:
     )
     assert "amount > 1000" not in gq.sql
     assert gq.intent is not None and gq.intent.definitions_suggested == ["large account"]
+
+
+def _visits_model() -> SemanticModel:
+    return SemanticModel(
+        lens="clinic",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="appointments",
+                source=EntitySource(connection="wh", table="appointments"),
+                default_time_field="appointment_date",
+                fields=[
+                    Field(name="appointment_date", type="date"),
+                    Field(name="status", type="string"),
+                    Field(name="service_code", type="string"),
+                    Field(name="actual_minutes", type="number"),
+                ],
+                dimensions=[Dimension(name="status"), Dimension(name="service_code")],
+                metrics=[
+                    Metric(
+                        name="avg_actual_minutes",
+                        agg="avg",
+                        expr="appointments.actual_minutes",
+                        filters=["appointments.status IN ('completed', 'billed')"],
+                    ),
+                    Metric(
+                        name="visits",
+                        agg="sum",
+                        expr="CASE WHEN appointments.status IN ('completed', 'billed') "
+                        "THEN 1 ELSE 0 END",
+                    ),
+                    Metric(name="bookings", agg="count"),
+                    Metric(
+                        name="visit_share",
+                        type="ratio",
+                        numerator="visits",
+                        denominator="bookings",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def test_a_literal_on_a_column_the_metric_governs_is_dropped_and_recorded() -> None:
+    """ "completed visits" became status = 'completed' beside the metric's own
+    status IN ('completed', 'billed'): the generator restating the metric in
+    the question's words, and a count halved in silence. The metric's
+    predicate wins, the ledger says so."""
+    from services.runtime.compiler import govern_literals
+
+    model = _visits_model()
+    intent = QueryIntent(
+        entity="appointments",
+        metrics=["avg_actual_minutes"],
+        filters=[
+            IntentFilter(field="appointments.service_code", value="GP20"),
+            IntentFilter(field="appointments.status", value="completed"),
+            IntentFilter(field="appointments.appointment_date", op=">=", value="2026-01-01"),
+        ],
+    )
+    governed = govern_literals(intent, model)
+    assert governed.literals_dropped == ["status = 'completed' (governed by avg_actual_minutes)"]
+    assert [f.field for f in governed.filters] == [
+        "appointments.service_code",
+        "appointments.appointment_date",
+    ]
+    sql = compile_intent(intent, model)  # compile applies the same rule on every door
+    assert "status = 'completed'" not in sql and "IN ('completed', 'billed')" in sql
+    # a CASE condition in the metric's expr governs its column exactly like a filter
+    by_case = QueryIntent(
+        entity="appointments",
+        metrics=["visits"],
+        filters=[IntentFilter(field="status", value="completed")],
+    )
+    assert govern_literals(by_case, model).literals_dropped == [
+        "status = 'completed' (governed by visits)"
+    ]
+    # ... and so does a ratio through its operands
+    ratio = QueryIntent(
+        entity="appointments",
+        metrics=["visit_share"],
+        filters=[IntentFilter(field="status", op="in", value=["completed", "billed"])],
+    )
+    assert govern_literals(ratio, model).literals_dropped == [
+        "status IN 'completed', 'billed' (governed by visit_share)"
+    ]
+    # an ungoverned column keeps its literal: 'completed bookings' is a narrowing
+    plain = QueryIntent(
+        entity="appointments",
+        metrics=["bookings"],
+        filters=[IntentFilter(field="status", value="completed")],
+    )
+    assert govern_literals(plain, model) is plain
+    assert "status = 'completed'" in compile_intent(plain, model)
+    # a comparison is a different ask and stays
+    gt = QueryIntent(
+        entity="appointments",
+        metrics=["avg_actual_minutes"],
+        filters=[IntentFilter(field="status", op="!=", value="billed")],
+    )
+    assert govern_literals(gt, model) is gt
+
+
+def test_literal_dropped_reaches_the_resolution_ledger() -> None:
+    from services.runtime.resolution import from_intent
+
+    model = _visits_model()
+    intent = QueryIntent(
+        entity="appointments",
+        metrics=["visits"],
+        filters=[IntentFilter(field="status", value="completed")],
+    )
+    from services.runtime.compiler import govern_literals
+
+    res = from_intent(govern_literals(intent, model), model, None)
+    assert res.literal_dropped == ["status = 'completed' (governed by visits)"]
+    assert not [s for s in res.slots if s.kind == "filter"]
+
+
+def _capacity_model() -> SemanticModel:
+    return SemanticModel(
+        lens="ops",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="capacity",
+                source=EntitySource(connection="wh", table="capacity"),
+                default_time_field="day",
+                fields=[
+                    Field(name="day", type="date"),
+                    Field(name="clinic", type="string"),
+                    Field(name="slots_per_week", type="integer"),
+                    Field(name="scheduled", type="integer"),
+                ],
+                dimensions=[Dimension(name="clinic")],
+                metrics=[
+                    Metric(
+                        name="slots_per_week",
+                        agg="max",
+                        expr="capacity.slots_per_week",
+                        additivity="level",
+                    ),
+                    Metric(name="scheduled", agg="sum", expr="capacity.scheduled"),
+                    Metric(
+                        name="utilisation",
+                        type="ratio",
+                        numerator="scheduled",
+                        denominator="slots_per_week",
+                        period_weight="weeks",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def test_a_period_weighted_ratio_reads_the_level_at_the_latest_snapshot_times_the_weeks() -> None:
+    """Utilisation = scheduled (a flow, summed) / slots per week (a level,
+    read at the window's latest snapshot) x weeks in the period — the
+    handbook's formula, which a level beside a flow could not express."""
+    import duckdb
+
+    model = _capacity_model()
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE capacity AS SELECT * FROM (VALUES "
+        "(DATE '2026-08-31', 'x', 100, 9), "  # outside the window: the August plan
+        "(DATE '2026-09-01', 'x', 70, 10), (DATE '2026-09-02', 'x', 70, 10), "
+        "(DATE '2026-09-30', 'x', 70, 10), "
+        "(DATE '2026-09-01', 'y', 35, 5), (DATE '2026-09-30', 'y', 35, 5)"
+        ") t(day, clinic, slots_per_week, scheduled)"
+    )
+    sept = [
+        IntentFilter(field="day", op=">=", value="2026-09-01"),
+        IntentFilter(field="day", op="<=", value="2026-09-30"),
+    ]
+    sql = compile_intent(
+        QueryIntent(
+            entity="capacity", metrics=["utilisation"], dimensions=["clinic"], filters=sept
+        ),
+        model,
+    )
+    assert "(30 / 7.0)" in sql and "SELECT MAX(capacity_latest.day)" in sql
+    # a lens clock never zones a DATE column's pin (it did, and DuckDB refused the compare)
+    model.timezone = "Europe/Helsinki"
+    zoned = compile_intent(
+        QueryIntent(
+            entity="capacity", metrics=["utilisation"], dimensions=["clinic"], filters=sept
+        ),
+        model,
+    )
+    assert "+03:00" not in zoned and "+02:00" not in zoned
+    rows = dict(con.execute(sql).fetchall())
+    assert rows["x"] == pytest.approx(30 / (70 * 30 / 7)) and rows["y"] == pytest.approx(
+        10 / (35 * 30 / 7)
+    )
+    # half-open and `days` weights follow the same bounds
+    half_open = [sept[0], IntentFilter(field="day", op="<", value="2026-10-01")]
+    assert "(30 / 7.0)" in compile_intent(
+        QueryIntent(entity="capacity", metrics=["utilisation"], filters=half_open), model
+    )
+    model.entities[0].metrics[-1].period_weight = "days"
+    assert "* 30, 0)" in compile_intent(
+        QueryIntent(entity="capacity", metrics=["utilisation"], filters=sept), model
+    )
+    # an open window has no weight, and a trend is one window at a time
+    with pytest.raises(CompileError, match="bounded on both ends"):
+        compile_intent(QueryIntent(entity="capacity", metrics=["utilisation"]), model)
+    with pytest.raises(CompileError, match="one period"):
+        compile_intent(
+            QueryIntent(entity="capacity", metrics=["utilisation"], grain="month", filters=sept),
+            model,
+        )
+    # the bare operands no longer refuse: the pair IS the declared ratio (days-weighted by now)
+    assert "* 30, 0)" in compile_intent(
+        QueryIntent(entity="capacity", metrics=["scheduled", "slots_per_week"], filters=sept),
+        model,
+    )
+
+
+def test_period_weight_is_a_ratio_field_over_exactly_one_level() -> None:
+    with pytest.raises(ValueError, match="period_weight"):
+        Metric(name="x", agg="sum", expr="t.a", period_weight="weeks")
+    model = _capacity_model()
+    model.entities[0].metrics[1].additivity = "level"
+    with pytest.raises(CompileError, match="both levels"):
+        compile_intent(
+            QueryIntent(
+                entity="capacity",
+                metrics=["utilisation"],
+                filters=[
+                    IntentFilter(field="day", op=">=", value="2026-09-01"),
+                    IntentFilter(field="day", op="<=", value="2026-09-30"),
+                ],
+            ),
+            model,
+        )
+
+
+def test_a_level_and_a_flow_asked_together_become_their_declared_weighted_ratio() -> None:
+    """The model names the operands the question spells out ("scheduled
+    appointments divided by slot capacity"); the compiler used to refuse the
+    pair. The author's period-weighted ratio over exactly those two is what
+    the question means, so the intent is rewritten to it before compiling."""
+    from services.runtime.compiler import prefer_weighted_ratio
+
+    model = _capacity_model()
+    sept = [
+        IntentFilter(field="day", op=">=", value="2026-09-01"),
+        IntentFilter(field="day", op="<=", value="2026-09-30"),
+    ]
+    pair = QueryIntent(entity="capacity", metrics=["slots_per_week", "scheduled"], filters=sept)
+    assert prefer_weighted_ratio(pair, model).metrics == ["utilisation"]
+    assert "(30 / 7.0)" in compile_intent(pair, model)
+    one = QueryIntent(entity="capacity", metrics=["scheduled"], filters=sept)
+    assert prefer_weighted_ratio(one, model) is one
+
+
+def test_the_grain_gate_leaves_a_period_weighted_ratio_alone() -> None:
+    """ "scheduled appointments divided by slot capacity per week" names the
+    formula's unit, not a weekly breakdown; the ratio reads one window."""
+    from services.runtime.intent_generator import gate_grain
+
+    model = _capacity_model()
+    intent = QueryIntent(
+        entity="capacity",
+        metrics=["utilisation"],
+        filters=[
+            IntentFilter(field="day", op=">=", value="2026-09-01"),
+            IntentFilter(field="day", op="<=", value="2026-09-30"),
+        ],
+    )
+    q = "utilisation of X in September 2026 (scheduled divided by slot capacity per week)"
+    assert gate_grain(q, intent, model) is intent
+    assert "(30 / 7.0)" in compile_intent(gate_grain(q, intent, model), model)
+
+
+def test_a_glossary_only_definition_named_beside_a_metric_does_not_fail_the_compile() -> None:
+    from services.contracts.semantic_model import Definition
+    from services.runtime.intent_generator import gate_definitions
+
+    model = _capacity_model()
+    model.definitions.append(Definition(term="slots_per_week", body="the monthly plan, per week"))
+    intent = QueryIntent(
+        entity="capacity",
+        metrics=["utilisation"],
+        definitions=["slots_per_week"],
+        filters=[
+            IntentFilter(field="day", op=">=", value="2026-09-01"),
+            IntentFilter(field="day", op="<=", value="2026-09-30"),
+        ],
+    )
+    gated = gate_definitions("utilisation by slots per week in September 2026", intent, model)
+    assert gated.definitions == [] and gated.definitions_suggested == []
+    assert "(30 / 7.0)" in compile_intent(gated, model)
+
+
+def test_a_metric_named_as_a_definition_is_not_a_definition() -> None:
+    from services.runtime.intent_generator import gate_definitions
+
+    model = _capacity_model()
+    intent = QueryIntent(entity="capacity", metrics=["utilisation"], definitions=["utilisation"])
+    assert gate_definitions("utilisation in September", intent, model).definitions == []
+    unknown = QueryIntent(entity="capacity", metrics=["utilisation"], definitions=["nope"])
+    assert gate_definitions("nope", unknown, model).definitions == ["nope"]  # compile names it
+
+
+def test_the_operand_pair_under_a_per_week_formula_compiles_as_the_ratio() -> None:
+    """The live shape: the model named both operands, "per week" in the
+    formula set grain: week before the pair became the ratio, and the ratio
+    refused a trend. The rewrite now precedes the grain gate."""
+    from services.runtime.compiler import prefer_weighted_ratio
+    from services.runtime.intent_generator import gate_grain
+
+    model = _capacity_model()
+    q = "utilisation of X in September 2026 (scheduled divided by slot capacity per week)"
+    pair = QueryIntent(
+        entity="capacity",
+        metrics=["scheduled", "slots_per_week"],
+        filters=[
+            IntentFilter(field="day", op=">=", value="2026-09-01"),
+            IntentFilter(field="day", op="<=", value="2026-09-30"),
+        ],
+    )
+    gated = gate_grain(q, prefer_weighted_ratio(pair, model), model)
+    assert gated.metrics == ["utilisation"] and gated.grain is None
+    assert "(30 / 7.0)" in compile_intent(gated, model)

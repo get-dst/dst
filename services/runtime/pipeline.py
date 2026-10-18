@@ -38,7 +38,7 @@ from services.contracts.response import (
     QueryResponse,
     TruncationInfo,
 )
-from services.contracts.semantic_model import Definition, Entity, SemanticModel
+from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.contracts.trace import TraceLog
 from services.contracts.verification import VerificationCheck
 from services.lenses.profile_age import ProfileAge
@@ -550,16 +550,38 @@ def _member_columns(entity: Entity, member: str) -> set[str] | None:
     return out
 
 
+def _metric_computed(entity: Entity, metric: Metric, sql: str, model: SemanticModel) -> bool:
+    """Does the SQL compute this metric — its compiled aggregation (bare or
+    filter-inlined) carried in the statement, or its name as a SELECT alias?
+    The same containment attribution uses, asked of one metric."""
+    if re.search(rf'\bas\s+"?{re.escape(metric.name)}"?\b', sql, re.IGNORECASE):
+        return True
+    sql_norm = verification._norm(sql)
+    for inline in (False, True):
+        try:
+            expr = metric_sql(metric, entity, inline_filters=inline)
+        except CompileError:
+            return False
+        if verification._expr_in_sql(expr, sql, sql_norm, model) and _tables_are_present(expr, sql):
+            return True
+    return False
+
+
 def certified_definitions(
     sql: str, columns: Sequence[str], model: SemanticModel
 ) -> list[Definition]:
     """The definitions a certified serve must disclose: those ``about`` a
-    member the approved SQL touches on an entity it reads — a column by
-    name, a metric or dimension by the columns its expression reads — plus
-    those the served columns bind to (``governing_definitions``, the
-    composer's own rail). Attribution by expression still runs first; this
-    is the floor for pages that carry no expression and would otherwise
-    reach nobody."""
+    member the approved SQL engages on an entity it reads — a column it
+    touches, a dimension whose columns it touches, a METRIC it computes (or
+    whose every column it reads, the de-duplication shape) — plus those the
+    served columns bind to (``governing_definitions``, the composer's own
+    rail). Attribution by expression still runs first; this is the floor for
+    pages that carry no expression and would otherwise reach nobody.
+
+    Reading the table is not engaging every metric declared on it: a median
+    over appointments cited the no-show-rate page (a ratio reads no column
+    of its own) and every ratio on the entity with it. A metric with no
+    columns rides only when the SQL computes it."""
     entities = {e.name.lower(): e for e in model.entities}
     sql_l = sql.lower()
 
@@ -577,10 +599,14 @@ def certified_definitions(
         )
         if not read:
             return False
-        columns = _member_columns(entity, member.strip())
+        name = member.strip()
+        metric = next((m for m in entity.metrics if m.name.lower() == name.lower()), None)
+        if metric is not None and _metric_computed(entity, metric, sql, model):
+            return True
+        columns = _member_columns(entity, name)
         if columns is None:
-            return verification._touches(member.strip(), sql)
-        return not columns or any(verification._touches(c, sql) for c in columns)
+            return verification._touches(name, sql)
+        return bool(columns) and all(verification._touches(c, sql) for c in columns)
 
     out = [d for d in model.definitions if reads(d)]
     seen = {d.term for d in out}
@@ -1341,7 +1367,9 @@ def run_query(
         # post-check beside filter_guard; DATE-typed columns raw-grouped are legal
         # daily grain and stay untouched. Certified SQL is exempt like table trust.
         if certification != "certified":
-            raw_groups = time_guard.raw_timestamp_groupings(guard.sql, semantic_model)
+            raw_groups = time_guard.raw_timestamp_groupings(
+                guard.sql, semantic_model, question=question
+            )
             if raw_groups:
                 period = time_guard.asked_period(question)
                 cols = ", ".join(f"'{entity}.{col}'" for entity, col in raw_groups)
@@ -1556,6 +1584,44 @@ def run_query(
     # HELD: rows the query matched and the caller never received are truncation.
     truncated = fetch_capped or total_rows > max_rows
 
+    # Row conservation (generation path only): a UNION ALL CTE whose branches
+    # all read one table may not yield more rows than the table has distinct
+    # declared keys under the same filters. Two counts, read-only, only when
+    # the SQL carries the shape; a count that cannot run is a named skip,
+    # never a fail and never the serve's error.
+    conservation_check: VerificationCheck | None = None
+    if certification != "certified":
+        plan = verification.row_conservation_plan(guard.sql, semantic_model)
+        if isinstance(plan, VerificationCheck):
+            conservation_check = plan
+        elif plan is not None:
+            count_started = time.perf_counter()
+
+            def _count(count_sql: str) -> int:
+                got = connector.execute(count_sql, read_only=True, row_limit=1)
+                cell = got.rows[0][0] if got.rows and got.rows[0] else 0
+                return int(str(cell)) if cell is not None else 0
+
+            try:
+                produced = warehouse_bounded(
+                    "the row-conservation count",
+                    functools.partial(_count, plan.produced_sql),
+                    connection=wh,
+                )
+                distinct = warehouse_bounded(
+                    "the row-conservation count",
+                    functools.partial(_count, plan.distinct_sql),
+                    connection=wh,
+                )
+                conservation_check = verification.row_conservation_check(plan, produced, distinct)
+            except Exception as exc:  # noqa: BLE001 — the count is evidence, not the serve
+                conservation_check = VerificationCheck(
+                    name="row_conservation",
+                    status="skip",
+                    reason=f"the row counts behind `{plan.cte}` could not be read: {exc}",
+                )
+            _mark("probe", count_started)
+
     # The not-computable backstop for paraphrases the question rail cannot
     # enumerate: a result column named after a measure this lens declared it
     # cannot compute is a substitution. It reads the result's columns, the same
@@ -1590,6 +1656,29 @@ def run_query(
         restated_check, restated = verification.restated_check(
             verified_value, served, skip_reason=skip_reason
         )
+    # The period rules the approved SQL reads past (a duplicated export in one
+    # month, declared as a definition with a `sql:` predicate and a period):
+    # approval vouched for the SQL, not for a rule declared on the dates it
+    # spans. Deterministic; the check fails loud, the term is named on every
+    # surface, and the grade caps at partial.
+    ignored = (
+        verification.ignored_definitions(
+            guard.sql, semantic_model, f"{question} {certified_question or ''}"
+        )
+        if certification == "certified"
+        else []
+    )
+    period_check = (
+        verification.definition_period_check(ignored) if certification == "certified" else None
+    )
+    # Prose composed over a sample of the result never serves verbatim over
+    # the whole: "the five clinics" is not a sentence about fourteen rows.
+    # The answer composes afresh (or serves rows only) and says why.
+    prose_sampled = (
+        verification.prose_sampled(verified_value, served)
+        if certification == "certified" and verified_prose is not None and restated is None
+        else None
+    )
 
     # On a certified serve, no model writes the answer. ``static_prose``
     # names why numeric_grounding SKIPS (there is no free prose to catch
@@ -1632,7 +1721,12 @@ def run_query(
             "deterministic certified render — the answer text was written by code "
             "from the result rows, no prose was composed"
         )
-    elif certification == "certified" and verified_prose is not None and restated is None:
+    elif (
+        certification == "certified"
+        and verified_prose is not None
+        and restated is None
+        and prose_sampled is None
+    ):
         # A fixed certified answer serves its certify-time prose VERBATIM: the
         # English was composed once from the executed result when a human
         # certified it, and re-composing per request is where the ~6s and the
@@ -1829,6 +1923,8 @@ def run_query(
         compiled_metrics=compiled_metrics,
         restated=restated_check,
         certified_question=certified_question,
+        definition_period=period_check,
+        row_conservation=conservation_check,
     )
     # Figure gate: a composed answer whose numeric_grounding check FAILS
     # is an invented figure on its way to a caller. Retry composition ONCE with
@@ -1903,6 +1999,7 @@ def run_query(
                     entity_coverage=entity_coverage,
                     compiled_metrics=compiled_metrics,
                     certified_question=certified_question,
+                    row_conservation=conservation_check,
                 )
                 regate = regraded.check("numeric_grounding")
                 if regate is None or regate.status != "fail":
@@ -2187,6 +2284,17 @@ def run_query(
             else f" Note: the certified result moved from {restated[0]} to {restated[1]} "
             "since this answer was verified; the figures above are today's."
         )
+    if prose_sampled is not None and not consumer:
+        answer_text += f" Note: {prose_sampled}; this answer was written over today's rows."
+    for d, why in ignored:
+        # In-band, like the restated note: a caller reading only the prose
+        # must not hold a figure the rule says is wrong as the governed one.
+        answer_text += (
+            f" This figure does not apply the rule `{d.term}`"
+            f"{f' ({d.summary.rstrip(chr(46))})' if d.summary else ''}."
+            if consumer
+            else f" DEFINITION NOT APPLIED: `{d.term}` — the approved SQL {why}."
+        )
     if stale is not None and stale.reason:
         answer_text += (
             f" The data is from {spoken_date(str(data_as_of)[:10])} and may be out of date."
@@ -2292,6 +2400,13 @@ def run_query(
             code_wrote = composer is None or certified_match == "parameterized"
             if code_wrote and answer_text and basis[0] not in answer_text:
                 answer_text += " " + " ".join(basis)
+        if ignored:
+            not_applied = " ".join(
+                f"Definition NOT applied: `{d.term}`"
+                f"{f' — {d.summary.strip().rstrip(chr(46))}' if d.summary else ''}."
+                for d, _why in ignored
+            )
+            trust_summary = f"{trust_summary} {not_applied}" if trust_summary else not_applied
         on_ledger = {slot.name for slot in ledger.slots if slot.kind == "definition"}
         ledger.slots.extend(
             Slot(kind="definition", name=d.term, source="certified", value=d.sql_expr or d.about)
@@ -2347,6 +2462,10 @@ def run_query(
         degraded_notes.append(
             f"RESTATED: this certified answer's result moved from {old} to {new}{when}"
         )
+    if prose_sampled is not None:
+        degraded_notes.append(f"SAMPLED: {prose_sampled}; the stored prose was not served")
+    for d, why in ignored:
+        degraded_notes.append(f"DEFINITION NOT APPLIED: `{d.term}` — the approved SQL {why}")
     if profile_age is not None and profile_age.stale:
         # Same idiom again: the facts behind this answer (data_as_of, the
         # dictionaries, the date span) are older than the project allows, and

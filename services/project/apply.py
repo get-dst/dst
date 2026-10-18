@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
 from services.certify.bindings import certified_bindings, foreign_tables, restamp_bindings
-from services.certify.generate import _MAX_ROWS, _value_summary
+from services.certify.generate import _MAX_ROWS, _PROSE_ROWS, _value_summary
 from services.config import EnvRefError, settings
 from services.contracts.authoring import collapse_notes
 from services.contracts.lens_config import LensConfig
@@ -552,7 +552,12 @@ def _dictionary_warnings(
         for key, profile in profiles.items()
         if key.partition(":")[0] in {e.source.connection for e in sm.entities}
     }
-    return [i.message for i in status_done_family_warnings(sm, by_table)]
+    from services.project.probe import join_cardinality_warnings
+
+    return [
+        *(i.message for i in status_done_family_warnings(sm, by_table)),
+        *join_cardinality_warnings(sm, by_table),
+    ]
 
 
 def _embedder() -> Embedder | None:
@@ -1203,6 +1208,7 @@ def check_lens(
     errors += _starvation_errors(session, name, source)
     if warnings_out is not None:
         warnings_out.extend(_binding_range_warnings(source))
+        warnings_out.extend(_certified_definition_warnings(source.certified_answers or [], model))
     gate_errors, _report = _deterministic_gates(
         session, name, store.LensBundle(config=config, semantic_model=model)
     )
@@ -1774,6 +1780,7 @@ def _certify_prose(
             result=probed,
             semantic_model=model,
             prose_context=[],
+            max_rows=_PROSE_ROWS,
         )
         # The same deterministic passes the serve path runs after composing:
         # reconcile rewrites rounded restatements back to the rows' own values,
@@ -2017,6 +2024,37 @@ def _certified_entry_errors(answer: dict[str, Any], model: SemanticModel) -> lis
     if reasons:
         return [f"certified answer '{question}' rejected: " + "; also: ".join(reasons)]
     return []
+
+
+def _certified_definition_warnings(
+    answers: Sequence[Mapping[str, Any]], model: SemanticModel
+) -> list[str]:
+    """``certified_ignores_definition``: the serve-time period check
+    (verification.ignored_definitions), asked of every certified answer at
+    plan and apply over its gate-rendered SQL, so a certified answer that
+    reads past a period rule is named with the rule before it serves below
+    `verified`. Pure — the same function plan runs."""
+    from services.runtime import verification
+
+    out: list[str] = []
+    for answer in answers:
+        question = str(answer.get("question", "")).strip()
+        if not question or str(answer.get("status") or "active") != "active":
+            continue
+        gated, _errors = _template_gate_sql(
+            dict(answer), question, str(answer.get("sql", "")), model
+        )
+        if gated is None:
+            continue
+        for d, why in verification.ignored_definitions(gated, model, question):
+            out.append(
+                f"certified_ignores_definition: certified answer '{question}' {why} "
+                f"(definition '{d.term}'"
+                f"{f', period {d.period}' if d.period else ''}) — it serves below "
+                "verified, naming the definition, until the SQL applies the rule or "
+                "the answer is retired"
+            )
+    return out
 
 
 def _sql_text(sql: object) -> str:
@@ -2368,6 +2406,7 @@ def _apply_certified_answers(
     unchanged = 0
     result.errors.extend(_cross_match_errors(session, name, source, model, result.warnings))
     result.warnings.extend(_binding_range_warnings(source))
+    result.warnings.extend(_certified_definition_warnings(source.certified_answers or [], model))
     for answer in source.certified_answers:
         question = str(answer.get("question", "")).strip()
         if not question:
@@ -2605,11 +2644,20 @@ def _apply_certified_answers(
                 prose = str(answer["verified_prose"]) if answer.get("verified_prose") else None
                 if connector is not None:
                     try:
-                        probed = connector.execute(exec_sql, read_only=True, row_limit=_MAX_ROWS)
-                        verified = _value_summary(probed.columns, probed.rows)
+                        # The whole result (to the prose cap, plus one row to
+                        # see the cap bite): the prose is composed over every
+                        # row it will describe, and the stored row count lets
+                        # a serve tell a result that grew. Past the cap no
+                        # prose is stored — a sentence over part of a result
+                        # must never serve verbatim over the whole.
+                        probed = connector.execute(
+                            exec_sql, read_only=True, row_limit=_PROSE_ROWS + 1
+                        )
+                        whole = len(probed.rows) <= _PROSE_ROWS
+                        verified = _value_summary(probed.columns, probed.rows, exact_count=whole)
                         probed_ok = True
                         probed_count += 1
-                        if prose is None and not answer.get("slots"):
+                        if prose is None and not answer.get("slots") and whole:
                             prose = _certify_prose(source.config, model, question, sql, probed)
                     except ApplyStepTimeout:
                         raise  # the deadline is the apply's verdict, not this answer's

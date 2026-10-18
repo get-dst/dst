@@ -83,6 +83,10 @@ class Resolution(BaseModel):
     # Definitions the generator wanted to apply that the question never named
     # (by term, alias or the metric it is `about`): surfaced here, never compiled.
     definition_suggested: list[str] = Field(default_factory=list)
+    # Literal filters the generator added on a column a selected metric's own
+    # filter governs ("status = 'completed'" beside IN ('completed', 'billed')):
+    # dropped at compile, the metric's predicate wins — disclosed here.
+    literal_dropped: list[str] = Field(default_factory=list)
 
 
 def derive_tag(slots: list[Slot], certification: str = "none") -> Tag:

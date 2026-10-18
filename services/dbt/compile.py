@@ -116,20 +116,26 @@ def _qualify(entity_name: str, expr: str) -> str:
     return tree.sql()
 
 
-def _table_name(
-    sm: DbtSemanticModel, strategy: str, model: DbtModel | None, *, manifest_only: bool
-) -> str:
+def qualified_table(schema: str | None, alias: str) -> str:
+    """``schema.alias`` when the manifest knows the schema dbt built the model
+    in and the alias is bare — the one spelling every import path writes. A
+    bare alias resolves only in the connection's default schema, which is
+    rarely where dbt writes (``fct_appointments`` for ``marts.fct_appointments``
+    failed on the first query, not at plan)."""
+    if schema and "." not in alias:
+        return f"{schema}.{alias}"
+    return alias
+
+
+def _table_name(sm: DbtSemanticModel, strategy: str, model: DbtModel | None) -> str:
     """The physical table an entity reads. ``relation_name`` is dbt's own fully
-    qualified relation; ``alias`` is the model alias, and on a manifest-only
-    import it is written under the schema dbt built it in (``marts.orders``) —
-    a bare alias resolves only in the connection's default schema, which is
-    rarely where dbt writes. The catalog (BigQuery project, Snowflake database)
-    is the connection's to supply at compile time, never the file's."""
+    qualified relation; otherwise the model alias under the schema dbt built
+    it in (``qualified_table``), on the MetricFlow and the manifest-only path
+    alike. The catalog (BigQuery project, Snowflake database) is the
+    connection's to supply at compile time, never the file's."""
     if strategy == "relation_name" and sm.relation_name:
         return sm.relation_name.replace('"', "")
-    if manifest_only and model is not None and model.schema and "." not in sm.model_alias:
-        return f"{model.schema}.{sm.model_alias}"
-    return sm.model_alias
+    return qualified_table(model.schema if model is not None else None, sm.model_alias)
 
 
 def _fields(model: DbtModel | None) -> list[Field]:
@@ -268,7 +274,7 @@ def _compile_entity(
         description=sm.description,
         source=EntitySource(
             connection=connection,
-            table=_table_name(sm, strategy, model, manifest_only=artifacts.manifest_only),
+            table=_table_name(sm, strategy, model),
         ),
         default_time_field=default_time,
         primary_key=primary_key,

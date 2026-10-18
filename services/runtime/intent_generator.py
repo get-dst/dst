@@ -24,7 +24,12 @@ from services.contracts.query_intent import QueryIntent
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
 from services.runtime import ambiguity
-from services.runtime.compiler import CompileError, compile_intent
+from services.runtime.compiler import (
+    CompileError,
+    compile_intent,
+    govern_literals,
+    prefer_weighted_ratio,
+)
 from services.runtime.timewindow import breakdown_unit
 
 _RULES = (
@@ -127,6 +132,11 @@ def serialize_layer(model: SemanticModel) -> str:
                 filters = f" [only where {' AND '.join(m.filters)}]" if m.filters else ""
                 if m.type == "ratio":
                     head = f"ratio {m.numerator} / {m.denominator}"
+                    if m.period_weight:
+                        head += (
+                            f" x {m.period_weight} in the period [select THIS metric for the "
+                            "ratio, with a bounded window — never its two operands]"
+                        )
                 elif m.type == "derived":
                     head = f"derived {m.expr}"
                 else:
@@ -205,7 +215,18 @@ def gate_definitions(question: str, intent: QueryIntent, model: SemanticModel) -
         t for t in intent.definitions if t not in by_term or ambiguity.named(question, by_term[t])
     ]
     suggested = [t for t in intent.definitions if t not in named]
-    if not suggested:
+    # A named definition with no sql_expr is glossary: it contributes no
+    # predicate, and handing it to the compiler fails the whole intent to the
+    # raw-SQL tier over nothing (the metric 'utilisation' also named as the
+    # term 'planned_capacity_slots' lost its compiled ratio that way). It is
+    # dropped here; the definition's prose still reaches the answer's basis.
+    named = [t for t in named if t not in by_term or (by_term[t].sql_expr or "").strip()]
+    # The model names the metric it selected as a definition too ("utilisation"
+    # in both lists): a metric is not a term, and an unknown term failed the
+    # whole intent to the raw-SQL tier over nothing.
+    metric_names = {m.name for e in model.entities for m in e.metrics}
+    named = [t for t in named if t in by_term or t not in metric_names]
+    if not suggested and named == intent.definitions:
         return intent
     return intent.model_copy(
         update={
@@ -215,30 +236,37 @@ def gate_definitions(question: str, intent: QueryIntent, model: SemanticModel) -
     )
 
 
-def gate_level_grain(question: str, intent: QueryIntent, model: SemanticModel) -> QueryIntent:
-    """The intent with ``grain`` set from the question's breakdown phrase ("by
-    month", "at the end of each month") when every selected metric is a level
-    and the model set no grain. A level pinned to one latest snapshot under a
-    "per month" ask collapses the series to its last day, and a level grouped
-    by the entity's own date column under the same ask serves every day
-    (the pin correlates on the day itself, a no-op) — so the entity's
-    date-typed dimensions give way to the grain the question states. The
-    phrase is deterministic and the compiler reads one snapshot per bucket
-    once the grain says so."""
+def gate_grain(question: str, intent: QueryIntent, model: SemanticModel) -> QueryIntent:
+    """The intent with ``grain`` pinned to the question's breakdown phrase ("by
+    month", "monthly", "one row per month") and the entity's own date-typed
+    dimensions removed beside it. The phrase is deterministic, so the asked
+    period is a rail and not the model's call, for a flow and a level alike:
+    a model that keeps ``day`` as a dimension next to ``grain: month`` compiles
+    ``GROUP BY DATE_TRUNC('MONTH', day), day`` — the bucket is a no-op and a
+    "monthly" answer serves every day. A level pinned to one latest snapshot
+    under a "per month" ask collapses the series to its last day the same
+    way; once the grain says so the compiler reads one snapshot per bucket.
+    A question naming no unit leaves the model's grain as it set it."""
     unit = breakdown_unit(question)
-    if unit is None or intent.grain is not None or not intent.metrics:
+    grain = unit or intent.grain
+    if grain is None or not intent.metrics:
         return intent
     entity = next((e for e in model.entities if e.name == intent.entity), None)
     if entity is None:
         return intent
     by_name = {m.name: m for m in entity.metrics}
-    if not all(m in by_name and by_name[m].additivity == "level" for m in intent.metrics):
+    if all(getattr(by_name.get(m), "period_weight", None) for m in intent.metrics):
+        # A period-weighted ratio reads one window: its weight IS the period,
+        # and "slot capacity per week" in the question is the formula's unit,
+        # not a breakdown ask. The compiler refuses a grain on it either way.
         return intent
     typed = {d.name: d.type for d in entity.dimensions} | {f.name: f.type for f in entity.fields}
     dimensions = [
         d for d in intent.dimensions if typed.get(d.rpartition(".")[2]) not in ("date", "timestamp")
     ]
-    return intent.model_copy(update={"grain": unit, "dimensions": dimensions})
+    if grain == intent.grain and dimensions == intent.dimensions:
+        return intent
+    return intent.model_copy(update={"grain": grain, "dimensions": dimensions})
 
 
 def intent_term(intent: QueryIntent | None) -> str | None:
@@ -312,7 +340,12 @@ class IntentSQLGenerator:
             if intent is None:
                 break
             intent = gate_definitions(question, intent, semantic_model)
-            intent = gate_level_grain(question, intent, semantic_model)
+            # The ratio rewrite runs before the grain gate: once the pair is
+            # the period-weighted ratio, "per week" in the question is its
+            # formula's unit and the gate leaves it alone.
+            intent = prefer_weighted_ratio(intent, semantic_model)
+            intent = gate_grain(question, intent, semantic_model)
+            intent = govern_literals(intent, semantic_model)
             try:
                 sql = compile_intent(intent, semantic_model)
                 error = None

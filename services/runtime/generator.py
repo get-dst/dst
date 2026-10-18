@@ -254,6 +254,12 @@ def serialize_model(m: SemanticModel) -> str:
                 line += f" [time: {metric.agg_time_field}]"
             if metric.additivity == "level":
                 line += " [level: a snapshot — read the LAST snapshot in each period, never a sum]"
+            if metric.period_weight:
+                line += (
+                    f" [period-weighted: the level operand is read at the window's latest "
+                    f"snapshot and multiplied by the window's {metric.period_weight} "
+                    "(days / 7 for weeks); the expansion shown omits that weight]"
+                )
             if metric.description:
                 line += f"  # {metric.description}"
             lines.append(line)
