@@ -1,0 +1,8 @@
+name: rental_ops
+display_name: Rental Operations
+connections: [toolshed]
+select:
+  entities:
+    - name: rentals
+    - name: tools
+  definitions: [late_return]

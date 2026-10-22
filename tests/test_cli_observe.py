@@ -296,3 +296,45 @@ def test_summary_headline_carries_the_bytes_scanned(_routes, capsys) -> None:
     _routes["/callers"] = []
     assert cli._observe(_args()) == 0
     assert "16.00 MB scanned" in capsys.readouterr().out
+
+
+def test_summary_says_the_routing_spend_no_request_carries(_routes, capsys) -> None:
+    """The AI total includes the router's spend on questions no lens served;
+    the summary says how much of it that is, so "0 queries · AI $" is legible."""
+    _routes["/kpis"] = {
+        "queries": 0,
+        "ai_cost_usd": 0.004,
+        "outcomes": {},
+        "routing": {"decisions": 2, "ai_cost_usd": 0.004, "input_tokens": 4000},
+    }
+    _routes["/callers"] = [{"caller": "ana", "queries": 0, "cost_usd": 0.004, "declined": 0}]
+    assert cli._observe(_args()) == 0
+    out = capsys.readouterr().out
+    assert "0 queries · AI $0.0040" in out
+    assert "AI spend includes $0.0040 routing 2 question(s) no lens served" in out
+
+
+def test_summary_labels_the_ai_and_warehouse_bills_apart(_routes, capsys) -> None:
+    """Two bills, each with its own label and its own unpriced count: the AI
+    providers' and the warehouse's. Where the AI spend went is one figure per
+    purpose, and eval runs' spend is said as test traffic, outside the totals."""
+    _routes["/kpis"] = {
+        "queries": 12,
+        "ai_cost_usd": 0.0312,
+        "unpriced": 2,
+        "warehouse_cost_usd": 0.0105,
+        "wh_unpriced": 1,
+        "wh_bytes": 16_000_000,
+        "outcomes": {"ok": 12},
+        "ai_by_purpose": {
+            "generate": {"calls": 12, "ai_cost_usd": 0.02, "unpriced": 0},
+            "decide": {"calls": 30, "ai_cost_usd": 0.0112, "unpriced": 2},
+        },
+        "eval_spend": {"runs": 3, "ai_cost_usd": 0.5, "unpriced_runs": 0},
+    }
+    _routes["/callers"] = []
+    assert cli._observe(_args()) == 0
+    out = capsys.readouterr().out
+    assert "12 queries · AI $0.0312 (+2 unpriced) · warehouse $0.0105 (+1 unpriced)" in out
+    assert "AI by purpose: generate $0.0200 · decide $0.0112 (+2 unpriced)" in out
+    assert "test traffic: 3 eval run(s) spent $0.5000 AI, not counted above" in out

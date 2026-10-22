@@ -113,15 +113,24 @@ def parse_probe(content: str, path: str) -> ProbeArtifact:
 
 
 def sample_windows(
-    profiles: list[TableProfile], entities: list[SharedEntity], connection: str, n: int
+    profiles: list[TableProfile],
+    entities: list[SharedEntity],
+    connection: str,
+    n: int,
+    prior: ProbeArtifact | None = None,
 ) -> dict[str, SampleWindow]:
     """table -> the slice its sampling pass reads: the latest ``n`` partitions
     of a time-partitioned table, else the last ``n`` days of the entity's
     declared ``default_time_field``, else nothing (whole table, as today).
     ``n == 0`` asks for no window at all. BigQuery's ingestion-time
-    partitioning has no column to anchor on and is recorded as such."""
+    partitioning has no column to anchor on and is recorded as such.
+
+    With *prior*, a table the stored artifact never read whole gets no
+    window: a window cannot prove a dictionary complete, so a refresh over
+    a catalog-only or window-only table would never hold a complete one."""
     if n <= 0:
         return {}
+    read_whole = None if prior is None else {p.table for p in prior.tables if _read_whole(p)}
     time_fields = {
         e.source.table: e.default_time_field
         for e in entities
@@ -129,6 +138,8 @@ def sample_windows(
     }
     out: dict[str, SampleWindow] = {}
     for profile in profiles:
+        if read_whole is not None and profile.table not in read_whole:
+            continue
         by_name = {c.name: c for c in profile.columns}
         part = profile.partitioning
         if part is not None and part.column and part.kind in (None, "time"):
@@ -147,6 +158,86 @@ def sample_windows(
         )
         if field is not None and is_temporal_type(by_name[field].type):
             out[profile.table] = SampleWindow(kind="days", n=n, column=field)
+    return out
+
+
+def _read_whole(profile: TableProfile) -> bool:
+    """Whether *profile* carries a whole-table read: sampled through no
+    window, or holding a dictionary a whole read proved complete."""
+    if profile.source == "catalog":
+        return False
+    window = profile.sample_window
+    if window is None or window.kind == "none":
+        return True
+    return any(c.values_complete for c in profile.columns)
+
+
+def lost_dictionaries(profiles: list[TableProfile], prior: ProbeArtifact | None) -> list[str]:
+    """``table.column`` for every dictionary the stored artifact held complete
+    that this run's profile no longer does, the column still there at the
+    same type, after a window's carry. A whole-table read that finds more
+    values than a dictionary keeps is right to call it partial; the probe
+    says which ones changed instead of dropping them silently."""
+    if prior is None:
+        return []
+    before = {
+        (p.table, c.name): c.type
+        for p in prior.tables
+        for c in p.columns
+        if c.values_complete and c.top_values
+    }
+    return [
+        f"{p.table}.{c.name}"
+        for p in profiles
+        for c in p.columns
+        if before.get((p.table, c.name)) == c.type and not (c.values_complete and c.top_values)
+    ]
+
+
+# What a catalog pass reads fresh for a table it did not sample; everything
+# else on a sampled profile came from a read of the rows.
+_CATALOG_TABLE_FACTS = (
+    "description",
+    "row_count",
+    "is_view",
+    "partitioning",
+    "clustering",
+    "last_updated_physical",
+)
+_CATALOG_COLUMN_FACTS = ("nullable", "description", "description_source")
+
+
+def keep_unsampled(profiles: list[TableProfile], prior: ProbeArtifact | None) -> list[TableProfile]:
+    """A table this run did not sample (outside `--tables`, outside the layer's
+    scope, or a sampling read that failed) keeps what the stored artifact had
+    sampled: its column facts and its sampling date, under this run's catalog
+    metadata. A column the catalog no longer lists, or lists at another type,
+    carries nothing over. Without this a targeted probe of one table rewrote
+    every other table as catalog-only, and their dictionaries left the
+    serving prompt on the next apply."""
+    if prior is None:
+        return profiles
+    before = {p.table: p for p in prior.tables}
+    out: list[TableProfile] = []
+    for profile in profiles:
+        old = before.get(profile.table)
+        if profile.source != "catalog" or old is None or old.source == "catalog":
+            out.append(profile)
+            continue
+        kept = {c.name: c for c in old.columns}
+        columns = []
+        for column in profile.columns:
+            previous = kept.get(column.name)
+            if previous is None or previous.type != column.type:
+                columns.append(column)
+                continue
+            columns.append(
+                previous.model_copy(update={k: getattr(column, k) for k in _CATALOG_COLUMN_FACTS})
+            )
+        update = {k: getattr(profile, k) for k in _CATALOG_TABLE_FACTS}
+        out.append(
+            old.model_copy(update={**update, "connection": profile.connection, "columns": columns})
+        )
     return out
 
 

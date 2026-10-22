@@ -155,6 +155,24 @@ pinned_dimensions: ["currency"]
   `birth_date`, `date_of_birth`, `address`) with no `hide` on it and no
   definition `about` it; the column reaching a door is a declared schema fact,
   and the author decides whether the hide or the definition is the fix.
+- **`internal`**: column patterns, matched like `hide`, that the lens keeps
+  but never offers a question: no filter, breakdown or ranking is decided on
+  them, a clarification never lists them, and the metric catalog leaves them
+  out. The column stays readable, so it may be the primary key a listing,
+  a join or a distinct count reads, which `hide` refuses. The usual case is a
+  surrogate key (`internal: [member_sk]`). Plan fails on a pattern that
+  matches no field.
+
+A dimension's `aliases` are the further words people use for it, read word
+for word like its name: "by region" groups by `store_region`, "which region"
+ranks it, and a binding keyed `region` binds it. Plan fails when one word
+names two dimensions of an entity.
+
+```yaml
+dimensions:
+  - name: store_region
+    aliases: [region, area]
+```
 
 ## A declared refusal holds on every door
 
@@ -199,6 +217,42 @@ is not that ask. On a lens with one entity, an `Avoid for:` line in the entity's
 `use_cases` is read the same way, with no sibling (`Avoid for: location-level
 churn; meeting-room revenue` declares two asks, a parenthetical is ignored).
 
+Routing reads the same asks. A lens is not a candidate for a question that names
+an ask, or that reads closer to one of its asks than to anything the lens covers
+("refunds per order" against `ask: booking-level refunds`), and the routing
+decider is shown each lens's asks. An `Avoid for:` line never counts as
+something its lens covers.
+
+A lens can also say where its data comes from. `sources` lists the systems as
+people name them in questions, and `scope` says whose figures they are, `own`
+or `market`:
+
+```yaml
+sources: [ticketing, door scanners]
+scope: own
+```
+
+A question that names a system some lens declares, each word whole (case
+ignored, hyphens and underscores read as spaces), goes only to the lenses that
+declare it: "attendance from the door scanners" reaches the lens fed by the
+scanners, not the one fed by ticketing, however alike their anchors read. A
+question naming a system that no lens the caller may use declares is uncovered,
+and the reason names the system. A question naming two systems needs a lens
+declaring both. Pick names people say apart from any figure: plan warns when a
+source is spelled like one of the lens's metrics, since every question naming
+the metric would then route by the system. The routing decider is shown both
+keys.
+
+Two more routing rules read what the lenses declare. A metric routes by its
+name or `label`; its `aliases` widen only how the lens itself reads the
+question, so adding one never moves questions between lenses. When several
+lenses declare the metric a question names, a table or entity only one of them
+carries picks it, and so does a split over time ("by month") that only one of
+them has a time field for. Otherwise the question is asked which lens, naming
+them. A lens asked to split a figure over time that its entity has no time
+field for refuses with `this lens cannot split <metric> by month`, rather than
+serving the total.
+
 `route_query` carries the same refusal: when it would decline and a lens the
 caller may use declares a term the question names not computable, the response
 is that lens's refusal (`routed_to.decided_by: refusal`, `answer.status:
@@ -217,7 +271,11 @@ refused`) rather than "no lens covers this".
 | a term's meaning never checkable in answers | `sql:` on the definition (alias `sql_expr`) | yes; definition_applied check + generation grounding |
 | a rule on one period (a duplicated export month) that certified SQL reads past | `sql:` + `period:` on a definition `about:` the entity | yes; definition_period check on every certified serve, `certified_ignores_definition` at plan/apply |
 | a term with two meanings silently guessed | `status: ambiguous` + `aliases` | yes; clarifies instead |
-| a metric nobody says by its identifier (`otd_rate`) resolved to a sibling | `label:` / `aliases:` on the metric | yes; the question names it word for word, and a bare metric question compiles without a decision |
+| a metric nobody says by its identifier (`otd_rate`) resolved to a sibling | `label:` / `aliases:` on the metric | yes; the question names it word for word and a bare metric question compiles without a decision. A `label` routes to the one lens declaring it; an alias is read inside the lens only |
+| two lenses over one subject, fed by different systems, mixed up | `sources:` in `lens.yaml` | yes; a question naming a system goes only to the lenses declaring it |
+| a dimension nobody says by its identifier (`store_region`) | `aliases:` on the dimension | yes; "by region", "which region" and a `region` binding read it word for word |
+| a surrogate key offered as a filter or a breakdown | `internal: [member_sk]` on the entity | yes; never offered, still readable as a key |
+| a period placed on one of an entity's two dates without saying which | `agg_time_field:` on the metric | yes; a question asking for no such metric names the date ("booked last month") or is asked which |
 | a metric that must never serve from this lens | leave it out of `select:` | yes; refusal |
 | known-good numbers that must not drift | certified answer | yes; served verbatim, re-verified |
 | tone/derivation guidance for the prose | `description` / definition prose | no; advisory |
@@ -304,6 +362,69 @@ The answer discloses the reading (a `Reading applied:` sentence naming the metri
 the ledger carries it as a declared window slot, so a snapshot read as a total
 is never silent. "At the end of August 2026" and "as of 2026-08-31" are windows
 the parser already understands: the month, and the day.
+
+When the time field is declared `date` but the warehouse stores it as a
+timestamp (the profile records the type), one snapshot's rows can carry
+different times on the same day. The latest snapshot is then the whole latest
+day, from its midnight to the next one, not the single latest moment.
+
+### Which snapshot a period reads
+
+A level asked "at the start of Q3 2026" or "at the beginning of August 2026" reads
+the **first** snapshot inside that period; "at the end of" reads the last, as
+does a period with no edge named. The edge is read from the question's words,
+so one metric serves both, and no declaration is needed. On the structured
+door the intent says it directly with `snapshot: first` or `snapshot: last`.
+
+A level asked over no period at all reads the latest snapshot the data holds,
+and the answer says so. A ratio or derived metric whose operands are all
+levels (occupied berths over all berths) is read the same way: at one
+snapshot, never averaged over every snapshot in the table.
+
+### A flag over a period: `window_reading`
+
+A flag kept on a snapshot table ("boats overdue on their berth fee", one row
+per berth per day) can be read over a quarter in two ways: the boats overdue
+at the quarter's end, or every boat that was overdue at any point in it. The
+metric declares which:
+
+```yaml
+metrics:
+  - name: overdue_boats
+    agg: count_distinct
+    expr: berth_days.boat_id
+    filters: ["berth_days.overdue"]
+    additivity: level
+    window_reading: any_in_window   # snapshot (the default) | any_in_window
+```
+
+`snapshot` reads one snapshot of the period, its last. `any_in_window` counts
+each boat flagged at any snapshot of the period once, and per bucket under a
+grain. Asked over no period, or at a named edge ("at the end of Q3"), both
+read the snapshot. `window_reading` needs `additivity: level`, and
+`any_in_window` needs `agg: count_distinct` over what is flagged; plan
+refuses either otherwise.
+
+A certified answer is held to the same declaration. When a metric declares
+`window_reading`, a certified SQL that reads its column over a window the
+other way (one pinned snapshot for `any_in_window`, every snapshot for
+`snapshot`) fails the apply gate like a restated value, and a certified serve
+of it grades partial with the conflict named. A level without the key keeps
+the reading its approver gave it.
+
+### A ratio asked over no period
+
+A ratio or derived metric asked with no period, on an entity that has a time
+field, is read over the **last complete month**, and the answer says which
+("the question names no period, so `cancellation_rate` is read over the last
+complete month, September 2026"). Over the whole table it would blend every
+period into one figure nobody asked for. The question's own words still
+decide: "all time", "ever" or "since launch" read the whole history, a stated
+period reads that period, and a breakdown by month reads each month. The
+structured door pins the same month when an intent carries no filter on the
+metric's time field; pass one for any other period. Where the month cannot be
+placed (the time field holds no dates, or an entity has two time fields and
+the metric declares neither), the question is asked instead.
 
 ### A ratio across additivities: `period_weight`
 

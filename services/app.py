@@ -531,6 +531,19 @@ def _models_status() -> str:
         return "unknown"
 
 
+def _pricing_status() -> str:
+    """ "ok", or which models this install can call have no price (their
+    calls record a NULL cost, and every AI total is a floor)."""
+    from services.llm import registry
+
+    try:
+        note = registry.unpriced_note()
+    except Exception:  # readiness must never crash on a config read
+        log.exception("readiness pricing check failed")
+        return "unknown"
+    return "ok" if note is None else f"UNPRICED ({note})"
+
+
 def _matching_status() -> str:
     """Can the certified door fire AT ALL? "ok" or "unavailable".
 
@@ -547,6 +560,23 @@ def _matching_status() -> str:
         return "ok" if registry.resolve_embedder() is not None else "unavailable"
     except Exception:  # already logged, with the cause, by _embedding_status
         return "unavailable"
+
+
+def _bands_status() -> str:
+    """Whether the serve bands certified matching uses were measured for the
+    configured embedder: "calibrated", "uncalibrated (…)" naming the fallback,
+    or "n/a" with no embedder (`certified_matching` already says so)."""
+    from services.llm import registry
+    from services.runtime.assembly import uncalibrated_bands_note
+
+    try:
+        if registry.embedding_model_name() is None:
+            return "n/a"
+        note = uncalibrated_bands_note()
+    except Exception:  # readiness must never crash on a config read
+        log.exception("readiness band check failed")
+        return "unknown"
+    return "calibrated" if note is None else f"uncalibrated ({note})"
 
 
 def _typed_status() -> str:
@@ -634,6 +664,8 @@ async def ready() -> dict[str, object]:
     # constructs the model — a slow readiness probe must never stall the loop.
     embeddings = await run_in_threadpool(_embedding_status)
     matching = await run_in_threadpool(_matching_status)
+    bands = await run_in_threadpool(_bands_status)
+    pricing = await run_in_threadpool(_pricing_status)
     models = await run_in_threadpool(_models_status)
     schema, schema_blocks = await run_in_threadpool(_schema_status)
     traces = trace_logger.trace_write_status()
@@ -658,6 +690,11 @@ async def ready() -> dict[str, object]:
         "mcp": mcp,
         "embeddings": embeddings,
         "certified_matching": matching,
+        # Whether the serve bands were measured for this embedder; a model
+        # outside the presets serves on the defaults and may miss paraphrases.
+        "certified_bands": bands,
+        # Every model this install can call has a price, or which do not.
+        "ai_pricing": pricing,
         # A typed-decision provider that is failing: answers fall back to
         # raw-SQL generation where accepted and are refused where not, so the
         # install is degraded until a typed decision succeeds again.

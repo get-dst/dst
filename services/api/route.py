@@ -42,6 +42,7 @@ from services.api.query import (
     exposed_hint,
     exposed_tables_named,
     lens_refusal_named,
+    routing_spend,
     run_lens_query,
 )
 from services.auth.deps import get_caller
@@ -54,6 +55,8 @@ from services.governance.credentials import CallerIdentity
 from services.governance.policy import authorize
 from services.lenses.store import list_published_for_org
 from services.llm import registry
+from services.observability import cost
+from services.observability import usage as ai_usage
 from services.router import (
     ROUTER_DOWN,
     CoverageProfile,
@@ -116,11 +119,16 @@ def _resolve_embedder() -> Embedder:
     return _LexicalEmbedder()
 
 
-def _accessible_profiles(caller: CallerIdentity) -> list[CoverageProfile]:
+def _accessible_profiles(caller: CallerIdentity) -> tuple[list[CoverageProfile], list[str]]:
     """The org's routing targets — ACCESS-AWARE: only lenses this caller may use (the
-    router honours each lens's access policy; control stays at the lens level)."""
+    router honours each lens's access policy; control stays at the lens level) —
+    and the source systems every published lens declares, the caller's or not:
+    a question naming one only a lens it may not use reads is uncovered for
+    that reason, never answered from a lens that does not read it."""
     profiles = []
+    known: list[str] = []
     for _name, _display, _desc, bundle in list_published_for_org(caller.org_id):
+        known += list(getattr(bundle.config, "sources", None) or [])
         ok, _ = authorize(caller, bundle.config)
         if ok:
             profiles.append(coverage_profile(bundle))
@@ -128,7 +136,7 @@ def _accessible_profiles(caller: CallerIdentity) -> list[CoverageProfile]:
     return [
         replace(p, certified=list(dict.fromkeys(p.certified + certified.get(p.lens, []))))
         for p in profiles
-    ]
+    ], known
 
 
 def _certified_questions(caller: CallerIdentity, lenses: list[str]) -> dict[str, list[str]]:
@@ -187,8 +195,7 @@ def _stored_scorer(
         return None
     lenses = [p.lens for p in profiles]
 
-    def scorer(question: str) -> list[tuple[str, float]]:
-        query_vec = embedder.embed([question])[0]
+    def scorer(query_vec: list[float]) -> list[tuple[str, float]]:
         with org_session(caller.org_id) as session:
             return anchor_store.scored(session, lenses, query_vec)
 
@@ -201,7 +208,7 @@ def _route(caller: CallerIdentity, question: str) -> RouteDecision:
     → LLM coverage decision (with a confident-match fast-path), or pure cosine when no
     LLM is configured. Blocking (embedder + decider over
     sync httpx) — call it off the event loop (the handler uses asyncio.to_thread)."""
-    profiles = _accessible_profiles(caller)
+    profiles, known_sources = _accessible_profiles(caller)
     embedder = _resolve_embedder()
     scorer = None
     if profiles and not isinstance(embedder, _LexicalEmbedder):
@@ -212,7 +219,9 @@ def _route(caller: CallerIdentity, question: str) -> RouteDecision:
     if not profiles:
         return Router(profiles, embedder).route(question)
     try:
-        return route_question(profiles, embedder, decider, question, scorer=scorer)
+        return route_question(
+            profiles, embedder, decider, question, scorer=scorer, known_sources=known_sources
+        )
     except Exception:
         # Never 500 the "just ask" path — but never silently route from the
         # mid-band cosine arm either (the deleted mid-confidence path must not
@@ -324,10 +333,12 @@ def _persist(
     covered: bool,
     degraded: str | None = None,
     decision: RouteDecision | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Record the routing decision off the deny/error paths (best-effort) and
     return its id — a generated one when the row could not be written, so the
-    caller always has a handle."""
+    caller always has a handle. ``request_id``: the served answer's id on the
+    second hop, the join observe uses to count the decider's spend once."""
     try:
         with org_session(caller.org_id) as session:
             return route_store.record(
@@ -337,27 +348,56 @@ def _persist(
                 score,
                 covered,
                 degraded=degraded,
-                decision=_decision_record(decision),
+                decision=_decision_record(decision, caller, request_id),
             ).id
     except Exception:
         log.exception("routing-decision persist failed")
         return "rtd_" + uuid.uuid4().hex[:16]
 
 
-def _decision_record(d: RouteDecision | None) -> dict[str, object] | None:
+def _decision_record(
+    d: RouteDecision | None, caller: CallerIdentity, request_id: str | None
+) -> dict[str, object] | None:
     """The measured half of a route, as the row stores it — None when the
-    decider was not consulted (cosine paths, outages)."""
-    if d is None or d.decision is None:
+    decider was not consulted (cosine paths, outages).
+
+    The decider's spend rides it on every path (tokens_in, tokens_out,
+    cost_usd; cost None when unpriced), with who asked (caller, agent) and,
+    on the second hop, the answer's ``request_id``. A route that reaches a
+    request_log row is charged there; a decline or a refusal reaches none,
+    and observe sums the spend from here instead. A decider outage decides
+    nothing, but what it billed before failing is stored the same way."""
+    if d is None:
         return None
     m = d.decision
-    return {
-        "provider": m.provider,
-        "chosen": m.chosen,
-        "p": m.p,
-        "runner_up": m.runner_up,
-        "margin": m.margin,
-        "verdict": d.verdict,
-    }
+    spend = routing_spend([*([(m.provider, m.usage)] if m is not None else []), *d.spent])
+    record: dict[str, object]
+    if m is not None:
+        record = {
+            "provider": m.provider,
+            "chosen": m.chosen,
+            "p": m.p,
+            "runner_up": m.runner_up,
+            "margin": m.margin,
+            "verdict": d.verdict,
+        }
+    elif spend is not None:
+        record = {"provider": d.spent[0][0]}
+    else:
+        return None
+    if spend is not None:
+        record.update(
+            tokens_in=spend[0],
+            tokens_out=spend[1],
+            # The decider's prompt-cache reads and writes, from its calls'
+            # usage records: persisted before any serve, so they are the
+            # routing calls alone.
+            cost_usd=cost.add_cost(spend[2], ai_usage.surcharge(ai_usage.current())),
+            caller=caller.name,
+            agent=caller.agent,
+            request_id=request_id,
+        )
+    return record
 
 
 @router.post("/query", response_model=RoutedAnswer | UncoveredEnvelope)
@@ -365,6 +405,32 @@ async def just_ask(
     body: JustAskBody,
     background: BackgroundTasks,
     caller: CallerIdentity = Depends(get_caller),
+) -> RoutedAnswer | UncoveredEnvelope:
+    """Ask without naming a lens (see ``_just_ask``). Every provider call the
+    question made, the routing decider's and the routed lens's, is written
+    to ai_call under the id the caller got back: the answer's request id, or
+    the routing record's when no lens served it."""
+    ref: dict[str, str] = {}
+    with ai_usage.collecting() as calls:
+        try:
+            return await _just_ask(body, background, caller, ref)
+        finally:
+            background.add_task(
+                ai_usage.write,
+                caller.org_id,
+                ref.get("id") or "rtd_" + uuid.uuid4().hex[:16],
+                list(calls),
+                lens=ref.get("lens"),
+                caller=caller.name,
+                agent=caller.agent,
+            )
+
+
+async def _just_ask(
+    body: JustAskBody,
+    background: BackgroundTasks,
+    caller: CallerIdentity,
+    ref: dict[str, str],
 ) -> RoutedAnswer | UncoveredEnvelope:
     """Ask without naming a lens. The router routes to the covering lens (second hop,
     governed, provenance-stamped) or declines with the uncovered envelope. A routed
@@ -380,13 +446,18 @@ async def just_ask(
         # Persist BEFORE the second hop: the routing decision happened regardless of
         # whether the routed lens's query then succeeds — persisting after meant a
         # routed-then-errored request left no row and was invisible to surface area.
+        # The second hop's request id, on the routing row: the join that
+        # tells observe the decider's spend was charged to that answer's row.
+        rid = "req_" + uuid.uuid4().hex[:16]
+        ref.update(id=rid, lens=decision.lens)
         decision_id = _persist(
-            caller, body.q, decision.lens, decision.score, True, decision=decision
+            caller, body.q, decision.lens, decision.score, True, decision=decision, request_id=rid
         )
         # The routed lens declares it is not for this ask: its own refusal,
         # naming the sibling, before any serve (the lens's door runs the same rail).
         declared = await asyncio.to_thread(_not_for_named, body.q, caller, decision.lens)
         if declared is not None:
+            ref["id"] = decision_id
             return RoutedAnswer(
                 routed_to=RouteProvenance(
                     lens=decision.lens, score=decision.score, decided_by=decision.decided_by
@@ -412,6 +483,8 @@ async def just_ask(
             body.bindings,
             body.allow_untyped,
             body.purpose,
+            routing=decision.decision,
+            request_id=rid,
         )
         return RoutedAnswer(
             routed_to=RouteProvenance(
@@ -438,6 +511,7 @@ async def just_ask(
     if refusal is not None:
         lens, wording = refusal
         decision_id = _persist(caller, body.q, lens, decision.score, True, decision=decision)
+        ref.update(id=decision_id, lens=lens)
         return RoutedAnswer(
             routed_to=RouteProvenance(lens=lens, score=decision.score, decided_by="refusal"),
             answer=QueryResponse(
@@ -447,6 +521,7 @@ async def just_ask(
     decision_id = _persist(
         caller, body.q, None, decision.score, False, degraded=decision.degraded, decision=decision
     )
+    ref["id"] = decision_id
     # Off the event loop: the lookup reads the org's published lenses.
     exposed = await asyncio.to_thread(exposed_tables_named, body.q, caller)
     reason = decision.reason

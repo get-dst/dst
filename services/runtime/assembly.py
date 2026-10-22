@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -25,8 +26,10 @@ from typing import Literal
 
 from services.benchmark.contamination import normalize
 from services.certdefs import load_certified_defs, select_context
+from services.certify import bands as fitted_bands
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
+from services.certify.bands import Bands as CertifiedBands
 from services.certify.lexical import (
     answer_names,
     breakdown_mismatch,
@@ -45,10 +48,12 @@ from services.contracts.protocols import (
     ContextChunk,
     Decider,
     Decision,
+    DecisionUsage,
     LLMProvider,
     Message,
     Option,
     QueryGenerator,
+    spent_by,
 )
 from services.contracts.resolution import DecisionRecord
 from services.contracts.semantic_model import SampleQuery, SemanticModel
@@ -59,6 +64,7 @@ from services.lenses.store import LensBundle
 from services.llm import registry
 from services.llm.assist import assist_llm
 from services.llm.vote_decider import EQUIV_K, VoteDecider
+from services.observability import usage as ai_usage
 from services.project import probe_settings
 from services.runtime import decision_policy, value_guard
 from services.runtime.bounded import call_bounded
@@ -77,20 +83,14 @@ CERTIFIED_EQUIV = 0.90
 CERTIFIED_ASSIST = 0.83
 
 
-@dataclass(frozen=True)
-class CertifiedBands:
-    exact: float
-    equiv: float
-    assist: float
-
-
 _DEFAULT_BANDS = CertifiedBands(CERTIFIED_EXACT, CERTIFIED_EQUIV, CERTIFIED_ASSIST)
 
 # Bands are EMBEDDER-RELATIVE — small local models spread cosines where hosted
 # models compress them, so one universal set of constants strands the serve
 # bands on some embedders (paraphrases that should serve never clear the
-# threshold). Presets are calibrated per model dst itself pins; unknown
-# embedders get the defaults. dst-owned, never a knob.
+# threshold). Presets are calibrated per model dst itself pins; a fit
+# `dst calibrate-bands` stored for the configured model wins over both;
+# other embedders get the defaults. Measured, never a knob.
 _BAND_PRESETS: dict[str, CertifiedBands] = {
     "BAAI/bge-small-en-v1.5": CertifiedBands(exact=0.93, equiv=0.80, assist=0.78),
 }
@@ -100,7 +100,29 @@ def certified_bands() -> CertifiedBands:
     """Serve bands for the CONFIGURED embedder (specs lookup only — no client
     is constructed). Rebuilt per call, like the registry itself."""
     name = registry.embedding_model_name()
+    if name and (fitted := fitted_bands.stored(name)) is not None:
+        return fitted
     return _BAND_PRESETS.get(name or "", _DEFAULT_BANDS)
+
+
+def uncalibrated_bands_note() -> str | None:
+    """The sentence saying the configured embedder has no measured serve
+    bands, or None when it has (or there is no embedder). A model outside the
+    presets serves on the defaults, and a model whose similarities spread
+    wider than the defaults assume (a larger model of the same family, say)
+    clears the exact band for fewer paraphrases: certified hits drop with
+    nothing failing. Said wherever an operator looks, never silent."""
+    name = registry.embedding_model_name()
+    if name is None or name in _BAND_PRESETS or fitted_bands.stored(name) is not None:
+        return None
+    b = _DEFAULT_BANDS
+    calibrated = ", ".join(sorted(_BAND_PRESETS))
+    return (
+        f"certified serve bands are not calibrated for embedder '{name}': the defaults "
+        f"(exact {b.exact}, equivalent {b.equiv}, assist {b.assist}) are in use, and a "
+        "paraphrase of an approved question may generate instead of serving; calibrated "
+        f"embedders: {calibrated}; `dst calibrate-bands` fits them for this one"
+    )
 
 
 # The temporal-qualifier veto's extraction lives in services/runtime/timewindow
@@ -174,6 +196,8 @@ class AssembledInputs:
     # typed resolver's own view, one entity at a time, so a column name shared
     # across entities with different values still has a dictionary.
     entity_domains: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # entity name -> why its table was never sampled (value_guard.entity_unsampled).
+    unsampled: dict[str, str] = field(default_factory=dict)
     # entity name -> column -> the warehouse's own type (value_guard.
     # entity_column_types): what a compiled window bound is cast to.
     column_types: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -186,6 +210,10 @@ class AssembledInputs:
     # Every measured closed-set decision assembly made for this question (the
     # certified-equivalence gate today). Rides the answer's ledger.
     decisions: list[DecisionRecord] = field(default_factory=list)
+    # What a decision that failed billed before it failed, as ``(provider,
+    # usage)`` pairs (contracts.protocols.spent_by): charged to the answer's
+    # row, never on its ledger.
+    spent: list[tuple[str, DecisionUsage]] = field(default_factory=list)
     # The caller's typed values for open slots (column -> value) and whether it
     # accepts raw-SQL generation when the question does not type.
     bindings: dict[str, str] = field(default_factory=dict)
@@ -219,26 +247,37 @@ def equivalence_decision(
 ) -> Decision:
     """Is ``question`` a paraphrase of the ``approved`` question — as a measured,
     closed-set decision (equivalent | different). ``k == 1`` with no injected
-    decider is the legacy yes/no call byte-for-byte, and measures nothing."""
-    if decider is None and k == 1:
-        res = llm.complete(
-            system=[CacheableBlock(_EQUIV_SYSTEM)],
-            messages=[Message("user", f"A: {approved}\nB: {question}")],
-            model=model,
-            temperature=0.0,
-            max_tokens=4,
+    decider is the legacy yes/no call byte-for-byte: it measures no
+    probability, only what the call cost."""
+    with ai_usage.purpose("equivalence"):
+        if decider is None and k == 1:
+            started = time.perf_counter()
+            res = llm.complete(
+                system=[CacheableBlock(_EQUIV_SYSTEM)],
+                messages=[Message("user", f"A: {approved}\nB: {question}")],
+                model=model,
+                temperature=0.0,
+                max_tokens=4,
+            )
+            yes = res.text.strip().lower().startswith("y")
+            return Decision(
+                chosen="equivalent" if yes else "different",
+                probs=None,
+                provider=f"legacy:{model}",
+                usage=DecisionUsage(
+                    calls=1.0,
+                    input_tokens=float(res.input_tokens),
+                    output_tokens=float(res.output_tokens),
+                    latency_s=time.perf_counter() - started,
+                ),
+            )
+        d = decider or VoteDecider(llm, model, k=k)
+        return d.decide(
+            question=f"A (approved): {approved}\nB (asked): {question}",
+            context=_EQUIV_SYSTEM,
+            options=_EQUIV_OPTIONS,
+            allow_none=False,
         )
-        yes = res.text.strip().lower().startswith("y")
-        return Decision(
-            chosen="equivalent" if yes else "different", probs=None, provider=f"legacy:{model}"
-        )
-    d = decider or VoteDecider(llm, model, k=k)
-    return d.decide(
-        question=f"A (approved): {approved}\nB (asked): {question}",
-        context=_EQUIV_SYSTEM,
-        options=_EQUIV_OPTIONS,
-        allow_none=False,
-    )
 
 
 def certified_equivalent(
@@ -249,6 +288,7 @@ def certified_equivalent(
     *,
     decider: Decider | None = None,
     record_to: list[DecisionRecord] | None = None,
+    spend_to: list[tuple[str, DecisionUsage]] | None = None,
 ) -> bool:
     """Cheap-model gate: is ``question`` a paraphrase of the ``approved`` question?
 
@@ -257,31 +297,29 @@ def certified_equivalent(
     generation — today's fail-closed. Fails closed (``False``) on any provider
     error too: a missed promotion just means generation runs, never that a
     wrong approved SQL is served. ``record_to`` collects the decision so it
-    rides the answer's ledger.
+    rides the answer's ledger; ``spend_to`` collects what a failed check
+    billed before it failed, so the answer's row is charged for it.
     """
     try:
         d = equivalence_decision(llm, model, question, approved, decider=decider)
-    except Exception:
+    except Exception as exc:
         log.exception("certified equivalence check failed")
+        if spend_to is not None:
+            spend_to.extend(spent_by(exc))
         return False
-    verdict = decision_policy.verdict(d, "certified_equivalent")
+    record = decision_policy.record(d, "certified_equivalent")
     if record_to is not None:
-        record_to.append(
-            DecisionRecord(
-                slot="certified_equivalent",
-                chosen=d.chosen,
-                p=d.p,
-                runner_up=d.runner_up,
-                margin=d.margin,
-                verdict=verdict,
-                provider=d.provider,
-            )
-        )
-    return verdict == "act" and d.chosen == "equivalent"
+        record_to.append(record)
+    return record.verdict == "act" and d.chosen == "equivalent"
 
 
 def certified_bind(
-    llm: LLMProvider, model: str, question: str, answer: certify_store.CertifiedAnswer
+    llm: LLMProvider,
+    model: str,
+    question: str,
+    answer: certify_store.CertifiedAnswer,
+    *,
+    spend_to: list[tuple[str, DecisionUsage]] | None = None,
 ) -> dict[str, str] | None:
     """The template bind gate — does ``question`` ask the template's
     question for specific slot values, and what are they?
@@ -291,7 +329,8 @@ def certified_bind(
     closed (``None``) on provider error, unparseable output, ``match: false``,
     or ANY validation miss — a mis-bound certified answer would be a
     confidently wrong number wearing the trust badge, so the safe failure mode
-    is falling through to generation.
+    is falling through to generation. ``spend_to`` collects what the call
+    billed, whatever the outcome, so the answer's row is charged for it.
     """
     specs, spec_errors = certify_binding.parse_slots(answer.slots)
     if spec_errors:
@@ -306,16 +345,19 @@ def certified_bind(
         f"Incoming question: {question}"
     )
     try:
-        res = llm.complete(
-            system=[CacheableBlock(_BIND_SYSTEM)],
-            messages=[Message("user", user)],
-            model=model,
-            temperature=0.0,
-            max_tokens=300,
-        )
+        with ai_usage.collecting() as billed, ai_usage.purpose("bind"):
+            res = llm.complete(
+                system=[CacheableBlock(_BIND_SYSTEM)],
+                messages=[Message("user", user)],
+                model=model,
+                temperature=0.0,
+                max_tokens=300,
+            )
     except Exception:
         log.exception("certified bind gate failed")
         return None
+    if spend_to is not None:
+        spend_to.extend(ai_usage.as_spent(billed))
     try:
         obj = json.loads(re.sub(r"^```[a-zA-Z]*|```$", "", res.text.strip()).strip())
     except json.JSONDecodeError:
@@ -338,6 +380,35 @@ MATCHING_DOWN = (
     "could have been served no matter how exactly it was asked"
 )
 NO_EMBEDDER = "this install has no usable embedding provider"
+MATCHING_OFF = (
+    "DEGRADED: certified matching is OFF on this install — {n} certified answer(s) on "
+    "lens '{lens}' cannot serve, so this answer was GENERATED however exactly it was "
+    "asked: {gap}"
+)
+
+
+def matching_line(lens: str, org_id: uuid.UUID | str, why: str | None) -> str | None:
+    """The answer's line when certified matching could not run, or None.
+
+    No embedder at all is a standing state of the install: the line counts
+    the lens's certified answers that cannot serve and names the fix, and a
+    lens with none gets no line (nothing could have matched, and a line on
+    every answer is read as noise). A configured embedder that failed keeps
+    the per-question line naming the failure."""
+    if why is None:
+        return None
+    if why != NO_EMBEDDER:
+        return MATCHING_DOWN.format(why=why)
+    try:
+        with org_session(org_id) as session:
+            n = certify_store.count_active(session, lens)
+    except Exception:
+        log.exception("certified count failed for lens %s", lens)
+        return MATCHING_DOWN.format(why=why)
+    if not n:
+        return None
+    gap = registry.embedder_gap() or NO_EMBEDDER
+    return MATCHING_OFF.format(n=n, lens=lens, gap=gap)
 
 
 def embed_question(question: str) -> list[float] | None:
@@ -385,10 +456,12 @@ def certified_lookup(
     serve: bool = True,
     exclude_id: str | None = None,
     record_to: list[DecisionRecord] | None = None,
+    spend_to: list[tuple[str, DecisionUsage]] | None = None,
     governed: frozenset[str] = frozenset(),
     measures: frozenset[str] = frozenset(),
     aliases: Mapping[str, str] | None = None,
     units: Mapping[str, str] | None = None,
+    restrictions: Callable[[str], frozenset[tuple[str, str]]] | None = None,
 ) -> tuple[
     certify_store.CertifiedAnswer | None,
     list[SampleQuery],
@@ -420,7 +493,11 @@ def certified_lookup(
     it outright; ``units`` is what the lens declares a metric is denominated
     in, read by the unit veto: a question that says "in EUR" (or hours,
     litres, %) never takes a hit whose words, SQL identifiers or declared
-    units report a different one — it drops to assisted.
+    units report a different one — it drops to assisted. ``restrictions``
+    reads the stored values and true/false fields a text names
+    (``named_restrictions``): a plain hit whose approved question states a
+    different set of them, the asked one's not filtered on by its SQL either,
+    drops to assisted ("guided tours" never takes the count of every tour).
     """
     if qvec is None:
         return None, [], "none", None, None
@@ -461,9 +538,19 @@ def certified_lookup(
             log.info("certified hit vetoed on unit for lens %s: %s", lens, unit_reason)
         elif top.slots:
             if (pair := assist_llm()) is not None:
-                bound = certified_bind(pair.llm, pair.name, question, top)
+                bound = certified_bind(pair.llm, pair.name, question, top, spend_to=spend_to)
                 if bound is not None:
                     return top, [], "certified", "parameterized", bound
+        elif restrictions is not None and (
+            restricted := restriction_mismatch(
+                restrictions(question), restrictions(top.question), top.sql
+            )
+        ):
+            # "casual rides" sits in the exact band of "rides": cosine reads
+            # one added word as a paraphrase. The restriction is a declared
+            # fact (a stored value, a flag's subject); the hit drops to the
+            # typed path, which applies it, and folds as an exemplar.
+            log.info("certified hit vetoed on restriction for lens %s: %s", lens, restricted)
         elif temporal_mismatch(question, top.question):
             # A "this quarter" answer must never serve a "last quarter" ask —
             # cosine cannot see the qualifier. Fall through: the pair still
@@ -478,7 +565,12 @@ def certified_lookup(
             return top, [], "certified", "exact", None
         elif (pair := assist_llm()) is not None:
             if certified_equivalent(
-                pair.llm, pair.name, question, top.question, record_to=record_to
+                pair.llm,
+                pair.name,
+                question,
+                top.question,
+                record_to=record_to,
+                spend_to=spend_to,
             ):
                 return top, [], "certified", "equivalent", None
     exemplars = [
@@ -489,6 +581,61 @@ def certified_lookup(
     return (
         (None, exemplars, "assisted", None, None) if exemplars else (None, [], "none", None, None)
     )
+
+
+def restriction_mismatch(
+    asked: frozenset[tuple[str, str]], approved: frozenset[tuple[str, str]], approved_sql: str
+) -> str | None:
+    """The restriction one question states and the other does not, or None.
+    A value only the asked question names still matches when the approved SQL
+    filters on it as a literal (its question may word it otherwise)."""
+    sql = approved_sql.lower()
+    for column, value in sorted(asked - approved):
+        if value.startswith("<") or f"'{value.lower()}'" not in sql:
+            return f"the question restricts {column} by {value!r}, the certified one does not"
+    for column, value in sorted(approved - asked):
+        return f"the certified question restricts {column} by {value!r}, the question does not"
+    return None
+
+
+def named_restrictions(
+    model: SemanticModel, per_entity: Mapping[str, Mapping[str, list[str]]]
+) -> Callable[[str], frozenset[tuple[str, str]]]:
+    """What a text restricts by, read off declared facts only: each stored
+    text value of the lens's dictionaries it names word for word, as
+    ``(column, value)``, and each true/false field it names by its subject
+    (``named_flags``), as ``(column, "<flag>")`` or ``(column, "<not flag>")``.
+    Numbers and true/false values are left out: a year or a count is not a
+    restriction a word names."""
+    from services.runtime.typed_resolver import named_flags
+
+    values = sorted(
+        {
+            (column, str(v))
+            for domains in per_entity.values()
+            for column, vals in domains.items()
+            for v in vals
+            if isinstance(v, str)
+            and len(v.strip()) >= 2
+            and re.search(r"[^\W\d_]", v)
+            and v.strip().lower() not in ("true", "false")
+        }
+    )
+    flags = [(e, f.name) for e in model.entities for f in e.fields if f.type == "boolean"]
+
+    def said(text: str) -> frozenset[tuple[str, str]]:
+        low = text.lower()
+        out = {
+            (column, v)
+            for column, v in values
+            if re.search(rf"(?<!\w){re.escape(v.lower())}(?!\w)", low)
+        }
+        for entity, column in flags:
+            for _c, _said, negated in named_flags(text, entity, [column]):
+                out.add((column, "<not flag>" if negated else "<flag>"))
+        return frozenset(out)
+
+    return said
 
 
 def certified_sql(certified_dir: str | None, question: str) -> str | None:
@@ -597,6 +744,7 @@ def assemble(
     per_entity: dict[str, dict[str, list[str]]] = {}
     types: dict[str, dict[str, str]] = {}
     periods: dict[str, str] = {}
+    unsampled: dict[str, str] = {}
     coverage: dict[str, profile_enrich.EntityCoverage] = {}
     if profiles:
         model = profile_enrich.enrich_model(model, profiles)
@@ -608,6 +756,7 @@ def assemble(
             domains = value_guard.value_domains(model, profiles)
             per_table = value_guard.table_domains(model, profiles)
         per_entity = value_guard.entity_domains(model, profiles)
+        unsampled = value_guard.entity_unsampled(model, profiles)
         types = value_guard.entity_column_types(model, profiles)
         periods = value_guard.period_fields(model, profiles)
         coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
@@ -615,6 +764,7 @@ def assemble(
     # Certified-answer repository: serve an approved SQL directly on an exact match,
     # or fold near-matches in as few-shot exemplars to guide generation.
     decisions: list[DecisionRecord] = []
+    spent: list[tuple[str, DecisionUsage]] = []
     certified, exemplars, certification, match, bound = certified_lookup(
         name,
         qvec,
@@ -623,10 +773,12 @@ def assemble(
         serve=serve_certified,
         exclude_id=exclude_certified_id,
         record_to=decisions,
+        spend_to=spent,
         governed=governed_names(bundle.semantic_model),
         measures=measure_names(bundle.semantic_model),
         aliases=name_aliases(bundle.semantic_model),
         units=declared_units(bundle.semantic_model),
+        restrictions=named_restrictions(bundle.semantic_model, per_entity),
     )
     if exemplars:
         model = model.model_copy(update={"sample_queries": list(model.sample_queries) + exemplars})
@@ -645,14 +797,16 @@ def assemble(
         data_as_of=as_of,
         table_as_of=stamps,
         profile_age=age,
-        degraded=() if embed_failure is None else (MATCHING_DOWN.format(why=embed_failure),),
+        degraded=() if (line := matching_line(name, org_id, embed_failure)) is None else (line,),
         value_domains=domains,
         table_domains=per_table,
         entity_domains=per_entity,
+        unsampled=unsampled,
         column_types=types,
         period_fields=periods,
         entity_coverage=coverage,
         decisions=decisions,
+        spent=spent,
         bindings=dict(bindings or {}),
         allow_untyped=allow_untyped,
         counts={
@@ -749,9 +903,7 @@ def typed_decider() -> Decider | None:
         return None
     if settings.typed_serving == "on":
         return decider
-    from services.llm.typesafe import TypesafeDecider
-
-    return decider if isinstance(decider, TypesafeDecider) else None
+    return decider if getattr(decider, "typed_decisions", False) else None
 
 
 def business_today_date(timezone: str | None) -> date:
@@ -826,6 +978,7 @@ def select_generators(
                 entity_domains=assembled.entity_domains,
                 period_fields=assembled.period_fields,
                 bindings=assembled.bindings,
+                unsampled=assembled.unsampled,
                 today=business_today_date(assembled.model.timezone),
             )
             return (
@@ -838,7 +991,14 @@ def select_generators(
             )
         # Metric layer exists → compile a structured intent; fall back to raw SQL on repair.
         return (
-            IntentSQLGenerator(llm, model=primary_model, temperature=gen_temp),
+            IntentSQLGenerator(
+                llm,
+                model=primary_model,
+                temperature=gen_temp,
+                domains=assembled.value_domains,
+                entity_domains=assembled.entity_domains,
+                column_types=assembled.column_types,
+            ),
             GroundedSQLGenerator(llm, model=model_name, temperature=gen_temp),
             assembled.certification,
             None,

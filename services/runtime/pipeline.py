@@ -26,9 +26,11 @@ from services.contracts.profile import LOW_CARDINALITY_MAX
 from services.contracts.protocols import (
     Connector,
     ContextChunk,
+    DecisionUsage,
     GeneratedQuery,
     LLMProvider,
     QueryGenerator,
+    spent_by,
 )
 from services.contracts.resolution import DecisionRecord, Resolution, Slot
 from services.contracts.response import (
@@ -51,15 +53,18 @@ from services.lenses.profile_enrich import (
     scope_as_of,
 )
 from services.observability import cost
+from services.observability import usage as ai_usage
 from services.reviews.judge import judge_trace, judge_typed
 from services.reviews.store import Trace as ReviewTrace
 from services.runtime import (
     adversary,
     ambiguity,
     cte_guard,
+    data_end,
     decision_policy,
     faithfulness,
     filter_guard,
+    growth,
     reading,
     receipt,
     resolution,
@@ -680,6 +685,8 @@ def run_query(
     table_as_of: Mapping[str, str] | None = None,
     scan_text: str | None = None,
     untyped: tuple[str, list[DecisionRecord]] | None = None,
+    # What a decision assembly made billed before it failed (AssembledInputs.spent).
+    spent: list[tuple[str, DecisionUsage]] | None = None,
     # Who reads the answer (answer.Audience). `consumer` changes the register of
     # the composed prose and of the lines this function appends — the scope in
     # words, the date as a person writes it, a decline in plain terms — and
@@ -754,21 +761,36 @@ def run_query(
     # resolver's slot votes, a reading's, a paraphrase gate's, the typed judge's.
     charged: set[int] = set()
 
-    def _charge(records: Iterable[DecisionRecord]) -> None:
+    def _spend(provider: str, tokens_in: int, tokens_out: int) -> None:
         nonlocal ai_in, ai_out, ai_cost
+        ai_in += tokens_in
+        ai_out += tokens_out
+        ai_cost = cost.add_cost(
+            ai_cost, cost.decisions_cost_usd({provider: (tokens_in, tokens_out)})
+        )
+
+    def _charge(records: Iterable[DecisionRecord]) -> None:
         for r in records:
             if id(r) in charged or not r.usage:
                 continue
             charged.add(id(r))
-            tokens_in = round(r.usage.get("input_tokens") or 0)
-            tokens_out = round(r.usage.get("output_tokens") or 0)
-            ai_in += tokens_in
-            ai_out += tokens_out
-            ai_cost = cost.add_cost(
-                ai_cost, cost.decisions_cost_usd({r.provider or "": (tokens_in, tokens_out)})
+            _spend(
+                r.provider or "",
+                round(r.usage.get("input_tokens") or 0),
+                round(r.usage.get("output_tokens") or 0),
             )
 
+    def _charge_spent(pairs: Iterable[tuple[str, DecisionUsage]]) -> None:
+        for provider, usage in pairs:
+            _spend(provider, round(usage.input_tokens), round(usage.output_tokens))
+
+    def _charge_failed(exc: BaseException) -> None:
+        # A decider that failed partway was still billed for what it did:
+        # the spend rides the failure (contracts.protocols.spent_by).
+        _charge_spent(spent_by(exc))
+
     _charge([*(decisions or []), *(untyped[1] if untyped else [])])
+    _charge_spent(spent or [])
     # Real per-stage latency. Generate accumulates across repair attempts.
     started = time.perf_counter()
     latency_ms: dict[str, float] = {}
@@ -969,9 +991,16 @@ def run_query(
         nc = deterministic_refusal_not_computable(rails_text, semantic_model)
         if nc is not None:
             return _trace_failure("refused", None, nc)
-        # An ask the lens declares it does not answer (`not_for`, or an
-        # entity's `Avoid for:` use case): its tables could produce a figure,
-        # and that figure is a different measure under the asked name.
+    # An ask the lens declares it does not answer (`not_for`, or an entity's
+    # `Avoid for:` use case): its tables could produce a figure, and that
+    # figure is a different measure under the asked name. A certified answer
+    # matched to a DIFFERENT question is no exemption: nobody approved it for
+    # this ask (the verbatim carve-out below, same reasoning).
+    certified_verbatim = certification == "certified" and (
+        certified_question is not None
+        and contamination_normalize(certified_question) == contamination_normalize(question)
+    )
+    if not certified_verbatim:
         if (refusal := not_for_refusal(rails_text, semantic_model)) is not None:
             return _trace_failure("refused", None, refusal)
 
@@ -1034,6 +1063,7 @@ def run_query(
                 reader_down = typed_health.provider_failure(exc)
                 if reader_down is None:
                     raise
+                _charge_failed(exc)
                 typed_health.failed(reader_down)
                 break
             pre_records.append(record)
@@ -1131,6 +1161,7 @@ def run_query(
             return _trace_failure("error", refused[0] if refused else None, str(exc))
         except typed_health.TypedUnavailable as exc:
             _mark("generate", gen_started)
+            _charge_failed(exc)
             if escalate_generator is not None and active is not escalate_generator:
                 # The typed lane is down, not the question: on a lens that
                 # accepts untyped answers raw-SQL generation serves it, and the
@@ -1159,7 +1190,7 @@ def run_query(
         ai_cost = cost.add_cost(
             ai_cost, cost.ai_cost_usd(gen_model, gen.input_tokens, gen.output_tokens)
         )
-        _charge(gen.decisions)
+        _charge([*gen.decisions, *gen.unused_decisions])
 
         if (
             attempt == 0
@@ -1561,6 +1592,35 @@ def run_query(
             )
         _mark("execute", exec_started)
 
+        # An empty result for a window that begins after the data ends ("today"
+        # before today's rows are loaded) is answered with where the data ends,
+        # read live by one MAX of the filtered time column — never served as a
+        # figure that reads "nothing happened". Certified answers keep their
+        # own coverage disclosure.
+        if certification != "certified" and data_end.no_data(
+            guard.sql, semantic_model.dialect, result
+        ):
+            probe_started = time.perf_counter()
+            try:
+                data_ends = warehouse_bounded(
+                    "the data-end probe",
+                    functools.partial(
+                        data_end.window_after_data,
+                        question,
+                        guard.sql,
+                        gen.intent,
+                        semantic_model,
+                        connector,
+                        lens_today(semantic_model.timezone),
+                    ),
+                    connection=wh,
+                )
+            except WarehouseTimeout:
+                data_ends = None
+            _mark("probe", probe_started)
+            if data_ends is not None:
+                return _trace_failure("refused", guard.sql, data_ends)
+
         # Probe-on-empty (generation path only): zero EVIDENCE behind a
         # string-literal filter is the confident-zero shape — zero rows, or the
         # one-row aggregate costume (COUNT → 0, other aggregates → NULL) that
@@ -1722,6 +1782,17 @@ def run_query(
     period_check = (
         verification.definition_period_check(ignored) if certification == "certified" else None
     )
+    # A level read over a window: the approved SQL must read it the way the
+    # metric declares (`window_reading`), as typed serving compiles it.
+    reading_check = (
+        verification.window_reading_check(
+            verification.window_reading_conflicts(
+                guard.sql, semantic_model, f"{question} {certified_question or ''}"
+            )
+        )
+        if certification == "certified"
+        else None
+    )
     # Prose composed over a sample of the result never serves verbatim over
     # the whole: "the five clinics" is not a sentence about fourteen rows.
     # The answer composes afresh (or serves rows only) and says why.
@@ -1797,7 +1868,7 @@ def run_query(
     elif investigation == "unresolved":
         # A detected-unsafe zero never reaches the composer: left to a model,
         # the same unresolved-empty event coin-flips between "zero customers
-        # are using AI replies" asserted as fact and an honest decline —
+        # use the booking widget" asserted as fact and an honest decline —
         # whichever the model happens to write that run. One code path,
         # deterministic text; the empty_result_investigation check still FAILS
         # on the report, so the grade stays below verified.
@@ -1904,6 +1975,12 @@ def run_query(
         level_line = resolution.level_disclosure(gen.intent, semantic_model)
         if level_line is not None:
             resolution_disclosures.append(level_line)
+    # A ratio asked over no period was read over the last complete month: the
+    # answer says which, on every door that pinned it (growth.pin_disclosure).
+    if gen.intent is not None and (
+        pin_line := growth.pin_disclosure(list(gen.decisions), gen.intent.metrics)
+    ):
+        resolution_disclosures.append(pin_line)
     if resolution_disclosures:
         disclosure = " ".join(filter(None, [disclosure, *resolution_disclosures]))
     if disclosure:
@@ -1975,6 +2052,7 @@ def run_query(
         restated=restated_check,
         certified_question=certified_question,
         definition_period=period_check,
+        window_reading=reading_check,
         row_conservation=conservation_check,
     )
     # Figure gate: a composed answer whose numeric_grounding check FAILS
@@ -2115,10 +2193,6 @@ def run_query(
     # nothing there. A serve whose asked question is not the certified
     # question (normalized) gets the same judge/adversary a generated serve
     # gets; an unknown certified question (None) counts as fuzzy — fail safe.
-    certified_verbatim = certification == "certified" and (
-        certified_question is not None
-        and contamination_normalize(certified_question) == contamination_normalize(question)
-    )
     if (
         inline_judge_llm is not None
         and not certified_verbatim
@@ -2165,13 +2239,18 @@ def run_query(
                 review_trace, typed_judge, governed_context=governed_context or None
             )
             _charge(_judge_decisions)
-        except Exception:  # noqa: BLE001 — the rubric judge is the fallback, never a 500
-            verdict, reasoning = judge_trace(
-                inline_judge_llm,
-                review_trace,
-                judge_model,
-                governed_context=governed_context or None,
-            )
+        except Exception as exc:  # noqa: BLE001 — the rubric judge is the fallback, never a 500
+            _charge_failed(exc)
+            # Charged from what its provider recorded: the rubric judge
+            # returns a verdict, not a usage.
+            with ai_usage.collecting() as billed:
+                verdict, reasoning = judge_trace(
+                    inline_judge_llm,
+                    review_trace,
+                    judge_model,
+                    governed_context=governed_context or None,
+                )
+            _charge_spent(ai_usage.as_spent(billed))
         _mark("judge", judge_started)
         report = verification.fold_judge(report, verdict, reasoning)
     # Opt-in adversarial reviewer — a second opinion that challenges the
@@ -2187,14 +2266,16 @@ def run_query(
         and composition is None
     ):
         adversary_started = time.perf_counter()
-        challenges = adversary.challenge(
-            adversary_llm,
-            question=question,
-            sql=guard.sql,
-            answer=ans.text,
-            semantic_model=semantic_model,
-            model=adversary_model,
-        )
+        with ai_usage.collecting() as billed:
+            challenges = adversary.challenge(
+                adversary_llm,
+                question=question,
+                sql=guard.sql,
+                answer=ans.text,
+                semantic_model=semantic_model,
+                model=adversary_model,
+            )
+        _charge_spent(ai_usage.as_spent(billed))
         _mark("adversary", adversary_started)
         report = verification.fold_challenges(report, challenges)
     # The waived snap lands on the REPORT — response and trace both carry it, so

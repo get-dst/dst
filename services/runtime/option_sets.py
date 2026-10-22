@@ -22,7 +22,7 @@ from typing import get_args
 from services.contracts.profile import LOW_CARDINALITY_MAX, TableProfile
 from services.contracts.protocols import Option
 from services.contracts.query_intent import TimeGrain
-from services.contracts.semantic_model import Entity, Metric, SemanticModel
+from services.contracts.semantic_model import Entity, Metric, SemanticModel, column_internal
 from services.runtime import value_guard
 from services.runtime.compiler import CompileError, metric_sql
 
@@ -73,9 +73,18 @@ def option_sets(
         Option(d.term, d.body or "") for d in model.definitions if d.sql_expr and d.sql_expr.strip()
     ]
     dimensions = [
-        Option(_qualified(d.name, e.name, dim_owners), d.description or "")
+        Option(
+            _qualified(d.name, e.name, dim_owners),
+            "; ".join(
+                p
+                for p in (d.description, d.aliases and "also called: " + ", ".join(d.aliases))
+                if p
+            ),
+            tuple(d.aliases),
+        )
         for e in model.entities
         for d in e.dimensions
+        if not column_internal(d.name, e)
     ]
     out: dict[str, list[Option]] = {
         "metric": metrics,

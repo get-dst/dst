@@ -221,7 +221,7 @@ def _gate_llm(monkeypatch, responses: list[str]) -> None:
     # this model; the scripted replies are SQL-shaped, so pin the grounded path.
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )

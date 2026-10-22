@@ -45,6 +45,7 @@ from sqlglot.optimizer import optimize
 
 from services.certify.store import CertifiedAnswer, is_active
 from services.contracts.eval import EvalResult
+from services.contracts.protocols import spent_by
 from services.contracts.resolution import MEASURE_KINDS, DecisionRecord, Resolution
 from services.contracts.semantic_model import SemanticModel
 from services.evals.calibration import GradedDecision
@@ -415,6 +416,19 @@ class _Run:
     )  # provider -> (calls, in, out)
 
 
+def _usage(spent: list[tuple[str, dict[str, float]]]) -> dict[str, tuple[float, float, float]]:
+    """``provider -> (calls, input tokens, output tokens)`` summed."""
+    usage: dict[str, tuple[float, float, float]] = {}
+    for provider, u in spent:
+        c, i, o = usage.get(provider, (0.0, 0.0, 0.0))
+        usage[provider] = (
+            c + u.get("calls", 0.0),
+            i + u.get("input_tokens", 0.0),
+            o + u.get("output_tokens", 0.0),
+        )
+    return usage
+
+
 def _run_once(
     a: CertifiedAnswer,
     model: SemanticModel,
@@ -434,17 +448,13 @@ def _run_once(
             [],
             None,
             elapsed_s=time.perf_counter() - started,
+            # What the resolution was billed before the decider failed.
+            usage=_usage([(p, u.as_dict()) for p, u in spent_by(exc)]),
         )
     elapsed = time.perf_counter() - started
-    usage: dict[str, tuple[float, float, float]] = {}
-    for r in res.decisions:
-        if r.usage:
-            c, i, o = usage.get(r.provider, (0.0, 0.0, 0.0))
-            usage[r.provider] = (
-                c + r.usage.get("calls", 0.0),
-                i + r.usage.get("input_tokens", 0.0),
-                o + r.usage.get("output_tokens", 0.0),
-            )
+    # Billed whether or not the resolution used it: a batched call's
+    # unused answers cost the same.
+    usage = _usage([(r.provider, r.usage) for r in [*res.decisions, *res.unused] if r.usage])
     graded = grade_decisions(res.decisions, expected, a.question)
     if res.intent is None:
         why = res.clarification.question if res.clarification else (res.decline or "did not type")
@@ -650,6 +660,11 @@ def eval_results(cases: list[SlotCase]) -> list[EvalResult]:
             },
             reason=c.evidence or None,
             actual_sql=c.compiled_sql,
+            # The lane keeps per-resolution means; the row holds what all
+            # of the case's runs cost.
+            ai_input_tokens=round(c.input_tokens * c.runs),
+            ai_output_tokens=round(c.output_tokens * c.runs),
+            ai_cost_usd=None if c.cost_usd is None else round(c.cost_usd * c.runs, 6),
             # The lane's generated value: the typed intent the question resolved
             # to (JSON), or the case's verdict when nothing typed.
             actual_value=c.intent

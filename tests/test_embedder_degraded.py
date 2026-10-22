@@ -50,7 +50,7 @@ def _scripted_generation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -178,3 +178,60 @@ def test_ready_reports_matching_ok_when_the_embedder_works(
 ) -> None:
     monkeypatch.setattr("services.llm.registry.resolve_embedder", HashEmbedder)
     assert client.get("/ready").json()["certified_matching"] == "ok"
+
+
+# ── no embedder while the lens holds certified answers ─────────────────────────
+
+
+def _ask(raw: str) -> dict[str, object]:
+    r = client.post(
+        "/v1/lenses/customer_value/query",
+        json={"q": "how many repeat customers?"},
+        headers={"Authorization": f"Bearer {raw}"},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@needs_db
+def test_no_embedder_with_certified_answers_names_what_cannot_serve_and_the_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An install that never configured an embedder served every answer with
+    a line saying matching did not run, and nothing about what that cost or
+    how to fix it. With certified answers on the lens, the line says matching
+    is off, how many approved answers cannot serve, and what to install."""
+    from services.certify import store as certify_store
+    from services.db.session import org_session
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    _scripted_generation(monkeypatch)
+    monkeypatch.setattr("services.llm.registry.resolve_embedder", lambda: None)
+    monkeypatch.setattr("services.llm.registry.find_spec", lambda _name: None)
+    try:
+        with org_session(org) as session:
+            for q in ("how many repeat customers?", "how many customers?"):
+                certify_store.create(session, "customer_value", q, "SELECT 1", None, "t")
+        note = _ask(raw)["degraded"][0]
+        assert note.startswith("DEGRADED: certified matching is OFF on this install")
+        assert "2 certified answer(s) on lens 'customer_value' cannot serve" in note
+        assert "dst-core[local-embed]" in note, note
+    finally:
+        _cleanup(settings.database_admin_url, org)
+
+
+@needs_db
+def test_no_embedder_and_no_certified_answers_adds_no_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing certified on the lens there is nothing matching could
+    have served: no line, so the one that matters is not read as noise."""
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    _scripted_generation(monkeypatch)
+    monkeypatch.setattr("services.llm.registry.resolve_embedder", lambda: None)
+    try:
+        assert _ask(raw)["degraded"] == []
+    finally:
+        _cleanup(settings.database_admin_url, org)

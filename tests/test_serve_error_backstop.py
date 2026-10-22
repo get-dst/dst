@@ -38,6 +38,8 @@ from services.runtime.pipeline import PipelineResult, run_query
 client = TestClient(app)
 
 RAW_ERROR = 'Binder Error: Referenced column "sales_channel" not found in FROM clause!'
+# What the failing statement read: drift counts only on a table it names.
+FAILED_SQL = "SELECT count(*) FROM orders JOIN customers USING (customer_id)"
 
 
 def _reachable(url: str) -> bool:
@@ -210,7 +212,7 @@ def _fake_pipeline(
                     lens=str(kw["lens_name"]),
                     status="error",
                     answer=f"The query could not be executed: {error}",
-                    sql="SELECT 1",
+                    sql=FAILED_SQL,
                     request_id=rid,
                 ),
                 trace=TraceLog(
@@ -219,7 +221,7 @@ def _fake_pipeline(
                     lens=str(kw["lens_name"]),
                     caller=str(kw["caller"]),
                     question=str(kw["question"]),
-                    sql="SELECT 1",
+                    sql=FAILED_SQL,
                     valid=False,
                     status="error",
                     error=error,
@@ -470,8 +472,10 @@ def test_compiled_sql_broken_by_drift_is_still_the_data_teams(
     _seed_lens(org)
     report = drift_watch.DriftReport(
         connection="jaffle",
-        fingerprint=drift_watch.fingerprint("jaffle", ["orders:column_type:ordered_at"]),
-        findings=[],
+        fingerprint=drift_watch.fingerprint("jaffle", ["orders:column_retyped:ordered_at"]),
+        findings=[
+            wd.Finding(table="orders", kind="column_retyped", detail="ordered_at: DATE -> STRING")
+        ],
     )
     monkeypatch.setattr(drift_watch, "check_connection", lambda s, c, o: report)
     _fake_pipeline(
@@ -507,5 +511,56 @@ def test_compiled_sql_without_a_baseline_keeps_the_incident_lane(
         _fake_pipeline(monkeypatch, fail=True, error="403 Permission denied", compiled=True)
         assert "the warehouse refused access" in str(_query(raw)["answer"])
         assert len(_tickets(org)) == 2
+    finally:
+        _cleanup(org)
+
+
+BQ_BOOLEAN_ERROR = (
+    "400 POST https://bigquery.googleapis.com/bigquery/v2/projects/p/jobs: No matching "
+    "signature for operator = for argument types: BOOL, STRING"
+)
+
+
+@needs_db
+@pytest.mark.parametrize(
+    "finding",
+    [
+        # A rewritten comment on a table the statement reads.
+        wd.Finding(
+            table="orders",
+            kind="column_recommented",
+            detail="status: 'order state' -> 'order state, lower case'",
+            refs=[wd.LayerRef(kind="entity", name="orders", path="e.yaml", why="reads it")],
+        ),
+        # A table the dataset gained.
+        wd.Finding(table="returns", kind="table_added", detail="returns"),
+        # A column dropped from a table the statement never reads.
+        wd.Finding(table="payments", kind="column_dropped", detail="method"),
+    ],
+)
+def test_drift_that_cannot_break_the_statement_is_not_its_cause(
+    monkeypatch: pytest.MonkeyPatch, finding: wd.Finding
+) -> None:
+    """A type error on compiled SQL over an unchanged schema is dst's own
+    defect, whatever else the connection's diff turned up: no drift ticket,
+    no degraded mark, and never "the warehouse schema changed"."""
+    org, raw = _org_and_token()
+    _seed_lens(org)
+    report = drift_watch.DriftReport(
+        connection="jaffle",
+        fingerprint=drift_watch.fingerprint("jaffle", [f"{finding.table}:{finding.kind}"]),
+        findings=[finding],
+    )
+    monkeypatch.setattr(drift_watch, "check_connection", lambda s, c, o: report)
+    _baseline(monkeypatch, True)
+    _fake_pipeline(monkeypatch, fail=True, error=BQ_BOOLEAN_ERROR, compiled=True)
+    try:
+        body = _query(raw)
+        answer = str(body["answer"])
+        assert answer.startswith("This question hit a dst defect")
+        assert "schema still matches" in answer
+        assert "schema changed" not in answer
+        assert not any("schema drift" in d for d in body["degraded"])
+        assert _tickets(org) == []
     finally:
         _cleanup(org)

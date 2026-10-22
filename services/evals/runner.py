@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from services.contracts.errors import ProviderError
 from services.contracts.eval import EvalCase, EvalResult, EvalRun
 from services.contracts.protocols import Connector, LLMProvider
+from services.observability import usage as ai_usage
 from services.reviews.judge import judge_trace
 from services.reviews.store import Trace as ReviewTrace
 from services.runtime.answer import AnswerComposer
@@ -142,6 +143,11 @@ def run_behavioral(
     shape_cases = [c for c in cases if c.expect is not None]
 
     def _score(c: EvalCase) -> EvalResult:
+        with ai_usage.collecting() as calls:
+            result = _attempts(c)
+        return result.model_copy(update=ai_usage.spend_fields(calls))
+
+    def _attempts(c: EvalCase) -> EvalResult:
         ok, reason, grade = False, None, "fail"
         sql: str | None = None
         # What the case got back, as the row's actual value: the response's
@@ -230,78 +236,87 @@ def run_health(
     """Run each case live and judge-score it (with the case's expected_sql as the oracle)."""
     results: list[EvalResult] = []
     for c in cases:
-        assembled = assemble_for(c.question)
-        generator, escalate = generators_for(assembled)
-        try:
-            pr = run_query(
-                question=c.question,
-                lens_name=lens,
-                org_id="eval",
-                caller="eval",
-                semantic_model=assembled.model,
-                value_domains=assembled.value_domains,
-                table_domains=assembled.table_domains,
-                connector=connector,
-                generator=generator,
-                escalate_generator=escalate,
-                composer=composer,
-                prose_context=assembled.prose,
-                model_name=model_name,
-                data_as_of=assembled.data_as_of,
-                table_as_of=assembled.table_as_of,
-                entity_coverage=assembled.entity_coverage,
-                profile_age=assembled.profile_age,
-            )
-        except ProviderError as exc:
-            results.append(
-                EvalResult(
-                    run_id="",
-                    case_id=c.id,
-                    question=c.question,
-                    passed=False,
-                    grade="errored",
-                    reason=f"model provider failed: {exc}",
+        before = len(results)
+        with ai_usage.collecting() as calls:
+            try:
+                assembled = assemble_for(c.question)
+                generator, escalate = generators_for(assembled)
+                try:
+                    pr = run_query(
+                        question=c.question,
+                        lens_name=lens,
+                        org_id="eval",
+                        caller="eval",
+                        semantic_model=assembled.model,
+                        value_domains=assembled.value_domains,
+                        table_domains=assembled.table_domains,
+                        connector=connector,
+                        generator=generator,
+                        escalate_generator=escalate,
+                        composer=composer,
+                        prose_context=assembled.prose,
+                        model_name=model_name,
+                        data_as_of=assembled.data_as_of,
+                        table_as_of=assembled.table_as_of,
+                        entity_coverage=assembled.entity_coverage,
+                        profile_age=assembled.profile_age,
+                    )
+                except ProviderError as exc:
+                    results.append(
+                        EvalResult(
+                            run_id="",
+                            case_id=c.id,
+                            question=c.question,
+                            passed=False,
+                            grade="errored",
+                            reason=f"model provider failed: {exc}",
+                        )
+                    )
+                    continue
+                t = pr.trace
+                if t.status != "ok":
+                    results.append(
+                        EvalResult(
+                            run_id="",
+                            case_id=c.id,
+                            question=c.question,
+                            passed=False,
+                            grade="errored",
+                            reason=t.error,
+                            actual_sql=t.sql,
+                        )
+                    )
+                    continue
+                rt = ReviewTrace(
+                    request_id=t.request_id,
+                    lens=t.lens,
+                    caller=t.caller,
+                    question=t.question,
+                    sql=t.sql,
+                    answer=t.answer,
+                    definition_used=t.definition_used,
+                    confidence=t.confidence,
+                    row_count=t.row_count,
                 )
-            )
-            continue
-        t = pr.trace
-        if t.status != "ok":
-            results.append(
-                EvalResult(
-                    run_id="",
-                    case_id=c.id,
-                    question=c.question,
-                    passed=False,
-                    grade="errored",
-                    reason=t.error,
-                    actual_sql=t.sql,
+                verdict, reasoning = judge_trace(
+                    judge_llm, rt, judge_model, reference_sql=c.expected_sql
                 )
-            )
-            continue
-        rt = ReviewTrace(
-            request_id=t.request_id,
-            lens=t.lens,
-            caller=t.caller,
-            question=t.question,
-            sql=t.sql,
-            answer=t.answer,
-            definition_used=t.definition_used,
-            confidence=t.confidence,
-            row_count=t.row_count,
-        )
-        verdict, reasoning = judge_trace(judge_llm, rt, judge_model, reference_sql=c.expected_sql)
-        results.append(
-            EvalResult(
-                run_id="",
-                case_id=c.id,
-                question=c.question,
-                passed=verdict == "approve",
-                # NO_VERDICT ("") means the judge returned nothing: the case is
-                # UNSCORED, like a broken oracle — never a lens failure the health
-                # lane reports as the lens getting worse.
-                grade=verdict or "errored",
-                reason=reasoning,
-                actual_sql=t.sql,
-            )
-        )
+                results.append(
+                    EvalResult(
+                        run_id="",
+                        case_id=c.id,
+                        question=c.question,
+                        passed=verdict == "approve",
+                        # NO_VERDICT ("") means the judge returned nothing: the case is
+                        # UNSCORED, like a broken oracle — never a lens failure the health
+                        # lane reports as the lens getting worse.
+                        grade=verdict or "errored",
+                        reason=reasoning,
+                        actual_sql=t.sql,
+                    )
+                )
+            finally:
+                # One result per case, whichever exit it took.
+                if len(results) > before:
+                    results[-1] = results[-1].model_copy(update=ai_usage.spend_fields(calls))
     return _finish(lens, "health", results)

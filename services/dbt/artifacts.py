@@ -421,18 +421,24 @@ def _read_json(path: Path) -> dict[str, object]:
     return data
 
 
+def load_manifest(target_dir: str | Path) -> dict[str, object]:
+    """The parsed ``manifest.json`` of a dbt ``target/`` directory."""
+    manifest_path = Path(target_dir) / "manifest.json"
+    if not manifest_path.is_file():
+        raise DbtArtifactError(f"manifest.json not found in {target_dir}")
+    return _read_json(manifest_path)
+
+
 def load_artifacts(target_dir: str | Path) -> DbtArtifacts:
     """Load and parse a dbt ``target/`` directory: ``manifest.json`` (required),
     ``semantic_manifest.json`` and ``catalog.json`` (each used when present).
     Raises DbtArtifactError when the manifest is missing or any file is invalid."""
     target = Path(target_dir)
-    manifest_path = target / "manifest.json"
-    if not manifest_path.is_file():
-        raise DbtArtifactError(f"manifest.json not found in {target}")
+    manifest = load_manifest(target)
     semantic_path = target / "semantic_manifest.json"
     catalog_path = target / "catalog.json"
     return parse_artifacts(
-        _read_json(manifest_path),
+        manifest,
         _read_json(semantic_path) if semantic_path.is_file() else None,
         _read_json(catalog_path) if catalog_path.is_file() else None,
     )

@@ -27,6 +27,7 @@ import json
 import re
 
 from services.contracts.protocols import CacheableBlock, LLMProvider, Message
+from services.observability import usage as ai_usage
 from services.probe.drift import DriftFinding, DriftVariant
 
 # ── medallion tier classification (the deterministic prior) ───────────────────
@@ -174,15 +175,16 @@ def _llm_pick(
         f"Candidate readings (all at the same medallion tier):\n"
         f"{_candidate_brief(finding.variants, candidates)}"
     )
-    res = llm.complete(
-        system=[CacheableBlock(_PICK_SYSTEM)],
-        messages=[Message("user", prompt)],
-        model=model,
-        temperature=0.0,
-        # Reasoning-style fast models spend output budget thinking before emitting
-        # content — 200 starved the pick to an empty string (same failure as _llm_name).
-        max_tokens=1000,
-    )
+    with ai_usage.purpose("other"):
+        res = llm.complete(
+            system=[CacheableBlock(_PICK_SYSTEM)],
+            messages=[Message("user", prompt)],
+            model=model,
+            temperature=0.0,
+            # Reasoning-style fast models spend output budget thinking before emitting
+            # content — 200 starved the pick to an empty string (same failure as _llm_name).
+            max_tokens=1000,
+        )
     try:
         parsed = json.loads(res.text.strip())
     except json.JSONDecodeError:

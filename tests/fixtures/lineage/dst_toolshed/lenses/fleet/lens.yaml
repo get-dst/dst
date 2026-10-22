@@ -1,0 +1,6 @@
+name: fleet
+display_name: Fleet
+connections: [toolshed]
+select:
+  entities:
+    - name: tools

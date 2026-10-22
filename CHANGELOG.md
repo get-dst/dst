@@ -73,6 +73,160 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.14.0] — 2026-10-22
+
+Three migrations: 0070 (stored serve bands per embedding model), 0071 (`ai_call`, one row per
+provider call; token and cost columns on eval runs and results), 0072
+(`ai_call.cache_write_long_tokens`). Run `dst migrate` before serving.
+
+New keys: lens `sources` and `scope`; metric `window_reading`; dimension `aliases`; entity
+`internal`; project `lineage`. New selectors `table/NAME`, `*` and `--tables-from`. New
+provider type `openai-decisions`. New command `dst calibrate-bands`.
+
+Behaviour changes to read before upgrading:
+
+- A ratio or derived metric asked with no period reads the last complete month and names it.
+  0.13.0 asked which period.
+- Metric aliases no longer route questions between lenses. A metric routes by its name or
+  label; aliases still work inside the lens.
+- A word qualifying what the answer counts must map to something the lens declares (a metric,
+  field, dimension, stored value, definition, period, or the entity's description). A scope
+  word nothing declares now asks instead of being ignored.
+- A certified answer is not served for a question that names a different stored value or
+  true/false field than its certified question.
+- `dst drift` lists a comment-only change as comment only: no warning on readers, no effect on
+  the exit code.
+- A typed-decision provider that refuses a question declines it and names the refusal.
+
+### Added
+
+- **Table selectors.** `--select table/NAME` picks the entities reading a warehouse table;
+  `table/NAME+` adds their definitions and every lens reading them. Names match
+  case-insensitively on the qualified name or its trailing parts.
+- **Lineage from dbt or SQLMesh.** With `lineage:` in `dst.yaml` (a dbt target directory or a
+  SQLMesh project) or `--lineage PATH`, `table/NAME+` starts from a model, seed or source and
+  walks the tool's DAG down to the tables entities read. dst runs neither tool.
+- **`--tables-from FILE|-`** selects `table/NAME+` for each name read, one per line, so
+  `dbt -q ls -s state:modified+ --resource-type model --output name | dst apply --tables-from -`
+  re-gates exactly the lenses a change touches. A selection that reaches no lens names the
+  tables no entity reads, pushes nothing and exits 0.
+- **`--select '*'`** selects the whole project on `dst plan`, `dst apply` and `dst test`, the
+  same as leaving `--select` out.
+- **`dst test`** takes `--select`, `--tables-from` and `--lineage`, and runs only the lenses
+  the selection reaches. The plan and apply selection row carries `paths` (table → entity →
+  lens).
+- **OpenAI Decisions API** as a typed-decision provider, `type: openai-decisions`
+  (`gpt-6-luna`): key from `OPENAI_API_KEY` by default, independent decisions batched into one
+  call, probabilities recorded as returned. With several typed-decision providers declared, the
+  first declared one with a key decides. `DST_TYPED_SERVING=auto` serves typed on any of them.
+- **Declared source systems.** A lens can declare `sources` (the systems its data comes from)
+  and `scope` (`own` or `market`). A question naming a declared system routes only to lenses
+  declaring it; one naming a system no lens the caller may use declares is uncovered, and the
+  reason names the system.
+- **`window_reading: snapshot | any_in_window`** on level metrics. `any_in_window` counts each
+  thing flagged at any snapshot of the period once. Typed answers and the certified gate read
+  the same declaration; a certified answer whose SQL reads the other way fails the apply gate.
+- **"At the start of" a period** reads a level's first snapshot in it. Structured intents accept
+  `snapshot: first | last`.
+- **Period comparison from the question's words.** Growth, change and "vs" wording compares
+  periods on typed serving; "which X grew most" ranks by the change; with no period stated it
+  asks, offering the last complete one.
+- **Dimension `aliases:`** for breakdowns, rankings and binding keys. Plan fails when one word
+  names two dimensions.
+- **Entity `internal:`** keeps columns, a surrogate primary key included, out of every filter,
+  breakdown and ranking offer and out of the metric catalog, while they stay readable.
+- **`dst calibrate-bands --pairs FILE`** fits the certified serve bands for the configured
+  embedding model from labelled pairs and stores them for that model. With fewer than 20 pairs
+  of each kind it stores nothing and says how many more are needed.
+- **One usage record per provider call** in `ai_call`, with model, tokens, cost and purpose
+  (route, decide, judge, equivalence, bind, generate, compose). Eval runs and results store
+  their tokens and cost. `dst observe` shows AI and warehouse cost apart and AI spend by
+  purpose.
+- **`dst plan`** hints SUM metrics with no `additivity:` on tables keyed by a date and another
+  column.
+
+### Changed
+
+- **Routing.** A lens is dropped when the question names one of its `not_for` asks or reads
+  closer to one than to anything the lens covers, on every routing path; the routing decider is
+  shown each lens's asks, and `Avoid for:` lines no longer count as coverage. A question naming
+  a metric's name or label that only one lens declares routes to that lens before similarity. A
+  metric several lenses declare goes to the one that alone carries a table or entity the
+  question names, or alone can split it over time; otherwise the question asks which lens,
+  naming them. A lens whose anchors are all shared with a sibling still reaches the decider.
+- **Two clocks.** On an entity with two time fields, a period goes on the date the asked
+  metric declares, else the one the question names, else the question asks which date.
+- **Probes.** `dst apply` re-gates only lenses whose scope reads a table a pushed probe
+  re-profiled. `dst probe --tables a` keeps the previous probe's sampled facts for every table it
+  did not sample. A refresh reads a table whole when the stored probe never did, and names any
+  value dictionary it leaves partial that was complete. `dst probe` counts the billed metadata
+  read and states BigQuery's 10 MB per-statement minimum. A table over `sample_bytes_budget` is
+  recorded as catalog-only with the reason, which describe and value clarifications repeat.
+- **Embeddings.** Plan and apply name a missing embedder on any lens with certified answers;
+  answers on such a lens say how many certified answers cannot serve and what to install.
+  `dst init` declares the local embedder when its extra is installed. Plan, apply and `/ready`
+  say when the serve bands were not calibrated for the configured model.
+- **Prices.** Built-in prices cover current Claude and OpenAI models, cited from the providers'
+  pages; Claude Sonnet 5 is $2/$10. Prompt-cache reads and writes are priced at each model's
+  published rates. A call reporting tokens its model has no rate for is unpriced and named on
+  `/ready` and by `dst doctor`, never counted as free. `gpt-6-luna` is priced by endpoint. Rates
+  in `ai_pricing` accept cache read, write and long-lived write, and a `"<endpoint>:<model>"`
+  key.
+- **Clarifications** ask in words and never offer internal labels; "which kind" lists the
+  stored values on every door.
+
+### Fixed
+
+- **Booleans.** A boolean or numeric column compared with a quoted value is bound by the
+  profiled type in every clause and dialect; BigQuery rejected `flag = 'true'`. A true/false
+  field the question names in words, negatives included, is applied or asked about, never
+  dropped. A pinned boolean held by a binding or a `NOT col` / `col IS TRUE` condition is not
+  asked back.
+- **Drift blame.** A warehouse error on compiled SQL is blamed on drift only when a column or
+  table the statement reads was dropped or retyped; otherwise it is dst's, and no drift ticket
+  opens.
+- **Values and bindings.** Stored values the question names resolve from the dictionary again,
+  whatever the column is named. A binding matches the stored value whatever its case, at any
+  dictionary size, whether or not its field was picked; an unknown value is asked about with the
+  values the column holds. A caller's binding, a value the population filter pins, and a value
+  the question settles are never asked back.
+- **Words inside a metric's name.** A number, a grain word ("daily target"), a bracketed code
+  ("errors (5xx)") or a "per X" inside the chosen metric's name or label belongs to the metric,
+  never a filter, a series or a breakdown. A dimension said only inside the metric's name is not
+  a breakdown. An exact label or alias outranks a voted metric whose name it only contains.
+- **Measured words.** The "figure asked must be one the metric measures" check reads names as
+  stemmed whole words, ignores undeclared short tokens, and asks only about words the lens
+  declares nowhere. A qualifier that maps to nothing ("deleted members" with no deleted flag)
+  asks instead of serving the unqualified figure; one only another metric carries asks which
+  metric.
+- **Shapes.** A listing leads with the entity's key and label, and reads the table and date the
+  question names. A superlative no metric carries ranks over the noun it names, or asks what to
+  rank. A ranking groups by the member the question names, asks instead of ranking by a field
+  only another table holds, and asks for another figure instead of ranking a count of its own
+  key. A share or rate asked of a non-ratio metric asks which ratio; "net new" of a one-sided
+  metric asks which net metric. An acronym alone or before a period word must be measured by
+  the chosen metric.
+- **Periods.** "The end of Q3 2026", "the end of 2026" and other named ends read as the period's
+  last day (a level: its last snapshot). "The first 2 quarters of 2026" and the first or last N
+  months, weeks or days of a period read as that part; the number is never a limit. A day bound
+  on a column declared `timestamp` closes at the next midnight on every door. A level whose
+  snapshot field is declared `date` over stored timestamps reads the whole latest day. A ratio or
+  derived metric whose operands are all levels reads one snapshot, never an average of every
+  snapshot. A period binding on the time field or as `window` is the question's window.
+- **Empty and impossible answers.** An empty result for a period after the newest row says where
+  the data ends. A figure asked by month or as a trend on an entity with no time field is
+  refused with "this lens cannot split <metric> by <unit>" instead of served as one total.
+- **Request log.** A row is written whatever values the answer carried; a Decimal or date in the
+  logged sample raised out of the logger, and NaN lost the row.
+- **Spend.** Every token a provider billed reaches a row exactly once: routing decider spend on
+  served answers and on questions no lens served; a batched decision call's whole usage even
+  when the resolution ended early, with shares that add up; spend billed before a provider
+  failed; the typed judge, readings, the certified-equivalence gate, the template bind gate, the
+  rubric judge fallback and the adversary. A model id containing a colon is priced correctly.
+- **Anthropic models** that reject `temperature` are not sent it; an unknown alias that refuses
+  it is retried once without.
+- **Comments and examples** use invented wording throughout.
+
 ## [0.13.0] — 2026-10-22
 
 No schema change. New `lens.yaml` key `not_for`; new metric `agg: sum_distinct_on` with

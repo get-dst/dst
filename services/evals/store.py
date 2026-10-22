@@ -409,19 +409,38 @@ def list_runs(session: Session, lens: str) -> list[EvalRunRow]:
 
 
 def record_results(session: Session, run_id: str, results: list[EvalResult]) -> None:
-    """Persist a run's per-case outcomes (the drill-down behind the aggregates)."""
+    """Persist a run's per-case outcomes (the drill-down behind the aggregates),
+    and the run's AI spend: the sum of its cases' (cost None when any case's
+    is unpriced)."""
+    cost: float | None = 0.0
+    for r in results:
+        cost = None if cost is None or r.ai_cost_usd is None else cost + r.ai_cost_usd
+    session.execute(
+        text(
+            "UPDATE eval_run SET ai_input_tokens = :i, ai_output_tokens = :o, ai_cost_usd = :c "
+            "WHERE id = :r"
+        ),
+        {
+            "r": run_id,
+            "i": sum(r.ai_input_tokens for r in results),
+            "o": sum(r.ai_output_tokens for r in results),
+            "c": None if cost is None else round(cost, 6),
+        },
+    )
     for r in results:
         session.execute(
             text(
                 """
                 INSERT INTO eval_result (
                     org_id, run_id, case_id, question, passed,
-                    grade, checks, actual_sql, actual_value, reason
+                    grade, checks, actual_sql, actual_value, reason,
+                    ai_input_tokens, ai_output_tokens, ai_cost_usd
                 )
                 VALUES (
                     NULLIF(current_setting('app.current_org', true), '')::uuid,
                     :run_id, :case_id, :question, :passed,
-                    :grade, CAST(:checks AS jsonb), :actual_sql, :actual_value, :reason
+                    :grade, CAST(:checks AS jsonb), :actual_sql, :actual_value, :reason,
+                    :ai_input_tokens, :ai_output_tokens, :ai_cost_usd
                 )
                 """
             ),
@@ -435,6 +454,9 @@ def record_results(session: Session, run_id: str, results: list[EvalResult]) -> 
                 "actual_sql": r.actual_sql,
                 "actual_value": r.actual_value,
                 "reason": r.reason,
+                "ai_input_tokens": r.ai_input_tokens,
+                "ai_output_tokens": r.ai_output_tokens,
+                "ai_cost_usd": r.ai_cost_usd,
             },
         )
 

@@ -17,15 +17,18 @@ extracted from prose.
 | shape | a figure, a listing, or neither | — |
 | entity | the lens's entities | `semantic/entities/` |
 | reading | the declared readings of an ambiguous term | `definitions` with `possible_mappings` |
-| metric, dimension, grain | the entity's declared metrics, dimensions and time grains (an entity that declares no `dimensions:` groups, when the question asks a breakdown such as "per SDR", "by source" or a ranking, by its string, boolean and date fields and by an integer field whose profile holds a complete value dictionary: the dimensions its metric catalog lists); a metric the question names word for word — by its identifier read as words, its `label`, or one of its `aliases` (`otd_rate` with `label: on-time delivery rate`) — is read off the text, and a question naming exactly one and nothing else is compiled without any decision | the entity file |
+| metric, dimension, grain | the entity's declared metrics, dimensions and time grains (an entity that declares no `dimensions:` groups, when the question asks a breakdown such as "per SDR", "by source" or a ranking, by its string, boolean and date fields and by an integer field whose profile holds a complete value dictionary: the dimensions its metric catalog lists); a metric the question names word for word — by its identifier read as words, its `label`, or one of its `aliases` (`otd_rate` with `label: on-time delivery rate`) — is read off the text, and a question naming exactly one and nothing else is compiled without any decision; a metric named word for word outranks a voted metric whose words the question says only inside that phrase ("net new members", an alias of the net metric, against `new_members`); a dimension is named by its name or its `aliases` ("by region" for `store_region` with `aliases: [region]`), in a breakdown, a ranking and a binding key | the entity file |
 | ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
 | filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this; a value spelled like a common word, such as a team named `Most`, only where the question writes it as a name: capitalised mid-sentence, quoted, or possessive), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
-| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"), days included ("on 28 August 2026", "August 28, 2026", "between 5 and 12 October", "5–12 Oct", "the week of 5 October", "the first half of August 2026", "the first 7 days of October", "the last 3 days of August", "the start of August", "the end of last month"); a day written without a year is its most recent occurrence on or before the lens clock, and a day window on a month-form period column asks rather than serving the month. A vague part of a month ("early", "mid-", "late August") asks, offering the days each reading would use, and so does any other day-level qualifier beside a month the parser cannot turn into days ("the first few days of August"): neither is ever served as the whole month. A level metric reads "the end of August" as August's last snapshot; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
+| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"), days included ("on 28 August 2026", "August 28, 2026", "between 5 and 12 October", "5–12 Oct", "the week of 5 October", "the first half of August 2026", "the first 7 days of October", "the last 3 days of August", "the start of August", "the end of last month"), periods included ("the end of Q3 2026" and "the end of 2026" are the period's last day, "the first 2 quarters of 2026" and "the last 3 months of 2025" that part of the year, and the number in such a phrase is never a top N); a day written without a year is its most recent occurrence on or before the lens clock, and a day window on a month-form period column asks rather than serving the month. A vague part of a month ("early", "mid-", "late August") asks, offering the days each reading would use, and so does any other day-level qualifier beside a month the parser cannot turn into days ("the first few days of August"): neither is ever served as the whole month. A level metric reads "the end of August" as August's last snapshot, and "the end of Q3 2026" as the quarter's; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
 
 A slot the question does not settle is asked back as a **clarification naming
 the slot**: which metric, which value of `status`. The asking agent answers by
 re-asking with `bindings` (an open value it supplies) — it never has to know
-the SQL. Raw-SQL generation survives only as a disclosed escalation: the caller
+the SQL. A binding for a column with a complete dictionary is read as the
+stored value it matches, whatever its case, and applies whether or not the
+decisions picked that column; a value the column does not hold is asked about,
+with the values it does hold. Raw-SQL generation survives only as a disclosed escalation: the caller
 opts into it with `allow_untyped: true`, or the lens owner makes it the lens's
 default with `untyped_fallback: true` in `lens.yaml`, for callers that cannot be
 expected to know the flag. A caller's `allow_untyped: false` still demands
@@ -48,12 +51,26 @@ can only move an answer toward a clarification:
 - **Candidates are answerable.** A field, dimension or filter is never offered
   when it is a key (the declared `primary_key`, a column named `*_id`,
   `*_key` or `unique_key`, a hidden column), nor a date or timestamp when the
-  question is not about time, unless the question names the column. A text
+  question is not about time, unless the question names the column or a
+  stored value it holds. A text
   column that is one part of a composite key (`host_name` in `[day,
   host_name]`) is not a key on its own: it is what a per-host question groups
   by. A listing with nothing left asks which metric is meant, and a
   breakdown nothing on offer groups asks with the entity's fields as the
-  options.
+  options. A column the entity marks `internal` is never offered at all,
+  even where the question names it.
+- **Every qualifier maps to the answer.** A content word standing in front of
+  a word the answer maps ("deleted" in "how many deleted members") must map
+  too: to the entity's row noun or declared scope (its description, grain,
+  population), the chosen metric (name, label, aliases, description, the
+  columns it reads), a field or dimension, a stored value, a filter or
+  binding value, a definition, or the period. One that maps to nothing asks
+  ("nothing in this lens holds what 'deleted' restricts"), rather than serving
+  every member; one that only another metric carries asks which metric is
+  meant. Words that shape the answer (totals, ranks, shares, changes, series)
+  are grammar, a word after a mapped one is read as a verb, and "new" beside
+  a stated period is the period. Beside a filter whose value a decision
+  chose, the check stays quiet.
 - **One measure, several settings.** When the chosen metric's siblings differ
   from it by one parameter token (`rebooked_within_7d`, `_30d`, `_90d`) and the
   question states none, the answer asks which one, whatever the probability.
@@ -76,6 +93,19 @@ can only move an answer toward a clarification:
   the ledger carries the window it used. A `level` metric over a window asks
   no further restriction: the window and the snapshot rule settle it.
 
+What the chosen metric's own name carries belongs to the metric. A number in
+it (`answered_within_15m`) is its setting, never a value a numeric filter takes
+from "within 15 minutes". A word the question says only as part of the
+metric's name ("branch visits" of `branch_visits`) is not a breakdown by
+`branch`, so the dimension decision is not asked over it. A grain word such as
+"daily" is the time grain unless a column stores it as a value or it is part
+of the chosen metric's name, label or the column it reads ("the daily target
+loaves" of `daily_target_loaves` is one figure, not a daily series). A code in
+brackets after a noun ("server errors (5xx)") is the stored value of the
+column whose dictionary holds it, or, where the chosen metric's name or label
+carries it, part of that name; its digits are never a number a filter takes,
+and it never asks for a binding.
+
 ## The policy: act unless none
 
 A typed-decision provider acts on its top choice. The one thing that stops an
@@ -86,6 +116,13 @@ against gold, the measured bar is **disclosure**, not a gate: an answer that
 acted below it is served with a `decision_confidence` check on its
 verification, its grade capped at partial, and the slot and probability named
 in the answer. Nothing is refused for being unsure; nothing unsure is silent.
+
+The probabilities are recorded as the provider returns them; dst does not
+rescale or recalibrate them, and a provider that is overconfident on its top
+option moves no threshold, since there is none to move. A provider that
+refuses a question instead of choosing (OpenAI's Decisions API can answer
+`refusal`) declines it: the decline names the refusal and the decision is
+recorded as refused, never read as a choice or as `none`.
 
 Every decision — slot, choice, probability, runner-up, verdict — rides the
 answer's resolution ledger and its [receipt](receipts.md), so a wrong answer
@@ -100,9 +137,18 @@ providers:
     api_key_env: DST_API_KEY_JEV
 ```
 
+Or, on OpenAI's Decisions API:
+
+```yaml
+providers:
+  openai:
+    type: openai-decisions   # key from OPENAI_API_KEY; model gpt-6-luna
+```
+
 Add the key to `.env` (or the deployment's secret store) under the name you
 chose. That is all: with `DST_TYPED_SERVING=auto` (the default) every lens
-switches to typed serving the moment a `typesafe` provider resolves. `on`
+switches to typed serving the moment a typed-decision provider resolves. With
+both declared, the first one in `providers` that has a key decides. `on`
 runs the same machinery on a voting chat model (five samples per decision — a
 coarser probability, and act bars apply); `off` keeps the one-shot intent
 emission.

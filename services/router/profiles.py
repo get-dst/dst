@@ -14,7 +14,7 @@ from services.certdefs import CertifiedDefinition, load_certified_defs
 from services.contracts.semantic_model import SemanticModel
 from services.lenses.store import LensBundle
 from services.router import CoverageProfile
-from services.runtime.not_for import declared_asks
+from services.runtime.not_for import declared_asks, is_avoid_line
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -50,7 +50,9 @@ def coverage_profile(
     # Entity-level meta: canonical questions and use-cases are question-shaped —
     # exactly the phrasings the router should hit near-exactly.
     anchors += [q for e in governed for q in e.common_questions]
-    anchors += [u for e in governed for u in e.use_cases]
+    # An "Avoid for:" line names what the entity is NOT for: as an anchor it
+    # pulls exactly those asks toward the lens. It rides ``not_for`` instead.
+    anchors += [u for e in governed for u in e.use_cases if not is_avoid_line(u)]
 
     pages = certified
     if pages is None and cfg.model.certified_dir:
@@ -65,6 +67,14 @@ def coverage_profile(
 
     names = [e.name for e in governed] + [e.source.table for e in governed]
     names += [m.name for e in governed for m in e.metrics] + [d.term for d in sm.definitions]
+    metric_names = [
+        phrase
+        for e in governed
+        for m in e.metrics
+        for phrase in (m.name, m.name.replace("_", " "), m.label or "")
+    ]
+    time_fields = [e.default_time_field or "" for e in governed]
+    time_fields += [m.agg_time_field or "" for e in governed for m in e.metrics]
     return CoverageProfile(
         lens=cfg.name,
         anchors=_dedupe(anchors),
@@ -73,6 +83,10 @@ def coverage_profile(
         certified=_dedupe([m.question for m in pages or [] if m.question]),
         names=_dedupe(names),
         not_for=_not_for(cfg, sm),
+        metric_names=_dedupe(metric_names),
+        time_fields=_dedupe(time_fields),
+        sources=_dedupe(list(getattr(cfg, "sources", None) or [])),
+        data_scope=str(getattr(cfg, "scope", None) or ""),
     )
 
 

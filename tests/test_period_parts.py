@@ -336,8 +336,125 @@ def test_a_grouping_by_day_asked_in_words_is_still_offered() -> None:
     res, decider = _resolve("rides per station per day in the first week of October 2026")
     assert res.intent is not None, res.clarification
     assert sorted(res.intent.dimensions) == ["day", "station_name"]
-    # "which day" asks about days outside the window phrase: the day is offered
-    _res, decider = _resolve(
+    # "which day" asks about days outside the window phrase: the day is what
+    # the ranking ranks, read off the question
+    res, decider = _resolve(
         "Which day had the most rides in the first week of October 2026?", "ranking"
     )
-    assert decider.offered and "day" in decider.offered[0]
+    assert res.intent is not None, res.clarification
+    assert res.intent.dimensions[0] == "day"
+
+
+# ── the end of a named quarter, half or year ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "day", "period"),
+    [
+        ("rides at the end of Q3 2026", date(2026, 9, 30), Q3),
+        ("rides at the end of the third quarter of 2026", date(2026, 9, 30), Q3),
+        ("rides at the close of 2026-Q3", date(2026, 9, 30), Q3),
+        ("rides at the end of H1 2026", date(2026, 6, 30), (date(2026, 1, 1), date(2026, 6, 30))),
+        ("rides at the end of the second half of 2026", date(2026, 12, 31), H2),
+        ("rides at the end of 2026", date(2026, 12, 31), (date(2026, 1, 1), date(2026, 12, 31))),
+        (
+            "rides at the end of the year 2025",
+            date(2025, 12, 31),
+            (date(2025, 1, 1), date(2025, 12, 31)),
+        ),
+    ],
+)
+def test_the_end_of_a_named_period_is_its_last_day(
+    text: str, day: date, period: tuple[date, date]
+) -> None:
+    """The end of a named quarter, half or year ("the end of Q3 2026") was
+    read as the whole period: a flow summed over all of it. It is the
+    period's last day, and a level metric reads the period's last snapshot."""
+    assert _range(text) == [(day, day)]
+    assert window_ranges(month_end_as_month(temporal_terms(text)), TODAY) == [period]
+
+
+def test_the_end_of_a_named_period_compiles_per_additivity() -> None:
+    assert _filters("rides at the end of Q3 2026") == [
+        ("day", ">=", "2026-09-30"),
+        ("day", "<=", "2026-09-30"),
+    ]
+    # a level metric's last snapshot inside the quarter
+    assert _filters("bikes docked at the end of Q3 2026", "bikes_docked") == [
+        ("day", ">=", "2026-07-01"),
+        ("day", "<=", "2026-09-30"),
+    ]
+    assert _filters("bikes docked at the end of 2026", "bikes_docked") == [
+        ("day", ">=", "2026-01-01"),
+        ("day", "<=", "2026-12-31"),
+    ]
+
+
+def test_the_start_of_a_named_period_is_its_first_day() -> None:
+    assert _range("rides at the start of Q4 2026") == [(date(2026, 10, 1), date(2026, 10, 1))]
+    assert _range("rides at the beginning of 2026") == [(date(2026, 1, 1), date(2026, 1, 1))]
+
+
+def test_a_window_with_the_end_of_a_period_fails_the_whole_period() -> None:
+    check = _check("rides at the end of Q3 2026", _sql("2026-07-01", "2026-09-30"))
+    assert check.status == "fail"
+
+
+# ── the first or last N quarters, months, weeks or days of a period ──────────
+
+
+@pytest.mark.parametrize(
+    ("text", "span"),
+    [
+        ("rides in the first 2 quarters of 2026", (date(2026, 1, 1), date(2026, 6, 30))),
+        ("rides in the first two quarters of 2026", (date(2026, 1, 1), date(2026, 6, 30))),
+        ("rides in the last 2 quarters of 2025", (date(2025, 7, 1), date(2025, 12, 31))),
+        ("rides in the first 3 months of 2026", (date(2026, 1, 1), date(2026, 3, 31))),
+        ("rides in the last 4 months of 2025", (date(2025, 9, 1), date(2025, 12, 31))),
+        ("rides in the first 2 months of Q3 2026", (date(2026, 7, 1), date(2026, 8, 31))),
+        ("rides in the last month of H1 2026", (date(2026, 6, 1), date(2026, 6, 30))),
+        ("rides in the first week of 2026", (date(2026, 1, 1), date(2026, 1, 7))),
+        ("rides in the first 6 weeks of 2026", (date(2026, 1, 1), date(2026, 2, 11))),
+        ("rides in the last 10 days of 2026", (date(2026, 12, 22), date(2026, 12, 31))),
+        ("rides in the first 2 weeks of Q4 2026", (date(2026, 10, 1), date(2026, 10, 14))),
+    ],
+)
+def test_the_first_or_last_n_units_of_a_period_are_that_part(
+    text: str, span: tuple[date, date]
+) -> None:
+    """A part of a period was read as the whole year ("the first 2 quarters
+    of 2026"), and its number as a top N. It is that part, never a limit."""
+    assert _range(text) == [span]
+    assert TypedResolver._order(text, ["rides"], []) == ([], None)
+
+
+def test_more_units_than_the_period_holds_asks_instead_of_serving_it() -> None:
+    assert _range("rides in the first 5 quarters of 2026") == []
+    assert _range("rides in the first 4 months of Q3 2026") == []
+    from services.runtime.typed_resolver import _Clarify
+
+    with pytest.raises(_Clarify):
+        _filters("rides in the first 5 quarters of 2026")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "rides per station in the first 2 quarters of 2026",
+        "rides per station in the first 3 months of 2026",
+        # unread phrase: the number before a calendar unit still counts periods
+        "rides per station in the first 2 quarters",
+    ],
+)
+def test_first_n_periods_is_never_a_limit(question: str) -> None:
+    assert TypedResolver._order(question, ["rides"], []) == ([], None)
+
+
+def test_a_breakdown_over_the_first_quarters_sums_them_per_group() -> None:
+    res, _decider = _resolve("rides per station in the first 2 quarters of 2026")
+    assert res.intent is not None, res.clarification
+    assert res.intent.limit is None and res.intent.dimensions == ["station_name"]
+    assert [(f.op, f.value) for f in res.intent.filters] == [
+        (">=", "2026-01-01"),
+        ("<=", "2026-06-30"),
+    ]

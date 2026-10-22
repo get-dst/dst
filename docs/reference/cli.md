@@ -3,7 +3,8 @@
 One entry point: `dst` (`services/cli/main.py`). Two kinds of command:
 
 - **In-process**: `init`, `dev`, `serve`, `migrate`, `doctor`, `bootstrap`, `secret`,
-  `rotate-key`, `demo`, `prune-log`, `test`, `revoke-key`, `revoke-token`, `reindex`, `probe`,
+  `rotate-key`, `demo`, `prune-log`, `test`, `revoke-key`, `revoke-token`, `reindex`,
+  `calibrate-bands`, `probe`,
   `drift`, `import`, `export osi`, `evals migrate` run directly against the configured
   database or the local files; no server, URL, or token needed. `introspect` joins them
   whenever `dst.yaml` declares the connection, and falls back to the server when it
@@ -251,13 +252,54 @@ the entities and definitions its `select:` names:
 | `lens/finance_*`, `definition/*` | every node of that kind whose name matches the glob |
 | `+lens/finance` | the lens and everything upstream: the entities and definitions it selects |
 | `entity/orders+` | the entity and everything downstream: every lens that selects it |
+| `table/marts.orders` | the entities whose `source.table` is that table |
+| `table/stg_orders+` | the table and everything downstream: with a [lineage](#tables-and-the-model-dag) configured, every table the dbt or SQLMesh DAG builds from it, the entities on those tables, the definitions `about` those entities, and every lens that selects either |
 | `@changed` | every node whose files differ from the server (the plan's own diff) |
+| `*` | everything, the same as leaving `--select` out; a CI step that always passes a selector can pass this one to run the whole project |
 
 Only selected files are pushed. An unselected lens is not validated and not touched,
 so a broken file in a sibling does not block yours. A selection that changes a shared
 asset an unselected published lens compiles against is refused before anything
 lands, naming the lens; `entity/orders+` takes every reader along. A selector that
 matches nothing is an error. `--lens <name>` is an alias for `--select lens/<name>`.
+
+##### Tables and the model DAG
+
+A `table/` name matches case-insensitively on the qualified name or its trailing parts,
+so `table/orders` matches an entity on `marts.orders`. Globs work as on the other kinds
+(`table/stg_*+`). A plain name that matches tables in two schemas takes both, and the
+selection notes it.
+
+With a `lineage:` in `dst.yaml` (see [Configuration](configuration.md#lineage-lineage)),
+or `--lineage PATH` on the command line, `table/X+` starts from a model, seed, snapshot
+or source of the transformation tool and walks its DAG down to the tables entities read.
+For dbt that is `target/manifest.json`: the `child_map` edges, and each node's relation
+(an ephemeral model has none and is walked through). For SQLMesh it is the project's
+`models/` files: the `MODEL (name …)` header names the table, and the tables its query
+reads are its parents. dst runs neither tool. A SQLMesh Python model, or a query that
+does not parse, stays in the graph unwalked, and every selection that walks the DAG
+names it, since a table it reads does not reach it.
+
+`--tables-from FILE` reads one table or model name per line (`-` reads stdin) and selects
+`table/<name>+` for each, so the transformation tool's own selector grammar does the
+picking:
+
+```bash
+dbt -q ls -s state:modified+ --resource-type model --output name \
+  | dst apply --tables-from -
+```
+
+Blank lines and `#` lines are skipped. A line that is not one name, such as a dbt log
+line when `-q` is left off, is skipped and the count is printed.
+
+A table selector never fails the run. A name that matches no table an entity reads and
+no model in the lineage is a note naming it. A selection that reaches no lens says which
+of the tables it reached no entity reads, pushes nothing, and exits 0: a changed model
+that no lens reads is a normal CI state. An empty `--tables-from` selects nothing and
+exits 0 without contacting the server. The plan's selection row (`--json`) carries
+`paths`, one entry per pick with `table`, `entity`, `definition` (when the lens reaches
+the entity through one) and `lens`; the human output prints the same paths under the
+selection line.
 
 `--scope {all,semantic,certified,cases,config}` limits which kinds of files are
 pushed: `semantic/**`, each selected lens's `certified_answers.yaml`, its
@@ -421,7 +463,10 @@ ones the warehouse knows and you have not written down.
 
 Sampling covers the tables the semantic layer reads: everything, while the
 layer is still empty. `--sample-all` samples every table and `--tables` pins an
-exact list; the catalog pass records every table either way. Each sampled
+exact list; the catalog pass records every table either way. A table a run
+does not sample keeps the facts the previous probe sampled for it, except on a
+column the warehouse has since retyped, so `--tables` refreshes the tables it
+names and leaves the rest of the artifact as it was. Each sampled
 table costs at most three statements (one aggregate carrying counts, ranges,
 means, the time columns' offsets from the entity's `default_time_field` and
 the whole-table freshness; one for every value dictionary; one for the shape
@@ -444,7 +489,8 @@ What has the warehouse done since you profiled it, and does the semantic layer
 still match. `introspect` is a snapshot; this is the diff against the baseline
 committed at `profiles/<connection>.json`, on two rails. Against the live
 catalog: new, dropped and retyped columns, and a column whose **comment**
-changed. Against the newest probe artifact: a time column whose median offset
+changed (listed on one line as comment only: no warning on the assets that read
+the table, and no effect on the exit code). Against the newest probe artifact: a time column whose median offset
 from the entity's `default_time_field` moved past `probe.drift_tolerance`, a
 numeric column whose mean did, a complete value dictionary that lost or renamed
 a member (a member gained is reported, not breaking). The second rail is what
@@ -457,9 +503,9 @@ derivation after the warehouse grew the real column, e.g. *"`orders` gained
 `discount_amount`; definition `discount` derives it from `list_price −
 unit_price` — review whether the new column supersedes the derivation."*
 Findings the layer reads sort first, definition-backed ahead of entity-only.
-Exit 0 clean, 2 changes none breaking, 1 a declared reference broke (a drop, a
-retype, a comment change, a shift past tolerance, a dictionary member gone), 4
-not armed. `--json`; `--accept` re-records the baseline once you have reviewed
+Exit 0 clean or comment changes only, 2 changes none breaking, 1 a declared
+reference broke (a drop, a retype, a shift past tolerance, a dictionary member
+gone), 4 not armed. `--json`; `--accept` re-records the baseline once you have reviewed
 (the catalog's schema and comments, the artifact's measured facts), and
 `dst apply` advances it the same way at deploy. `dst probe` arms it on the
 first run and never rewrites it afterwards.
@@ -571,6 +617,12 @@ matching disabled, then compare executed results. Approved behavioral expectatio
 published lens in this project's org (`--all` says the lens default explicitly). A
 passing answer re-stamps its bindings to current hashes: re-verification through
 evidence. Runs in-process; needs a smart-tier model configured.
+
+`--select`, `--tables-from` and `--lineage` narrow the sweep to the lenses a selection
+reaches, with the grammar of [plan and apply](#selecting-part-of-the-project), resolved
+against the project files under `--dir`. `@changed` needs the server's view and is
+refused here. A selection that reaches no lens prints its selection line and exits 0
+without testing anything; `--json` then carries the `selection` row and `total: 0`.
 
 Exit codes carry the outcome, so a deploy gate branches without parsing prose: **0**
 everything verified passed; **1** something diverged; **4** *nothing was verified*:
@@ -791,9 +843,22 @@ and the caller rows; the headline says how many requests it left out, and
 `--include-test` counts them.
 
 The bare form is the answer to "the CFO wants to know who has been using the
-reporting tool": one line of totals (queries, AI spend, warehouse bytes
-scanned; the KPI payload carries the bytes per lens too), then a row per
-caller. `requests --status
+reporting tool": one line of totals, then a row per caller. The totals line
+labels the two bills apart: `AI $…` (the model providers) and `warehouse $…`
+(the scans, where the engine prices bytes), each with the number of unpriced
+items behind it when there are any (such a total is a floor); then the
+warehouse bytes scanned (the KPI payload carries the bytes per
+lens too). `AI by purpose:` splits the AI spend by what each provider call was
+for: `route`, `decide` (a typed slot or the reading of an ambiguous term),
+`judge`, `equivalence` (is this a paraphrase of an approved question), `bind`
+(a certified template's values), `generate`, `compose`. It is read from
+`ai_call`, one row per provider call, written for every question asked through
+a door; requests from before it carry none. Eval runs (`dst test`, the publish
+gate) record their own tokens and cost on `eval_run` and `eval_result`, and a
+`test traffic:` line says what they spent, outside the totals. The AI spend includes the router's spend on questions asked without a
+lens that no lens served (a decline or a refusal); a line under the headline
+says how much of it that is. A routed question that was answered carries the
+router's spend on its own request row. `requests --status
 error` is the fastest way to find a metric that is failing repeatedly: a caller
 retrying the same question three times in two minutes is visible here and
 nowhere else.
@@ -884,6 +949,42 @@ the next apply, so remove the declaration too when you mean gone.
 Re-embed all stored vectors with the configured embedder; required after changing the
 embedding model or dimension (the write-path guard blocks mismatched writes until
 then). Resumable. Flag: `--batch` (rows per committed batch, default 64).
+
+### `dst calibrate-bands --pairs <file>`
+
+Fit the certified serve bands for the configured embedding model and store them for
+that model. The bands are the similarities at which a question serves an approved
+answer outright (`exact`), goes to the paraphrase check (`equivalent`), or is shown to
+generation as an example (`assist`). Each embedding model spreads similarities
+differently, so a model without its own bands serves on the defaults and may generate
+answers for paraphrases that should have served.
+
+The pairs file is written by you or your AI; dst does not generate paraphrases. Each
+pair names a question someone might ask, the certified question it is about (word for
+word, from `lenses/*/certified_answers.yaml`), and whether that answer should serve it:
+
+```yaml
+pairs:
+  - asked: how many parcels went out last week
+    certified: parcels shipped last week
+    serves: true
+  - asked: how many parcels came back last week
+    certified: parcels shipped last week
+    serves: false
+```
+
+The fit puts `exact` above every pair marked `serves: false`, `equivalent` low enough
+that nearly every true paraphrase reaches the check, and `assist` at the lowest true
+paraphrase. Pairs a serve-time rule already decides (a different period, a breakdown the
+approved SQL does not group by, a different unit) are left out. It needs at least 20
+pairs of each kind after those; with fewer it stores nothing and says how many more
+are needed. Templates and retired answers are not part of the corpus. The output says
+how many paraphrases each band catches.
+
+Stored per model in the database (install-wide, like the embedder); a running server
+reads it within a minute, and plan, apply and `/ready` stop reporting the bands as
+uncalibrated. Run it again after changing the embedding model. Flags: `--dir`,
+`--dry-run` (report the fit, store nothing).
 
 *(Verified against `services/cli/main.py` and `services/cli/init.py`. Not every flag
 is listed here — `dst <command> --help` is the exhaustive one.)*

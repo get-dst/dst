@@ -30,7 +30,9 @@ from services.contracts.protocols import (
     LLMProvider,
     Message,
     Option,
+    spend_on,
 )
+from services.observability import usage as ai_usage
 
 # Measured (scripts/decision_calibration.py, the routing calibration run of 2026-09-16:
 # deepseek-v4-flash over the 52-question held-out routing set): k=5 had the
@@ -142,21 +144,33 @@ class VoteDecider:
         if self._k == 1:
             single = _one(0)
             if single is False:
-                raise DeciderStarved(
+                starved = DeciderStarved(
                     "reply named no option and no 'none' — starvation, not a decline"
                 )
+                spend_on(starved, self.provider, _usage())
+                raise starved
             assert single is None or isinstance(single, str)
             return Decision(chosen=single, probs=None, provider=self.provider, usage=_usage())
 
         workers = self._concurrency or self._k
-        with ThreadPoolExecutor(max_workers=min(workers, self._k)) as pool:
-            replies = list(pool.map(_one, range(self._k)))
+        try:
+            # On a vote's failure the pool still waits for the votes already
+            # running: the replies that came back were billed, and ride the
+            # failure so the caller charges them.
+            with ThreadPoolExecutor(max_workers=min(workers, self._k)) as pool:
+                # Each vote is a call of whoever asked for the decision.
+                replies = list(pool.map(ai_usage.in_context(_one), range(self._k)))
+        except Exception as exc:
+            spend_on(exc, self.provider, _usage())
+            raise
         valid = [r for r in replies if r is not False]
         if not valid:
-            raise DeciderStarved(
+            starved = DeciderStarved(
                 f"all {self._k} sampled replies named no option and no 'none' — "
                 "starvation, not a decline"
             )
+            spend_on(starved, self.provider, _usage())
+            raise starved
         votes = Counter("none" if r is None else str(r) for r in valid)
         # Every option (and none, when allowed) gets a probability, unvoted = 0.
         keys = [o.name for o in options] + (["none"] if allow_none else [])

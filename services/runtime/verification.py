@@ -20,7 +20,7 @@ import sqlglot
 from sqlglot import expressions as exp
 
 from services.contracts.resolution import DecisionRecord
-from services.contracts.semantic_model import Definition, Entity, SemanticModel
+from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.contracts.verification import (
     CheckStatus,
     Grade,
@@ -33,8 +33,10 @@ from services.lenses.profile_enrich import EntityCoverage
 from services.runtime import adversary, faithfulness, sql_canon, time_guard
 from services.runtime.answer import grounding_notes
 from services.runtime.canon import canon_cell
+from services.runtime.compiler import window_reading as declared_reading
 from services.runtime.timewindow import (
     breakdown_unit,
+    edge_as_period,
     is_day_window,
     month_end_as_month,
     sql_engages_time,
@@ -1309,6 +1311,111 @@ def definition_period_check(ignored: Sequence[tuple[Definition, str]]) -> Verifi
     )
 
 
+def _pins(node: exp.Expr, field: str) -> bool:
+    """Is *node* a snapshot pin on *field* — the column compared with a
+    subquery taking its MAX or MIN (``compiler._latest_snapshot``'s shape)?"""
+    if not isinstance(node, exp.EQ | exp.GTE | exp.LT):
+        return False
+    sides = (node.this, node.expression)
+    return any(
+        isinstance(a, exp.Column)
+        and a.name.lower() == field
+        and any(isinstance(n, exp.Max | exp.Min) for n in b.find_all(exp.Max, exp.Min))
+        and b.find(exp.Select) is not None
+        for a, b in (sides, sides[::-1])
+    )
+
+
+def _reads_filters(tree: exp.Expr, metric: Metric, dialect: str) -> bool:
+    """Does the SQL read every column the metric's own filters read? Two
+    flags counted over one id column (`overdue_boats`, `moored_boats`) share
+    the counted column; the flag is what tells their SQL apart. A filter that
+    does not parse reads as read, so the check stays as strict as before."""
+    read = {c.name.lower() for c in tree.find_all(exp.Column)}
+    for fragment in metric.filters:
+        try:
+            cond = sqlglot.parse_one(fragment, read=dialect)
+        except Exception:  # noqa: BLE001
+            continue
+        if any(c.name.lower() not in read for c in cond.find_all(exp.Column)):
+            return False
+    return True
+
+
+def window_reading_conflicts(sql: str, model: SemanticModel, question: str) -> list[str]:
+    """The level metrics this SQL reads over a window differently from how
+    they declare a window reads them (an explicit ``window_reading``): a window over a
+    snapshot metric's column with no snapshot pin (every snapshot in it
+    counted), or a pinned read of an ``any_in_window`` flag where the
+    question names no edge of the period ("at the end of Q3" reads the
+    snapshot under either declaration). Over no window both readings are a
+    snapshot, and nothing is said. Only plain-column metrics are read, so a
+    shape this cannot parse is never a conflict. Deterministic: the SQL's
+    own tree and the model."""
+    try:
+        tree = sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(tree, exp.Expression):
+        return []
+    edge = edge_as_period(temporal_terms(question))[1]
+    out: list[str] = []
+    for e in model.entities:
+        for m in e.metrics:
+            field = (m.agg_time_field or e.default_time_field or "").lower()
+            # Only a declared reading binds approved SQL: a level with none
+            # keeps the reading its approver gave it.
+            if m.window_reading is None or m.additivity != "level" or not field or not m.expr:
+                continue
+            if not re.fullmatch(r"[\w.]+", m.expr):
+                continue
+            column = m.expr.rpartition(".")[2].lower()
+            read = any(
+                c.name.lower() == column
+                for agg in tree.find_all(exp.AggFunc)
+                for c in agg.find_all(exp.Column)
+            )
+            if not read or not _reads_filters(tree, m, model.dialect):
+                continue
+            on_field = [
+                n
+                for n in tree.find_all(exp.EQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between)
+                if any(c.name.lower() == field for c in n.find_all(exp.Column))
+            ]
+            # One day named outright (`snap_day = '2026-09-30'`) is one snapshot too.
+            pinned = any(
+                _pins(n, field) or (isinstance(n, exp.EQ) and n.find(exp.Select) is None)
+                for n in on_field
+            )
+            windowed = any(
+                not isinstance(n, exp.EQ) and not _pins(n, field) and n.find(exp.Select) is None
+                for n in on_field
+            )
+            if not windowed:
+                continue
+            reading = declared_reading(m, e)
+            if edge is None and reading == "any_in_window" and pinned:
+                out.append(
+                    f"`{m.name}` is declared `window_reading: any_in_window`, and this SQL "
+                    f"reads one snapshot of `{field}` in the window"
+                )
+            elif (edge is not None or reading == "snapshot") and not pinned:
+                out.append(
+                    f"`{m.name}` reads one snapshot of `{field}`"
+                    + (" (the question names an edge of the period)" if edge else "")
+                    + ", and this SQL counts every snapshot in the window"
+                )
+    return out
+
+
+def window_reading_check(conflicts: Sequence[str]) -> VerificationCheck:
+    """The certified serve's ``window_reading`` check: approved SQL reads a
+    level over a window the way the metric declares, as typed serving does."""
+    if not conflicts:
+        return VerificationCheck(name="window_reading", status="pass")
+    return VerificationCheck(name="window_reading", status="fail", reason="; ".join(conflicts))
+
+
 @dataclass(frozen=True)
 class ConservationPlan:
     """The two counts that decide ``row_conservation`` for one UNION ALL CTE
@@ -1948,6 +2055,8 @@ def build_report(
     certified_question: str | None = None,
     # A certified serve's ``definition_period`` check (definition_period_check).
     definition_period: VerificationCheck | None = None,
+    # A certified serve's ``window_reading`` check (window_reading_check).
+    window_reading: VerificationCheck | None = None,
     # The generated path's ``row_conservation`` check (row_conservation_check).
     row_conservation: VerificationCheck | None = None,
 ) -> VerificationReport:
@@ -2068,6 +2177,8 @@ def build_report(
         checks.append(restated)
     if definition_period is not None:
         checks.append(definition_period)
+    if window_reading is not None:
+        checks.append(window_reading)
     if row_conservation is not None:
         checks.append(row_conservation)
     return _with_grade(checks, certification, numeric_status, composed=composed)

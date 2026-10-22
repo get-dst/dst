@@ -45,6 +45,9 @@ class LLMResult:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    # The part of cache_creation_tokens written to the long-lived cache
+    # (Anthropic's 1-hour, OpenAI's 12-hour), billed at its own rate.
+    cache_write_long_tokens: int = 0
 
 
 # ── Context / generation value types ─────────────────────────────────────────
@@ -79,6 +82,10 @@ class GeneratedQuery:
     # The typed resolver's decisions (each slot's measured choice) and the filter
     # columns whose value the caller supplied — they ride the answer's ledger.
     decisions: list[DecisionRecord] = field(default_factory=list)
+    # Decisions a batched call answered ahead that the resolution never
+    # reached: off the ledger, but the provider billed them, so their usage
+    # is charged with the rest.
+    unused_decisions: list[DecisionRecord] = field(default_factory=list)
     supplied: list[str] = field(default_factory=list)
     # True iff the typed resolver produced this SQL (no escalation).
     typed: bool | None = None
@@ -230,14 +237,26 @@ class DecisionUsage:
     output_tokens: float = 0.0
     latency_s: float = 0.0
 
-    def split(self, n: int) -> DecisionUsage:
+    def split(self, n: int) -> list[DecisionUsage]:
+        """One call's usage shared by the *n* decisions it answered. Tokens
+        are split whole, the remainder to the first shares, so the shares
+        add up to what the provider billed: a fractional share rounded on
+        each answer row would lose a token per decision."""
         n = max(1, n)
-        return DecisionUsage(
-            calls=self.calls / n,
-            input_tokens=self.input_tokens / n,
-            output_tokens=self.output_tokens / n,
-            latency_s=self.latency_s / n,
-        )
+
+        def whole(total: float) -> list[int]:
+            q, r = divmod(round(total), n)
+            return [q + (i < r) for i in range(n)]
+
+        return [
+            DecisionUsage(
+                calls=self.calls / n,
+                input_tokens=float(i),
+                output_tokens=float(o),
+                latency_s=self.latency_s / n,
+            )
+            for i, o in zip(whole(self.input_tokens), whole(self.output_tokens), strict=True)
+        ]
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -246,6 +265,24 @@ class DecisionUsage:
             "output_tokens": round(self.output_tokens, 2),
             "latency_s": round(self.latency_s, 4),
         }
+
+
+# What a failure billed before it failed: ``(provider, usage)`` pairs riding
+# the exception. A decider whose calls were billed and then failed (a vote
+# that errored after others answered, a reply that came back unreadable), and
+# a resolution that fails after some of its decisions were made, attach their
+# spend here on the way out, so whoever catches the failure charges it.
+
+
+def spend_on(exc: BaseException, provider: str, usage: DecisionUsage) -> None:
+    """Attach *usage*, billed by *provider*, to the failure *exc*."""
+    if usage.calls or usage.input_tokens or usage.output_tokens:
+        exc.spent = [*spent_by(exc), (provider, usage)]  # type: ignore[attr-defined]
+
+
+def spent_by(exc: BaseException) -> list[tuple[str, DecisionUsage]]:
+    """The spend attached to *exc* (``spend_on``); empty when none was."""
+    return list(getattr(exc, "spent", None) or [])
 
 
 @dataclass
@@ -269,6 +306,9 @@ class Decision:
     # (a probability wire) or measured nothing.
     votes: int | None = None
     k: int | None = None
+    # The provider declined to answer (a typed refusal): ``chosen`` is None and
+    # nothing was measured, so the slot declines; never read as a pick.
+    refused: bool = False
 
     @property
     def p(self) -> float | None:

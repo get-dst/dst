@@ -1,0 +1,9 @@
+gateways:
+  local:
+    connection:
+      type: duckdb
+      database: toolshed.duckdb
+default_gateway: local
+model_defaults:
+  dialect: duckdb
+  start: 2026-01-01

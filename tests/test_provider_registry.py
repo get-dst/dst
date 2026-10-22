@@ -332,6 +332,72 @@ def test_decider_prefers_a_keyed_typed_decision_provider(monkeypatch: pytest.Mon
         down.decide(question="q", context="pick", options=[Option("a")], allow_none=False)
 
 
+def test_openai_decisions_serves_the_decision_seam_with_its_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`openai-decisions` reads OPENAI_API_KEY unless api_key_env names another,
+    calls gpt-6-luna unless `models` names one, and never serves text."""
+    from services.llm.openai_decisions import OpenAIDecisionsDecider
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    _use(monkeypatch, {"oad": ProviderConfig(type="openai-decisions"), **_CHEAP_PLUS_ANTHROPIC})
+    decider = registry.resolve_decider()
+    assert isinstance(decider, OpenAIDecisionsDecider)
+    assert decider.provider == "openai-decisions:gpt-6-luna" and decider._api_key == "sk-from-env"
+    assert registry.resolve("oad/gpt-6-luna") is None
+    assert registry.specs()["oad"].key_hint == "OPENAI_API_KEY"
+    _use(
+        monkeypatch,
+        {
+            "oad": ProviderConfig(
+                type="openai-decisions",
+                api_key_env="DST_API_KEY_OAD_UNSET",
+                models=["gpt-6-luna-preview"],
+                base_url="https://gateway.example/v1",
+            ),
+            **_CHEAP_PLUS_ANTHROPIC,
+        },
+    )
+    # A named key env that holds nothing is keyless: skipped, the vote decides.
+    from services.llm.vote_decider import VoteDecider
+
+    assert isinstance(registry.resolve_decider(), VoteDecider)
+    monkeypatch.setenv("DST_API_KEY_OAD_UNSET", "sk-named")
+    decider = registry.resolve_decider()
+    assert isinstance(decider, OpenAIDecisionsDecider)
+    assert decider.provider == "openai-decisions:gpt-6-luna-preview"
+    assert decider._base_url == "https://gateway.example/v1"
+
+
+def test_the_first_declared_typed_decision_provider_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two typed-decision providers: declaration order decides, as it does for
+    the tiers; a keyless one is passed over."""
+    from services.llm.openai_decisions import OpenAIDecisionsDecider
+    from services.llm.typesafe import TypesafeDecider
+
+    jev = ProviderConfig(type="typesafe", api_key="ts-key")
+    oad = ProviderConfig(type="openai-decisions", api_key="sk-o")
+    _use(monkeypatch, {"oad": oad, "jev": jev})
+    assert isinstance(registry.resolve_decider(), OpenAIDecisionsDecider)
+    _use(monkeypatch, {"jev": jev, "oad": oad})
+    assert isinstance(registry.resolve_decider(), TypesafeDecider)
+    keyless = ProviderConfig(type="openai-decisions", api_key_env="DST_API_KEY_NOWHERE")
+    _use(monkeypatch, {"oad": keyless, "jev": jev})
+    assert isinstance(registry.resolve_decider(), TypesafeDecider)
+
+
+def test_typed_serving_auto_runs_on_either_typed_decision_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.runtime import assembly
+
+    monkeypatch.setattr(settings, "typed_serving", "auto")
+    _use(monkeypatch, {"oad": ProviderConfig(type="openai-decisions", api_key="sk-o")})
+    assert assembly.typed_decider() is not None
+    _use(monkeypatch, _CHEAP_PLUS_ANTHROPIC)  # only the vote: auto stays untyped
+    assert assembly.typed_decider() is None
+
+
 def test_decider_falls_back_to_the_voting_chat_model_on_the_fast_tier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

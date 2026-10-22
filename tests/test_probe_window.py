@@ -313,3 +313,45 @@ def test_the_first_probe_reads_whole_and_the_refresh_reads_the_window(
     assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 0
     third = probe.read_probe(root, "warehouse")
     assert third is not None and third.tables[0].sample_window is None
+
+
+def test_a_refresh_over_a_prior_with_nothing_complete_reads_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The artifact a refresh starts from may hold no whole-table read of a
+    table: a catalog checkpoint a killed run left, a table outside an earlier
+    run's scope. A window there can never prove a dictionary complete, so a
+    windowed refresh produced zero complete dictionaries and every later one
+    stayed that way. Such a table is read whole."""
+    root = _project(tmp_path, recent_partitions=7)
+    connector = DuckDBConnector(str(root / "wh.duckdb"))
+    probe.write_probe(root, "warehouse", catalog_profiles(connector, "warehouse"), [_entity()])
+    assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 0
+    artifact = probe.read_probe(root, "warehouse")
+    assert artifact is not None
+    table = artifact.tables[0]
+    assert table.sample_window is None
+    kind = next(c for c in table.columns if c.name == "kind")
+    assert kind.values_complete and sorted(kind.top_values or []) == ["click", "legacy", "view"]
+    assert "1 complete value dictionaries" in capsys.readouterr().out
+
+
+def test_a_whole_read_that_loses_a_complete_dictionary_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A whole-table read that finds more values than a dictionary holds is
+    right to call it partial; it says which dictionaries stopped being
+    complete, never silently."""
+    root = _project(tmp_path, recent_partitions=0)
+    assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 0
+    capsys.readouterr()
+    con = duckdb.connect(str(root / "wh.duckdb"))
+    con.execute(
+        "INSERT INTO ops.events SELECT DATE '2026-05-01', 'kind_' || i::VARCHAR "
+        "FROM range(400) r(i)"
+    )
+    con.close()
+    assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 0
+    err = capsys.readouterr().err
+    assert "1 value dictionary complete in the previous probe is not complete now" in err
+    assert "ops.events.kind" in err

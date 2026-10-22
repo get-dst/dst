@@ -19,10 +19,20 @@ The stages, in order:
    semantic files, governed definitions and [curated context](curated-context.md)
    the model may read. When the caller names no lens, a routing step picks one
    first, or declines. Routing settles what the lenses declare before any model
-   is asked: a lens whose `not_for` names the ask is not a candidate; a question
-   that is one lens's certified question goes to that lens; text two lenses
-   carry word for word counts for neither; and between two remaining
-   candidates, a table, entity or metric only one of them declares picks it.
+   is asked: a lens whose `not_for` names the ask, or that the question reads
+   closer to one of its `not_for` asks than to anything it covers, is not a
+   candidate; a question that is one lens's certified question goes to that
+   lens; a question naming a source system some lens declares in `sources`
+   goes only to the lenses declaring it, and is uncovered, naming the system,
+   when no lens the caller may use does; a metric named by its name or `label`
+   that only one lens declares goes to that lens (an alias does not route: it
+   is read inside the lens); a metric several lenses declare goes to the one
+   that alone carries a table or entity the question names, or alone can split
+   it over time when the question asks for that, and otherwise the question is
+   asked which lens; text two lenses carry word for word counts for neither
+   when ranking, though the decider still sees both lenses whole; and between
+   two remaining candidates, a table, entity or metric only one of them
+   declares picks it.
 2. **Match.** If a [certified answer](certified.md) covers the question, its
    approved SQL is served verbatim and generation is skipped.
 3. **Check, then generate.** Before generation runs, deterministic code

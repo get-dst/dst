@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from services.config import ProviderConfig
+from services.config import ProviderConfig, check_ai_pricing
 from services.contracts.authoring import Authored, parse_authored
 from services.project.loader import parse_yaml
 
@@ -204,16 +204,50 @@ class ProbeConfig(Authored):
         return delta if delta else None
 
 
+class LineageDecl(Authored):
+    """Where the transformation tool's model DAG lives, for `table/X+`
+    selection: one of a dbt target directory or a SQLMesh project directory,
+    relative to the project root. Read by the client; the server stores nothing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dbt: str | None = Field(
+        default=None,
+        description="a dbt target directory holding manifest.json (`dbt parse` writes it), "
+        "or the dbt project directory whose target/ holds it",
+    )
+    sqlmesh: str | None = Field(
+        default=None, description="a SQLMesh project directory (its models/ are read)"
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> LineageDecl:
+        if (self.dbt is None) == (self.sqlmesh is None):
+            raise ValueError("lineage names exactly one tool: `dbt: <dir>` or `sqlmesh: <dir>`")
+        return self
+
+    @property
+    def tool(self) -> tuple[str, str]:
+        """(tool, directory)."""
+        return ("dbt", self.dbt) if self.dbt is not None else ("sqlmesh", str(self.sqlmesh))
+
+
 class ProjectConfig(Authored):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     default_provider: str | None = None
-    ai_pricing: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    ai_pricing: dict[str, tuple[float, ...]] = Field(default_factory=dict)
     connections: dict[str, ConnectionDecl] = Field(default_factory=dict)
     demo: DemoConfig | None = None
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
+    lineage: LineageDecl | None = None
+
+    @field_validator("ai_pricing")
+    @classmethod
+    def _pricing_shape(cls, v: dict[str, tuple[float, ...]]) -> dict[str, tuple[float, ...]]:
+        return check_ai_pricing(v)
 
     @field_validator("providers")
     @classmethod

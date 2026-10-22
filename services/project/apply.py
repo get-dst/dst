@@ -146,6 +146,48 @@ def certified_orphan_warning(session: Session, name: str) -> str | None:
     )
 
 
+def _matching_gap() -> str | None:
+    """Why certified matching cannot run on this install, or None when it can
+    (or the embedder is configured and failing, which is named where it fails).
+    Identity first, so nothing is constructed when an embedder is declared."""
+    from services.llm import registry
+
+    if registry.embedding_identity() is not None:
+        return None
+    try:
+        if _embedder() is not None:
+            return None
+    except Exception:  # noqa: BLE001 — a configured, broken embedder
+        return None
+    return registry.embedder_gap()
+
+
+def unembedded_warning(n: int) -> str:
+    """The standing line for *n* stored answers without an embedding. With no
+    embedder on this install, `dst reindex` cannot help, so the line says what
+    is missing instead."""
+    line = certify_store.UNEMBEDDED_WARNING.format(n=n)
+    if (gap := _matching_gap()) is not None:
+        line += f" once this install has an embedder (certified matching is OFF: {gap})"
+    return _degraded(line)
+
+
+def certified_matching_warning(declared: int) -> str | None:
+    """Plan's line for a lens that declares certified answers on an install
+    with no embedder: every answer would store unembedded and never match, and
+    each served answer saying so is not a failure anyone sees."""
+    from services.runtime.assembly import uncalibrated_bands_note
+
+    if not declared:
+        return None
+    if (gap := _matching_gap()) is not None:
+        return _degraded(
+            f"{declared} certified answer(s) declared, but certified matching will not run "
+            f"on this install: {gap}"
+        )
+    return uncalibrated_bands_note()
+
+
 def unchanged_lens_warnings(
     session: Session, name: str, *, has_certified_file: bool = True
 ) -> list[str]:
@@ -159,7 +201,7 @@ def unchanged_lens_warnings(
     diff), so the skip path is exactly where that push lands."""
     warnings: list[str] = []
     if unembedded := certify_store.count_unembedded(session, name):
-        warnings.append(_degraded(certify_store.UNEMBEDDED_WARNING.format(n=unembedded)))
+        warnings.append(unembedded_warning(unembedded))
     if not has_certified_file and (orphan := certified_orphan_warning(session, name)):
         warnings.append(orphan)
     return warnings
@@ -409,8 +451,14 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], list[str]]:
+def apply_profiles(
+    session: Session, files: dict[str, str], landed_tables: set[tuple[str, str]] | None = None
+) -> tuple[list[str], list[str]]:
     """Pushed probe artifacts (``profiles/<conn>.probe.json``) → table_profile upserts.
+
+    ``landed_tables`` collects ``(connection, table)`` for every profile that
+    landed: the inputs this apply changed, so only a lens reading one of
+    those tables goes back through the eval gate (``reads_landed_table``).
 
     The seam that makes `dst probe` reach serving: the committed artifact
     lands in the store `assembly.profile_facts` already reads, so value
@@ -466,6 +514,8 @@ def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], 
                 continue
             profile_store.upsert_profile(session, incoming)
             landed += 1
+            if landed_tables is not None:
+                landed_tables.add((artifact.connection, profile.table))
         note = f", kept {kept} newer server-side" if kept else ""
         line = f"profiles '{artifact.connection}': landed {landed} table(s){note}"
         if landed:
@@ -474,6 +524,19 @@ def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], 
             # Nothing landed, so nothing changed: said, but not as an applied input.
             warnings.append(line)
     return applied, warnings
+
+
+def reads_landed_table(bundle: store.LensBundle, landed_tables: set[tuple[str, str]]) -> bool:
+    """Does the lens's scope read a table whose profile this apply landed? A
+    re-probed table changes what serving knows about it (dictionaries, types,
+    freshness) for the lenses that read it, and for no other."""
+    from services.project.warehouse_drift import same_table
+
+    return any(
+        e.source.connection == conn and same_table(e.source.table, table)
+        for e in bundle.semantic_model.entities
+        for conn, table in landed_tables
+    )
 
 
 def apply_semantic_assets(session: Session, files: dict[str, str]) -> tuple[list[str], list[str]]:
@@ -1297,6 +1360,11 @@ def check_lens(
     errors += _cross_match_errors(session, name, source, model, warnings_out)
     errors += _starvation_errors(session, name, source)
     if warnings_out is not None:
+        declared = sum(
+            1 for a in source.certified_answers or [] if str(a.get("question", "")).strip()
+        )
+        if line := certified_matching_warning(declared):
+            warnings_out.append(line)
         warnings_out.extend(_binding_range_warnings(source))
         warnings_out.extend(_certified_definition_warnings(source.certified_answers or [], model))
     gate_errors, _report = _deterministic_gates(
@@ -2718,12 +2786,15 @@ def _apply_certified_answers(
         embedder = _embedder()
         vectors: list[list[float] | None]
         if embedder is None:
+            from services.llm import registry
+
             vectors = [None] * len(fresh)
             result.warnings.append(
                 _degraded(
-                    f"{len(fresh)} certified answer(s) stored unembedded — no embedding "
-                    "provider configured; they will not be served or matched until one is "
-                    "added and `dst reindex` runs"
+                    f"{len(fresh)} certified answer(s) stored unembedded — "
+                    f"{registry.embedder_gap() or 'no embedding provider configured'}; "
+                    "they will not be served or matched until one is added and "
+                    "`dst reindex` runs"
                 )
             )
         else:
@@ -2872,7 +2943,9 @@ def _apply_certified_answers(
     # answers left unembedded by an EARLIER degraded apply — every apply after
     # it reports success while the corpus can never match.
     if unembedded := certify_store.count_unembedded(session, name):
-        result.warnings.append(_degraded(certify_store.UNEMBEDDED_WARNING.format(n=unembedded)))
+        result.warnings.append(unembedded_warning(unembedded))
+    elif (declared := len(existing) + created) and (note := certified_matching_warning(declared)):
+        result.warnings.append(note)
     deleted_part = f"deleted {deleted}, " if deleted else ""
     result.applied.append(
         f"certified answers: created {created}, updated {len(changed)}, "

@@ -66,8 +66,9 @@ from services.evals.runner import (
 from services.lenses.connections import ConnectionUnavailable, resolve_connector
 from services.lenses.store import LensBundle, bundle_fingerprint
 from services.llm.registry import ResolvedModel
+from services.observability import usage as ai_usage
 from services.project.plan import stale_certified
-from services.runtime import assembly
+from services.runtime import assembly, verification
 from services.runtime.answer import AnswerComposer
 from services.runtime.bounded import ApplyStepTimeout
 from services.runtime.canon import canon_cell
@@ -562,6 +563,29 @@ def _value_lane(
                 )
             )
             continue
+        if conflicts := verification.window_reading_conflicts(
+            oracle_sql, bundle.semantic_model, a.question
+        ):
+            # A level read over a window the other way than the metric
+            # declares: typed serving and this answer would disagree on the
+            # same question. Fails like a restated value.
+            why = "; ".join(conflicts)
+            lane.restated.append(
+                f"certified '{a.question}' reads a level against its declared window "
+                f"reading: {why} — fix the sql or the metric's `window_reading`"
+            )
+            lane.results.append(
+                EvalResult(
+                    run_id="",
+                    case_id=case_id,
+                    question=a.question,
+                    passed=False,
+                    grade="fail",
+                    reason=why,
+                    actual_sql=oracle_sql,
+                )
+            )
+            continue
         try:
             with query_context(purpose="eval", lens=lens):
                 got = connector.execute(oracle_sql, read_only=True, row_limit=_ROW_CAP)
@@ -708,6 +732,7 @@ def _certified_gate(
                 reason=r.reason,
                 actual_sql=r.generated_sql,
                 actual_value=value_json(r.generated_result),
+                **ai_usage.spend_fields(r.ai_calls),
             )
         )
     return lane

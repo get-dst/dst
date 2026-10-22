@@ -28,6 +28,7 @@ if TYPE_CHECKING:  # httpx is imported per-verb (CLI startup cost) — types onl
     from services.db.schema_state import SchemaState
     from services.dbt import DbtArtifacts, ImportResult
     from services.evals.slot_lane import SlotLaneOutcome
+    from services.project.lineage import LineageGraph
 
 # How long `plan` will wait on the warehouse before it drops the staleness check
 # and says nothing. plan is the verb an engineer runs every day and the check is a
@@ -92,6 +93,7 @@ def _doctor(args: argparse.Namespace) -> int:
     from services.contracts.protocols import Message
     from services.db.schema_state import schema_state
     from services.llm import registry
+    from services.observability import usage as ai_usage
 
     failures = 0
     try:
@@ -125,6 +127,11 @@ def _doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"embeddings    FAIL — {exc}")
         failures += 1
+    if note := registry.unpriced_note():
+        # Not a failure of callability, but a cost line that is a floor.
+        print(style.warn(f"pricing       {note}"))
+    else:
+        print("pricing       ok")
     print("providers")
     for tier_name in ("fast", "smart"):
         ref = registry.tier(tier_name)
@@ -134,18 +141,19 @@ def _doctor(args: argparse.Namespace) -> int:
             print(f"  {tier_name:<6}{ref or '(unset)'}  SKIP — {detail}")
             continue
         try:
-            pair.llm.complete(
-                system=[],
-                messages=[Message(role="user", content="ping")],
-                model=pair.name,
-                temperature=0.0,
-                # 8, not 1: a 1-token cap is consumed before any content, so
-                # completion_text logs an 'empty completion' warning on a call
-                # that SUCCEEDED — a false alarm in the one verb whose job is to
-                # say what works. Still a fraction of a cent; this probes
-                # callability, not output.
-                max_tokens=8,
-            )
+            with ai_usage.purpose("other"):
+                pair.llm.complete(
+                    system=[],
+                    messages=[Message(role="user", content="ping")],
+                    model=pair.name,
+                    temperature=0.0,
+                    # 8, not 1: a 1-token cap is consumed before any content, so
+                    # completion_text logs an 'empty completion' warning on a call
+                    # that SUCCEEDED — a false alarm in the one verb whose job is to
+                    # say what works. Still a fraction of a cent; this probes
+                    # callability, not output.
+                    max_tokens=8,
+                )
             print(f"  {tier_name:<6}{pair.name}  ok")
         except Exception as exc:  # noqa: BLE001 — the whole point is naming this
             failures += 1
@@ -811,6 +819,14 @@ def _prune_log(args: argparse.Namespace) -> int:
                 ),
                 {"o": oid, "d": int(args.keep_days)},
             )
+            # The per-call usage rows age with the requests they belong to.
+            c.execute(
+                text(
+                    "DELETE FROM ai_call WHERE org_id = :o "
+                    "AND created_at < now() - make_interval(days => :d)"
+                ),
+                {"o": oid, "d": int(args.keep_days)},
+            )
         n = int(res.rowcount)
         total += n
         print(f"{name}: {n} row(s) older than {args.keep_days} day(s) deleted")
@@ -827,6 +843,60 @@ def _reindex(args: argparse.Namespace) -> int:
         print(f"error: {registry.EMBEDDER_HINT}", file=sys.stderr)
         return 1
     return run_reindex(embedder, batch=args.batch)
+
+
+def _calibrate_bands(args: argparse.Namespace) -> int:
+    """Fit the certified serve bands for the configured embedder from the
+    project's certified questions and a labelled pairs file the user writes,
+    and store them for that model. Refuses, saying how many more pairs are
+    needed, when there are too few to fit; `--dry-run` reports without
+    storing."""
+    import yaml
+
+    from services.certify import bands
+    from services.llm import registry
+
+    _adopt_project_env(args)
+    root = Path(getattr(args, "dir", ".") or ".")
+    embedder = registry.resolve_embedder()
+    model = registry.embedding_model_name()
+    if embedder is None or model is None:
+        print(f"error: {registry.embedder_gap() or registry.EMBEDDER_HINT}", file=sys.stderr)
+        return 1
+    corpus: dict[str, str] = {}
+    for path in sorted(root.glob("lenses/*/certified_answers.yaml")):
+        entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or entry.get("slots"):
+                continue  # a template never serves on similarity alone
+            if str(entry.get("status", "active")) == "retired":
+                continue
+            question, sql = str(entry.get("question") or "").strip(), entry.get("sql")
+            if question and isinstance(sql, str):
+                corpus[question] = sql
+    if not corpus:
+        print(
+            f"error: no certified answers under {root}/lenses/*/certified_answers.yaml",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        pairs = bands.parse_pairs(yaml.safe_load(Path(args.pairs).read_text(encoding="utf-8")))
+        result = bands.fit(model, corpus, pairs, embedder.embed)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: {args.pairs}: {exc}", file=sys.stderr)
+        return 1
+    for line in result.lines():
+        print(line)
+    if result.bands is None:
+        print(f"error: {result.refused}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print("dry run: nothing stored")
+        return 0
+    bands.store(model, result)
+    print(f"stored for {model}; a running server reads it within a minute")
+    return 0
 
 
 # A query that produced no SQL exits NON-ZERO. Exit 0 used to mean "the request
@@ -1504,7 +1574,10 @@ def _drift_one(
             "baseline_recorded_at": baseline.recorded_at.isoformat(),
             "probed_at": artifact.probed_at.isoformat() if artifact else None,
             "tables": len(current),
-            "findings": [{**f.model_dump(), "breaking": wd.is_breaking(f)} for f in findings],
+            "findings": [
+                {**f.model_dump(), "breaking": wd.is_breaking(f), "quiet": wd.is_quiet(f)}
+                for f in findings
+            ],
         }
         if args.as_json
         else None
@@ -1533,13 +1606,16 @@ def _drift_one(
         for finding in findings:
             for line in wd.render(finding):
                 print(line)
-        read = sum(1 for f in findings if f.referenced)
-        broken = sum(1 for f in findings if wd.is_breaking(f))
+        loud = [f for f in findings if not wd.is_quiet(f)]
+        read = sum(1 for f in loud if f.referenced)
+        broken = sum(1 for f in loud if wd.is_breaking(f))
         verdict = f", {broken} BREAKING declared references" if broken else ""
+        quiet = len(findings) - len(loud)
+        comments = f"; {quiet} comment-only change(s)" if quiet else ""
         print(
-            f"\n{len(findings)} change(s) since "
+            f"\n{len(loud)} change(s) since "
             f"{baseline.recorded_at.date().isoformat()}, {read} on tables the semantic "
-            f"layer reads{verdict}. Re-record with `dst drift --accept` once reviewed."
+            f"layer reads{verdict}{comments}. Re-record with `dst drift --accept` once reviewed."
         )
     if args.accept:
         # Re-record from the live catalog and the newest artifact whenever the
@@ -1742,7 +1818,11 @@ def _probe_connections(
             needed = {
                 e.source.table for e in entities if e.source.connection == name and e.source.table
             }
-            profiles = catalog_profiles(connector, name, priority_tables=needed)
+            # One bill for the connection: the catalog pass's metadata reads
+            # (a billed job each on BigQuery) and the sampling statements.
+            meter = sampling.SampleMeter()
+            with sampling.metered(meter):
+                profiles = catalog_profiles(connector, name, priority_tables=needed)
             if not profiles:
                 # Empty output is never success (blocker 1): say so, exit non-zero.
                 print(f"error: connection '{name}' listed no tables", file=sys.stderr)
@@ -1768,7 +1848,7 @@ def _probe_connections(
                 for d in e.dimensions
             )
             windows = (
-                probe_artifact.sample_windows(profiles, entities, name, recent_partitions)
+                probe_artifact.sample_windows(profiles, entities, name, recent_partitions, prior)
                 if prior is not None
                 else {}
             )
@@ -1782,7 +1862,7 @@ def _probe_connections(
                 and e.default_time_field
                 and wd.same_table(e.source.table, p.table)
             }
-            with sampling.metered() as meter:
+            with sampling.metered(meter):
                 merged = sample_profiles(
                     connector,
                     [p for p in profiles if p.table in scope],
@@ -1791,7 +1871,8 @@ def _probe_connections(
                     time_fields=time_fields,
                 )
             profiles = probe_artifact.carry_complete_dictionaries(
-                [merged.get(p.table, p) for p in profiles], prior
+                probe_artifact.keep_unsampled([merged.get(p.table, p) for p in profiles], prior),
+                prior,
             )
         except Exception as exc:  # noqa: BLE001 — one dead warehouse must not stop the rest
             first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
@@ -1800,7 +1881,24 @@ def _probe_connections(
             continue
         # Report what was SAMPLED, not what was scheduled: a pass that sampled
         # nothing must not read as a pass that sampled everything.
-        sampled = sum(1 for p in profiles if p.source != "catalog")
+        sampled = sum(1 for p in merged.values() if p.source != "catalog")
+        kept = sum(1 for p in profiles if p.source != "catalog") - sampled
+        if kept > 0:
+            print(
+                f"'{name}': {kept} table(s) not sampled this run keep the sampled facts "
+                "of the previous probe",
+                file=sys.stderr,
+            )
+        if lost := probe_artifact.lost_dictionaries(profiles, prior):
+            many = len(lost) != 1
+            print(
+                f"warning: {len(lost)} value {'dictionaries' if many else 'dictionary'} complete "
+                f"in the previous probe {'are' if many else 'is'} not complete now "
+                f"({', '.join(lost[:10])}{', …' if len(lost) > 10 else ''}): this read did not "
+                "prove them complete (more values than a dictionary keeps, or a sampled read), "
+                "so a value a question names is no longer checked against them",
+                file=sys.stderr,
+            )
         if sampled < len(scope):
             print(
                 f"warning: sampled {sampled} of the {len(scope)} table(s) in scope — "
@@ -1859,21 +1957,26 @@ def _probe_connections(
 def _print_probe_bill(
     name: str, type_: str, meter: Any, price: Callable[[int | None, str], float | None]
 ) -> None:
-    """What the sampling pass cost, on stderr: statements, bytes billed and the
-    estimate where the engine prices bytes. An engine that reports no bytes
-    gets the statement count and says the bytes are unreported, never $0."""
+    """What the probe cost, on stderr: statements (the catalog pass's billed
+    metadata reads and the sampling statements), the bytes the engine billed
+    for them, and the estimate where the engine prices bytes. An engine that
+    reports no bytes gets the statement count and says the bytes are
+    unreported, never $0. BigQuery's per-job minimum is said, since a probe of
+    small tables bills it on every statement."""
     if not meter.priced:
         print(
-            f"'{name}': {meter.statements} sampling statement(s); bytes not reported by {type_}",
+            f"'{name}': {meter.statements} probe statement(s); bytes not reported by {type_}",
             file=sys.stderr,
         )
         return
     usd = price(meter.bytes_scanned, type_)
-    line = (
-        f"'{name}': {meter.statements} sampling statement(s), {_bytes(meter.bytes_scanned)} billed"
-    )
+    line = f"'{name}': {meter.statements} probe statement(s), {_bytes(meter.bytes_scanned)} billed"
     if usd is not None:
         line += f", about ${usd:.4f}"
+    if type_ == "bigquery" and meter.statements:
+        # BigQuery bills every query job it runs at least 10 MB, a metadata
+        # read included; a result served from its cache bills nothing.
+        line += " (BigQuery bills at least 10 MB per statement it runs; a cached one bills 0)"
     print(line, file=sys.stderr)
 
 
@@ -3038,7 +3141,14 @@ def _selection_line(entry: dict[str, Any]) -> str:
         f"selection: {selectors} (scope: {entry.get('kinds')}) → lenses: {lenses}; "
         f"assets: {assets}; {entry.get('excluded', 0)} file(s) left out"
     )
-    return "\n".join([line, *(f"  ! {n}" for n in entry.get("notes") or [])])
+    paths = dict.fromkeys(
+        "  "
+        + " → ".join(
+            str(p[k]) for k in ("table", "entity", "definition", "lens") if p.get(k) is not None
+        )
+        for p in entry.get("paths") or []
+    )
+    return "\n".join([line, *paths, *(f"  ! {n}" for n in entry.get("notes") or [])])
 
 
 def _render_plan(plan: list[dict[str, Any]], write: Callable[[str], None]) -> int:
@@ -3239,11 +3349,15 @@ def _plan(args: argparse.Namespace) -> int:
     `dst drift` does the analysis."""
     import httpx
 
-    body = {"files": _project_files(args, "plan")}
+    if _nothing_selected(args, "plan"):
+        return 0
+    body: dict[str, Any] = {"files": _project_files(args, "plan")}
     url, headers = _client(args)
     params: dict[str, str | list[str]] = {}
     if selectors := _selectors(args):
         params["select"] = selectors
+        if (lineage := _lineage(args, body["files"], selectors)) is not None:
+            body["lineage"] = lineage
     if (scope := getattr(args, "scope", None) or "all") != "all":
         params["scope"] = scope
     try:
@@ -3494,7 +3608,9 @@ def _apply(args: argparse.Namespace) -> int:
 
     if getattr(args, "action", None) == "status":
         return _apply_status(args)
-    body = {"files": _project_files(args, "apply")}
+    if _nothing_selected(args, "apply"):
+        return 0
+    body: dict[str, Any] = {"files": _project_files(args, "apply")}
     url, headers = _client(args)
     params: dict[str, str | list[str]] = {}
     if getattr(args, "probe_certified", False):
@@ -3505,6 +3621,8 @@ def _apply(args: argparse.Namespace) -> int:
         params["require_gates"] = "true"
     if selectors := _selectors(args):
         params["select"] = selectors
+        if (lineage := _lineage(args, body["files"], selectors)) is not None:
+            body["lineage"] = lineage
     if (scope := getattr(args, "scope", None) or "all") != "all":
         params["scope"] = scope
     # The server runs the apply as a job and answers with its id at once; this
@@ -3574,9 +3692,120 @@ def _apply(args: argparse.Namespace) -> int:
 
 
 def _selectors(args: argparse.Namespace) -> list[str]:
-    """--select selectors, with --lens NAME as the alias for lens/NAME."""
+    """--select selectors, with --lens NAME as the alias for lens/NAME and each
+    name --tables-from reads as table/NAME+."""
     lenses = [f"lens/{n.strip()}" for n in (getattr(args, "lens", None) or []) if n.strip()]
-    return [*(s.strip() for s in getattr(args, "select", None) or [] if s.strip()), *lenses]
+    tables = [f"table/{n}+" for n in _tables_from(args)]
+    if _select_all(args):  # `*` is the whole project: send no selector at all
+        return []
+    return [
+        *(s.strip() for s in getattr(args, "select", None) or [] if s.strip()),
+        *lenses,
+        *tables,
+    ]
+
+
+def _select_all(args: argparse.Namespace) -> bool:
+    """`--select '*'`: everything, the same as leaving --select out."""
+    return "*" in (s.strip() for s in getattr(args, "select", None) or [])
+
+
+def _tables_from(args: argparse.Namespace) -> list[str]:
+    """The table or model names --tables-from FILE|- reads, one per line (the
+    output of `dbt -q ls --output name`, a SQLMesh plan's changed models).
+    Blank and # lines are skipped; a line that is not one name (a log line) is
+    skipped and counted. Read once: stdin cannot be read twice."""
+    import re
+
+    source = getattr(args, "tables_from", None)
+    if source is None:
+        return []
+    if (cached := getattr(args, "_table_names", None)) is not None:
+        return list(cached)
+    try:
+        text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: --tables-from {source}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    names: list[str] = []
+    skipped: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            (names if re.fullmatch(r"[^\s+]+", line) else skipped).append(line)
+    if skipped:
+        print(
+            f"warning: --tables-from {source}: skipped {len(skipped)} line(s) that are not "
+            f"one table or model name (first: {skipped[0][:60]!r}); `dbt -q ls` prints "
+            "names only",
+            file=sys.stderr,
+        )
+    args._table_names = names
+    return names
+
+
+def _nothing_selected(args: argparse.Namespace, verb: str) -> bool:
+    """--tables-from read no name and nothing else was selected: say so, and
+    the caller exits 0 without a request (an empty `dbt ls` is a normal CI
+    state, and no selector at all would mean the whole project)."""
+    if getattr(args, "tables_from", None) is None or _selectors(args) or _select_all(args):
+        return False
+    print(f"--tables-from {args.tables_from} names no table or model — nothing to {verb}")
+    return True
+
+
+def _lineage(args: argparse.Namespace, files: dict[str, str], selectors: list[str]) -> Any:
+    """`_lineage_graph` as the JSON the project endpoints take."""
+    graph = _lineage_graph(args, files, selectors)
+    return None if graph is None else graph.model_dump(mode="json")
+
+
+def _lineage_graph(
+    args: argparse.Namespace, files: dict[str, str], selectors: list[str]
+) -> LineageGraph | None:
+    """The model DAG a `table/` selector walks: --lineage PATH (a dbt target
+    or project, or a SQLMesh project) or dst.yaml's `lineage:` (relative to
+    the project root). None without a table selector or a configured
+    lineage; a lineage that is configured but unreadable is an error, never a
+    silent walk over nothing."""
+    from services.project.lineage import LineageError, detect_lineage, load_lineage
+    from services.project.schema import parse_project_yaml
+
+    if not any("table/" in s for s in selectors):
+        return None
+    try:
+        if override := getattr(args, "lineage", None):
+            graph = detect_lineage(Path(override))
+        else:
+            try:
+                decl = parse_project_yaml(files.get("dst.yaml", "")).lineage
+            except ValueError:
+                return None  # the server names what is wrong with dst.yaml
+            if decl is None:
+                return None
+            tool, where = decl.tool
+            graph = load_lineage(tool, Path(getattr(args, "dir", ".") or ".") / where)
+    except LineageError as exc:
+        print(f"error: lineage: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    return graph
+
+
+def _add_table_selection_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--tables-from",
+        dest="tables_from",
+        metavar="FILE",
+        help="select table/NAME+ for every table or model name in FILE, one per line "
+        "(- reads stdin): pipe `dbt -q ls -s state:modified+ --resource-type model "
+        "--output name` or a SQLMesh plan's changed models",
+    )
+    p.add_argument(
+        "--lineage",
+        metavar="PATH",
+        help="the model DAG table/ selectors walk: a dbt target directory (or project) "
+        "or a SQLMesh project; overrides dst.yaml's `lineage:`",
+    )
 
 
 def _job_line(job: dict[str, Any]) -> str:
@@ -4317,6 +4546,65 @@ def _lens_profile_age(session: Any, bundle: Any) -> Any:
     return profile_age(profiles, probe_settings.load(session).max_age_delta, tables=tables)
 
 
+def _test_selection(args: argparse.Namespace) -> set[str] | None:
+    """The lenses `dst test --select/--tables-from` reaches, resolved against
+    the project files under --dir with the plan/apply grammar; None when no
+    selector was given. A selection reaching no lens prints its notes and
+    returns an empty set: nothing is tested, and that is said."""
+    from services.project.plan import resolve_selection
+
+    names = _tables_from(args)
+    selectors = [
+        *(s.strip() for s in getattr(args, "select", None) or [] if s.strip()),
+        *(f"table/{n}+" for n in names),
+    ]
+    emit_json = bool(getattr(args, "as_json", False))
+    if "*" in selectors:  # everything, as with no selector
+        return None
+    if not selectors:
+        if getattr(args, "tables_from", None) is None:
+            return None
+        print(f"--tables-from {args.tables_from} names no table or model — nothing to test")
+        return set()
+    if "@changed" in selectors:
+        print(
+            "error: dst test resolves --select against the project files alone; @changed "
+            "needs the server's view, so use it on plan or apply",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    root = Path(getattr(args, "dir", ".") or ".")
+    files = _read_project(root)
+    if not files:
+        print(
+            f"error: --select needs the project files, and {root.resolve()} has none",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    try:
+        selection = resolve_selection(
+            files,
+            selectors,
+            "all",
+            db_semantic={},
+            db_trees={},
+            lineage=_lineage_graph(args, files, selectors),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    row = selection.row()
+    args._selection_row = row
+    print(_selection_line(row), file=sys.stderr if emit_json else sys.stdout)
+    if not selection.lenses:
+        if emit_json:
+            print(json.dumps({"selection": row, "results": [], "passed": 0, "total": 0}, indent=2))
+        else:
+            print("nothing to test: the selection reaches no lens")
+        return set()
+    return set(selection.lenses)
+
+
 def _test_scope(args: argparse.Namespace) -> list[tuple[uuid.UUID, str]] | None:
     """Which orgs `dst test` sweeps — THIS project's, not every tenant in the
     database. None (after printing why) when the scope resolves to nothing.
@@ -4537,11 +4825,15 @@ def _test(args: argparse.Namespace) -> int:
     from services.lenses import store as lens_store
     from services.lenses.connections import resolve_connector
     from services.llm import registry
+    from services.observability import usage as ai_usage
     from services.runtime import assembly
     from services.runtime.answer import AnswerComposer
 
     if args.all:
         args.lens = None
+    selected = _test_selection(args)
+    if selected is not None and not selected:
+        return 0  # the selection reaches no lens; said, and nothing ran
     if registry.resolve(registry.tier("smart")) is None:
         print(
             "error: no smart-tier model resolves — set smart_model (and its API key) on a provider",
@@ -4580,6 +4872,8 @@ def _test(args: argparse.Namespace) -> int:
         with org_session(oid) as session:
             for name, _dn, _desc, bundle in lens_store.list_published(session):
                 if args.lens and name != args.lens:
+                    continue
+                if selected is not None and name not in selected:
                     continue
                 found_lens = True
                 # Every result line names the ORG — see _test_scope. A bare
@@ -5028,6 +5322,7 @@ def _test(args: argparse.Namespace) -> int:
                                 # JSON-native, cells canonical: the shape a
                                 # verified_value has, so the two compare.
                                 actual_value=value_json(cr.generated_result),
+                                **ai_usage.spend_fields(cr.ai_calls),
                             )
                         )
                 if behavioral and not slots_only:
@@ -5107,6 +5402,7 @@ def _test(args: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {
+                    "selection": getattr(args, "_selection_row", None),
                     "results": rows,
                     "passed": total - failed,
                     "total": total,
@@ -5361,7 +5657,18 @@ def _observe(args: argparse.Namespace) -> int:
         return 0
 
     if isinstance(kpis, dict):
-        head = f"{kpis.get('queries', 0)} queries · ${float(kpis.get('ai_cost_usd') or 0):.4f} AI"
+        # The two bills apart, each labelled: the AI providers' and the
+        # warehouse's. A total with unpriced items behind it is a floor and
+        # says so; a sum of both would be neither bill.
+        ai = f"AI ${float(kpis.get('ai_cost_usd') or 0):.4f}"
+        if unpriced := int(kpis.get("unpriced") or 0):
+            ai += f" (+{unpriced} unpriced)"
+        head = f"{kpis.get('queries', 0)} queries · {ai}"
+        if "warehouse_cost_usd" in kpis:
+            wh = f"warehouse ${float(kpis.get('warehouse_cost_usd') or 0):.4f}"
+            if wh_unpriced := int(kpis.get("wh_unpriced") or 0):
+                wh += f" (+{wh_unpriced} unpriced)"
+            head += f" · {wh}"
         if (scanned := kpis.get("wh_bytes")) is not None:
             # The warehouse half of the bill, in the unit the warehouse bills:
             # a Snowflake credit has no price here, but bytes are bytes.
@@ -5404,6 +5711,40 @@ def _observe(args: argparse.Namespace) -> int:
                 style.dim(
                     f"{test_n:,} test request(s) (agent dst-test / benchmark) not counted "
                     "above — --include-test counts them"
+                )
+            )
+        routing = kpis.get("routing")
+        if isinstance(routing, dict) and (routed_n := int(routing.get("decisions") or 0)):
+            # Spend that no request row carries, said as itself: without this
+            # line a header of "0 queries · $0.0040 AI" reads as a bug.
+            print(
+                style.dim(
+                    f"AI spend includes ${float(routing.get('ai_cost_usd') or 0):.4f} "
+                    f"routing {routed_n:,} question(s) no lens served"
+                )
+            )
+        by_purpose = kpis.get("ai_by_purpose")
+        if isinstance(by_purpose, dict) and by_purpose:
+            # Where the AI spend went, one figure per purpose (route, decide,
+            # judge, equivalence, bind, generate, compose).
+            parts = []
+            for name, b in by_purpose.items():
+                if not isinstance(b, dict):
+                    continue
+                part = f"{name} ${float(b.get('ai_cost_usd') or 0):.4f}"
+                if int(b.get("unpriced") or 0):
+                    part += f" (+{b['unpriced']} unpriced)"
+                parts.append(part)
+            print(f"{style.accent('AI by purpose:')} {' · '.join(parts)}")
+        evals = kpis.get("eval_spend")
+        if isinstance(evals, dict) and int(evals.get("runs") or 0):
+            unpriced_runs = int(evals.get("unpriced_runs") or 0)
+            print(
+                style.dim(
+                    f"test traffic: {int(evals['runs']):,} eval run(s) spent "
+                    f"${float(evals.get('ai_cost_usd') or 0):.4f} AI"
+                    + (f" (+{unpriced_runs} with unpriced calls)" if unpriced_runs else "")
+                    + ", not counted above"
                 )
             )
         if isinstance(profiles := kpis.get("profiles"), dict):
@@ -6667,6 +7008,20 @@ def main() -> int:
     p.add_argument("--batch", type=int, default=64, help="rows per committed batch")
     p.set_defaults(fn=_reindex)
 
+    p = sub.add_parser(
+        "calibrate-bands",
+        help="fit the certified serve bands for the configured embedder from labelled "
+        "paraphrase pairs, and store them for that model",
+    )
+    p.add_argument(
+        "--pairs",
+        required=True,
+        help="YAML file: `pairs:` a list of {asked, certified, serves: true|false}",
+    )
+    p.add_argument("--dir", default=".", help="the project (default: .)")
+    p.add_argument("--dry-run", action="store_true", help="report the fit, store nothing")
+    p.set_defaults(fn=_calibrate_bands)
+
     p = sub.add_parser("init", help="scaffold a new dst project (dbt-style)")
     p.add_argument(
         "dir", nargs="?", default=None, help="target directory (default: create ./<project name>)"
@@ -6959,6 +7314,16 @@ def main() -> int:
         "active corpus; exit 1 on any divergence",
     )
     p.add_argument("lens", nargs="?", help="lens to test (default: every published lens)")
+    p.add_argument(
+        "--select",
+        nargs="+",
+        action="extend",
+        metavar="SELECTOR",
+        help="test only the lenses these selectors reach, resolved against the project "
+        "files under --dir: the plan/apply grammar (lens/NAME, entity/NAME+, "
+        "table/NAME+, globs, * for everything) except @changed",
+    )
+    _add_table_selection_args(p)
     p.add_argument(
         "--all",
         action="store_true",
@@ -7416,9 +7781,12 @@ def main() -> int:
                 action="extend",
                 metavar="SELECTOR",
                 help="push only these nodes of the project graph: definition/NAME, "
-                "entity/NAME, lens/NAME, a glob on the name (lens/finance_*), +X (X and "
-                "what it reads), X+ (X and the lenses that read it), @changed (what "
-                "differs from the server). Unselected lenses are not validated or "
+                "entity/NAME, lens/NAME, table/NAME (the entities reading that table), a "
+                "glob on the name (lens/finance_*), +X (X and what it reads), X+ (X and "
+                "the lenses that read it; table/X+ walks the dbt or SQLMesh lineage down "
+                "first), @changed (what differs from the server), * (everything). "
+                "Unselected lenses are "
+                "not validated or "
                 "touched; a selection that changes an asset an unselected published "
                 "lens reads is refused, naming it",
             )
@@ -7428,6 +7796,7 @@ def main() -> int:
                 metavar="NAME",
                 help="alias for --select lens/NAME (repeatable)",
             )
+            _add_table_selection_args(p)
             p.add_argument(
                 "--scope",
                 choices=["all", "semantic", "certified", "cases", "config"],

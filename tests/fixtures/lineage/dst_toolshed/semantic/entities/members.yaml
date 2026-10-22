@@ -1,0 +1,10 @@
+name: members
+description: One row per member.
+source:
+  connection: toolshed
+  table: marts.dim_members
+primary_key: [member_id]
+fields:
+  - {name: member_id, type: integer}
+  - {name: joined_on, type: date}
+  - {name: plan, type: string}

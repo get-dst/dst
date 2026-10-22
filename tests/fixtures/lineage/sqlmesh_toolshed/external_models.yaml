@@ -1,0 +1,19 @@
+- name: raw.rentals
+  columns:
+    rental_id: int
+    tool_id: int
+    member_id: int
+    rented_on: date
+    returned_on: date
+    due_on: date
+- name: raw.tools
+  columns:
+    tool_id: int
+    tool_name: text
+    category: text
+    day_rate: double
+- name: raw.members
+  columns:
+    member_id: int
+    joined_on: date
+    plan: text

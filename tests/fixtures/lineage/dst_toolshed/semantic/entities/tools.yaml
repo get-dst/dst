@@ -1,0 +1,11 @@
+name: tools
+description: One row per tool in the shed.
+source:
+  connection: toolshed
+  table: marts.dim_tools
+primary_key: [tool_id]
+fields:
+  - {name: tool_id, type: integer}
+  - {name: tool_name, type: string}
+  - {name: category, type: string}
+  - {name: day_rate, type: number}

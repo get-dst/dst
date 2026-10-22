@@ -358,15 +358,22 @@ def test_the_model_wide_dictionary_names_the_kinds_too() -> None:
     assert gq.clarification is not None and gq.clarification.options == KINDS["record_kind"]
 
 
+_BLIND = (
+    '{"entity": "locker_ops_workspace", "metrics": ["parcels"], "grain": "week", '
+    '"filters": [{"field": "created_at", "op": ">=", "value": "2026-08-01"}]}'
+)
+
+
 def test_the_intent_door_asks_which_kind_when_its_repair_still_sums_them() -> None:
+    """The kinds are listed on the intent door too: it compiles with the
+    entity's own dictionaries, as the typed path does. Before, it compiled
+    with none and asked which kind offering no options at all."""
     from services.contracts.fakes import ScriptedLLM
     from services.runtime.intent_generator import IntentSQLGenerator
 
-    blind = (
-        '{"entity": "locker_ops_workspace", "metrics": ["parcels"], "grain": "week", '
-        '"filters": [{"field": "created_at", "op": ">=", "value": "2026-08-01"}]}'
-    )
-    gq = IntentSQLGenerator(ScriptedLLM([blind, blind])).generate(
+    gq = IntentSQLGenerator(
+        ScriptedLLM([_BLIND, _BLIND]), entity_domains={"locker_ops_workspace": KINDS}
+    ).generate(
         question=TWO_KINDS,
         semantic_model=_workspace_without_kind_metrics(),
         prose_context=[],
@@ -374,11 +381,54 @@ def test_the_intent_door_asks_which_kind_when_its_repair_still_sums_them() -> No
     )
     assert not gq.sql
     assert gq.clarification is not None and gq.clarification.term == "record_kind"
-    assert gq.clarification.options == []
-    assert gq.clarification.question == (
-        "The locker_ops_workspace table holds several kinds of record in `record_kind`: "
-        "which one, or one row per kind?"
+    assert gq.clarification.options == KINDS["record_kind"]
+    assert gq.clarification.question == ASKED
+
+
+def test_the_served_intent_door_carries_the_entitys_dictionaries() -> None:
+    """Serving builds the intent door with the assembled dictionaries: a kind
+    column two tables share is dropped from the model-wide ones, and the
+    entity's own still lists it."""
+    from services.contracts.fakes import ScriptedLLM
+    from services.contracts.lens_config import LensConfig
+    from services.llm.registry import ResolvedModel
+    from services.runtime.assembly import AssembledInputs, select_generators
+    from services.runtime.intent_generator import IntentSQLGenerator
+
+    model = _workspace_without_kind_metrics()
+    assembled = AssembledInputs(
+        model=model,
+        prose=[],
+        certified=None,
+        certification="none",
+        certified_sql=None,
+        data_as_of=None,
+        counts={},
+        entity_domains={"locker_ops_workspace": KINDS},
     )
+    config = LensConfig.model_validate(
+        {"name": "locker_ops", "connections": ["wh"], "model": {"provider": "anthropic"}}
+    )
+    resolved = ResolvedModel(ScriptedLLM([_BLIND, _BLIND]), "anthropic/claude-sonnet-4-6", "m")
+    generator, _esc, _mode, _band = select_generators(assembled, resolved, config=config)
+    assert isinstance(generator, IntentSQLGenerator)
+    gq = generator.generate(
+        question=TWO_KINDS, semantic_model=model, prose_context=[], dialect="duckdb"
+    )
+    assert gq.clarification is not None
+    assert gq.clarification.options == KINDS["record_kind"]
+
+
+def test_a_dictionary_is_found_whatever_the_case_of_the_pinned_name() -> None:
+    model = _workspace()
+    entity = model.entities[0].model_copy(update={"pinned_dimensions": ["Record_Kind"]})
+    with pytest.raises(UnpinnedDimension) as err:
+        compile_intent(
+            QueryIntent(entity="locker_ops_workspace", metrics=["parcels"], filters=AUGUST),
+            model.model_copy(update={"entities": [entity]}),
+            domains=KINDS,
+        )
+    assert err.value.values == KINDS["record_kind"]
 
 
 # ── window literals carry the column's declared type ───────────────────────
@@ -505,6 +555,173 @@ def test_a_day_bound_on_a_stored_moment_closes_at_the_next_midnight(
             column_types={"locker_ops_workspace": {"created_on": physical}},
         )
         assert "created_on >= " in one_day and "created_on < " in one_day
+
+
+@pytest.mark.parametrize(
+    ("dialect", "physical", "upper"),
+    [
+        ("bigquery", "TIMESTAMP", "created_at < CAST('2026-09-01' AS TIMESTAMP)"),
+        ("bigquery", "DATETIME", "created_at < CAST('2026-09-01' AS DATETIME)"),
+        ("bigquery", None, "created_at < '2026-09-01'"),
+        ("duckdb", "TIMESTAMP", "created_at < CAST('2026-09-01' AS TIMESTAMP)"),
+        ("duckdb", None, "created_at < CAST('2026-09-01' AS TIMESTAMP)"),
+        ("postgres", None, "created_at < CAST('2026-09-01' AS TIMESTAMP)"),
+    ],
+)
+def test_a_day_bound_on_a_declared_timestamp_closes_at_the_next_midnight(
+    dialect: str, physical: str | None, upper: str
+) -> None:
+    """A caller's `<= '2026-08-31'` on a column declared `timestamp` (the
+    metrics and batch doors take the caller's operator as written) is
+    midnight of the 31st and dropped that day's events, while the question
+    door read the same day whole. It closes at the next midnight, exclusive,
+    on every door and dialect, with or without a profile."""
+    model = _workspace(dialect)
+    filters = [
+        IntentFilter(field="created_at", op=">=", value="2026-08-01"),
+        IntentFilter(field="created_at", op="<=", value="2026-08-31"),
+    ]
+    sql = compile_intent(
+        QueryIntent(entity="locker_ops_workspace", metrics=["c2ls"], filters=filters),
+        model,
+        column_types={"locker_ops_workspace": {"created_at": physical}} if physical else None,
+    )
+    assert upper in sql and "2026-08-31" not in sql
+    after = compile_intent(
+        QueryIntent(
+            entity="locker_ops_workspace",
+            metrics=["c2ls"],
+            filters=[IntentFilter(field="created_at", op=">", value="2026-08-31")],
+        ),
+        model,
+    )
+    assert "created_at >= " in after and "2026-09-01" in after
+
+
+def test_a_declared_timestamp_day_bound_counts_the_last_days_rows() -> None:
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE locker_ops_workspace "
+        "(created_at TIMESTAMP, record_kind VARCHAR, parcel_id VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO locker_ops_workspace VALUES "
+        "('2026-08-30 09:00', 'C2L', 'p1'), ('2026-08-31 00:00', 'C2L', 'p2'), "
+        "('2026-08-31 17:45', 'C2L', 'p3'), ('2026-09-01 00:00', 'C2L', 'p4')"
+    )
+    sql = compile_intent(
+        QueryIntent(
+            entity="locker_ops_workspace",
+            metrics=["c2ls"],
+            filters=[
+                IntentFilter(field="created_at", op=">=", value="2026-08-01"),
+                IntentFilter(field="created_at", op="<=", value="2026-08-31"),
+            ],
+        ),
+        _workspace(),
+    )
+    assert con.execute(sql).fetchone() == (3,)
+
+
+def _shelf_counts(dialect: str = "duckdb") -> SemanticModel:
+    """A stock snapshot declared by its day and stored as moments: one
+    snapshot's rows carry different times on the same day."""
+    return SemanticModel(
+        lens="shelves",
+        dialect=dialect,  # type: ignore[arg-type]
+        entities=[
+            Entity(
+                name="shelf_counts",
+                source=EntitySource(connection="wh", table="shelf_counts"),
+                default_time_field="counted_on",
+                fields=[
+                    Field(name="counted_on", type="date"),
+                    Field(name="shelf", type="string"),
+                    Field(name="units", type="number"),
+                ],
+                metrics=[
+                    Metric(
+                        name="units_on_hand",
+                        agg="sum",
+                        expr="shelf_counts.units",
+                        additivity="level",
+                    )
+                ],
+            )
+        ],
+    )
+
+
+_STOCK_ROWS = (
+    "('2026-07-31 02:00:00', 'a', 5), ('2026-07-31 02:00:07', 'b', 6), "
+    "('2026-08-31 02:00:00', 'a', 7), ('2026-08-31 02:00:09', 'b', 8)"
+)
+
+
+@pytest.mark.parametrize(
+    ("filters", "grain", "expected"),
+    [
+        (
+            [
+                IntentFilter(field="counted_on", op=">=", value="2026-08-01"),
+                IntentFilter(field="counted_on", op="<=", value="2026-08-31"),
+            ],
+            None,
+            [(15,)],
+        ),
+        ([], None, [(15,)]),
+        ([], "month", [(11,), (15,)]),
+    ],
+)
+def test_a_level_snapshot_declared_by_day_reads_the_whole_latest_day(
+    filters: list[IntentFilter], grain: str | None, expected: list[tuple[int]]
+) -> None:
+    """The latest-snapshot pin on a date-declared column the profile records
+    as a moment was an equality on the latest moment, which kept the last
+    row's instant and dropped the rest of that day's snapshot (8 for 15). It
+    reads the latest day, from its midnight to the next one, exclusive."""
+    con = duckdb.connect()
+    con.execute("CREATE TABLE shelf_counts (counted_on TIMESTAMP, shelf VARCHAR, units INTEGER)")
+    con.execute(f"INSERT INTO shelf_counts VALUES {_STOCK_ROWS}")
+    sql = compile_intent(
+        QueryIntent(entity="shelf_counts", metrics=["units_on_hand"], filters=filters, grain=grain),
+        _shelf_counts(),
+        column_types={"shelf_counts": {"counted_on": "TIMESTAMP"}},
+    )
+    values = [r[-1:] for r in con.execute(sql + (" ORDER BY 1" if grain else "")).fetchall()]
+    assert values == expected
+
+
+@pytest.mark.parametrize(
+    ("dialect", "physical", "cast"),
+    [
+        ("bigquery", "TIMESTAMP", "AS TIMESTAMP)"),
+        ("bigquery", "DATETIME", "AS DATETIME)"),
+        ("snowflake", "TIMESTAMP_NTZ", "AS TIMESTAMP"),
+        ("postgres", "timestamp without time zone", "AS TIMESTAMP)"),
+    ],
+)
+def test_the_latest_day_pin_parses_and_casts_back_on_every_dialect(
+    dialect: str, physical: str, cast: str
+) -> None:
+    import sqlglot
+
+    sql = compile_intent(
+        QueryIntent(entity="shelf_counts", metrics=["units_on_hand"]),
+        _shelf_counts(dialect),
+        column_types={"shelf_counts": {"counted_on": physical}},
+    )
+    sqlglot.parse_one(sql, read=dialect)
+    assert "= (SELECT MAX(" not in sql and cast in sql
+
+
+def test_a_real_date_snapshot_keeps_the_equality_pin() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="shelf_counts", metrics=["units_on_hand"]),
+        _shelf_counts(),
+        column_types={"shelf_counts": {"counted_on": "DATE"}},
+    )
+    assert "shelf_counts.counted_on = (SELECT MAX(" in sql
 
 
 def test_the_profiled_type_reaches_the_typed_path() -> None:

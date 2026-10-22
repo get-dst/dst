@@ -412,7 +412,7 @@ def test_a_level_metric_carries_its_snapshot_reading_as_a_declared_window_slot()
     m = SemanticModel(lens="t", dialect="duckdb", entities=[snapshots])
     level = from_intent(QueryIntent(entity="arr_snapshots", metrics=["arr"]), m, None)
     assert [(s.name, s.source, s.value) for s in level.slots if s.kind == "window"] == [
-        ("snapshot_date", "declared", "latest snapshot in the window")
+        ("snapshot_date", "declared", "latest snapshot in the data")
     ]
     assert level.tag == "declared"  # a window slot never moves the tag
     by_month = from_intent(
@@ -422,7 +422,9 @@ def test_a_level_metric_carries_its_snapshot_reading_as_a_declared_window_slot()
     flow = from_intent(QueryIntent(entity="arr_snapshots", metrics=["bookings"]), m, None)
     assert not [s for s in flow.slots if s.kind == "window"]
     line = level_disclosure(QueryIntent(entity="arr_snapshots", metrics=["arr"]), m)
-    assert line is not None and "`arr`" in line and "latest snapshot in the window" in line
+    # asked over no period, the level says it read the newest snapshot
+    assert line is not None and "`arr`" in line and "latest snapshot in the data" in line
+    assert "names no period" in line
     assert level_disclosure(QueryIntent(entity="arr_snapshots", metrics=["bookings"]), m) is None
 
 

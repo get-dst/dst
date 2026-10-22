@@ -1,0 +1,8 @@
+name: toolshed
+connections:
+  toolshed:
+    type: duckdb
+    config:
+      path: toolshed.duckdb
+lineage:
+  dbt: ../dbt_toolshed/target

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, timedelta
+from typing import Literal
 
 _REL_NORM = {"current": "this", "previous": "last", "prior": "last", "past": "last"}
 _MTD = {"ytd": "this year", "qtd": "this quarter", "mtd": "this month"}
@@ -148,6 +149,83 @@ _EDGE = re.compile(
     rf"|(?P<iso>(?:19|20)\d{{2}}-(?:0[1-9]|1[0-2])))(?![\w-])",
     re.IGNORECASE,
 )
+# A period of a year: "2026", "the year 2026", "Q3 2026", "H1 of 2026", "the
+# third quarter of 2026", "the second half, 2026", "2026-Q3".
+_PART_ORD = r"first|1st|second|2nd|third|3rd|fourth|4th|last|final"
+_PERIOD_TAIL = (
+    rf"(?:the\s+)?(?:(?:q(?P<q>[1-4])|h(?P<h>[12]))(?:\s*,?\s*(?:of\s+)?)"
+    rf"|(?P<pord>{_PART_ORD})\s+(?P<punit>quarter|half)(?:\s*,\s*|\s+(?:of|in)\s+)"
+    rf"|year\s+)?(?P<py>{_YR})(?:-(?:q(?P<iq>[1-4])|h(?P<ih>[12])))?(?![\w-])"
+)
+# "the end of Q3 2026", "the close of 2026", "the start of the second half of
+# 2026": the period's last (or first) day, as "the end of August" is the
+# month's. A level metric reads it as the period's last snapshot
+# (``month_end_as_month``).
+_PERIOD_EDGE = re.compile(
+    rf"\b(?P<edge>start|beginning|end|close)\s+of\s+{_PERIOD_TAIL}", re.IGNORECASE
+)
+# "the first 2 quarters of 2026", "the last 3 months of Q3 2026", "the first
+# 6 weeks of 2026": that part of the period — never the whole year, and its
+# number never a top N.
+_FIRST_LAST_OF = re.compile(
+    rf"\b(?P<which>first|last|final|opening|closing)\s+(?:(?P<n>{_N})\s+)?"
+    rf"(?P<unit>days?|weeks?|months?|quarters?)\s+(?:of|in)\s+{_PERIOD_TAIL}",
+    re.IGNORECASE,
+)
+_PART_NUM = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3}
+_PART_NUM |= {"fourth": 4, "4th": 4}
+
+
+def _period_of(m: re.Match[str]) -> tuple[date, date] | None:
+    """The first and last day of the period a ``_PERIOD_TAIL`` match names,
+    or None when it names no such period (a fifth quarter)."""
+    y = int(m.group("py"))
+    q = m.group("q") or m.group("iq")
+    h = m.group("h") or m.group("ih")
+    if ord_ := m.group("pord"):
+        unit = m.group("punit").lower()
+        n = _PART_NUM.get(ord_.lower(), 4 if unit == "quarter" else 2)
+        if unit == "half" and n > 2:
+            return None
+        q, h = (str(n), None) if unit == "quarter" else (None, str(n))
+    if q:
+        first = 3 * int(q) - 2
+        return date(y, first, 1), _month_end(y, first + 2)
+    if h:
+        first = 6 * int(h) - 5
+        return date(y, first, 1), _month_end(y, first + 5)
+    return date(y, 1, 1), date(y, 12, 31)
+
+
+def _part_of_period(m: re.Match[str]) -> str:
+    """The term for "the first/last N <unit>s of <period>": whole months as a
+    month span beside the year, days and weeks as a span of days. A part
+    longer than the period is a term that resolves to nothing, so the window
+    asks instead of serving the period."""
+    period = _period_of(m)
+    raw = (m.group("n") or "1").lower()
+    n = _COUNT_WORDS.get(raw) or int(raw)
+    unit = m.group("unit").lower().rstrip("s")
+    first = m.group("which").lower() in ("first", "opening")
+    if period is None or n < 1:
+        return f"unplaced:{m.group(0).lower()}"
+    p0, p1 = period
+    if unit in ("month", "quarter"):
+        months = n * (3 if unit == "quarter" else 1)
+        span = p1.month - p0.month + 1
+        if months > span:
+            return f"unplaced:{m.group(0).lower()}"
+        lo, hi = (p0.month, p0.month + months - 1) if first else (p1.month - months + 1, p1.month)
+        return f"span:{_MONTH_BY_NUM[lo]}-{_MONTH_BY_NUM[hi]}"
+    days = n * (7 if unit == "week" else 1)
+    if days > (p1 - p0).days + 1:
+        return f"unplaced:{m.group(0).lower()}"
+    start, end = (
+        (p0, p0 + timedelta(days=days - 1)) if first else (p1 - timedelta(days=days - 1), p1)
+    )
+    return f"{start.isoformat()}..{end.isoformat()}"
+
+
 # Vague parts of a month: never served as the month, never guessed — the
 # caller is asked, offered the days each reading would use.
 _VAGUE = re.compile(
@@ -289,6 +367,26 @@ def _day_phrases(text: str) -> list[tuple[tuple[int, int], str]]:
         else:
             term = _range_term(month, f"end~{n - 1}", month, "end", y, y)
         out.append((m.span(), term))
+    for m in _FIRST_LAST_OF.finditer(text):
+        unit = m.group("unit").lower()
+        if m.group("n") is None and (unit.endswith("s") or unit == "quarter"):
+            # "the first months of 2026" names no number (the qualifier asks);
+            # "the first quarter of 2026" is the quarter, read as one below
+            continue
+        if free(m.span()):
+            term = _part_of_period(m)
+            out.append((m.span(), term))
+            if term.startswith("span:"):
+                out.append((m.span("py"), m.group("py")))
+    for m in _PERIOD_EDGE.finditer(text):
+        if not free(m.span()):
+            continue
+        if (period := _period_of(m)) is None:
+            out.append((m.span(), f"unplaced:{m.group(0).lower()}"))
+        elif m.group("edge").lower() in ("start", "beginning"):
+            out.append((m.span(), f"start:{period[0].isoformat()}..{period[1].isoformat()}"))
+        else:
+            out.append((m.span(), f"end:{period[0].isoformat()}..{period[1].isoformat()}"))
     for m in _EDGE.finditer(text):
         if not free(m.span()) or not dateish(m, m.group("m") if not m.group("y") else None):
             continue
@@ -299,7 +397,7 @@ def _day_phrases(text: str) -> list[tuple[tuple[int, int], str]]:
         else:
             md, yr = _md(m.group("m"), 1), year(m)
         if m.group("edge").lower() in ("start", "beginning"):
-            out.append((m.span(), _dated(md, yr)))
+            out.append((m.span(), f"start:{_dated(md, yr)}..{_dated(md[:2] + '-end', yr)}"))
         else:
             out.append((m.span(), "end:" + _dated(md[:2] + "-end", yr)))
     for m in _REL_EDGE.finditer(text):
@@ -619,7 +717,7 @@ def _calendar_period(today: date, rel: str, grain: str) -> tuple[date, date]:
 
 
 _DAY_PART = r"(?:(?:19|20)\d{2}|-)-\d{2}-(?:\d{2}|end(?:~\d{1,2})?)"
-_DAY_TERM = re.compile(rf"(?:week:|end:)?{_DAY_PART}(?:\.\.{_DAY_PART})?")
+_DAY_TERM = re.compile(rf"(?:week:|end:|start:)?{_DAY_PART}(?:\.\.{_DAY_PART})?")
 
 
 def _day_parts(part: str) -> tuple[int | None, int, str]:
@@ -650,7 +748,15 @@ def _day_span(term: str, today: date) -> tuple[date, date] | None:
     2025's. "week:<day>" is the Monday-to-Sunday week holding that day;
     "end:<day>" is the last day of a month ("the end of August"), which a
     level metric reads as the month's last snapshot (``month_end_as_month``)."""
+    if term.startswith("start:"):
+        # the start of a month or a period: its first day
+        span = _day_span(term[6:], today)
+        return None if span is None else (span[0], span[0])
     week = term.startswith("week:")
+    if term.startswith("end:") and ".." in term:
+        # the end of a quarter, a half or a year: its last day
+        last_day = date.fromisoformat(term.partition("..")[2])
+        return last_day, last_day
     first, _sep, last = term.removeprefix("week:").removeprefix("end:").partition("..")
     y1, m1, d1 = _day_parts(first)
     y2, m2, d2 = _day_parts(last) if last else (y1, m1, d1)
@@ -677,11 +783,33 @@ def month_end_as_month(terms: frozenset[str]) -> frozenset[str]:
     for t in terms:
         if (edge := _EDGE_TERM.fullmatch(t)) and edge.group(1) == "end":
             out.add(t[4:])
+        elif t.startswith("end:") and ".." in t:
+            out.add(t[4:])  # a quarter's, a half's or a year's end: the whole period
         elif t.startswith("end:") and not edge:
             out.add(f"{t[4:].rsplit('-', 1)[0]}-01..{t[4:]}")
         else:
             out.add(t)
     return frozenset(out)
+
+
+def edge_as_period(terms: frozenset[str]) -> tuple[frozenset[str], Literal["first", "last"] | None]:
+    """``terms`` with each start or end of a period read as the whole period,
+    and which snapshot of it a level reads there: "at the start of Q3" is
+    Q3's first snapshot, "at the end of August" August's last. None when the
+    terms name no edge, or both edges (a span from one to the other)."""
+    starts = {t for t in terms if t.startswith("start:")}
+    ends = {t for t in terms if t.startswith("end:")}
+    if starts and ends:
+        return terms, None
+    if ends:
+        return month_end_as_month(terms), "last"
+    if not starts:
+        return terms, None
+    out = set(terms - starts)
+    for t in starts:
+        edge = _EDGE_TERM.fullmatch(t)
+        out.add(f"{edge.group(2)} {edge.group(3)}" if edge else t[6:])
+    return frozenset(out), "first"
 
 
 def _placed_month(m: re.Match[str], today: date) -> tuple[date, date]:

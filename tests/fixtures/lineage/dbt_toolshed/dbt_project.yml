@@ -1,0 +1,16 @@
+name: toolshed
+version: "1.0.0"
+profile: toolshed
+model-paths: ["models"]
+macro-paths: ["macros"]
+models:
+  toolshed:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: ephemeral
+    marts:
+      +schema: marts
+      +materialized: table

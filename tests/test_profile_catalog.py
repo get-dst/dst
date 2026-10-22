@@ -270,7 +270,10 @@ class _FakeBQClient:
     def query(self, sql: str, job_config: Any = None, timeout: float | None = None) -> Any:
         assert "INFORMATION_SCHEMA.PARTITIONS" in sql, f"data-scanning SQL issued: {sql}"
         self.queries.append(sql)
-        return SimpleNamespace(result=lambda timeout=None: [("orders", "20260601")])
+        # BigQuery bills a metadata read at the per-job minimum (10 MiB).
+        return SimpleNamespace(
+            result=lambda timeout=None: [("orders", "20260601")], total_bytes_billed=10_485_760
+        )
 
 
 def _bq_connector(client: _FakeBQClient) -> BigQueryConnector:
@@ -304,6 +307,33 @@ def test_bigquery_profile_catalog_metadata_only() -> None:
     # exactly one query was issued, and it hit the PARTITIONS metadata view
     assert len(client.queries) == 1
     assert conn.catalog_join_candidates() == []
+
+
+def test_the_partitions_read_is_billed_into_the_probe_meter() -> None:
+    """The catalog pass's one PARTITIONS read is a billed job: the probe's
+    bill counts it at the bytes the job billed, so a probe that samples
+    nothing does not report 0 B."""
+    from services.connectors.sampling import metered
+
+    with metered() as meter:
+        _bq_connector(_FakeBQClient()).profile_catalog()
+    assert meter.statements == 1
+    assert meter.priced and meter.bytes_scanned == 10_485_760
+
+
+def test_the_probe_bill_reports_billed_bytes_and_says_the_minimum(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from services.cli.main import _print_probe_bill
+    from services.connectors.sampling import SampleMeter
+    from services.observability import cost
+
+    _print_probe_bill("wh", "bigquery", SampleMeter(3, 10_485_760), cost.warehouse_cost_usd)
+    line = capsys.readouterr().err
+    assert "'wh': 3 probe statement(s), 10.49 MB billed" in line
+    assert "BigQuery bills at least 10 MB per statement it runs" in line
+    _print_probe_bill("wh", "duckdb", SampleMeter(2, 0, priced=False), cost.warehouse_cost_usd)
+    assert "bytes not reported by duckdb" in capsys.readouterr().err
 
 
 def test_bigquery_latest_partitions_degrades_on_error() -> None:

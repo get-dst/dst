@@ -148,6 +148,10 @@ names the running job.
 and what it reads; `--select @changed` pushes only what differs from the server.
 A selection that changes a shared asset another published lens reads is refused,
 naming that lens, until the selection takes it too (`entity/orders+`).
+Downstream of dbt or SQLMesh, `table/stg_orders+` takes every lens on the marts built
+from that model, and `--tables-from -` takes the tool's own selection from stdin, for
+example `dbt -q ls -s state:modified+ --resource-type model --output name | dst apply
+--tables-from -` (see [Tables and the model DAG](../reference/cli.md#tables-and-the-model-dag)).
 `--scope cases` lands eval-case edits without re-running any gate.
 
 **On a schedule — probe, then drift, then apply when green, then test.** `dst

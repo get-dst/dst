@@ -16,6 +16,7 @@ from __future__ import annotations
 from services.contracts.protocols import Decider, Option
 from services.contracts.resolution import DecisionRecord
 from services.contracts.semantic_model import Definition
+from services.observability import usage as ai_usage
 from services.runtime import ambiguity, decision_policy
 
 SLOT = "reading"
@@ -36,18 +37,10 @@ def decide_reading(
         "declared meaning. Which declared reading does the question mean? "
         "Pick none if the wording does not settle it."
     )
-    dec = decider.decide(question=question, context=context, options=options, allow_none=True)
-    verdict = decision_policy.verdict(dec, SLOT, policies)
-    record = DecisionRecord(
-        slot=SLOT,
-        chosen=dec.chosen,
-        p=dec.p,
-        runner_up=dec.runner_up,
-        margin=dec.margin,
-        verdict=verdict,
-        provider=dec.provider,
-    )
-    if verdict != "act" or dec.chosen is None:
+    with ai_usage.purpose("decide"):
+        dec = decider.decide(question=question, context=context, options=options, allow_none=True)
+    record = decision_policy.record(dec, SLOT, policies)
+    if record.verdict != "act" or dec.chosen is None:
         return None, record
     mapping = next(
         (m for m in d.possible_mappings if ambiguity.mapping_label(m) == dec.chosen), None

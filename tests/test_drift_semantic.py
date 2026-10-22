@@ -61,15 +61,41 @@ def _cross(deltas: list) -> list[wd.Finding]:  # type: ignore[type-arg]
 # ── the diff ─────────────────────────────────────────────────────────────────
 
 
-def test_a_changed_column_comment_breaks_a_declared_reference() -> None:
+def test_a_changed_column_comment_is_a_quiet_finding() -> None:
+    """Named once, never a warning on every reader and never an exit code: a
+    meaning that really moved shows in the measured kinds on the next probe."""
     before = _table(_column("shipped_at", description="shipment time, UTC"))
     after = _table(_column("shipped_at", description="shipment time, local"))
     findings = _cross(wd.baseline_drift(before, after))
     assert [f.kind for f in findings] == ["column_recommented"]
-    assert wd.is_breaking(findings[0]) and wd.exit_code(findings) == 1
-    text = "\n".join(wd.render(findings[0]))
-    assert "RECOMMENTED `shipped_at` 'shipment time, UTC' -> 'shipment time, local'" in text
-    assert "entity `orders`" in text and "stated meaning changed" in text
+    assert wd.is_quiet(findings[0]) and not wd.is_breaking(findings[0])
+    assert wd.exit_code(findings) == 0
+    lines = wd.render(findings[0])
+    assert lines == [
+        "ops.orders: RECOMMENTED `shipped_at` 'shipment time, UTC' -> 'shipment time, local'"
+        " — comment only (1 asset(s) read this table)"
+    ]
+
+
+def test_a_comment_change_does_not_hide_a_breaking_finding() -> None:
+    before = _table(_column("shipped_at", description="shipment time, UTC"), _column("ordered_at"))
+    after = _table(_column("shipped_at", description="shipment time, local"))
+    findings = _cross(wd.baseline_drift(before, after))
+    assert [f.kind for f in findings] == ["column_dropped", "column_recommented"]
+    assert wd.exit_code(findings) == 1
+
+
+def test_a_description_dst_wrote_is_not_compared_with_the_catalog() -> None:
+    before = _table(
+        ColumnProfile(
+            name="shipped_at",
+            type="TIMESTAMP",
+            description="when the parcel left",
+            description_source="llm",
+        )
+    )
+    after = _table(_column("shipped_at"))
+    assert wd.baseline_drift(before, after) == []
 
 
 def test_a_comment_appearing_on_an_undocumented_column_is_a_recommented_finding() -> None:
@@ -253,7 +279,7 @@ def test_probe_arms_once_and_never_overwrites_the_baseline(
     assert baseline.read_text(encoding="utf-8") == recorded
     err = capsys.readouterr().err
     assert "first probe" not in err
-    assert "sampling statement(s); bytes not reported by duckdb" in err
+    assert "probe statement(s); bytes not reported by duckdb" in err
     assert _cli(monkeypatch, ["drift", *where]) == 2
     assert "gained column `carrier`" in capsys.readouterr().out
 
@@ -265,7 +291,7 @@ def test_probe_arms_once_and_never_overwrites_the_baseline(
     assert _cli(monkeypatch, ["drift", *where]) == 0
 
 
-def test_a_comment_change_in_the_live_warehouse_is_breaking(
+def test_a_comment_change_in_the_live_warehouse_is_reported_quietly(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = _project(tmp_path)
@@ -273,10 +299,11 @@ def test_a_comment_change_in_the_live_warehouse_is_breaking(
     assert _cli(monkeypatch, ["probe", *where]) == 0
     _sql(root, "COMMENT ON COLUMN ops.orders.shipped_at IS 'shipment time, local'")
     capsys.readouterr()
-    assert _cli(monkeypatch, ["drift", *where]) == 1
+    assert _cli(monkeypatch, ["drift", *where]) == 0
     out = capsys.readouterr().out
     assert "RECOMMENTED `shipped_at` 'shipment time, UTC' -> 'shipment time, local'" in out
-    assert "entity `orders`" in out and "BREAKING" in out
+    assert "comment only" in out and "1 comment-only change(s)" in out
+    assert "BREAKING" not in out and "may no longer hold" not in out and "  ! " not in out
 
 
 def test_a_shift_past_tolerance_in_the_newest_artifact_is_breaking(

@@ -73,7 +73,8 @@ from pathlib import Path
 from threading import Lock, RLock
 
 from services.contracts.protocols import CacheableBlock, LLMProvider, Message
-from services.observability.cost import ai_cost_usd
+from services.observability import usage as ai_usage
+from services.observability.cost import result_cost_usd
 
 from .conventions import MEMO_BYTES, memo_file
 from .lanes import DstLane, LaneAnswer
@@ -289,17 +290,18 @@ class _AgentLoop:
             if stop:
                 log.append(f"BUDGET: {stop}")
                 break
-            result = self._llm.complete(
-                system=[CacheableBlock(text=system, ttl="1h")],
-                messages=messages,
-                model=self._model,
-                temperature=0.0,
-                # Reasoning-mode headroom (same bug as the lanes' 1024 cap):
-                # thinking bills against max_tokens before the JSON lands.
-                max_tokens=8192,
-            )
+            with ai_usage.purpose("other"):
+                result = self._llm.complete(
+                    system=[CacheableBlock(text=system, ttl="1h")],
+                    messages=messages,
+                    model=self._model,
+                    temperature=0.0,
+                    # Reasoning-mode headroom (same bug as the lanes' 1024 cap):
+                    # thinking bills against max_tokens before the JSON lands.
+                    max_tokens=8192,
+                )
             tokens += result.input_tokens + result.output_tokens
-            spent += ai_cost_usd(self._model, result.input_tokens, result.output_tokens) or 0.0
+            spent += result_cost_usd(self._model, result) or 0.0
             log.append(f"MODEL: {result.text[:_LOG_CHARS]}")
 
             step = extract_step(result.text, self._verbs)

@@ -17,7 +17,7 @@ from services.connectors.duckdb import DuckDBConnector
 from services.contracts.fakes import ScriptedLLM
 from services.contracts.lens_config import LensConfig
 from services.contracts.semantic_model import Entity, EntitySource, Field, Metric, SemanticModel
-from services.runtime.generator import GroundedSQLGenerator
+from services.runtime.generator import FixedSQLGenerator, GroundedSQLGenerator
 from services.runtime.not_for import content_words, declared_asks, not_for_refusal
 from services.runtime.pipeline import run_query
 
@@ -163,3 +163,39 @@ def test_the_pipeline_refuses_before_any_generation(tmp_path: Path) -> None:
     assert res.trace.status == "refused"
     assert res.response.answer is not None
     assert "does not answer door-scan attendance; ask attendance" in res.response.answer
+
+
+@pytest.mark.parametrize(
+    ("certified_question", "refused"),
+    [
+        # Matched to another question: nobody approved that SQL for this ask.
+        ("How much did we take per show?", True),
+        # The certified question IS the asked one: a human approved exactly it.
+        ("Show me door-scan attendance against capacity", False),
+    ],
+)
+def test_a_certified_match_to_another_question_is_no_exemption(
+    tmp_path: Path, certified_question: str, refused: bool
+) -> None:
+    con = duckdb.connect(str(tmp_path / "wh.duckdb"))
+    con.execute("CREATE TABLE ticket_sales (amount DOUBLE)")
+    con.execute("INSERT INTO ticket_sales VALUES (1.0)")
+    con.close()
+    res = run_query(
+        question="Show me door-scan attendance against capacity",
+        lens_name="ticket_sales",
+        org_id="org",
+        caller="t",
+        semantic_model=_model(
+            "ticket_sales",
+            "ticket_sales",
+            [{"ask": "door-scan attendance", "sibling": "attendance"}],
+        ),
+        connector=DuckDBConnector(str(tmp_path / "wh.duckdb")),
+        generator=FixedSQLGenerator("SELECT SUM(amount) AS total FROM ticket_sales"),
+        composer=None,
+        certification="certified",
+        certified_match="equivalent",
+        certified_question=certified_question,
+    )
+    assert (res.trace.status == "refused") is refused

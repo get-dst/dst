@@ -20,8 +20,10 @@ from services.contracts.protocols import (
     Message,
 )
 from services.contracts.query_intent import QueryIntent
+from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
+from services.observability import usage as ai_usage
 from services.runtime.compiler import CompileError, metric_sql
 from services.runtime.identifiers import quote_ident, quote_table
 
@@ -375,11 +377,13 @@ class FixedSQLGenerator:
         definition_used: str | None = None,
         intent: QueryIntent | None = None,
         clarification: ClarificationRequest | None = None,
+        decisions: list[DecisionRecord] | None = None,
     ) -> None:
         self._sql = sql
         self._definition_used = definition_used
         self._intent = intent
         self._clarification = clarification
+        self._decisions = list(decisions or [])
         self.model = "certified"
 
     def generate(
@@ -396,6 +400,7 @@ class FixedSQLGenerator:
             definition_used=self._definition_used,
             intent=self._intent,
             clarification=self._clarification,
+            decisions=list(self._decisions),
         )
 
 
@@ -445,13 +450,14 @@ class GroundedSQLGenerator:
         gq: GeneratedQuery | None = None
         last_text = ""
         for _attempt in range(3):  # initial call + up to 2 format re-asks
-            res = self._llm.complete(
-                system=[system],
-                messages=messages,
-                model=self.model,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-            )
+            with ai_usage.purpose("generate"):
+                res = self._llm.complete(
+                    system=[system],
+                    messages=messages,
+                    model=self.model,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                )
             in_tok += res.input_tokens
             out_tok += res.output_tokens
             last_text = res.text

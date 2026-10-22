@@ -52,6 +52,7 @@ from services.contracts.semantic_model import Definition
 from services.lenses.profile_drift import STALE_TABLE_DAYS, _staleness
 from services.lenses.profile_store import StoredProfile
 from services.lenses.store import LensBundle
+from services.observability import usage as ai_usage
 from services.reviews.store import Ticket, Trace
 
 PatchKind = Literal["definition", "instruction", "certified", "reindex", "reprofile"]
@@ -269,17 +270,19 @@ def _draft_definition_body(
             if definition is not None
             else f"Term: {term} (new — not yet defined)"
         )
-        res = llm.complete(
-            system=[CacheableBlock(_DEFINITION_SYSTEM)],
-            messages=[
-                Message(
-                    "user", f"{current}\n{_trace_block(trace, note)}{_rejection_block(rejections)}"
-                )
-            ],
-            model=model,
-            temperature=0.0,
-            max_tokens=1200,  # a whole amended body, not one sentence
-        )
+        with ai_usage.purpose("other"):
+            res = llm.complete(
+                system=[CacheableBlock(_DEFINITION_SYSTEM)],
+                messages=[
+                    Message(
+                        "user",
+                        f"{current}\n{_trace_block(trace, note)}{_rejection_block(rejections)}",
+                    )
+                ],
+                model=model,
+                temperature=0.0,
+                max_tokens=1200,  # a whole amended body, not one sentence
+            )
         drafted = _strict_json_field(res.text, "body") or note
     return _amend(definition.body, drafted) if definition is not None else drafted
 
@@ -294,13 +297,16 @@ def _draft_instruction(
 ) -> str:
     if llm is None:
         return note
-    res = llm.complete(
-        system=[CacheableBlock(_INSTRUCTION_SYSTEM)],
-        messages=[Message("user", f"{_trace_block(trace, note)}{_rejection_block(rejections)}")],
-        model=model,
-        temperature=0.0,
-        max_tokens=200,
-    )
+    with ai_usage.purpose("other"):
+        res = llm.complete(
+            system=[CacheableBlock(_INSTRUCTION_SYSTEM)],
+            messages=[
+                Message("user", f"{_trace_block(trace, note)}{_rejection_block(rejections)}")
+            ],
+            model=model,
+            temperature=0.0,
+            max_tokens=200,
+        )
     return _strict_json_field(res.text, "instruction") or note
 
 

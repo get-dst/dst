@@ -1,7 +1,7 @@
 """An unconfirmed zero is never narrated as a business fact.
 
 The same unresolved-empty event used to coin-flip between a zero asserted as
-fact ("zero active paying customers are using AI replies") and an honest
+fact ("zero active paying customers use the booking widget") and an honest
 "I cannot provide a count" — whichever the composer model wrote. The narration
 is now ONE deterministic code path: when the empty-result investigation cannot
 confirm the zero, no model writes the

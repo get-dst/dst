@@ -7,10 +7,11 @@ logs the full trace off the response path.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from typing import Any, Literal
@@ -29,9 +30,16 @@ from services.certify.store import CertifiedAnswer
 from services.config import settings
 from services.contracts.correction import CorrectionDelta
 from services.contracts.lens_config import LensConfig
-from services.contracts.protocols import Connector, SharedSnapshot
+from services.contracts.protocols import Connector, Decision, DecisionUsage, SharedSnapshot
 from services.contracts.query_intent import QueryIntent
-from services.contracts.response import CertifiedProvenance, ConsumerAnswer, QueryResponse
+from services.contracts.resolution import DecisionRecord
+from services.contracts.response import (
+    CertifiedProvenance,
+    ClarificationRequest,
+    ConsumerAnswer,
+    QueryResponse,
+)
+from services.contracts.trace import TraceLog
 from services.db.session import org_session
 from services.governance import audit, drift_watch, quota, ratelimit
 from services.governance.credentials import CallerIdentity
@@ -48,6 +56,8 @@ from services.lenses.describe import (
 )
 from services.lenses.store import LensBundle, list_published_for_org, load_published_lens
 from services.llm.registry import ResolvedModel
+from services.observability import cost
+from services.observability import usage as ai_usage
 from services.observability.logger import log_trace
 from services.project import demo_page
 from services.reviews import service as reviews_service
@@ -63,7 +73,11 @@ from services.runtime.pipeline import (
     deterministic_refusal_not_computable,
     run_query,
 )
-from services.runtime.typed_resolver import TypedIntentGenerator, sole_metric_intent
+from services.runtime.typed_resolver import (
+    TypedIntentGenerator,
+    pin_intent,
+    sole_metric_intent,
+)
 
 log = logging.getLogger("dst")
 
@@ -185,7 +199,7 @@ def _lens_unavailable(name: str) -> HTTPException:
     """ONE response for 'does not exist' and 'exists but not granted to you'.
     A 404-vs-403 split is a reliable existence oracle — any caller key can
     enumerate the org's lens inventory by probing names,
-    and lens names describe the business (two_step_checkout, revrec_oss,
+    and lens names describe the business (split_checkout, revrec_oss,
     ae_quota each disclose a program or a GTM motion). The managed router
     already upholds non-disclosure (candidates are scoped BEFORE routing);
     the direct routes now match it. The audit trail keeps the true reason —
@@ -367,7 +381,7 @@ def describe_lens_for_caller(
             certified_examples = [e.question for e in active_certified(session, name)[:3]]
         except Exception:
             log.exception("certified example lookup failed for lens %s", name)
-    domains, certified = _catalog_facts(bundle, caller, name)
+    domains, certified, unsampled = _catalog_facts(bundle, caller, name)
     return describe_model(
         name,
         display_name=bundle.config.display_name,
@@ -377,29 +391,32 @@ def describe_lens_for_caller(
         certified_examples=certified_examples,
         domains=domains,
         certified=certified,
+        unsampled=unsampled,
     )
 
 
 def _catalog_facts(
     bundle: LensBundle, caller: CallerIdentity, name: str
-) -> tuple[dict[str, dict[str, list[str]]], list[tuple[str, list[str]]]]:
+) -> tuple[dict[str, dict[str, list[str]]], list[tuple[str, list[str]]], dict[str, str]]:
     """What the metric catalog reads besides the model: each entity's complete
     value dictionaries from the stored profile (none when the profile is past
     probe.max_age: a stale dictionary proves nothing about today's values),
     and each active certified answer's id with its stored terms. Best-effort,
     like the certified examples: a failed lookup leaves the catalog without
-    values or certified links, never without metrics."""
+    values or certified links, never without metrics. Third: each entity
+    whose table was never sampled, and why (its values cannot bind)."""
     domains: dict[str, dict[str, list[str]]] = {}
     profiles, _as_of, age, _stamps = assembly.profile_facts(bundle, caller.org_id)
     if profiles and (age is None or not age.stale):
         domains = value_guard.entity_domains(bundle.semantic_model, profiles)
+    unsampled = value_guard.entity_unsampled(bundle.semantic_model, profiles)
     certified: list[tuple[str, list[str]]] = []
     try:
         with org_session(caller.org_id) as session:
             certified = [(a.id, list(a.terms or [])) for a in active_certified(session, name)]
     except Exception:
         log.exception("certified terms lookup failed for lens %s", name)
-    return domains, certified
+    return domains, certified, unsampled
 
 
 @router.get("/lenses/{name}/catalog", response_model=MetricCatalog)
@@ -411,7 +428,7 @@ def metric_catalog_for_caller(
     metrics' dependencies form — what an app needs to render a metric tree in
     one call. Same authorization as describe; no model call, no warehouse."""
     bundle = _authorized_bundle(name, caller)
-    domains, certified = _catalog_facts(bundle, caller, name)
+    domains, certified, _unsampled = _catalog_facts(bundle, caller, name)
     metrics, dimensions = catalog_of(bundle.semantic_model, domains=domains, certified=certified)
     return MetricCatalog(
         lens=name, metrics=metrics, dimensions=dimensions, tree=metric_tree(metrics)
@@ -673,7 +690,8 @@ def _serve_error_backstop(
     SQL dst compiled from an intent (``result.compiled``) that the applied
     baseline shows no drift under is dst's own fault, whatever the engine
     called it: no ticket, and the answer says the SQL is dst's. With no
-    baseline only an error about the SQL's own vocabulary is."""
+    baseline only an error about the SQL's own vocabulary is. Drift counts
+    only where it can break the statement (``DriftReport.breaks_sql``)."""
     if result.error_kind != "warehouse":
         return
     cause = drift_watch.cause_class(result.trace.error or "")
@@ -708,6 +726,14 @@ def _serve_error_backstop(
             report = (
                 drift_watch.check_connection(session, connection, org_id) if connection else None
             )
+            if report is not None and not report.breaks_sql(
+                result.response.sql or result.trace.sql or ""
+            ):
+                # Drift that cannot have made the warehouse reject this
+                # statement (a rewritten comment, a gained column, a change on
+                # a table it does not read) is not its cause: the schema the
+                # SQL reads is unchanged, and the lanes below attribute it.
+                report = None
             if report is not None:
                 ticket, _created = drift_watch.file_ticket(
                     session,
@@ -832,6 +858,42 @@ def _shaped(
     return response
 
 
+@contextlib.contextmanager
+def calls_logged(
+    background: BackgroundTasks, caller: CallerIdentity, rid: str, lens: str
+) -> Iterator[None]:
+    """Every provider call made inside the block is written to ai_call under
+    *rid*, off the response path, whatever the block's outcome (a call billed
+    before a 504 was still billed). A door that already opened a collection
+    (the routed one) writes it under the same id, with its own calls."""
+    if ai_usage.active():
+        yield
+        return
+    with ai_usage.collecting() as calls:
+        try:
+            yield
+        finally:
+            background.add_task(
+                ai_usage.write,
+                caller.org_id,
+                rid,
+                list(calls),
+                lens=lens,
+                caller=caller.name,
+                agent=caller.agent,
+            )
+
+
+def charge_cache(trace: TraceLog) -> None:
+    """Add what the request's calls so far billed for prompt-cache tokens to
+    its row. Every step charges the row its calls' uncached input and output
+    tokens; the cache reads and writes are known only to the provider's
+    usage record, so they are charged here, once, from the request's open
+    collection (the routing decider's calls included on a routed answer).
+    A cache token with no price leaves the row unpriced."""
+    trace.ai_cost_usd = cost.add_cost(trace.ai_cost_usd, ai_usage.surcharge(ai_usage.current()))
+
+
 def run_lens_query(
     name: str,
     q: str,
@@ -841,8 +903,15 @@ def run_lens_query(
     bindings: dict[str, str] | None = None,
     allow_untyped: bool | None = None,
     purpose: str = "",
+    routing: Decision | None = None,
+    request_id: str | None = None,
 ) -> QueryResponse | ConsumerAnswer:
     """Authorize + run the governed query pipeline for one lens question.
+
+    ``routing``: the measured decision that routed the question here (the
+    routed door's), charged to this answer's AI spend. ``request_id``: the id
+    the routed door already wrote on its routing_decision row, so observe can
+    tell a routing spend charged here from one that reached no request_log row.
 
     request_id_generated_here — the join key. Generated up front so the audit rows
     written inside `_authorized_bundle` (allow AND the deny paths) carry the same id
@@ -862,7 +931,25 @@ def run_lens_query(
     minutes) — an async caller MUST dispatch it off the event loop (run_in_threadpool /
     asyncio.to_thread); a sync FastAPI handler already gets that for free.
     """
-    rid = "req_" + uuid.uuid4().hex[:16]
+    rid = request_id or "req_" + uuid.uuid4().hex[:16]
+    with calls_logged(background, caller, rid, name):
+        return _run_lens_query(
+            name, q, caller, background, fmt, bindings, allow_untyped, purpose, routing, rid
+        )
+
+
+def _run_lens_query(
+    name: str,
+    q: str,
+    caller: CallerIdentity,
+    background: BackgroundTasks,
+    fmt: AnswerFormat,
+    bindings: dict[str, str] | None,
+    allow_untyped: bool | None,
+    purpose: str,
+    routing: Decision | None,
+    rid: str,
+) -> QueryResponse | ConsumerAnswer:
     bundle = _authorized_bundle(name, caller, rid)
 
     resolved = require_llm(bundle.config.model.model_ref())
@@ -892,6 +979,12 @@ def run_lens_query(
             allow_untyped=allow_untyped,
             tables_elsewhere=lambda: tables_held_elsewhere(caller, exclude=name),
         )
+    # Charged before any request_log write (the timeout path logs below): a
+    # row with this id always carries the routing spend, so observe counts the
+    # routing row's own copy only when no such row exists.
+    if routing is not None:
+        _charge_routing(result.trace, routing)
+    charge_cache(result.trace)
     _fail_on_warehouse_timeout(result, caller)
     if result.response.status == "refused":
         # A refusal that names a table another lens exposes says so: the caller
@@ -927,6 +1020,41 @@ def run_lens_query(
     if _auto_review_flags(bundle.config.auto_review, result.response):
         background.add_task(_auto_review, caller.org_id, result.response.request_id)
     return _shaped(result.response, fmt, audience)
+
+
+def routing_spend(
+    spent: Iterable[tuple[str, DecisionUsage | None]],
+) -> tuple[int, int, float | None] | None:
+    """``(tokens_in, tokens_out, cost_usd)`` of the routing decider's calls,
+    given as ``(provider, usage)`` pairs (a decision's, or what an outage
+    billed before it failed), each priced by its decider's model (None cost
+    when any is unpriced); None when no pair carries usage."""
+    tokens_in = tokens_out = 0
+    cost_usd: float | None = 0.0
+    charged = False
+    for provider, usage in spent:
+        if usage is None:
+            continue
+        i, o = round(usage.input_tokens), round(usage.output_tokens)
+        tokens_in += i
+        tokens_out += o
+        cost_usd = cost.add_cost(cost_usd, cost.decisions_cost_usd({provider or "": (i, o)}))
+        charged = True
+    return (tokens_in, tokens_out, cost_usd) if charged else None
+
+
+def _charge_routing(trace: TraceLog, routing: Decision) -> None:
+    """The routing decider's calls are this answer's AI spend, like the
+    generator's and the typed decider's: the votes that chose the lens are
+    added to the row's tokens and priced by the decider's model. An unpriced
+    model leaves the row's cost unpriced, never a partial sum."""
+    spend = routing_spend([(routing.provider, routing.usage)])
+    if spend is None:
+        return
+    tokens_in, tokens_out, cost_usd = spend
+    trace.ai_input_tokens = (trace.ai_input_tokens or 0) + tokens_in
+    trace.ai_output_tokens = (trace.ai_output_tokens or 0) + tokens_out
+    trace.ai_cost_usd = cost.add_cost(trace.ai_cost_usd, cost_usd)
 
 
 def serve_lens_question(
@@ -979,12 +1107,34 @@ def serve_lens_question(
             domains=assembled.value_domains,
             today=assembly.business_today_date(assembled.model.timezone),
         )
+        pinned: list[DecisionRecord] = []
+        if intent is not None:
+            # A ratio asked over no period reads the last complete month and
+            # says so (typed_resolver.pin_period), as on every door.
+            pin = pin_intent(
+                q,
+                intent,
+                assembled.model,
+                assembly.business_today_date(assembled.model.timezone),
+                period_field=assembled.period_fields.get(intent.entity or ""),
+            )
+            if isinstance(pin, ClarificationRequest):
+                generator = FixedSQLGenerator("", clarification=pin)
+                intent = None
+            elif pin is not None:
+                intent, record = pin
+                pinned.append(record)
         if intent is not None:
             try:
                 sql = compile_intent(
                     intent,
                     assembled.model,
-                    domains=assembled.value_domains,
+                    # The entity's own dictionaries, as the typed path reads
+                    # them: the model-wide ones drop a column two tables share.
+                    domains={
+                        **assembled.value_domains,
+                        **assembled.entity_domains.get(intent.entity or "", {}),
+                    },
                     column_types=assembled.column_types,
                 )
             except UnpinnedDimension as exc:
@@ -994,7 +1144,7 @@ def serve_lens_question(
                 log.exception("sole-metric intent did not compile; generating instead")
             else:
                 generator = FixedSQLGenerator(
-                    sql, definition_used=intent_term(intent), intent=intent
+                    sql, definition_used=intent_term(intent), intent=intent, decisions=pinned
                 )
                 generator_tier = "metrics"
 
@@ -1021,6 +1171,7 @@ def serve_lens_question(
         entity_coverage=assembled.entity_coverage,
         profile_age=assembled.profile_age,
         decisions=assembled.decisions,
+        spent=assembled.spent,
         connector=connector,
         generator=generator,
         escalate_generator=escalate,
@@ -1181,8 +1332,11 @@ def run_lens_metrics(
     rid = "req_" + uuid.uuid4().hex[:16]
     bundle = _authorized_bundle(name, caller, rid)
     serve = _MetricsServe.prepare(name, bundle, caller, fmt)
+    intent, pinned = serve.pinned(intent)
     sql = serve.compiled(intent)
-    result = serve.run(intent, sql, rid, serve.connector)
+    with calls_logged(background, caller, rid, name):
+        result = serve.run(intent, sql, rid, serve.connector, pinned)
+        charge_cache(result.trace)
     background.add_task(log_trace, result.trace)
     return _shaped(result.response, fmt, serve.audience)
 
@@ -1232,6 +1386,20 @@ class _MetricsServe:
             composer = AnswerComposer(resolved.llm, model=model_name)
         return cls(name, bundle, caller, connector, composer, model_name)
 
+    def pinned(self, intent: QueryIntent) -> tuple[QueryIntent, list[DecisionRecord]]:
+        """The intent with the last complete month pinned when it asks a
+        ratio over no period (typed_resolver.pin_period), and the record the
+        answer discloses it by. A month the entity's clock cannot hold is a
+        400 naming the period to pass."""
+        model = self.bundle.semantic_model
+        # No question text: a structured caller states a window as a filter.
+        pin = pin_intent("", intent, model, assembly.business_today_date(model.timezone))
+        if isinstance(pin, ClarificationRequest):
+            raise HTTPException(status_code=400, detail=pin.question)
+        if pin is None:
+            return intent, []
+        return pin[0], [pin[1]]
+
     def compiled(self, intent: QueryIntent) -> str:
         """The intent's SQL, or a 400 carrying the compiler's own sentence."""
         try:
@@ -1241,7 +1409,14 @@ class _MetricsServe:
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def run(self, intent: QueryIntent, sql: str, rid: str, connector: Connector) -> PipelineResult:
+    def run(
+        self,
+        intent: QueryIntent,
+        sql: str,
+        rid: str,
+        connector: Connector,
+        pinned: list[DecisionRecord] | None = None,
+    ) -> PipelineResult:
         caller, bundle = self.caller, self.bundle
         with attributed(
             Attribution(
@@ -1265,7 +1440,7 @@ class _MetricsServe:
                 # The caller's own intent names the metric — basis provenance is a
                 # fact here, not an attribution guess.
                 generator=FixedSQLGenerator(
-                    sql, definition_used=intent_term(intent), intent=intent
+                    sql, definition_used=intent_term(intent), intent=intent, decisions=pinned
                 ),
                 composer=self.composer,
                 max_rows=bundle.config.model.max_rows_to_return,
@@ -1442,8 +1617,11 @@ def run_lens_metrics_batch(
         item = body.intents[index]
         intent = QueryIntent(**item.model_dump(exclude={"id"}))
         try:
+            intent, pinned = serve.pinned(intent)
             sql = serve.compiled(intent)
-            result = serve.run(intent, sql, rids[index], connector)
+            with calls_logged(background, caller, rids[index], name):
+                result = serve.run(intent, sql, rids[index], connector, pinned)
+                charge_cache(result.trace)
         except HTTPException as exc:
             # A timed-out query was traced under its id; a refused compile never ran.
             rid = rids[index] if exc.status_code == 504 else None
@@ -1633,10 +1811,16 @@ def run_certified_for_caller(
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
     fmt: AnswerFormat = body.format if body else "both"
     audience = _audience(caller)
-    with attributed(
-        Attribution(
-            principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
-        )
+    with (
+        calls_logged(background, caller, rid, name),
+        attributed(
+            Attribution(
+                principal=caller.name,
+                agent=caller.agent,
+                request_id=rid,
+                org_id=str(caller.org_id),
+            )
+        ),
     ):
         result = run_query(
             question=question,
@@ -1672,6 +1856,7 @@ def run_certified_for_caller(
             generator_tier="certified",
             log_samples=bundle.config.logging.log_samples,
         )
+        charge_cache(result.trace)
     _fail_on_warehouse_timeout(result, caller)
     _trust_backstops(
         result,

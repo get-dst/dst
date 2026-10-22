@@ -319,6 +319,17 @@ def resolve_model(model: SemanticModel) -> tuple[SemanticModel, list[str], list[
                     f"latest snapshot — set default_time_field on entity '{e.name}' or "
                     "agg_time_field on the metric"
                 )
+            if m.window_reading is not None and m.additivity != "level":
+                ctx.error(
+                    f"metric {m.name}: window_reading '{m.window_reading}' says how a "
+                    "period reads a level — declare `additivity: level` with it, or drop it"
+                )
+            elif m.window_reading == "any_in_window" and m.agg != "count_distinct":
+                ctx.error(
+                    f"metric {m.name}: window_reading 'any_in_window' counts the distinct "
+                    "things flagged at any snapshot of the period — it needs `agg: "
+                    f"count_distinct` over what is flagged, not '{m.agg or m.type}'"
+                )
             m.filters = [_resolve_fragment(f, f"metric {m.name} filter", ctx) for f in m.filters]
             if m.type == "simple" and m.expr:
                 m.expr = _resolve_fragment(m.expr, f"metric {m.name}", ctx)

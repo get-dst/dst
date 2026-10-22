@@ -117,6 +117,10 @@ def sample_profiles(
         base = base_by_table.get(fragment.table)
         if base is None:  # a table we never asked about — refuse to store it
             continue
+        if fragment.unsampled is not None:
+            # Catalog facts only, and why: the table stays unsampled.
+            merged[fragment.table] = base.model_copy(update={"unsampled": fragment.unsampled})
+            continue
         merged[fragment.table] = merge_sampled(base, fragment, excluded)
     return merged
 

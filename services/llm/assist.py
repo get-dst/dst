@@ -13,6 +13,7 @@ from typing import Any
 
 from services.contracts.protocols import CacheableBlock, LLMProvider, Message
 from services.llm import registry
+from services.observability import usage as ai_usage
 
 
 def assist_llm() -> registry.ResolvedModel | None:
@@ -24,13 +25,14 @@ def complete_json(
     llm: LLMProvider, model: str, system: str, user: str, max_tokens: int = 1200
 ) -> dict[str, Any]:
     """Run a JSON-returning prompt and parse it, tolerating code fences."""
-    res = llm.complete(
-        system=[CacheableBlock(system)],
-        messages=[Message("user", user)],
-        model=model,
-        temperature=0.2,
-        max_tokens=max_tokens,
-    )
+    with ai_usage.purpose("generate"):
+        res = llm.complete(
+            system=[CacheableBlock(system)],
+            messages=[Message("user", user)],
+            model=model,
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
     body = res.text.strip()
     body = re.sub(r"^```[a-zA-Z]*", "", body).strip()
     body = re.sub(r"```$", "", body).strip()

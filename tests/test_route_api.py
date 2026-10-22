@@ -80,6 +80,8 @@ def test_route_runs_the_second_hop_and_stamps_provenance(monkeypatch: pytest.Mon
         bindings: dict[str, str] | None = None,
         allow_untyped: bool = False,
         purpose: str = "",
+        routing: object = None,
+        request_id: str | None = None,
     ) -> QueryResponse:
         captured["lens"], captured["q"], captured["fmt"] = name, q, fmt
         captured["purpose"] = purpose

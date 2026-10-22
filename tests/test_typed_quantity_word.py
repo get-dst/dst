@@ -203,3 +203,80 @@ def test_a_word_that_is_not_a_measure_stays_the_deciders_reading() -> None:
         "What was turnover in May?",
     ):
         assert unconsumed_quantity(question, e, ["rental_count"], model, {}) is None, question
+
+
+# ── false positives are forbidden ────────────────────────────────────────────
+
+
+def _replies(*metrics: Metric, fields: list[Field] | None = None) -> Entity:
+    """A help desk's replies: one row per reply sent."""
+    return Entity(
+        name="replies",
+        source=EntitySource(connection="wh", table="replies"),
+        default_time_field="sent_on",
+        primary_key=["reply_id"],
+        grain="one row per reply sent",
+        fields=[
+            Field(name="reply_id", type="string"),
+            Field(name="sent_on", type="date"),
+            Field(name="channel", type="string"),
+            Field(name="ai_suggested", type="boolean", description="a drafted reply was offered"),
+            Field(name="first_response_minutes", type="number"),
+            *(fields or []),
+        ],
+        metrics=list(metrics),
+    )
+
+
+_SENT = Metric(name="replies_sent", agg="count", expr="replies.reply_id", label="replies sent")
+
+
+def _unconsumed(question: str, entity: Entity, chosen: str) -> str | None:
+    model = SemanticModel(lens="desk", dialect="duckdb", entities=[entity])
+    return unconsumed_quantity(question, entity, [chosen], model, {"channel": ["email", "chat"]})
+
+
+def test_a_word_the_metric_carries_counts_though_a_field_name_carries_it_too() -> None:
+    assisted = Metric(name="ai_assisted_replies", agg="count", expr="replies.reply_id")
+    e = _replies(_SENT, assisted)
+    # "ai" of `ai_suggested`, "sent" of `sent_on`: still the chosen metric's words
+    assert _unconsumed("How many AI drafts in May 2026?", e, "ai_assisted_replies") is None
+    assert _unconsumed("How many messages sent in May 2026?", e, "replies_sent") is None
+
+
+def test_the_verb_a_count_is_named_for_is_evidence() -> None:
+    e = _replies(Metric(name="sent_count", agg="count", expr="replies.reply_id"))
+    assert _unconsumed("How many messages were sent in May 2026?", e, "sent_count") is None
+    # a verb the metric is not named for proves nothing
+    assert _unconsumed("How many tickets were opened in May 2026?", e, "sent_count") == "tickets"
+
+
+def test_a_word_inside_another_metrics_name_is_the_votes_to_weigh() -> None:
+    frt = Metric(
+        name="frt", agg="avg", expr="replies.first_response_minutes", label="first response time"
+    )
+    e = _replies(_SENT, frt)
+    assert _unconsumed("What were responses in May 2026?", e, "replies_sent") is None
+
+
+def test_names_match_as_stemmed_whole_words() -> None:
+    shipped = Metric(name="shipped_parcels", agg="sum", expr="replies.parcels")
+    e = _replies(
+        shipped,
+        fields=[Field(name="parcels", type="number"), Field(name="shipment_weight", type="number")],
+    )
+    assert _unconsumed("What were shipments by channel?", e, "shipped_parcels") is None
+
+
+def test_a_short_token_counts_only_where_the_lens_declares_it() -> None:
+    e = _replies(_SENT)
+    assert _unconsumed("What was the EU total in May 2026?", e, "replies_sent") is None
+    value = Field(name="gross_value", type="number", description="GV: what the reply billed")
+    e = _replies(_SENT, fields=[value])
+    assert _unconsumed("What was the GV total in May 2026?", e, "replies_sent") == "gv"
+
+
+def test_an_acronym_nothing_declares_still_clarifies() -> None:
+    e = _replies(_SENT)
+    assert _unconsumed("What was NPS in May 2026?", e, "replies_sent") == "nps"
+    assert _unconsumed("NPS by channel in May 2026", e, "replies_sent") == "nps"

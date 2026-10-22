@@ -39,11 +39,15 @@ from services.contracts.protocols import (
     ContextChunk,
     Decider,
     Decision,
+    DecisionUsage,
     GeneratedQuery,
     Option,
+    spend_on,
+    spent_by,
 )
 from services.contracts.query_intent import (
     FilterOp,
+    IntentCompare,
     IntentFilter,
     IntentOrder,
     QueryIntent,
@@ -53,22 +57,35 @@ from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import (
     Definition,
+    Dimension,
     Entity,
     Metric,
     SemanticModel,
     column_hidden,
+    column_internal,
 )
-from services.runtime import ambiguity, decision_policy, reading, timewindow, typed_health
+from services.observability import usage as ai_usage
+from services.runtime import (
+    ambiguity,
+    decision_policy,
+    growth,
+    reading,
+    timewindow,
+    typed_health,
+)
 from services.runtime.compiler import (
     CompileError,
     UnpinnedDimension,
+    _single_value_columns,
     compile_intent,
     contradicted_literal,
     govern_literals,
     is_predicate,
     metric_sql,
     prefer_weighted_ratio,
+    reads_as_level,
 )
+from services.runtime.compiler import _resolve_entity as resolve_entity
 from services.runtime.intent_generator import intent_term
 from services.runtime.option_sets import option_sets
 
@@ -115,7 +132,13 @@ _OPS = [
     Option(">=", "at least / from"),
     Option("<=", "at most / up to"),
 ]
-_TOP = re.compile(r"\b(?:top|first|largest|biggest|highest)\s+(\d{1,3})\b", re.I)
+# "first N" before a calendar unit counts periods ("the first 2 quarters"),
+# never a top N, even where the window phrase around it was not read.
+_TOP = re.compile(
+    r"\b(?:top|largest|biggest|highest|first(?!\s+\d{1,3}\s+(?:calendar\s+)?"
+    r"(?:days?|weeks?|months?|quarters?|years?)\b))\s+(\d{1,3})\b",
+    re.I,
+)
 _BOTTOM = re.compile(r"\b(?:bottom|lowest|smallest|fewest)\s+(\d{1,3})\b", re.I)
 _HIGHEST = re.compile(r"\b(?:highest|largest|biggest|most|top)\b", re.I)
 _LOWEST = re.compile(r"\b(?:lowest|smallest|least|fewest|bottom)\b", re.I)
@@ -131,6 +154,11 @@ _YEARISH = re.compile(r"\b(?:19|20)\d{2}\b")
 QUESTION_TEXT = "question-text"
 _LETTER = re.compile(r"[^\W\d_]")
 _CODE = re.compile(r"^[A-Z0-9]{1,4}$")
+
+
+def _said_plural(word: str) -> str:
+    """A counted noun as the question says it, in the plural: "members" stays."""
+    return word if word.endswith("s") else _plural(word)
 
 
 def _plural(value: str) -> str:
@@ -284,9 +312,72 @@ def _value_aliases(model: SemanticModel) -> dict[str, dict[str, str]]:
     return out
 
 
+def _without(question: str, values: set[str]) -> str:
+    """The question with every occurrence of ``values`` blanked out, case
+    aside — what is left to read once the named values are consumed."""
+    for v in sorted(values, key=len, reverse=True):
+        question = re.sub(rf"(?<!\w){re.escape(v)}(?!\w)", " ", question, flags=re.I)
+    return question
+
+
 def _uses(named: dict[str, str], filters: list[IntentFilter]) -> bool:
     """Does some filter restrict one of the named value's columns to it?"""
     return any(f.op == "=" and f.field in named and f.value == named[f.field] for f in filters)
+
+
+# The words a true/false column's name opens with to say it is a flag, not
+# what it flags: `is_ebike` is about e-bikes, `has_refund` about refunds.
+_FLAG_PREFIX = frozenset("is has was were had are can did".split())
+# Written before a flag's subject, these say the rows where it is false:
+# "unpaid", "non-student", "not paid", "no warranty".
+_FLAG_NEGATION = ("un", "non", "not", "no")
+
+
+def named_flags(question: str, entity: Entity, columns: list[str]) -> list[tuple[str, str, bool]]:
+    """The true/false columns among ``columns`` the question names by their
+    subject — `is_ebike` by "e-bike rides", `paid` by "unpaid invoices" — as
+    ``(column, the words as written, negated)``. A flag's dictionary holds only
+    true and false, so ``named_values`` never sees one, and a restriction said
+    this way was dropped whenever the filter decision answered "none". The
+    subject is the column's name without its flag prefix, read joined so
+    hyphens and spacing do not matter ("e-bike", "e bike", "ebike"), its last
+    word also plural; un-, non-, not or no in front negates it."""
+    words = _WORD.findall(question.lower())
+    out: list[tuple[str, str, bool]] = []
+    for column in columns:
+        if _field_type(entity, column) != "boolean":
+            continue
+        parts = _WORD.findall(column.rsplit(".", 1)[-1].lower())
+        while parts and parts[0] in _FLAG_PREFIX:
+            parts = parts[1:]
+        subject = "".join(parts)
+        if len(subject) < 3:
+            continue
+        forms = {subject, "".join([*parts[:-1], _plural(parts[-1])])} if parts else set()
+        hit: tuple[str, bool] | None = None
+        for i in range(len(words)):
+            for j in range(i + 1, min(i + len(parts) + 3, len(words) + 1)):
+                joined = "".join(words[i:j])
+                neg = next((n for n in _FLAG_NEGATION if joined.startswith(n)), "")
+                if joined in forms or (neg and joined[len(neg) :] in forms):
+                    hit = (" ".join(words[i:j]), joined not in forms)
+                    break
+            if hit is not None:
+                break
+        if hit is not None:
+            out.append((column, *hit))
+    return out
+
+
+def _population_columns(entity: Entity, dialect: str | None) -> set[str]:
+    """The columns the entity's ``population_filter`` reads, lowercased."""
+    if not (entity.population_filter or "").strip():
+        return set()
+    try:
+        tree = sqlglot.parse_one(entity.population_filter or "", read=dialect or None)
+    except sqlglot.errors.ParseError:
+        return set(_WORD.findall((entity.population_filter or "").lower()))
+    return {c.name.lower() for c in tree.find_all(exp.Column)}
 
 
 GRAMMAR = {
@@ -303,6 +394,9 @@ class TypedResolution:
     decisions: list[DecisionRecord] = field(default_factory=list)
     clarification: ClarificationRequest | None = None
     decline: str | None = None
+    # Answers a batched call fetched ahead that the resolution never reached:
+    # not decisions of this resolution, but billed — their usage is charged.
+    unused: list[DecisionRecord] = field(default_factory=list)
     # Filter columns whose value came from the caller's bindings.
     supplied: list[str] = field(default_factory=list)
     # Filter columns whose value the question named verbatim (named_values).
@@ -326,6 +420,11 @@ class _Decline(Exception):
         self.reason = reason
 
 
+class _Refused(_Decline):
+    """The decider refused a slot's question: the whole question declines,
+    whichever slot it was, naming the refusal."""
+
+
 _MONTH_PERIOD = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 # A breakdown over time is ASKED in words — by month, weekly, daily trend,
 # over time. A stated period ("in August 2026") is a window, never a grain,
@@ -342,6 +441,28 @@ _BREAKDOWN_OVER_TIME = re.compile(
 
 def asks_breakdown_over_time(question: str) -> bool:
     return _BREAKDOWN_OVER_TIME.search(question) is not None
+
+
+_UNIT_OF = {
+    "hourly": "hour",
+    "daily": "day",
+    "weekly": "week",
+    "monthly": "month",
+    "quarterly": "quarter",
+    "yearly": "year",
+    "annually": "year",
+}
+
+
+def split_over_time(question: str) -> str:
+    """How the question asks to split over time, as a refusal says it: "by
+    month" for "monthly" or "per month", "over time" for a trend."""
+    m = _BREAKDOWN_OVER_TIME.search(question)
+    if m is None:
+        return "over time"
+    words = re.findall(r"[a-z]+", m.group(0).lower())
+    unit = next((w for w in words if w in _UNIT_OF.values()), _UNIT_OF.get(words[0]))
+    return f"by {unit}" if unit else "over time"
 
 
 def period_field(entity: Entity, domains: dict[str, list[str]]) -> str | None:
@@ -420,6 +541,45 @@ def _named_spans(question: str, options: list[Option]) -> list[tuple[int, str, s
     return sorted(found)
 
 
+def exact_over_partial(question: str, picked: str, options: list[Option]) -> str | None:
+    """The metric the question names word for word (name, label or alias,
+    longest first) when the voted metric ``picked`` is said only inside that
+    phrase: "net new members", the alias of the net metric, holds the whole
+    name of `new_members`, and a vote for the latter serves the joiners as
+    the net change. An exact phrase is a declared fact and outranks a metric
+    it merely contains. None when the vote stands: the question names no
+    other metric, or says a word of the voted metric outside the phrase, or
+    none of its words at all (the vote read it some other way)."""
+    by_name = {o.name: o for o in options}
+    voted = by_name.get(picked)
+    if voted is None:
+        return None
+    spans = [s for s in _named_spans(question, options) if s[1] != picked]
+    if not spans or any(name == picked for _p, name, _s in _named_spans(question, options)):
+        return None
+    text = _as_words(question)
+    own = {
+        w
+        for spelling in (voted.name.rsplit(".", 1)[-1], *voted.aliases)
+        for w in _as_words(spelling).split()
+        if w not in _ORDINARY
+    }
+    stems = {_word_stem(w) for w in own}
+    inside: dict[str, bool] = {}
+    covered: list[tuple[int, int, str]] = []
+    for _pos, name, surface in spans:
+        for m in re.finditer(rf"(?<!\w){re.escape(surface)}(?!\w)", text):
+            covered.append((m.start(), m.end(), name))
+    for m in re.finditer(r"[a-z0-9]+", text):
+        if _word_stem(m.group(0)) not in stems:
+            continue
+        holder = next((n for a, b, n in covered if a <= m.start() and m.end() <= b), None)
+        if holder is None:
+            return None  # the voted metric's own word, said outside any exact phrase
+        inside[holder] = True
+    return next(iter(inside)) if len(inside) == 1 else None
+
+
 # The words a question may add around a metric's name and still ask for
 # nothing but that figure: interrogative frame, politeness, "total". Any other
 # word — a period, a place, a dimension, a limit — is a slot, and the question
@@ -429,9 +589,144 @@ _FRAME_WORDS = frozenset(
     "value of all and whats s were are was do we have i want need know can you it".split()
 )
 # The prepositions a period rides in on: "in September", "for Q3 2026",
-# "during last month", "on 28 August". Admitted only beside a window the text
-# states.
-_WINDOW_FRAME_WORDS = frozenset("in for during over within on".split())
+# "during last month", "on 28 August", "at the start of Q3". Admitted only
+# beside a window the text states.
+_WINDOW_FRAME_WORDS = frozenset("in for during over within on at".split())
+
+
+# Words a time field's name carries that say it is a time, not which one:
+# `booked_at` and `booking_date` are named by "booked"/"booking", never "date".
+_CLOCK_GENERIC = frozenset("at on date day time timestamp ts dt utc local".split())
+
+
+def _named_entity(question: str, model: SemanticModel) -> str | None:
+    """The one entity a listing names by its own name word for word ("which
+    stations closed" of `stations`), the last word singular or plural: what
+    the rows are is read off the text, as a named metric is. None when no
+    entity, or more than one, is named."""
+    text = f" {_as_words(question)} "
+    hits = []
+    for e in model.entities:
+        words = _as_words(e.name)
+        head, _sp, last = words.rpartition(" ")
+        singular = last[:-1] if last.endswith("s") and len(last) > 3 else last
+        forms = {f"{head} {w}".strip() for w in (last, singular, _plural(singular))}
+        if any(f" {f} " in text for f in forms if f):
+            hits.append(e.name)
+    return hits[0] if len(hits) == 1 else None
+
+
+def entity_clocks(entity: Entity) -> list[str]:
+    """The entity's declared time fields: its default and every metric's own."""
+    found = [entity.default_time_field, *(m.agg_time_field for m in entity.metrics)]
+    return list(dict.fromkeys(f for f in found if f))
+
+
+def _stem(word: str) -> str:
+    for suffix in ("ing", "ed", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)]
+    return word
+
+
+def named_clocks(
+    question: str, entity: Entity, metrics: list[str], candidates: list[str] | None = None
+) -> list[str]:
+    """The entity's time fields the question names by their own words
+    ("by booking date", "performed last month" — `booked_at`, `performed_at`),
+    read past the words of the entity and the metrics it asks for
+    (`performances`, `tickets_booked` name what is counted, not a date).
+    ``candidates``: the date fields to read for, by default its clocks."""
+    asked = set(metrics)
+    taken = {
+        w
+        for m in entity.metrics
+        if m.name in asked
+        for phrase in (m.name, m.label or "", *m.aliases)
+        for w in _as_words(phrase).split()
+    }
+    taken |= set(_as_words(entity.name).split())
+    words = [w for w in _as_words(question).split() if w not in taken]
+    out = []
+    for clock in entity_clocks(entity) if candidates is None else candidates:
+        own = [w for w in re.split(r"[\W_]+", clock.lower()) if w and w not in _CLOCK_GENERIC]
+        if own and all(any(q.startswith(_stem(w)) for q in words) for w in own):
+            out.append(clock)
+    return out
+
+
+def window_clock(question: str, entity: Entity, metrics: list[str]) -> str | None:
+    """The time field a stated window or bucket goes on.
+
+    One declared clock, or a figure whose metric declares its own (its
+    ``agg_time_field``, else the entity default it inherits): that field, as
+    always. An entity with two clocks and a question that asks for no such
+    figure (a count of rows, a listing) names the clock or is asked which —
+    never one picked for it. A question naming a clock the figure is not
+    counted by is asked too: the compiled figure would read the other date."""
+    field_name = entity.default_time_field
+    for m in entity.metrics:
+        if m.name in metrics and m.agg_time_field:
+            field_name = m.agg_time_field
+    clocks = entity_clocks(entity)
+    if len(clocks) < 2:
+        # A date the entity holds but declares as no clock, named by the
+        # question ("which stations closed in 2026", `closed_on` beside the
+        # declared `opened_on`): a listing reads it; a figure counted by the
+        # clock is asked, as for two clocks — the window never goes on the
+        # declared clock in its place.
+        others = [
+            f.name
+            for f in entity.fields
+            if f.type in ("date", "timestamp")
+            and f.name not in clocks
+            and not column_hidden(f.name, entity)
+        ]
+        named = named_clocks(question, entity, metrics, others) if others else []
+        if len(named) != 1 or named_clocks(question, entity, metrics, clocks):
+            return field_name
+        if not metrics:
+            return named[0]
+        raise _Clarify(
+            ClarificationRequest(
+                kind="unresolved_slot",
+                term="time_field",
+                question=f"The question dates the figure by {named[0]}, and "
+                f"{', '.join(metrics)} is counted by {field_name}. Which date should the "
+                "period use?",
+                options=[f for f in (field_name, named[0]) if f],
+            )
+        )
+    declared = {
+        clock
+        for m in entity.metrics
+        if m.name in metrics and (clock := m.agg_time_field or entity.default_time_field)
+    }
+    named = named_clocks(question, entity, metrics)
+    if declared:
+        if named and not set(named) <= declared:
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="time_field",
+                    question=f"The question dates the figure by {', '.join(named)}, and "
+                    f"{', '.join(metrics)} is counted by {', '.join(sorted(declared))}. "
+                    "Which date should the period use?",
+                    options=clocks,
+                )
+            )
+        return field_name
+    if len(named) == 1:
+        return named[0]
+    raise _Clarify(
+        ClarificationRequest(
+            kind="unresolved_slot",
+            term="time_field",
+            question=f"{entity.name} has {len(clocks)} dates — {', '.join(clocks)}. Which one "
+            "should the period use?",
+            options=clocks,
+        )
+    )
 
 
 def window_filters(
@@ -477,9 +772,10 @@ def window_filters(
                 options=[GRAMMAR["date_range"]],
             )
         )
-    if any(m.name in metrics and m.additivity == "level" for m in entity.metrics):
-        # A level metric at a month's end is the month's last snapshot.
-        terms = timewindow.month_end_as_month(terms)
+    if level_edge(question, entity, metrics) is not None:
+        # A level metric at a period's end is the period's last snapshot, at
+        # its start the first (``level_edge`` puts which on the intent).
+        terms = timewindow.edge_as_period(terms)[0]
     # A month the question names that no window term carries would be
     # served as the OTHER months alone (or as all time) — a silently wrong
     # period. Ask for the period instead; never drop a stated month.
@@ -496,10 +792,7 @@ def window_filters(
         )
     if not terms:
         return []
-    field_name = entity.default_time_field
-    for m in entity.metrics:
-        if m.name in metrics and m.agg_time_field:
-            field_name = m.agg_time_field
+    field_name = window_clock(question, entity, metrics)
     period = None if field_name else period_field
     if period is not None:
         field_name = period
@@ -566,6 +859,87 @@ def window_filters(
     ]
 
 
+def pin_period(
+    question: str,
+    entity: Entity,
+    metrics: list[str],
+    filters: list[IntentFilter],
+    grain: str | None,
+    *,
+    period_field: str | None,
+    today: date,
+) -> tuple[list[IntentFilter], DecisionRecord] | ClarificationRequest | None:
+    """A ratio or derived metric asked over no period, on an entity that has
+    one, is read over the last complete month: its window filters and the
+    ledger record the answer discloses it by (``growth.pin_disclosure``).
+    Over the whole table it would blend every period into one figure. A
+    level reads its latest snapshot on its own, and "all time" reads the
+    whole history (``growth.windowless_ratio``). Where the month cannot be
+    placed on the entity's clock (two time fields, none of them a date),
+    the question is asked instead. None when nothing is pinned."""
+    ratio = growth.windowless_ratio(question, entity, metrics, filters, grain, period_field)
+    if ratio is None:
+        return None
+    try:
+        pinned = window_filters(
+            "last month", entity, metrics, period_field=period_field, today=today
+        )
+    except _Clarify:
+        pinned = []
+    if not pinned or any(
+        f.field != period_field and _field_type(entity, f.field) not in ("date", "timestamp")
+        for f in pinned
+    ):
+        # a clock that holds no dates (a text period column the profile
+        # did not read as months) cannot be given a month here: ask
+        return growth.ratio_window(ratio, today)
+    return pinned, growth.pinned_window(growth.last_complete_month(today))
+
+
+def pin_intent(
+    question: str,
+    intent: QueryIntent,
+    model: SemanticModel,
+    today: date,
+    *,
+    period_field: str | None = None,
+) -> tuple[QueryIntent, DecisionRecord] | ClarificationRequest | None:
+    """``pin_period`` for a whole intent: the doors that hold one (the
+    structured door, a generated intent, the sole-metric compile)."""
+    if intent.compare is not None or not intent.metrics:
+        return None
+    try:
+        entity = resolve_entity(model, intent.entity, intent.metrics)
+    except CompileError:
+        return None
+    out = pin_period(
+        question,
+        entity,
+        intent.metrics,
+        intent.filters,
+        intent.grain,
+        period_field=period_field,
+        today=today,
+    )
+    if out is None or isinstance(out, ClarificationRequest):
+        return out
+    filters, record = out
+    return intent.model_copy(update={"filters": [*intent.filters, *filters]}), record
+
+
+def level_edge(
+    question: str, entity: Entity, metrics: list[str]
+) -> Literal["first", "last"] | None:
+    """Which snapshot of the period a level metric is read at when the
+    question names an edge of it: "at the start of Q3" the first, "at the
+    end of August" the last. None for flows and for a question naming no
+    edge (or both)."""
+    bare = {m.rsplit(".", 1)[-1] for m in metrics}
+    if not any(reads_as_level(m, entity) for m in entity.metrics if m.name in bare):
+        return None
+    return timewindow.edge_as_period(timewindow.temporal_terms(question))[1]
+
+
 def sole_metric_intent(
     question: str,
     model: SemanticModel,
@@ -598,10 +972,11 @@ def sole_metric_intent(
     if len(named) != 1:
         return None
     _pos, name, surface = named[0]
-    if asks_breakdown_over_time(question):
-        return None
     text = _as_words(question)
     residue = re.sub(rf"(?<!\w){re.escape(surface)}(?!\w)", " ", text, count=1)
+    # "daily target loaves" names the metric: its grain word is not a series.
+    if asks_breakdown_over_time(residue):
+        return None
     windowed = timewindow.place_bare_month(residue, today or date.today())
     spans = timewindow.temporal_spans(windowed)
     for a, b in reversed(spans):
@@ -633,7 +1008,24 @@ def sole_metric_intent(
             return None  # the window did not settle; the usual path asks or reads it
         if not filters:
             return None
-    return QueryIntent(entity=entity.name, metrics=[name], filters=filters)
+    return QueryIntent(
+        entity=entity.name,
+        metrics=[name],
+        filters=filters,
+        snapshot=level_edge(question, entity, [bare]) if spans else None,
+    )
+
+
+def _described(d: Dimension) -> str:
+    """A dimension's description for a decision, with the words it is also
+    called by."""
+    also = f"also called: {', '.join(d.aliases)}" if d.aliases else ""
+    return "; ".join(p for p in (d.description or "", also) if p)
+
+
+def dimension_aliases(entity: Entity) -> dict[str, str]:
+    """alias (as words) -> the dimension it names."""
+    return {_as_words(a): d.name for d in entity.dimensions for a in d.aliases if _as_words(a)}
 
 
 def by_dimension(question: str, dims: list[Option]) -> tuple[str | None, str]:
@@ -647,12 +1039,14 @@ def by_dimension(question: str, dims: list[Option]) -> tuple[str | None, str]:
     text = _as_words(question)
     hits: list[tuple[str, tuple[int, int]]] = []
     for o in dims:
-        surface = _as_words(o.name.rsplit(".", 1)[-1])
-        if not surface:
-            continue
-        m = re.search(rf"(?<!\w)(?:by|per) {re.escape(surface)}(?!\w)", text)
-        if m is not None:
-            hits.append((o.name, m.span()))
+        for spelling in (o.name.rsplit(".", 1)[-1], *o.aliases):
+            surface = _as_words(spelling)
+            if not surface:
+                continue
+            m = re.search(rf"(?<!\w)(?:by|per) {re.escape(surface)}(?!\w)", text)
+            if m is not None:
+                hits.append((o.name, m.span()))
+                break
     if len(hits) != 1:
         return None, question
     name, (start, end) = hits[0]
@@ -705,6 +1099,7 @@ def _keyish(entity: Entity, name: str) -> bool:
         or low in ("id", "key", "unique_key", "uuid")
         or low.endswith(("_id", "_key", "_uuid"))
         or column_hidden(name, entity)
+        or column_internal(name, entity)
     )
 
 
@@ -734,7 +1129,7 @@ def groupable(question: str, entity: Entity, shape: str, domains: dict[str, list
     never a measure or an id) — the members the metric catalog reports. A
     question asking none is not offered a grouping to add."""
     if entity.dimensions:
-        return {d.name for d in entity.dimensions}
+        return {d.name for d in entity.dimensions if not column_internal(d.name, entity)}
     units = set(_TIME_UNITS) | {_plural(u) for u in _TIME_UNITS}
     if shape != "ranking" and not any(w - units for w in breakdown_words(question)):
         return set()
@@ -742,6 +1137,7 @@ def groupable(question: str, entity: Entity, shape: str, domains: dict[str, list
         f.name
         for f in entity.fields
         if not column_hidden(f.name, entity)
+        and not column_internal(f.name, entity)
         and (
             f.type in ("string", "boolean", "date", "timestamp")
             or (f.type == "integer" and f.name.lower() in domains)
@@ -771,10 +1167,13 @@ def offered(question: str, entity: Entity, options: list[Option]) -> list[Option
     return [
         o
         for o in options
-        if _says(question, o.name)
-        or not (
-            (_keyish(entity, o.name) and not keyed(o.name) and not _key_part(entity, o.name))
-            or (not temporal and _field_type(entity, o.name) in ("date", "timestamp"))
+        if not column_internal(o.name.rsplit(".", 1)[-1], entity)
+        and (
+            _says(question, o.name)
+            or not (
+                (_keyish(entity, o.name) and not keyed(o.name) and not _key_part(entity, o.name))
+                or (not temporal and _field_type(entity, o.name) in ("date", "timestamp"))
+            )
         )
     ]
 
@@ -929,6 +1328,12 @@ def undeclared_measure(question: str, entity: Entity, model: SemanticModel) -> s
 _COUNT_OF = re.compile(r"\bcounts?\s+of\s+((?:[a-z][a-z-]*\s*){1,3})", re.I)
 _X_COUNTS = re.compile(r"\b((?:[a-z][a-z-]*\s+(?:or|and)\s+)*)([a-z][a-z-]*)\s+counts?\b", re.I)
 _HOW_MANY = re.compile(r"\b(?:how\s+many|number\s+of)\s+((?:[a-z][a-z-]*\s*){1,3})", re.I)
+# What the counted things had happen to them: "how many emails were sent".
+_COUNTED_VERB = re.compile(
+    r"\b(?:how\s+many|number\s+of)\s+(?:[a-z][a-z-]*\s+){1,3}?"
+    r"(?:were|was|got|(?:have|has|had)\s+been)\s+([a-z]+)",
+    re.I,
+)
 _COUNT_SKIP = (
     _ORDINARY
     | _MEASURE_SHAPE_WORDS
@@ -1033,13 +1438,18 @@ def _expr_columns_of(metric: Metric) -> list[exp.Column]:
 
 # The figure a question asks for: the words after "what was", "how much",
 # "total", "sum of" ("what was GRV in March"), or the opening noun phrase before
-# by/per/in ("GRV by station"). Counts ride _counted.
+# a breakdown, a period or the end ("GRV by station", "GRV last month", "show
+# GRV for May", "GRV?"). Counts ride _counted.
 _FIGURE_CUE = re.compile(
     r"\b(?:what\s+(?:was|were|is|are|s)|whats|how\s+much|sum\s+of|totals?(?:\s+of)?)\s+"
     r"((?:[a-z0-9][a-z0-9-]*\s*){1,5})",
     re.I,
 )
-_LEADING_FIGURE = re.compile(r"^\s*((?:[a-z][a-z0-9-]*\s+){1,4}?)(?:by|per|in)\b", re.I)
+_LEADING_FIGURE = re.compile(
+    r"^\s*((?:[a-z][a-z0-9-]*\s*){1,4}?)"
+    r"(?:\b(?:by|per|in|for|on|during|over|across|last|this|vs|versus|compared)\b|[?.!]|$)",
+    re.I,
+)
 _FIGURE_LEAD = frozenset(
     "the a an our my your their its total totals overall average avg mean median "
     "show give tell me us get find".split()
@@ -1076,13 +1486,20 @@ def _content_words(text: str) -> list[str]:
     return [w for w in _WORD.findall(text.lower()) if w not in _ORDINARY]
 
 
-def _spelled_out(acronym: str, texts: list[str]) -> list[list[str]]:
+def _spelled_out(acronym: str, texts: list[str], *, content_only: bool = False) -> list[list[str]]:
     """The word runs of ``texts`` whose initials spell ``acronym`` — where a
-    description or a definition writes it out ("GRV: gross rental value")."""
+    description or a definition writes it out ("GRV: gross rental value").
+    ``content_only``: runs of content words alone, so "for each event" never
+    spells "fee"."""
     runs: list[list[str]] = []
     n = len(acronym)
     for text in texts:
-        for words in (_WORD.findall(text.lower()), _content_words(text)):
+        lists = (
+            [_content_words(text)]
+            if content_only
+            else [_WORD.findall(text.lower()), _content_words(text)]
+        )
+        for words in lists:
             for i in range(len(words) - n + 1):
                 run = words[i : i + n]
                 if "".join(w[0] for w in run) == acronym:
@@ -1102,6 +1519,51 @@ def _metric_texts(entity: Entity, metric: Metric) -> list[str]:
     return [t for t in texts if t]
 
 
+_CAPITALS = re.compile(r"\b[A-Z][A-Z0-9]{1,5}\b")
+
+
+def _word_stem(word: str) -> str:
+    """A word's stem for matching the question's word to the lens's: the
+    plural, then -ment, -ing, -al, -er, -ed, -ly, -y and a final -e or doubled
+    consonant ("renewals", "renewed" -> renew; "shipped", "shipments" -> ship;
+    "deliveries", "delivered" -> deliv). Lenient on purpose: it is only ever
+    evidence that a word IS carried, so it can stop a clarification and
+    never start one."""
+    w = word.lower()
+    if len(w) > 4 and w.endswith("ies"):
+        w = w[:-3] + "y"
+    elif w.endswith(("sses", "xes", "zes", "ches", "shes")):
+        w = w[:-2]
+    elif w.endswith("s") and not w.endswith(("ss", "us", "is")) and len(w) > 3:
+        w = w[:-1]
+    changed = True
+    while changed:
+        changed = False
+        for suffix in ("ment", "ing", "al", "er", "ed", "ly", "y"):
+            if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+                w = w[: -len(suffix)]
+                changed = True
+                break
+    if len(w) > 4 and w.endswith("e"):
+        w = w[:-1]
+    if len(w) > 3 and w[-1] == w[-2] and w[-1] not in "aeiouls":
+        w = w[:-1]
+    return w
+
+
+def _declared_acronyms(entity: Entity, model: SemanticModel) -> set[str]:
+    """The short codes the lens itself writes in capitals — in a metric's
+    label, aliases or description, a field's description, a definition's term,
+    aliases or body ("AI-assisted replies", "SLA breach"). A token under three
+    letters is a word of the question only where the lens declares it so."""
+    texts = [entity.description or "", *(f.description or "" for f in entity.fields)]
+    for m in entity.metrics:
+        texts += [m.label or "", *m.aliases, m.description or ""]
+    for d in model.definitions:
+        texts += [d.term, *d.aliases, d.body]
+    return {w.lower() for t in texts for w in _CAPITALS.findall(t)}
+
+
 def unconsumed_quantity(
     question: str,
     entity: Entity,
@@ -1119,7 +1581,15 @@ def unconsumed_quantity(
     field, a stored value or a definition the question triggers are not
     quantity words, and a figure's word is checked only where it reads as a
     measure (see ``measure_word``). None when the figure is measured, or the
-    question names a metric of the entity word for word."""
+    question names a metric of the entity word for word.
+
+    False positives are forbidden: names are read as whole words (stemmed), a
+    token under three letters counts only where the lens declares it as an
+    acronym, a word of the question that a chosen metric carries is evidence
+    even where a field's name also carries it ("sent" of `sent_on`), and a
+    word counts as unconsumed only where nothing the lens declares carries it
+    — no metric, field, dimension, alias or bound definition. A word another
+    metric carries is the metric vote's to weigh, not this rail's."""
     by_name = {m.name: m for m in entity.metrics}
     chosen = [by_name[n] for n in (x.rsplit(".", 1)[-1] for x in metrics) if n in by_name]
     if not chosen:
@@ -1162,6 +1632,11 @@ def unconsumed_quantity(
             words |= entity_words
         return {f for w in words for f in _forms(w)}
 
+    declared = _declared_acronyms(entity, model)
+
+    def short(word: str) -> bool:
+        return len(word) < 3 and word not in declared
+
     measures = {m.name: vocab(m, False) for m in chosen}
     counts = {m.name: vocab(m, True) for m in chosen}
     chosen_names = set(measures)
@@ -1196,7 +1671,7 @@ def unconsumed_quantity(
     # the lens), a word of a numeric column, of another metric, or of a measure
     # definition. "busiest", "difference" or a synonym the lens never declares
     # stays the decider's reading.
-    capitals = {w.lower() for w in re.findall(r"\b[A-Z][A-Z0-9]{1,5}\b", question)}
+    capitals = {w.lower() for w in _CAPITALS.findall(question) if not short(w.lower())}
     measure_terms: set[str] = set()
     for f in entity.fields:
         if f.type in ("number", "integer") and not _keyish(entity, f.name):
@@ -1207,19 +1682,33 @@ def unconsumed_quantity(
     for d in model.definitions:
         if d.sql_expr and not is_predicate(d.sql_expr, model.dialect):
             measure_terms |= set(_WORD.findall(d.term.lower()))
-    measure_terms = {f for w in measure_terms for f in _forms(w)}
+    measure_terms = {
+        f for w in measure_terms if w not in _ORDINARY and not short(w) for f in _forms(w)
+    }
 
     def measure_word(word: str) -> bool:
         return (
             word in capitals
             or bool(_forms(word) & measure_terms)
-            or bool(_spelled_out(word, spelled_in))
+            or (len(word) >= 3 and bool(_spelled_out(word, spelled_in, content_only=True)))
         )
+
+    # Everything the lens declares by name, as stems: a word one of these
+    # carries is a known word, never an unconsumed one.
+    known_texts: list[str] = [entity.name]
+    known_texts += [f.name for f in entity.fields] + [d.name for d in entity.dimensions]
+    for m in entity.metrics:
+        known_texts += [m.name, m.label or "", *m.aliases]
+    for d in model.definitions:
+        if d.sql_expr or d.about:
+            known_texts += [d.term, *d.aliases]
+        known_texts += list(d.value_aliases)
+    known = {_word_stem(w) for t in known_texts for w in _WORD.findall(t.lower())}
 
     def measured(word: str, counting: bool) -> bool:
         for m in chosen:
             v = counts[m.name] if counting else measures[m.name]
-            if _forms(word) & v:
+            if _forms(word) & v or _word_stem(word) in {_word_stem(x) for x in v}:
                 return True
             if counting:
                 continue  # a count's noun is a thing, never an acronym of a measure
@@ -1231,19 +1720,20 @@ def unconsumed_quantity(
                     return True
         return False
 
+    # The verb a count's things take is what a count metric is often named
+    # for ("how many emails were sent" of `sent_count`): evidence, never a
+    # word that must be measured.
+    verbs = [m.group(1).lower() for m in _COUNTED_VERB.finditer(question)]
     for phrase, counting in asked:
-        words = [
-            w
-            for w in phrase
-            if w not in _MEASURE_SHAPE_WORDS
-            and w not in _COUNT_SKIP
-            and not (_forms(w) & naming)
-            and len(w) > 1
-        ]
+        said = [w for w in phrase if w not in _MEASURE_SHAPE_WORDS and w not in _COUNT_SKIP]
+        words = [w for w in said if not (_forms(w) & naming) and not short(w)]
         if not words or not (counting or all(measure_word(w) for w in words)):
             continue
-        if not any(measured(w, counting) for w in words):
-            return " ".join(words)
+        if any(measured(w, counting) for w in [*said, *(verbs if counting else [])]):
+            continue
+        if any(_word_stem(w) in known for w in words):
+            continue
+        return " ".join(words)
     return None
 
 
@@ -1310,8 +1800,10 @@ def unplaced_breakdown(
     grain's, checked where the grain is."""
     by_name = {m.name: m for m in entity.metrics}
     covered: set[str] = set(_TIME_UNITS) | {_plural(u) for u in _TIME_UNITS}
+    aliases = dimension_aliases(entity)
     for d in dimensions:
         covered |= set(_WORD.findall(d.rsplit(".", 1)[-1].lower()))
+        covered |= {w for a, dim in aliases.items() if dim == d for w in a.split()}
     for name in metrics:
         m = by_name.get(name.rsplit(".", 1)[-1])
         for text in (name, *(((m.label or ""), *m.aliases) if m else ())):
@@ -1326,6 +1818,142 @@ def unplaced_breakdown(
         forms = {f for w in words for f in _forms(w)}
         if not forms & covered:
             return " ".join(sorted(words))
+    return None
+
+
+# Words that shape the answer, not the rows it counts: aggregations, ranks,
+# shares, changes, series, listings. Never a qualifier.
+_SHAPE_WORDS = frozenset(
+    """
+    average avg mean median sum count counts number numbers total totals overall
+    figure figures amount list listing show give tell get find see rank ranked
+    ranking order ordered sorted sort per each every breakdown split broken
+    trend trends series running cumulative distinct unique different
+    whole entire combined altogether grand mom qoq yoy wow grew grow grown growing
+    rose rise risen fell fall fallen dropped drop gained gain
+    """.split()
+)
+
+
+_TIME_UNIT_STEMS = frozenset(_word_stem(u) for u in _TIME_UNITS)
+
+
+def _coverage_exempt(word: str) -> bool:
+    return (
+        word in _ORDINARY
+        or word in _FRAME_WORDS
+        or word in _WINDOW_FRAME_WORDS
+        or word in _SHAPE_WORDS
+        or (word in _MEASURE_SHAPE_WORDS and word != "net")  # net against gross qualifies
+        or word in _FIGURE_LEAD
+        or word in _EXTREME_WORDS
+        or word in _SHARE_WORDS
+        or word in _PARAMETER_WORDS
+        or word in _PERIOD_FLAG_WORDS
+        or word in growth.CHANGE_WORDS
+        or _word_stem(word) in _TIME_UNIT_STEMS
+        or any(c.isdigit() for c in word)
+    )
+
+
+def unmapped_qualifier(
+    question: str,
+    entity: Entity,
+    model: SemanticModel,
+    *,
+    metrics: list[str],
+    dimensions: list[str],
+    filters: list[IntentFilter],
+    decided: list[IntentFilter],
+    bound: list[str],
+    domains: dict[str, list[str]],
+    windowed: bool = False,
+) -> tuple[str, list[str]] | None:
+    """A word qualifying what the answer counts that maps to nothing it
+    reads: ``(word, the unchosen metrics that carry it)``, or None.
+
+    "How many deleted members" on a lens with no deleted flag: the filter vote
+    finds no column, rightly, and the plain count of members is served for the
+    deleted ones. Read off the question's runs of content words (window
+    phrases blanked): in a run holding a word the answer maps, every content
+    word in front of it must map too — the entity's row noun, the chosen metric (its name, label,
+    aliases, description, the columns it reads), a field or dimension of the
+    entity (and a dimension's aliases), a stored value of its dictionaries, a
+    filter or binding value, a definition's term, aliases or value aliases,
+    or a time field. Words that shape the answer (totals, ranks, shares,
+    changes, series) are grammar. A word another metric of the entity
+    carries returns that metric, so the question asks which is meant.
+
+    Only words before the run's first mapped word count: a word after one is
+    a verb or a word of its own ("members signed up", "which gym grew
+    revenue"), and a run with nothing mapped is a synonym the metric vote has
+    read. The entity's description, grain and population, and the lens's
+    name, are its declared scope: a word they carry restricts nothing. A
+    filter whose value a decision chose (not the question's own words) may
+    be the qualifier's, so the rail stays quiet beside one: a clarification
+    here must never be a false one. A flag the question names by its subject
+    ("student members") is the words', not such a decision: the rail still
+    reads the words beside it ("suspended student members")."""
+    if decided:
+        return None
+    declared = _declared_acronyms(entity, model)
+    # The entity's declared scope says what every row already is: "pro
+    # drafts" on an entity described as pro drafts restricts nothing.
+    mapped_texts: list[str] = [entity.name, *_grain_nouns(entity), model.lens]
+    mapped_texts += [entity.description or "", entity.grain or "", entity.population or ""]
+    mapped_texts += [f.name for f in entity.fields] + [d.name for d in entity.dimensions]
+    mapped_texts += [a for d in entity.dimensions for a in d.aliases]
+    mapped_texts += entity_clocks(entity)
+    for m in _chosen(entity, metrics):
+        mapped_texts += _metric_texts(entity, m)
+        mapped_texts += list(m.filters)
+    for values in domains.values():
+        mapped_texts += [str(v) for v in values]
+    for f in filters:
+        vals = f.value if isinstance(f.value, list) else [f.value]
+        mapped_texts += [f.field, *(str(v) for v in vals)]
+    mapped_texts += bound
+    # A flag a filter reads, named by its subject ("off-peak" of `is_offpeak`):
+    # the words as written map, however the column's name splits them.
+    mapped_texts += [
+        said for _c, said, _n in named_flags(question, entity, [f.field for f in filters])
+    ]
+    for d in model.definitions:
+        mapped_texts += [d.term, *d.aliases, *d.value_aliases]
+    mapped = {_word_stem(w) for t in mapped_texts for w in _WORD.findall(t.lower())}
+    chosen = {c.name for c in _chosen(entity, metrics)}
+    others = {
+        m.name: {
+            _word_stem(w)
+            for t in (m.name, m.label or "", *m.aliases)
+            for w in _WORD.findall(t.lower())
+        }
+        for m in entity.metrics
+        if m.name not in chosen
+    }
+
+    def maps(word: str) -> bool:
+        return _word_stem(word) in mapped or bool(_forms(word) & mapped)
+
+    # "New members in May" counts the members whose date falls in May: the
+    # window on the entity's clock is what "new" says.
+    recent = {"new", "recent"} if windowed else set()
+
+    text = re.sub(r"[\'’]s\b", " ", timewindow.beside_windows(question))
+    for run in re.split(
+        r"[^\w\s-]|\b(?:" + "|".join(sorted(_ORDINARY | _FRAME_WORDS)) + r")\b", text.lower()
+    ):
+        words = [w for w in _WORD.findall(run) if not _coverage_exempt(w)]
+        heads = [i for i, w in enumerate(words) if maps(w)]
+        if not heads:
+            continue
+        # Before the run's first mapped word: a word after one is a verb or a
+        # word of its own ("which gym grew fee revenue", "the Radiant side").
+        for w in words[: heads[0]]:
+            if maps(w) or w in recent or (len(w) < 3 and w not in declared):
+                continue
+            carriers = sorted(n for n, stems in others.items() if _word_stem(w) in stems)
+            return w, carriers
     return None
 
 
@@ -1456,6 +2084,83 @@ def _carried(entity: Entity, metrics: list[str], dialect: str | None) -> _Carrie
     return _Carried(tuple(words), frozenset(selects))
 
 
+def _name_surfaces(entity: Entity, metrics: list[str]) -> list[str]:
+    """The chosen metrics' names, labels and aliases."""
+    by_name = {m.name: m for m in entity.metrics}
+    out: list[str] = []
+    for name in metrics:
+        m = by_name.get(name.rsplit(".", 1)[-1])
+        if m is not None:
+            out += [t for t in (m.name, m.label or "", *m.aliases) if t]
+    return out
+
+
+def beside_names(question: str, entity: Entity, metrics: list[str]) -> str:
+    """The question as words with the chosen metrics' names, labels, aliases
+    and the columns they read blanked out, longest first: what the question
+    says beside the figure it names. "the daily target loaves" of
+    `daily_target_loaves` leaves no "daily" to ask a series with."""
+    by_name = {m.name: m for m in entity.metrics}
+    surfaces = set(_name_surfaces(entity, metrics))
+    for name in metrics:
+        if (m := by_name.get(name.rsplit(".", 1)[-1])) is not None:
+            surfaces |= _expr_columns(m)
+    text = _as_words(question)
+    for surface in sorted({_as_words(s) for s in surfaces if s}, key=len, reverse=True):
+        if surface:
+            text = re.sub(rf"(?<!\w){re.escape(surface)}(?!\w)", " ", text)
+    return text
+
+
+# A code in brackets after a noun: "server errors (5xx)", "tickets (P1)".
+_BRACKETED_CODE = re.compile(r"\(\s*([^\W_]+)\s*\)")
+
+
+def bracketed_codes(question: str) -> list[str]:
+    """The bracketed codes that mix letters and digits ("5xx", "P1"): a code,
+    never a number, whatever its digits."""
+    return [
+        c
+        for c in _BRACKETED_CODE.findall(question)
+        if any(ch.isdigit() for ch in c) and _LETTER.search(c)
+    ]
+
+
+def named_codes(question: str, entity: Entity, metrics: list[str]) -> list[str]:
+    """The bracketed codes the chosen metrics' names, labels or aliases carry
+    as a word: "server errors (5xx)" asked of a metric labelled so. The code
+    is the metric's name, not a value a filter takes."""
+    words = {w for t in _name_surfaces(entity, metrics) for w in _WORD.findall(t.lower())}
+    return [c for c in bracketed_codes(question) if c.lower() in words]
+
+
+def _name_numbers(entity: Entity, metrics: list[str]) -> frozenset[str]:
+    """The numbers the chosen metrics' names, labels and aliases carry — a
+    window size or a threshold the metric is defined at."""
+    return frozenset(n for t in _name_surfaces(entity, metrics) for n in re.findall(r"\d+", t))
+
+
+# The words of a dimension's name that say its role, not its subject.
+_ROLE_WORDS = frozenset("name names id key code label type kind".split())
+
+
+def _subject_only(question: str, dimension: str, surfaces: list[str]) -> bool:
+    """Does the question say the dimension only inside the metric's own name
+    ("branch visits" of `branch_visits`)? With the metric's name, label and
+    aliases blanked out, no word of the dimension is left: no "by branch",
+    "per branch" or "which branch" asks it as a breakdown."""
+    own = {w for w in _WORD.findall(dimension.rsplit(".", 1)[-1].lower()) if w not in _ROLE_WORDS}
+    text = _as_words(question)
+    if not own or not any(w in text.split() or _plural(w) in text.split() for w in own):
+        return False
+    for surface in sorted({_as_words(s) for s in surfaces if s}, key=len, reverse=True):
+        head, _sp, last = surface.rpartition(" ")
+        for form in (surface, f"{head} {_plural(last)}".strip()):
+            text = re.sub(rf"(?<!\w){re.escape(form)}(?!\w)", " ", text)
+    left = set(text.split())
+    return not any(w in left or _plural(w) in left for w in own)
+
+
 def _refuse_self_defining_filters(
     entity: Entity, metrics: list[str], filters: list[IntentFilter]
 ) -> None:
@@ -1539,6 +2244,243 @@ def _grammar_for(ftype: str | None) -> str:
     return GRAMMAR["string"]
 
 
+# ── words that ask for a shape ───────────────────────────────────────────────
+# A superlative asks for a ranking, a share word for a ratio, a listing for
+# rows someone can tell apart. Each is read off the question at typing time:
+# it shapes the intent, or the question is asked back — a plain aggregate
+# never stands in for it.
+
+_LABEL_SUFFIXES = ("name", "label", "title")
+
+
+def listing_identity(entity: Entity) -> list[str]:
+    """What names each row of a listing: the declared primary key and, beside
+    a single key, its label column (`member_name` beside `member_id`, or
+    `name`). "Which members lapsed" served as a status and a date per row
+    lists rows nobody can tell apart. Hidden columns never."""
+    members = {f.name for f in entity.fields} | {d.name for d in entity.dimensions}
+    keys = [k for k in entity.primary_key if k in members and not column_hidden(k, entity)]
+    if len(keys) != 1:
+        return keys
+    stem = re.sub(r"_?(?:id|key|uuid)$", "", keys[0], flags=re.I).lower()
+    wanted = set(_LABEL_SUFFIXES) | ({f"{stem}_{s}" for s in _LABEL_SUFFIXES} if stem else set())
+    labels = [
+        f.name
+        for f in entity.fields
+        if f.name.lower() in wanted
+        and f.name != keys[0]
+        and f.type == "string"
+        and not column_hidden(f.name, entity)
+    ]
+    return [*labels[:1], *keys]
+
+
+# The noun a ranking ranks follows these: "which stations", "the top 5
+# members", "the largest visit".
+_RANK_LEAD = re.compile(
+    r"\b(?:which|what|top\s+\d{1,3}|bottom\s+\d{1,3})\s+((?:[a-z][a-z-]*\s*){1,4})", re.I
+)
+_SUPERLATIVE = re.compile(r"\b(?:largest|biggest|highest|lowest|smallest|fewest)\b", re.I)
+_SUPER_LEAD = re.compile(
+    r"\b(?:largest|biggest|highest|lowest|smallest|fewest)\s+((?:[a-z][a-z-]*\s*){1,4})", re.I
+)
+_TOP_N = re.compile(r"\b(?:top|bottom)\s+\d{1,3}\b", re.I)
+_MEMBER_SUFFIX = re.compile(r"_(?:id|key|uuid|name|label|title|code)$", re.I)
+_EXTREME_WORDS = frozenset(
+    "max min maximum minimum peak top largest biggest highest lowest smallest".split()
+)
+
+
+def _leading_run(text: str) -> list[str]:
+    """The text's content words from its start up to the first grammar word."""
+    out: list[str] = []
+    for w in _WORD.findall(text.lower()):
+        if w in _ORDINARY:
+            break
+        out.append(w)
+    return out
+
+
+def ranked_member(question: str, entity: Entity, allowed: set[str]) -> tuple[str, bool, str] | None:
+    """The member a ranking ranks, named by the noun after which / what / top
+    N or a superlative ("which stations", "the top 5 members", "the largest
+    visit"): ``(member, singular, the noun as written)``, among ``allowed``.
+    A member is named by its name without a key or label suffix
+    (`member_name` and `member_id` are both "member"); the label wins over the
+    key, and the entity's own row noun names its single key. None when no
+    noun names one member."""
+    text = timewindow.beside_windows(question)
+    by_stem: dict[tuple[str, ...], list[str]] = {}
+    for name in sorted(allowed):
+        stem = tuple(_WORD.findall(_MEMBER_SUFFIX.sub("", name.rsplit(".", 1)[-1]).lower()))
+        if stem:
+            by_stem.setdefault(stem, []).append(name)
+    for alias, dim in dimension_aliases(entity).items():
+        if dim in allowed:
+            by_stem.setdefault(tuple(alias.split()), []).append(dim)
+    keys = [k for k in entity.primary_key if k in allowed]
+    for rx in (_RANK_LEAD, _SUPER_LEAD):
+        for m in rx.finditer(text):
+            run = _leading_run(m.group(1))
+            best: tuple[tuple[str, ...], list[str], str] | None = None
+            for stem, names in by_stem.items():
+                n = len(stem)
+                for i in range(len(run) - n + 1):
+                    said = run[i + n - 1]
+                    if run[i : i + n - 1] == list(stem[:-1]) and said in (
+                        stem[-1],
+                        _plural(stem[-1]),
+                    ):
+                        if best is None or n > len(best[0]):
+                            best = (stem, names, said)
+            if best is None and len(keys) == 1:
+                nouns = _grain_nouns(entity)
+                noun = next((w for w in run if _forms(w) & nouns), None)
+                if noun is not None:
+                    best = ((noun.removesuffix("s"),), keys, noun)
+            if best is None:
+                continue
+            stem, names, said = best
+            labels = [n for n in names if not _keyish(entity, n)]
+            pick = labels[0] if len(labels) == 1 else names[0] if len(names) == 1 else None
+            if pick is None:
+                return None
+            return pick, said == stem[-1], said
+    return None
+
+
+def _naming_words(
+    entity: Entity, domains: dict[str, list[str]], model: SemanticModel | None = None
+) -> set[str]:
+    """Words that name something the entity holds: its own name, its fields'
+    and dimensions' names, the stored values of its dictionaries, and the
+    lens's definition terms and aliases ("largest accounts" as a term)."""
+    out = set(_WORD.findall(entity.name.lower()))
+    for d in model.definitions if model is not None else []:
+        for t in (d.term, *d.aliases):
+            out |= set(_WORD.findall(t.lower()))
+    for name in [*(f.name for f in entity.fields), *(d.name for d in entity.dimensions)]:
+        out |= set(_WORD.findall(name.lower()))
+        for v in domains.get(name.lower(), []):
+            out |= set(_WORD.findall(str(v).lower()))
+    return out
+
+
+def _chosen(entity: Entity, metrics: list[str]) -> list[Metric]:
+    by_name = {m.name: m for m in entity.metrics}
+    return [by_name[n] for n in (x.rsplit(".", 1)[-1] for x in metrics) if n in by_name]
+
+
+def _metric_words(metrics: list[Metric]) -> set[str]:
+    return {
+        w
+        for m in metrics
+        for t in (m.name, m.label or "", *m.aliases)
+        for w in _WORD.findall(t.lower())
+    }
+
+
+def unconsumed_superlative(
+    question: str,
+    entity: Entity,
+    metrics: list[str],
+    domains: dict[str, list[str]],
+    model: SemanticModel | None = None,
+) -> str | None:
+    """A superlative the question ranks by ("the largest visit", "the top 3")
+    that the answer's metrics do not carry: none is a MAX or MIN, and none is
+    named for an extreme. Served as the plain total, "the largest visit" is
+    the sum of every visit. A word naming a field, a dimension or a stored
+    value is a name, not a superlative."""
+    beside = timewindow.beside_windows(question)
+    m = _SUPERLATIVE.search(beside) or _TOP_N.search(beside)
+    if m is None:
+        return None
+    word = m.group(0).split()[0].lower()
+    chosen = _chosen(entity, metrics)
+    if any(c.agg in ("max", "min") for c in chosen):
+        return None
+    if _metric_words(chosen) & (_EXTREME_WORDS | {word}):
+        return None
+    if word in _naming_words(entity, domains, model):
+        return None
+    return word
+
+
+_SHARE = re.compile(r"\b(share|percentage|percent|proportion|fraction|ratio|rate)\b|%", re.I)
+_SHARE_WORDS = frozenset(
+    "share shares percentage percent pct proportion fraction ratio rate rates".split()
+)
+
+
+def unconsumed_share(
+    question: str,
+    entity: Entity,
+    metrics: list[str],
+    domains: dict[str, list[str]],
+    model: SemanticModel | None = None,
+    *,
+    changing: bool = False,
+) -> str | None:
+    """A share word ("what share of members", "the percentage of visits", "the
+    conversion rate") asked of metrics none of which is a ratio: the count of
+    members on a plan served for their share of all members. A ratio, a
+    derived division, a percent-formatted metric or one named for a share
+    word carries it; a share word naming a field, a dimension or a stored
+    value is a name. ``changing``: the question asks for a change, whose
+    relative delta is its rate ("the growth rate")."""
+    chosen = _chosen(entity, metrics)
+    if (
+        not chosen
+        or any(growth.is_ratio(c) for c in chosen)
+        or _metric_words(chosen) & _SHARE_WORDS
+    ):
+        return None
+    naming = _naming_words(entity, domains, model)
+    for m in _SHARE.finditer(question):
+        word = (m.group(1) or "%").lower()
+        if word == "rate" and changing:
+            continue
+        if word in naming:
+            continue
+        return word
+    return None
+
+
+def counts_its_grouping(
+    entity: Entity, metrics: list[str], dimensions: list[str]
+) -> tuple[str, str] | None:
+    """``(metric, column)`` when a COUNT DISTINCT counts what the answer groups
+    by — the column itself, or the key a grouped label names (`member_id`
+    under `member_name`): every group counts one. "Which members visit most"
+    ranked by distinct members per member serves 1 for everyone. So does a
+    count of the entity's own rows grouped by its single key or that key's
+    label: "the largest station" ranked by stations per station name."""
+
+    def stem(column: str) -> str:
+        return _MEMBER_SUFFIX.sub("", column.rsplit(".", 1)[-1].lower())
+
+    grouped = {d.rsplit(".", 1)[-1].lower() for d in dimensions}
+    stems = {stem(d) for d in grouped}
+    identity = [c.lower() for c in listing_identity(entity)]
+    keys = [k.lower() for k in entity.primary_key]
+    for m in _chosen(entity, metrics):
+        if (
+            m.type == "simple"
+            and m.agg == "count"
+            and len(keys) == 1
+            and (m.expr or "").strip().rsplit(".", 1)[-1].lower() in ("", "1", "*", keys[0])
+            and grouped & set(identity)
+        ):
+            return m.name, keys[0]
+        if m.type != "simple" or m.agg != "count_distinct":
+            continue
+        columns = {c.name.lower() for c in _expr_columns_of(m)}
+        if columns and all(c in grouped or stem(c) in stems for c in columns):
+            return m.name, sorted(columns)[0]
+    return None
+
+
 class TypedResolver:
     def __init__(
         self,
@@ -1550,15 +2492,34 @@ class TypedResolver:
         bindings: dict[str, str] | None = None,
         today: date | None = None,
         policies: dict[str, decision_policy.Policy] | None = None,
+        unsampled: dict[str, str] | None = None,
     ) -> None:
         self._decider = decider
+        # entity name -> why its table was never sampled: no dictionary
+        # exists for its columns, and a value asked for says why.
+        self._unsampled = unsampled or {}
         self._domains = domains or {}
         self._entity_domains = entity_domains or {}
         self._period_fields = period_fields or {}
-        self._bindings = {k.rsplit(".", 1)[-1].lower(): str(v) for k, v in (bindings or {}).items()}
+        self._bound = {k.rsplit(".", 1)[-1].lower(): str(v) for k, v in (bindings or {}).items()}
+        self._bindings = dict(self._bound)
+        self._spent: frozenset[str] = frozenset()
         self._today = today or date.today()
         self._policies = policies
         self._value_aliases: dict[str, dict[str, str]] = {}
+
+    def _splits_in_time(self, entity: Entity, metrics: list[str], dimensions: list[str]) -> bool:
+        """Can this answer be split over time: the entity or a chosen metric
+        declares a time field, or a chosen breakdown is a date or the
+        entity's month-period column."""
+        if entity.default_time_field or any(m.agg_time_field for m in _chosen(entity, metrics)):
+            return True
+        period = self._period_field(entity)
+        return any(
+            _field_type(entity, d.rsplit(".", 1)[-1]) in ("date", "timestamp")
+            or d.rsplit(".", 1)[-1] == period
+            for d in dimensions
+        )
 
     def _period_field(self, entity: Entity) -> str | None:
         """The entity's month-period field: from the profile's sample when
@@ -1579,23 +2540,8 @@ class TypedResolver:
     def _record(
         self, slot: str, d: Decision, records: list[DecisionRecord]
     ) -> tuple[Decision, str, int]:
-        verdict = decision_policy.verdict(d, slot, self._policies)
-        records.append(
-            DecisionRecord(
-                slot=slot,
-                chosen=d.chosen,
-                p=d.p,
-                runner_up=d.runner_up,
-                margin=d.margin,
-                votes=d.votes,
-                k=d.k,
-                p_lower=d.p_lower,
-                verdict=verdict,
-                provider=d.provider,
-                usage=d.usage.as_dict() if d.usage is not None else None,
-            )
-        )
-        return d, verdict, len(records) - 1
+        records.append(decision_policy.record(d, slot, self._policies))
+        return d, records[-1].verdict, len(records) - 1
 
     def _decide(
         self,
@@ -1609,13 +2555,22 @@ class TypedResolver:
         key: str | None = None,
     ) -> tuple[Decision, str, int]:
         """One decision — served from the round's fan-out when it was asked
-        there (``key``), else asked now."""
+        there (``key``), else asked now. A refusal declines the question: on a
+        slot where `none` means "no more" it would otherwise drop a filter or a
+        breakdown without a word."""
         if key is not None and key in self._prefetched:
-            return self._prefetched.pop(key)
-        d = self._decider.decide(
-            question=question, context=context, options=options, allow_none=allow_none
-        )
-        return self._record(slot, d, records)
+            hit = self._prefetched.pop(key)
+        else:
+            with ai_usage.purpose("decide"):
+                d = self._decider.decide(
+                    question=question, context=context, options=options, allow_none=allow_none
+                )
+            hit = self._record(slot, d, records)
+        if hit[0].refused:
+            raise _Refused(
+                f"the decision provider ({hit[0].provider}) refused to decide the {slot}"
+            )
+        return hit
 
     def _fan_out(
         self,
@@ -1631,10 +2586,11 @@ class TypedResolver:
         specs = {k: v for k, v in specs.items() if v[2]}  # nothing to ask over no options
         if decide_many is None or not specs:
             return
-        answers = decide_many(
-            question,
-            {k: (ctx, opts, allow_none) for k, (_slot, ctx, opts, allow_none) in specs.items()},
-        )
+        with ai_usage.purpose("decide"):
+            answers = decide_many(
+                question,
+                {k: (ctx, opts, allow_none) for k, (_slot, ctx, opts, allow_none) in specs.items()},
+            )
         for key, (slot, _ctx, _opts, _allow_none) in specs.items():
             self._prefetched[key] = self._record(slot, answers[key], records)
 
@@ -1656,8 +2612,11 @@ class TypedResolver:
     def _candidates(d: Decision, options: list[Option]) -> list[str]:
         ranked = sorted((d.probs or {}).items(), key=lambda kv: -kv[1])
         names = {o.name for o in options}
-        named = [k for k, _v in ranked if k != _NONE and k in names][:4]
-        return named or [o.name for o in options[:4]]
+        # `none` and `unstated` are the decider's labels, not answers a person
+        # could give: never offered back.
+        internal = (_NONE, _UNSTATED)
+        named = [k for k, _v in ranked if k not in internal and k in names][:4]
+        return named or [o.name for o in options[:4] if o.name not in internal]
 
     def _pick(
         self,
@@ -1672,9 +2631,12 @@ class TypedResolver:
         clarify_question: str,
         decline_reason: str | None = None,
         key: str | None = None,
+        clarify_options: list[str] | None = None,
     ) -> str | None:
         """One single-choice slot under the policy: the chosen name on act,
-        None on an acted `none`, a clarification or decline otherwise."""
+        None on an acted `none`, a clarification or decline otherwise.
+        ``clarify_options``: what the clarification offers when the options are
+        the decider's own labels rather than answers a person would give."""
         if not options:
             return None
         d, verdict, idx = self._decide(
@@ -1695,7 +2657,9 @@ class TypedResolver:
                 kind="unresolved_slot",
                 term=clarify_term,
                 question=clarify_question,
-                options=self._candidates(d, options),
+                options=(
+                    clarify_options if clarify_options is not None else self._candidates(d, options)
+                ),
             )
         )
 
@@ -1764,9 +2728,13 @@ class TypedResolver:
         reading of an ambiguous term) — they ride the entity and metric
         decisions' instructions, the way they ride the JSON generator's prompt."""
         records: list[DecisionRecord] = []
+        self._bindings = dict(self._bound)
         self._prefetched: dict[str, tuple[Decision, str, int]] = {}
         self._matched: list[str] = []
         self._declined: list[str] = []
+        # Numbers the chosen metrics' names carry ("15" of answered_within_15m):
+        # the metric's setting, never a literal a filter may take.
+        self._spent = frozenset()
         self._notes = " ".join(notes or [])
         self._value_aliases = _value_aliases(model)
         # An exposed table is never a typed option: it declares no metric, no
@@ -1783,28 +2751,48 @@ class TypedResolver:
                 )
             intent, supplied = self._resolve(question, model, records)
         except _Clarify as c:
+            used, unused = self._consumed(records)
             return TypedResolution(
-                intent=None, decisions=self._consumed(records), clarification=c.request
+                intent=None, decisions=used, unused=unused, clarification=c.request
             )
         except _Decline as d:
-            return TypedResolution(intent=None, decisions=self._consumed(records), decline=d.reason)
+            used, unused = self._consumed(records)
+            return TypedResolution(intent=None, decisions=used, unused=unused, decline=d.reason)
+        except Exception as exc:
+            # The provider failed partway: the decisions made before it (used
+            # or fetched ahead) were billed, and ride the failure with
+            # whatever the failing call itself billed.
+            self._prefetched = {}
+            for r in records:
+                if r.usage:
+                    spend_on(exc, r.provider, DecisionUsage(**r.usage))
+            raise
+        used, unused = self._consumed(records)
         return TypedResolution(
             intent=intent,
-            decisions=self._consumed(records),
+            decisions=used,
+            unused=unused,
             supplied=supplied,
             matched=list(self._matched),
             declined=list(self._declined),
         )
 
-    def _consumed(self, records: list[DecisionRecord]) -> list[DecisionRecord]:
-        """The ledger carries the decisions the resolution USED. A fan-out asks
-        ahead; when an earlier slot clarified or declined, the answers still
-        waiting were never part of this resolution and their raw policy verdicts
-        would read as decisions taken (an optional slot's confident `none` as
-        a decline). They are dropped, not relabelled."""
+    def _consumed(
+        self, records: list[DecisionRecord]
+    ) -> tuple[list[DecisionRecord], list[DecisionRecord]]:
+        """``(used, unused)``. The ledger carries the decisions the resolution
+        USED. A fan-out asks ahead; when an earlier slot clarified or declined,
+        the answers still waiting were never part of this resolution and their
+        raw policy verdicts would read as decisions taken (an optional slot's
+        confident `none` as a decline). They leave the ledger, not relabelled;
+        the call that fetched them was billed whole, so they are returned
+        apart for their usage to be charged."""
         unused = {idx for _d, _v, idx in self._prefetched.values()}
         self._prefetched = {}
-        return [r for i, r in enumerate(records) if i not in unused]
+        return (
+            [r for i, r in enumerate(records) if i not in unused],
+            [r for i, r in enumerate(records) if i in unused],
+        )
 
     def _readings(
         self, question: str, model: SemanticModel, records: list[DecisionRecord]
@@ -1932,6 +2920,8 @@ class TypedResolver:
                 decline_reason="not a question this lens's data answers (no figure, no listing)",
                 key="shape",
             )
+        except _Refused:
+            raise
         except _Decline:
             shape = self._shape_after_none(question, model, sets["metric"], records)
         if shape is None:
@@ -2008,6 +2998,15 @@ class TypedResolver:
                 first_metric = named_metrics[0]
             if first_metric is None:
                 raise _Decline("no governed metric of this lens answers the question")
+            if not named_metrics and (
+                exact := exact_over_partial(question, first_metric, sets["metric"])
+            ):
+                records.append(
+                    DecisionRecord(
+                        slot="metric", chosen=exact, verdict="act", provider=QUESTION_TEXT
+                    )
+                )
+                first_metric = exact
             if not named_metrics:
                 owner = owner_of.get(first_metric)
                 if siblings := parameter_siblings(
@@ -2033,9 +3032,18 @@ class TypedResolver:
                     )
             entity_name: str | None = owner_of.get(first_metric)
         else:
+            named_entity = _named_entity(question, model)
+            if named_entity is not None and len(model.entities) > 1:
+                records.append(
+                    DecisionRecord(
+                        slot="entity", chosen=named_entity, verdict="act", provider=QUESTION_TEXT
+                    )
+                )
             entity_name = (
                 model.entities[0].name
                 if len(model.entities) == 1
+                else named_entity
+                if named_entity is not None
                 else self._pick(
                     "entity",
                     question,
@@ -2056,12 +3064,48 @@ class TypedResolver:
         entity, first_metric = self._holds_the_named(
             question, model, entity, shape, first_metric, sets["metric"], owner_of, records
         )
+        # A binding keyed by a dimension's alias binds that dimension.
+        self._bindings = dict(self._bound)
+        for alias, dim in dimension_aliases(entity).items():
+            key = alias.replace(" ", "_")
+            for k in (alias, key):
+                if k in self._bound and dim.lower() not in self._bindings:
+                    self._bindings[dim.lower()] = self._bound[k]
+        chosen_so_far = [m for m in (first_metric, *named_metrics) if m]
+        self._spent = _name_numbers(entity, chosen_so_far)
+        # "server errors (5xx)" asked of the metric labelled so: the code is
+        # the metric's name. Read past it from here on, so no filter takes it
+        # and no decision is asked whether it states a value. A code a
+        # dictionary holds is that column's value instead (`_filters`).
+        held = {v.lower() for named in self._named(question, entity) for v in named.values()}
+        for spent_code in named_codes(question, entity, chosen_so_far):
+            if spent_code.lower() not in held:
+                question = re.sub(rf"\(\s*{re.escape(spent_code)}\s*\)", " ", question)
+        # "The largest visit" read as a figure is the total of every visit: a
+        # superlative no chosen metric carries asks for a ranking. A series
+        # ("the highest month") orders its buckets and stays a figure.
+        promoted = (
+            shape == "aggregate"
+            and first_metric is not None
+            and not asks_breakdown_over_time(question)
+            and unconsumed_superlative(
+                question, entity, [first_metric], self._domains_for(entity), model
+            )
+            is not None
+        )
+        if promoted:
+            records.append(
+                DecisionRecord(
+                    slot="shape", chosen="ranking", verdict="act", provider=QUESTION_TEXT
+                )
+            )
+            shape = "ranking"
         # By owner, not by bare name: two siblings declaring `win_rate` each
         # have the other's qualified option match the bare name, and "another
         # metric?" then offers the sibling's figure as this entity's own.
         own_metrics = [o for o in sets["metric"] if owner_of.get(o.name) == entity.name]
         own_members = [
-            *(Option(d.name, d.description or "") for d in entity.dimensions),
+            *(Option(d.name, _described(d), tuple(d.aliases)) for d in entity.dimensions),
             *(
                 Option(f.name, f.description or "")
                 for f in entity.fields
@@ -2080,18 +3124,32 @@ class TypedResolver:
         # wearing a ranking's shape. Such a column is not offered as a dimension
         # at all — the named value binds it below (`_filters`), deterministically.
         named_columns = {c for named in self._named(question, entity) for c in named}
-        can_group = groupable(question, entity, shape, self._domains_for(entity))
+        # "per tray" inside "bakes per tray per day", the figure's own label,
+        # names the figure: read breakdown words beside the chosen metric's
+        # names, as the grain is, so it opens no field to a breakdown vote.
+        can_group = groupable(
+            beside_names(question, entity, chosen_so_far), entity, shape, self._domains_for(entity)
+        )
         dims = [
             o
             for o in offered(question, entity, own_members)
             if o.name in can_group
             and o.name not in named_columns
-            and time_grouping_asked(question, entity, o.name)
+            and time_grouping_asked(beside_names(question, entity, chosen_so_far), entity, o.name)
         ]
+        if shape == "aggregate" and chosen_so_far:
+            # "branch visits in May" says `branch` only as the word the metric
+            # is named for: that names what it measures, not a breakdown, and
+            # leaving it to the vote flips the answer between a total and one
+            # row per branch at the threshold.
+            surfaces = _name_surfaces(entity, chosen_so_far)
+            dims = [o for o in dims if not _subject_only(question, o.name, surfaces)]
         # What a breakdown clarification offers when no dimension fits: the
         # entity's fields, so the question it asks names something to pick.
         fallback = [o.name for o in dims] or [
-            f.name for f in entity.fields if not column_hidden(f.name, entity)
+            f.name
+            for f in entity.fields
+            if not column_hidden(f.name, entity) and not column_internal(f.name, entity)
         ]
         # The fields a listing may show: no key column, no timestamp the
         # question does not ask about. With none left the listing is not one
@@ -2122,6 +3180,39 @@ class TypedResolver:
                 )
             )
             dim_initial = [named_dim]
+        # What a ranking ranks, when the question names it ("which stations",
+        # "the largest visit"), is read off the text like a "by" phrase: the
+        # decider grouping by another field ranks something nobody asked about.
+        ranked = (
+            self._ranked(question, entity, dims, named_columns)
+            if shape == "ranking" and named_dim is None
+            else None
+        )
+        if ranked is None and shape == "ranking" and named_dim is None:
+            self._ranks_elsewhere(question, model, entity, fallback)
+        if ranked is not None:
+            named_dim, _singular, said = ranked
+            # "Which members visit most" ranks members, one figure each: no
+            # further grouping is asked for (a "per gym" phrase still is, and
+            # clarifies where nothing groups by it).
+            dims = [Option(named_dim)]
+            metric_text = re.sub(rf"(?<!\w){re.escape(said)}(?!\w)", " ", _as_words(metric_text))
+            records.append(
+                DecisionRecord(
+                    slot="dimension", chosen=named_dim, verdict="act", provider=QUESTION_TEXT
+                )
+            )
+            dim_initial = [named_dim]
+        elif promoted:
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="dimension",
+                    question="The question asks for a largest or smallest one, and a total "
+                    "would not answer it. Ranked across what? " + ", ".join(fallback) + ".",
+                    options=fallback,
+                )
+            )
         # The metrics this answer starts with: the first pick, plus every
         # further metric the question named on this entity.
         initial_metrics = [first_metric] if first_metric is not None else []
@@ -2145,7 +3236,14 @@ class TypedResolver:
             "each row — hour, day, week, month, quarter or year? A stated period such "
             "as 'in August 2026' is the window, not the breakdown."
         )
-        over_time = asks_breakdown_over_time(question)
+        # "daily" is the grain's word unless a column stores it: a stored value
+        # the question names is that value ("daily-term loans"), never a series.
+        stored_said = {v for named in self._named(question, entity) for v in named.values()}
+        # A grain word inside the figure's own name ("daily target loaves")
+        # names the figure, not a series.
+        over_time = asks_breakdown_over_time(
+            beside_names(_without(question, stored_said), entity, initial_metrics)
+        )
         grain_opts = [*sets["grain"], Option(_NONE, "no time series is asked for")]
         # A level metric read over a window is settled by the window and the
         # snapshot rule: the last snapshot inside it. No restricting field is
@@ -2295,6 +3393,11 @@ class TypedResolver:
             )
             if not fields:
                 raise _Decline("no field of this lens matches what the listing asks for")
+            # Rows of a listing name what they are: the key (and its label)
+            # leads every listing that does not already show one.
+            identity = listing_identity(entity)
+            if identity and not set(identity) & set(fields):
+                fields = [*identity, *(f for f in fields if f not in identity)]
 
         dimensions: list[str] = []
         if shape in _FIGURES:
@@ -2328,6 +3431,17 @@ class TypedResolver:
                 )
             )
 
+        if (
+            shape in _FIGURES
+            and over_time
+            and not self._splits_in_time(entity, metrics, dimensions)
+        ):
+            # A figure asked over time on an entity with no clock to bucket
+            # it by would be served as one total: say the lens cannot split it.
+            raise _Decline(
+                f"this lens cannot split {', '.join(metrics)} {split_over_time(question)}: "
+                f"{entity.name} declares no time field"
+            )
         grain: TimeGrain | None = None
         if shape in _FIGURES and entity.default_time_field and over_time:
             g = self._pick(
@@ -2343,6 +3457,10 @@ class TypedResolver:
                 key="grain",
             )
             grain = g if g in {o.name for o in sets["grain"]} else None  # type: ignore[assignment]
+        if grain is not None:
+            # The bucket goes on the figure's own clock: a question dating it
+            # by another of the entity's clocks is asked, never bucketed silently.
+            window_clock(question, entity, metrics)
 
         definitions = self._definitions(question, model, records)
         if shape in _FIGURES and (noun := undeclared_measure(question, entity, model)):
@@ -2367,9 +3485,9 @@ class TypedResolver:
                 ClarificationRequest(
                     kind="unresolved_slot",
                     term=counted,
-                    question=f"The question counts {_plural(counted)}, and {', '.join(metrics)} "
-                    f"does not count them. Which metric of {entity.name} does it mean, or is "
-                    "it for another lens?",
+                    question=f"The question counts {_said_plural(counted)}, and "
+                    f"{', '.join(metrics)} does not count them. Which metric of "
+                    f"{entity.name} does it mean, or is it for another lens?",
                     options=counts or [m.name for m in entity.metrics],
                 )
             )
@@ -2388,6 +3506,64 @@ class TypedResolver:
                     options=[m.name for m in entity.metrics],
                 )
             )
+        self._spent = _name_numbers(entity, metrics)
+        chosen_words = _metric_words(_chosen(entity, metrics))
+        change = (
+            growth.read(
+                question,
+                chosen_words,
+                _naming_words(entity, self._domains_for(entity), model),
+                self._today,
+            )
+            if shape in _FIGURES
+            else None
+        )
+        if isinstance(change, ClarificationRequest):
+            raise _Clarify(change)
+        if shape in _FIGURES and (
+            word := unconsumed_share(
+                question,
+                entity,
+                metrics,
+                self._domains_for(entity),
+                model,
+                changing=change is not None,
+            )
+        ):
+            ratios = [m.name for m in entity.metrics if growth.is_ratio(m)]
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term=word,
+                    question=f"The question asks for a {word}, and {', '.join(metrics)} is not "
+                    "one: served as it is, the answer would be the plain figure, not its "
+                    "share. "
+                    + (
+                        f"Which ratio does it mean? {', '.join(ratios)}."
+                        if ratios
+                        else f"{entity.name} declares no ratio for it: declare one "
+                        "(the part over the whole), or ask for the figure itself."
+                    ),
+                    options=ratios or [m.name for m in entity.metrics],
+                )
+            )
+        if shape in _FIGURES and growth.net_new_unmet(question, chosen_words):
+            nets = [m.name for m in entity.metrics if "net" in _metric_words([m])]
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="net new",
+                    question=f"The question asks for a net figure, and {', '.join(metrics)} "
+                    "counts one side only. "
+                    + (
+                        f"Which net metric does it mean? {', '.join(nets)}."
+                        if nets
+                        else f"{entity.name} declares no net metric: declare one, or ask "
+                        "for the side you mean."
+                    ),
+                    options=nets or [m.name for m in entity.metrics],
+                )
+            )
         filters, supplied = self._filters(
             question,
             entity,
@@ -2395,6 +3571,8 @@ class TypedResolver:
             _carried(entity, metrics, model.dialect),
             records,
             snapshot=self._level_windowed(question, entity, metrics),
+            grouped=tuple(dimensions),
+            dialect=model.dialect,
         )
         if code := unheld_code(question, entity, model, self._domains_for(entity)):
             if not any(str(f.value).lower() == code.lower() for f in filters):
@@ -2411,7 +3589,32 @@ class TypedResolver:
         if conflict := _population_conflict(entity, filters, model.dialect):
             raise _Decline(conflict)
         _refuse_self_defining_filters(entity, metrics, filters)
-        filters += self._window(question, entity, metrics, records)
+        asked_filters = list(filters)
+        window_text = change.text if change is not None else question
+        filters += self._window(window_text, entity, metrics, records)
+        compare: IntentCompare | None = None
+        if change is not None:
+            compare, grain = self._compare(change, window_text, entity, metrics, filters, grain)
+            records.append(
+                DecisionRecord(
+                    slot="compare", chosen=compare.to, verdict="act", provider=QUESTION_TEXT
+                )
+            )
+        elif shape in _FIGURES and (
+            pin := pin_period(
+                question,
+                entity,
+                metrics,
+                filters,
+                grain,
+                period_field=self._period_field(entity),
+                today=self._today,
+            )
+        ):
+            if isinstance(pin, ClarificationRequest):
+                raise _Clarify(pin)
+            filters += pin[0]
+            records.append(pin[1])
         # A column an equality filter pins to one value is a constant: grouping
         # by it adds a column and no information, and whether a decider added it
         # was the only thing that varied between runs of one question. A named
@@ -2430,6 +3633,23 @@ class TypedResolver:
                         options=[o for o in fallback if o not in pinned] or fallback,
                     )
                 )
+        if shape in _FIGURES and (hit := counts_its_grouping(entity, metrics, dimensions)):
+            counted, column = hit
+            others = [m.name for m in entity.metrics if m.name != counted]
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="metric",
+                    question=f"'{counted}' counts distinct {column}, and the answer groups by "
+                    f"{', '.join(dimensions)}, one {column} each, so every row would read 1. "
+                    "Which figure should "
+                    + ("rank them" if shape == "ranking" else "it show")
+                    + "? "
+                    + ", ".join(others)
+                    + ".",
+                    options=others,
+                )
+            )
         if shape in _FIGURES and (
             missing := unplaced_breakdown(question, entity, metrics, dimensions, grain, filters)
         ):
@@ -2448,7 +3668,49 @@ class TypedResolver:
                     options=fallback,
                 )
             )
+        if unmapped := unmapped_qualifier(
+            question,
+            entity,
+            model,
+            metrics=metrics,
+            dimensions=[*dimensions, *fields],
+            filters=asked_filters,
+            decided=[
+                f for f in asked_filters if f.field not in supplied and f.field not in self._matched
+            ],
+            bound=list(self._bound.values()),
+            domains=self._domains_for(entity),
+            windowed=len(filters) > len(asked_filters),
+        ):
+            word, carriers = unmapped
+            records.append(
+                DecisionRecord(
+                    slot="filter", chosen=None, verdict="clarify", provider=QUESTION_TEXT
+                )
+            )
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term=word,
+                    question=(
+                        f"'{word}' is said only by {', '.join(carriers)}, and the answer "
+                        f"reads {', '.join(metrics)}. Which metric does the question mean?"
+                        if carriers
+                        else f"Nothing in this lens holds what '{word}' restricts: the "
+                        "answer would leave it out and serve "
+                        + (", ".join(metrics) or "the rows")
+                        + f" for every {entity.name.rstrip('s')}. Is the question meant "
+                        "without it, or for another lens?"
+                    ),
+                    options=carriers or [entity.name],
+                )
+            )
         order_by, limit = self._order(question, metrics, fields, self._better(entity, metrics))
+        if promoted and limit is None and ranked is not None and ranked[1]:
+            limit = 1  # "the largest visit": one
+        if compare is not None and order_by:
+            # "which station grew most" ranks by the change, not the level
+            order_by = [o.model_copy(update={"field": f"{o.field}_delta"}) for o in order_by]
         if shape == "ranking" and not order_by:
             # Read as a ranking with no direction the question states: which end
             # is the answer is not the resolver's to guess.
@@ -2471,6 +3733,8 @@ class TypedResolver:
             filters=filters,
             order_by=order_by,
             limit=limit,
+            compare=compare,
+            snapshot=level_edge(window_text, entity, metrics),
         )
         return intent, supplied
 
@@ -2592,6 +3856,96 @@ class TypedResolver:
             )
         )
 
+    def _ranked(
+        self, question: str, entity: Entity, dims: list[Option], named_columns: set[str]
+    ) -> tuple[str, bool, str] | None:
+        """The member the question's ranking noun names (``ranked_member``)
+        among the offered dimensions, the entity's text fields and its keys —
+        a ranking of "which members" may group by `member_id` when no label
+        is declared. Never a column a named value already filters."""
+        allowed = {o.name for o in dims} | {
+            f.name
+            for f in entity.fields
+            if not column_hidden(f.name, entity)
+            and not column_internal(f.name, entity)
+            and (f.type == "string" or _keyish(entity, f.name))
+        }
+        return ranked_member(question, entity, allowed - named_columns)
+
+    @staticmethod
+    def _ranks_elsewhere(
+        question: str, model: SemanticModel, entity: Entity, fallback: list[str]
+    ) -> None:
+        """A ranking noun this entity holds nothing for and another entity of the
+        lens does ("which district had the most rides", the district on the
+        stations): one answer reads one entity, and the decider grouping by a
+        field of this one ranks something nobody asked about. Asked instead."""
+        for other in model.entities:
+            if other.name == entity.name:
+                continue
+            allowed = {
+                n
+                for n in [*(f.name for f in other.fields), *(d.name for d in other.dimensions)]
+                if not column_hidden(n, other)
+                and _field_type(other, n) not in ("date", "timestamp", "number", "integer")
+            }
+            hit = ranked_member(question, other, allowed)
+            if hit is None:
+                continue
+            member, _singular, said = hit
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="dimension",
+                    question=f"The question ranks by {said}: {other.name} holds {member}, and "
+                    f"{entity.name}, which the figure is counted on, does not. One answer "
+                    "reads one entity — rank by a field of "
+                    f"{entity.name}, or ask {other.name} about it.",
+                    options=fallback,
+                )
+            )
+
+    def _compare(
+        self,
+        change: growth.Reading,
+        window_text: str,
+        entity: Entity,
+        metrics: list[str],
+        filters: list[IntentFilter],
+        grain: TimeGrain | None,
+    ) -> tuple[IntentCompare, TimeGrain | None]:
+        """The comparison window for a change the question asks for (growth.py),
+        read against the answer's own window on the metrics' time field."""
+        field_name = entity.default_time_field
+        for m in _chosen(entity, metrics):
+            field_name = m.agg_time_field or field_name
+        if not field_name:
+            period = self._period_field(entity)
+            if period is not None and any(f.field == period for f in filters):
+                raise _Decline(
+                    f"a change over time is compared on dates, and {entity.name} keeps its "
+                    f"period in '{period}' as text"
+                )
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="window",
+                    question=f"The question asks for a change over time, and {entity.name} "
+                    "declares no time field to measure it on.",
+                    options=[m.name for m in entity.metrics],
+                )
+            )
+        window = growth.window_of(filters, field_name)
+        if window is None:
+            raise _Clarify(growth.no_window(change.unit, self._today))
+        this = sorted(t for t in timewindow.temporal_terms(window_text) if t.startswith("this "))
+        to_date = this[0].split()[-1] if this else None
+        got = growth.target(change, window, to_date, grain)
+        if isinstance(got, ClarificationRequest):
+            raise _Clarify(got)
+        to, new_grain = got
+        return IntentCompare(to=to), cast("TimeGrain | None", new_grain)
+
     def _noted(self, context: str) -> str:
         return f"{context} {self._notes}".strip() if getattr(self, "_notes", "") else context
 
@@ -2613,17 +3967,24 @@ class TypedResolver:
         time_field = (entity.default_time_field or "").lower()
         windowed = bool(timewindow.temporal_terms(question))
         period = (self._period_field(entity) or "").lower() if windowed else ""
+        # A column holding a stored value the question names is a candidate
+        # whatever its name or role: the value settles it, as it always has.
+        holding = (
+            {c for named in self._named(question, entity) for c in named} if decided else set()
+        )
         out: list[Option] = []
         for m in members:
             if m.name.lower() in (time_field, period) and m.name.lower():
                 continue
+            if column_internal(m.name, entity):
+                continue  # kept for keys and counts, never offered as a filter
             # A numeric column restricts only by a number the question states:
             # offered otherwise, an id column (ally_hero_id beside ally_hero_name)
             # wins the pick and the filter then asks for a number nobody gave.
             ftype = _field_type(entity, m.name)
             if (
                 ftype in ("integer", "number")
-                and self._literal_in_question(question, ftype) is None
+                and self._literal_in_question(question, ftype, self._spent) is None
             ):
                 continue
             if windowed and _field_type(entity, m.name) in ("date", "timestamp"):
@@ -2633,14 +3994,18 @@ class TypedResolver:
             if (
                 decided
                 and windowed
+                and m.name not in holding
                 and not _says(question, m.name)
                 and set(_WORD.findall(m.name.lower())) & _PERIOD_FLAG_WORDS
             ):
                 continue
             out.append(m)
+        if not decided:
+            return out
         # A decided filter is never on a key column or an unasked timestamp; a
         # stored value the question names binds its column whatever it is.
-        return offered(question, entity, out) if decided else out
+        kept = {o.name for o in offered(question, entity, out)}
+        return [o for o in out if o.name in kept or o.name in holding]
 
     @staticmethod
     def _filter_ctx(columns: list[str]) -> str:
@@ -2680,6 +4045,7 @@ class TypedResolver:
                 clarify_term=d.term,
                 clarify_question=f"Should the governed meaning of '{d.term}' apply here?",
                 key=f"definition:{d.term}",
+                clarify_options=[f"apply '{d.term}'", f"do not apply '{d.term}'"],
             )
             if pick == "engaged":
                 out.append(d.term)
@@ -2694,31 +4060,62 @@ class TypedResolver:
         records: list[DecisionRecord],
         *,
         snapshot: bool = False,
+        grouped: tuple[str, ...] = (),
+        dialect: str | None = None,
     ) -> tuple[list[IntentFilter], list[str]]:
         filters: list[IntentFilter] = []
         supplied: list[str] = []
         candidates = [] if snapshot else self._filter_candidates(question, entity, members)
+        # A column the caller bound is applied below whatever the vote says:
+        # offered to it, a split vote on that column asked the caller again for
+        # the restriction they had just supplied.
+        candidates = [o for o in candidates if o.name.lower() not in self._bindings]
+        # A column the population holds to one value (`is_ebike = TRUE` on an
+        # e-bike-only table) is never a restriction left to ask about.
+        population = (entity.population_filter or "").strip()
+        held = _single_value_columns([population], dialect or "duckdb") if population else set()
+        candidates = [o for o in candidates if o.name.lower() not in held]
         # Column, then its value, then "another filter or none" — one filter at a
         # time, so the value decision follows the column it belongs to.
         columns: list[str] = []
+        # Columns the question's own words bind below — a stored value it names,
+        # a true/false field it names by its subject: a split vote over these
+        # alone is no question to ask back, the words settle it.
+        settled = {c for named in self._named(question, entity) for c in named} | {
+            c for c, _said, _neg in named_flags(question, entity, [o.name for o in candidates])
+        }
         while candidates and len(columns) < MAX_FILTERS:
-            column = self._pick(
-                "filter",
-                question,
-                self._filter_ctx(columns),
-                [*candidates, Option(_NONE, "no further restriction is asked for")],
-                allow_none=True,
-                records=records,
-                clarify_term="filter",
-                clarify_question="Which field should the answer be restricted by? "
-                + ", ".join(o.name for o in candidates[:6]),
-                key=f"filter:{len(columns)}",
-            )
+            try:
+                column = self._pick(
+                    "filter",
+                    question,
+                    self._filter_ctx(columns),
+                    [*candidates, Option(_NONE, "no further restriction is asked for")],
+                    allow_none=True,
+                    records=records,
+                    clarify_term="filter",
+                    clarify_question="Which field should the answer be restricted by? "
+                    + ", ".join(o.name for o in candidates[:6]),
+                    key=f"filter:{len(columns)}",
+                )
+            except _Clarify as unsure:
+                if unsure.request.options and set(unsure.request.options) <= settled:
+                    break
+                raise
             if column is None:
                 break
             columns.append(column)
             candidates = [o for o in candidates if o.name != column]
             self._value(question, entity, column, filters, supplied, records)
+        # A binding is a restriction the caller stated: it applies whether or
+        # not the column vote picked its field. Dropped, the answer is for
+        # every value while the caller reads it as theirs.
+        time_field = (entity.default_time_field or "").lower()
+        for o in members:
+            low = o.name.lower()
+            if low in self._bindings and low != time_field and o.name not in columns:
+                columns.append(o.name)
+                self._value(question, entity, o.name, filters, supplied, records)
         # A value the question names is a restriction it asked for: serving
         # without it answers a different question. The general "any restriction?"
         # decision can miss it (the name read as a field to show), so each
@@ -2762,6 +4159,30 @@ class TypedResolver:
                     options=sorted(named),
                 )
             )
+        # A true/false column the question names by its subject ("top stations
+        # by e-bike rides", "unpaid invoices") restricts the answer like a
+        # named value; served without it, the ranking or total is over every
+        # row while the caller reads it as the flagged ones. A grouped flag is
+        # its breakdown; one the population or the metric already decides is
+        # not asked. Any other gets a focused decision, and its "none" is a
+        # question back, never a silent drop.
+        decided_by_rows = _population_columns(entity, dialect)
+        for column, said, negated in named_flags(question, entity, [o.name for o in members]):
+            low = column.lower()
+            if (
+                column in columns
+                or column in grouped
+                or low in decided_by_rows
+                or carried.carries(column)
+                or carried.carries(said.replace(" ", ""))
+                or any(f.field == column for f in filters)
+            ):
+                continue
+            value = self._flag_value(question, entity, column, said, negated, records)
+            columns.append(column)
+            filters.append(IntentFilter(field=column, op="=", value=value))
+            # Named by the question's own words: no qualifier hides behind it.
+            self._matched.append(column)
         # A filter to the value the metric selects its rows by decides it: the
         # draw rate over `lane_result = 'drawn'`, filtered to drawn lanes, is
         # 1.0 on every row. The question's 'drawn' is the metric's already.
@@ -2777,6 +4198,55 @@ class TypedResolver:
             if f.field in self._matched:
                 self._matched.remove(f.field)
         return filters, supplied
+
+    def _flag_value(
+        self,
+        question: str,
+        entity: Entity,
+        column: str,
+        said: str,
+        negated: bool,
+        records: list[DecisionRecord],
+    ) -> str:
+        """The stored value of a true/false column the question names by its
+        subject (``named_flags``): a focused decision between its two values,
+        told which words name it. Shown only "true", "false" and "unstated", a
+        decider read "unpaid invoices" as no value at all; a "none" here is a
+        question back, never a drop."""
+        reading = "false" if negated else "true"
+        pick = self._pick(
+            "filter_value",
+            question,
+            f"The question says '{said}', which names the true/false field '{column}'"
+            + (" in the negative" if negated else "")
+            + ". Which rows does it ask about?",
+            [
+                Option("true", f"only the rows where {column} is true"),
+                Option("false", f"only the rows where {column} is false"),
+                Option(_NONE, "every row; the word does not restrict the answer"),
+            ],
+            allow_none=True,
+            records=records,
+            clarify_term=column,
+            clarify_question=f"The question says '{said}': should the answer count only "
+            f"the rows where '{column}' is {reading}? Supply it as a binding (true or "
+            "false), or re-ask without the word.",
+            key=f"flag:{column}",
+            clarify_options=["true", "false"],
+        )
+        if pick not in ("true", "false"):
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term=column,
+                    question=f"The question says '{said}', and no filter of the answer "
+                    f"uses '{column}'. Should it count only the rows where it is "
+                    f"{reading}? Supply it as a binding (true or false).",
+                    options=["true", "false"],
+                )
+            )
+        domain = self._decidable_domain(entity, column) or []
+        return next((v for v in domain if v.casefold() == pick), pick)
 
     def _named(self, question: str, entity: Entity) -> list[dict[str, str]]:
         """The stored values the question names among the entity's filter
@@ -2836,7 +4306,7 @@ class TypedResolver:
         ftype = _field_type(entity, column)
         domain = self._decidable_domain(entity, column)
         bound = self._bindings.get(column.lower())
-        if domain and bound is not None and bound in domain:
+        if bound is not None and domain:
             return None
         named = self._named_for(question, entity, column, [])
         if len(named) > 1:
@@ -2856,7 +4326,7 @@ class TypedResolver:
                     True,
                 ),
             )
-        if bound is not None or self._literal_in_question(question, ftype) is not None:
+        if bound is not None or self._literal_in_question(question, ftype, self._spent) is not None:
             return None
         return (
             f"stated:{column}",
@@ -2880,9 +4350,25 @@ class TypedResolver:
         ftype = _field_type(entity, column)
         domain = self._decidable_domain(entity, column)
         bound = self._bindings.get(column.lower())
-        if domain and bound is not None and bound in domain:
-            # The caller bound it: the value is theirs, no decision to make.
-            filters.append(IntentFilter(field=column, op="=", value=bound))
+        if bound is not None and domain:
+            # The caller bound it: the value is theirs, no decision to make. It
+            # resolves against the column's dictionary as the question's own
+            # words do, whatever its case; a value the dictionary does not hold
+            # is asked about, never handed to a decision or dropped.
+            stored = next((v for v in domain if v.casefold() == bound.strip().casefold()), None)
+            if stored is None:
+                shown = ", ".join(domain[:LOW_CARDINALITY_MAX])
+                more = len(domain) - LOW_CARDINALITY_MAX
+                raise _Clarify(
+                    ClarificationRequest(
+                        kind="unknown_value",
+                        term=column,
+                        question=f"The binding for '{column}' ({bound!r}) is not a value it "
+                        f"holds. It holds: {shown}" + (f", and {more} more." if more > 0 else "."),
+                        options=list(domain[:LOW_CARDINALITY_MAX]),
+                    )
+                )
+            filters.append(IntentFilter(field=column, op="=", value=stored))
             supplied.append(column)
             return
         named = self._named_for(question, entity, column, filters)
@@ -2924,6 +4410,13 @@ class TypedResolver:
             filters.append(IntentFilter(field=column, op="=", value=value))
             self._matched.append(column)
             return
+        flag = named_flags(question, entity, [column]) if ftype == "boolean" else []
+        if flag:
+            _col, said, negated = flag[0]
+            value = self._flag_value(question, entity, column, said, negated, records)
+            filters.append(IntentFilter(field=column, op="=", value=value))
+            self._matched.append(column)
+            return
         if domain and len(domain) <= LOW_CARDINALITY_MAX:
             value = self._pick(
                 "filter_value",
@@ -2960,7 +4453,7 @@ class TypedResolver:
             filters.append(IntentFilter(field=column, op=op, value=value_obj))
             supplied.append(column)
             return
-        literal = self._literal_in_question(question, ftype)
+        literal = self._literal_in_question(question, ftype, self._spent)
         if literal is not None:
             # The question states this number once: it restricts one column. A
             # second column reading it ('15 minutes' as minute = 15 AND
@@ -2985,6 +4478,13 @@ class TypedResolver:
         # value, no binding, no literal: one more decision before asking the
         # agent to bind — does the question state a value at all? A column
         # picked at low p on a question that names no value is not a filter.
+        grammar = _grammar_for(ftype)
+        # A table never sampled has no dictionary to bind from: say why.
+        why = (
+            f" dst holds no values of '{column}': {self._unsampled[entity.name]}."
+            if entity.name in self._unsampled
+            else ""
+        )
         stated = self._pick(
             "filter_value",
             question,
@@ -2993,8 +4493,10 @@ class TypedResolver:
             allow_none=False,
             records=records,
             clarify_term=column,
-            clarify_question=f"Which value of '{column}' should the answer filter on?",
+            clarify_question=f"Should the answer be restricted to one value of '{column}'? "
+            f"If so, supply it as a binding ({grammar}); if not, re-ask without it.{why}",
             key=f"stated:{column}",
+            clarify_options=[f"one value of '{column}' ({grammar})", f"every '{column}'"],
         )
         if stated == _UNSTATED:
             return
@@ -3003,8 +4505,8 @@ class TypedResolver:
                 kind="unresolved_slot",
                 term=column,
                 question=f"Which value of '{column}' should the answer filter on? "
-                f"Supply it as a binding ({_grammar_for(ftype)}).",
-                options=[_grammar_for(ftype)],
+                f"Supply it as a binding ({grammar}).{why}",
+                options=[grammar],
             )
         )
 
@@ -3051,12 +4553,18 @@ class TypedResolver:
         return raw
 
     @staticmethod
-    def _literal_in_question(question: str, ftype: str | None) -> object | None:
+    def _literal_in_question(
+        question: str, ftype: str | None, spent: frozenset[str] = frozenset()
+    ) -> object | None:
         """A number or ISO date resolves from the question only when exactly one
-        standalone literal of that type appears — one is a fact, two is a guess."""
+        standalone literal of that type appears — one is a fact, two is a guess.
+        ``spent``: numbers a chosen metric's name carries, which are its
+        setting ("within 15 minutes" of `answered_within_15m`), not a literal."""
         if ftype in ("number", "integer"):
+            for code in bracketed_codes(question):
+                question = question.replace(code, " ")
             stripped = _ISO_DATE.sub(" ", _YEARISH.sub(" ", question))
-            nums = _NUMBER.findall(stripped)
+            nums = [n for n in _NUMBER.findall(stripped) if n.lstrip("-") not in spent]
             if len(nums) == 1:
                 return float(nums[0]) if "." in nums[0] else int(nums[0])
             return None
@@ -3068,6 +4576,11 @@ class TypedResolver:
     def _window(
         self, question: str, entity: Entity, metrics: list[str], records: list[DecisionRecord]
     ) -> list[IntentFilter]:
+        if bound := self._window_binding(question, entity, metrics):
+            records.append(
+                DecisionRecord(slot="window", chosen=bound, verdict="act", provider="binding")
+            )
+            question = f"{question} ({bound})"
         filters = window_filters(
             question, entity, metrics, period_field=self._period_field(entity), today=self._today
         )
@@ -3089,11 +4602,36 @@ class TypedResolver:
             )
         return filters
 
+    def _window_binding(self, question: str, entity: Entity, metrics: list[str]) -> str | None:
+        """The period a binding supplies when the question states none — on the
+        entity's time field (which a filter binding never takes), or as
+        `window`, the term a window clarification names: YYYY, YYYY-Qn, YYYY-MM, YYYY-MM-DD or
+        YYYY-MM-DD/YYYY-MM-DD, read as the question's own window."""
+        if timewindow.temporal_terms(question):
+            return None
+        keys = {(entity.default_time_field or "").lower(), "window"}
+        raw = next((v.strip() for k, v in self._bindings.items() if k in keys), None)
+        if not raw:
+            return None
+        first, _sep, last = raw.partition("/")
+        text = f"from {first} to {last}" if last else first
+        if not timewindow.window_ranges(timewindow.temporal_terms(text), self._today):
+            raise _Clarify(
+                ClarificationRequest(
+                    kind="unresolved_slot",
+                    term="window",
+                    question=f"The period binding {raw!r} is not one dst reads. Supply it "
+                    f"as {GRAMMAR['date_range']}.",
+                    options=[GRAMMAR["date_range"]],
+                )
+            )
+        return text
+
     def _level_windowed(self, question: str, entity: Entity, metrics: list[str]) -> bool:
         """Is a level metric (a snapshot figure) read over a stated window?"""
         bare = {m.rsplit(".", 1)[-1] for m in metrics}
         return bool(timewindow.temporal_terms(question)) and any(
-            m.additivity == "level" for m in entity.metrics if m.name in bare
+            reads_as_level(m, entity) for m in entity.metrics if m.name in bare
         )
 
     def _shape_after_none(
@@ -3224,13 +4762,21 @@ class TypedIntentGenerator:
             if what is None:
                 raise
             typed_health.failed(what)
-            raise typed_health.TypedUnavailable(what) from exc
+            raise typed_health.TypedUnavailable(what, spent=spent_by(exc)) from exc
         typed_health.succeeded()
         if res.clarification is not None:
-            return GeneratedQuery(sql="", clarification=res.clarification, decisions=res.decisions)
+            return GeneratedQuery(
+                sql="",
+                clarification=res.clarification,
+                decisions=res.decisions,
+                unused_decisions=res.unused,
+            )
         if res.intent is None:
             return GeneratedQuery(
-                sql="", no_answer_reason=res.decline or "did not type", decisions=res.decisions
+                sql="",
+                no_answer_reason=res.decline or "did not type",
+                decisions=res.decisions,
+                unused_decisions=res.unused,
             )
         try:
             res.intent = govern_literals(
@@ -3247,19 +4793,24 @@ class TypedIntentGenerator:
             # The reading is complete but sums kinds of record that do not add:
             # which kind is the caller's to say, so ask rather than decline.
             return GeneratedQuery(
-                sql="", clarification=exc.clarification(), decisions=res.decisions
+                sql="",
+                clarification=exc.clarification(),
+                decisions=res.decisions,
+                unused_decisions=res.unused,
             )
         except CompileError as exc:
             return GeneratedQuery(
                 sql="",
                 no_answer_reason=f"the typed intent did not compile: {exc}",
                 decisions=res.decisions,
+                unused_decisions=res.unused,
             )
         return GeneratedQuery(
             sql=sql,
             definition_used=intent_term(res.intent),
             intent=res.intent,
             decisions=res.decisions,
+            unused_decisions=res.unused,
             supplied=res.supplied,
             typed=True,
             declined=res.declined,

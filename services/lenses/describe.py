@@ -20,7 +20,13 @@ from collections.abc import Mapping, Sequence
 
 from pydantic import BaseModel
 
-from services.contracts.semantic_model import Entity, Metric, SemanticModel, column_hidden
+from services.contracts.semantic_model import (
+    Entity,
+    Metric,
+    SemanticModel,
+    column_hidden,
+    column_internal,
+)
 from services.runtime.compiler import PLACEHOLDER, unsafe_join_reason
 
 
@@ -34,6 +40,9 @@ class LensEntityInfo(BaseModel):
     name: str
     description: str | None = None
     fields: list[LensFieldInfo]
+    # Set when no value of this entity's columns can be bound from a
+    # dictionary, and why (its table was never sampled: over the budget).
+    values_note: str | None = None
 
 
 class ExposedTableInfo(BaseModel):
@@ -84,6 +93,8 @@ class CatalogMetric(BaseModel):
     # a window reads its latest one) — the compiler's reading, so an
     # undeclared metric says flow.
     additivity: str = "flow"
+    # A level's declared reading of a stated period: snapshot or any_in_window.
+    window_reading: str | None = None
     # The declared unit: an ISO currency code, or `percent`; None when the
     # author declared neither, and then no unit is implied.
     unit: str | None = None
@@ -106,6 +117,8 @@ class CatalogDimension(BaseModel):
     name: str
     entity: str
     label: str | None = None
+    # Further words that name the dimension (`aliases:`).
+    aliases: list[str] = []
     type: str
     description: str | None = None
     # The complete value dictionary from the stored profile when the column
@@ -176,15 +189,22 @@ def _unit(metric: Metric) -> str | None:
     return "percent" if metric.format == "percent" else None
 
 
-def _members(entity: Entity) -> list[tuple[str, str, str | None]]:
-    """``(name, type, description)`` of every member groupable on *entity*:
-    its declared dimensions, then its fields of a groupable type."""
-    out: dict[str, tuple[str, str, str | None]] = {}
+def _members(entity: Entity) -> list[tuple[str, str, str | None, list[str]]]:
+    """``(name, type, description, aliases)`` of every member groupable on
+    *entity*: its declared dimensions, then its fields of a groupable type.
+    An `internal` column is never offered."""
+    out: dict[str, tuple[str, str, str | None, list[str]]] = {}
     for d in entity.dimensions:
-        out[d.name] = (d.name, d.type, d.description)
+        if not column_internal(d.name, entity):
+            out[d.name] = (d.name, d.type, d.description, list(d.aliases))
     for f in entity.fields:
-        if f.name not in out and f.type in _DIMENSION_TYPES and not column_hidden(f.name, entity):
-            out[f.name] = (f.name, f.type, f.description)
+        if (
+            f.name not in out
+            and f.type in _DIMENSION_TYPES
+            and not column_hidden(f.name, entity)
+            and not column_internal(f.name, entity)
+        ):
+            out[f.name] = (f.name, f.type, f.description, [])
     return list(out.values())
 
 
@@ -203,6 +223,7 @@ def catalog_of(
         CatalogDimension(
             name=name,
             entity=e.name,
+            aliases=aliases,
             type=type_,
             description=desc,
             values=(
@@ -212,7 +233,7 @@ def catalog_of(
             ),
         )
         for e in governed
-        for name, type_, desc in _members(e)
+        for name, type_, desc, aliases in _members(e)
     ]
     metrics: list[CatalogMetric] = []
     for e in governed:
@@ -221,8 +242,8 @@ def catalog_of(
             for other in governed
             if other.name != e.name and unsafe_join_reason(model, e.name, other.name) is None
         ]
-        callable_dims = [n for n, _t, _d in _members(e)] + [
-            f"{other.name}.{n}" for other in reachable for n, _t, _d in _members(other)
+        callable_dims = [n for n, _t, _d, _a in _members(e)] + [
+            f"{other.name}.{n}" for other in reachable for n, _t, _d, _a in _members(other)
         ]
         types = {f.name: f.type for f in e.fields}
         for m in e.metrics:
@@ -237,6 +258,7 @@ def catalog_of(
                     type=m.type,
                     agg=m.agg,
                     additivity=m.additivity or "flow",
+                    window_reading=m.window_reading,
                     unit=_unit(m),
                     currency=m.currency,
                     format=m.format,
@@ -282,8 +304,12 @@ def describe_model(
     certified_examples: list[str] | None = None,
     domains: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
     certified: Sequence[tuple[str, Sequence[str]]] = (),
+    unsampled: Mapping[str, str] | None = None,
 ) -> LensDescription:
-    """Project a compiled semantic model into the caller-facing description."""
+    """Project a compiled semantic model into the caller-facing description.
+    ``unsampled``: entity name -> why its table was never sampled
+    (``value_guard.entity_unsampled``)."""
+    why = unsampled or {}
     metrics, dimensions = catalog_of(model, domains=domains, certified=certified)
     return LensDescription(
         name=name,
@@ -298,6 +324,12 @@ def describe_model(
                     LensFieldInfo(name=f.name, type=f.type, description=f.description)
                     for f in e.fields
                 ],
+                values_note=(
+                    f"values cannot bind: {why[e.name]}, so dst holds no values of its "
+                    "columns to check or bind a named value against; supply one as a binding"
+                    if e.name in why
+                    else None
+                ),
             )
             for e in model.entities
             if not e.exposed

@@ -15,7 +15,13 @@ import sqlglot
 from pydantic import BaseModel
 from sqlglot import expressions as exp
 
-from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
+from services.contracts.semantic_model import (
+    Definition,
+    Entity,
+    Metric,
+    SemanticModel,
+    column_internal,
+)
 from services.definitions import drift
 from services.definitions.standards import OrgStandard
 from services.lenses.store import LensBundle
@@ -214,6 +220,47 @@ def _lint_compiles(sm: SemanticModel, issues: list[Issue]) -> None:
                     )
                 )
                 break
+
+
+def _lint_dimension_words(e: Entity, issues: list[Issue]) -> None:
+    """A word two dimensions of one entity both answer to ("area" as an alias
+    of two, or one's alias the other's name) names neither: the breakdown
+    and binding rails read it word for word, so the clash dies at plan."""
+    claims: dict[str, set[str]] = {}
+    for d in e.dimensions:
+        for word in (d.name, *d.aliases):
+            key = " ".join(re.findall(r"[a-z0-9]+", word.lower()))
+            if key:
+                claims.setdefault(key, set()).add(d.name)
+    for word, owners in sorted(claims.items()):
+        if len(owners) > 1:
+            issues.append(
+                Issue(
+                    severity="error",
+                    code="dimension_alias_conflict",
+                    message=f"entity '{e.name}': '{word}' names dimensions "
+                    f"{', '.join(sorted(owners))} — an alias must name one dimension",
+                    subject=e.name,
+                )
+            )
+
+
+def _lint_internal_columns(e: Entity, issues: list[Issue]) -> None:
+    """An `internal` pattern that matches no field withholds nothing: the same
+    silent miss as a `hide` that matches nothing."""
+    names = [f.name for f in e.fields] + [d.name for d in e.dimensions]
+    for pattern in e.internal:
+        probe = e.model_copy(update={"internal": [pattern]})
+        if not any(column_internal(n, probe) for n in names):
+            issues.append(
+                Issue(
+                    severity="error",
+                    code="internal_unmatched",
+                    message=f"entity '{e.name}' marks '{pattern}' internal but no field "
+                    "matches it — fix the pattern or drop it",
+                    subject=e.name,
+                )
+            )
 
 
 def _lint_imperative_prose(e: Entity, issues: list[Issue]) -> None:
@@ -651,6 +698,35 @@ def status_done_family_warnings(
     return issues
 
 
+def _spelled(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _sources_shadow_metrics(bundle: LensBundle) -> list[Issue]:
+    """A declared source system spelled like one of the lens's metrics: every
+    question naming the metric would then name the system, and routing would
+    send it only to lenses declaring that system."""
+    phrases = {
+        _spelled(p): m.name
+        for e in bundle.semantic_model.entities
+        for m in e.metrics
+        for p in (m.name, m.label or "", *m.aliases)
+        if _spelled(p)
+    }
+    return [
+        Issue(
+            severity="warning",
+            code="source_names_a_metric",
+            message=f"source '{src}' is spelled like metric '{phrases[_spelled(src)]}': every "
+            "question naming the metric names the system too, and routes only to lenses "
+            "declaring it. Name the system as people say it apart from the figure",
+            subject=src,
+        )
+        for src in getattr(bundle.config, "sources", None) or []
+        if _spelled(src) in phrases
+    ]
+
+
 def _check_bundle(
     bundle: LensBundle,
     standards: list[OrgStandard],
@@ -684,6 +760,8 @@ def _check_bundle(
 
     for e in sm.entities:
         _lint_imperative_prose(e, issues)
+        _lint_dimension_words(e, issues)
+        _lint_internal_columns(e, issues)
         _lint_twin_metric_filters(e, sm.dialect, issues)
         _lint_population_filter_binds(e, sm.dialect, issues)
         if e.source.connection not in allowed_connections:
@@ -729,6 +807,8 @@ def _check_bundle(
                     subject=sm.timezone,
                 )
             )
+
+    issues.extend(_sources_shadow_metrics(bundle))
 
     if sm.stale_after_days is not None and sm.stale_after_days < 1:
         # Same rule as the zone: a nonsense freshness contract must die at plan.

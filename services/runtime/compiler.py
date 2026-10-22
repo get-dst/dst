@@ -408,26 +408,98 @@ def _trunc_sql(table: str, field: str, grain: str, dialect: str) -> str:
     return node.sql(dialect=dialect)
 
 
+def _operands(metric: Metric, by_name: Mapping[str, Metric]) -> list[Metric | None]:
+    """The sibling metrics a ratio or derived metric is computed from."""
+    if metric.type == "ratio":
+        refs = [metric.numerator, metric.denominator]
+    elif metric.type == "derived":
+        refs = list(PLACEHOLDER.findall(metric.expr or ""))
+    else:
+        return []
+    return [by_name.get(r or "") for r in refs]
+
+
+def _level_fields(
+    metric: Metric, entity: Entity, by_name: Mapping[str, Metric], seen: frozenset[str]
+) -> set[str | None] | None:
+    """The snapshot time fields *metric* reads as a level through, or None
+    when it is not one. A metric declaring ``additivity`` says so itself; a
+    ratio or derived metric that declares none is a level when every operand
+    is one (occupied berths over all berths, both snapshots), read at the same
+    snapshot as they are."""
+    if metric.additivity is not None:
+        if metric.additivity != "level":
+            return None
+        return {metric.agg_time_field or entity.default_time_field}
+    if metric.name in seen:
+        return None
+    ops = _operands(metric, by_name)
+    if not ops or any(o is None for o in ops):
+        return None
+    out: set[str | None] = set()
+    for o in ops:
+        assert o is not None
+        fields = _level_fields(o, entity, by_name, seen | {metric.name})
+        if fields is None:
+            return None
+        out |= fields
+    if metric.agg_time_field:
+        return {metric.agg_time_field}
+    return out
+
+
+def reads_as_level(metric: Metric, entity: Entity) -> bool:
+    """Is *metric*'s figure for a window a snapshot inside it — a level, or a
+    ratio or derived metric over levels only?"""
+    by_name = {m.name: m for m in entity.metrics}
+    return _level_fields(metric, entity, by_name, frozenset()) is not None
+
+
+def window_reading(metric: Metric, entity: Entity) -> str:
+    """How a level reads a window: ``snapshot`` (one snapshot inside it, the
+    default) or ``any_in_window`` (the distinct things it counts at any
+    snapshot inside it). A ratio or derived level reads its operands'."""
+    if metric.window_reading is not None:
+        return metric.window_reading
+    by_name = {m.name: m for m in entity.metrics}
+    readings = {
+        window_reading(o, entity)
+        for o in _operands(metric, by_name)
+        if o is not None and o is not metric
+    }
+    return "any_in_window" if readings == {"any_in_window"} else "snapshot"
+
+
 def level_time_field(entity: Entity, metrics: Sequence[Metric]) -> str | None:
     """The snapshot field a level reading restricts, or None when no selected
     metric is a level. A level beside a flow is refused: one WHERE cannot both
     keep every row of the window and keep only its last snapshot."""
-    levels = [m for m in metrics if m.additivity == "level"]
+    by_name = {m.name: m for m in entity.metrics}
+    fields = {m.name: _level_fields(m, entity, by_name, frozenset()) for m in metrics}
+    levels = [m for m in metrics if fields[m.name] is not None]
     if not levels:
         return None
     if len(levels) != len(metrics):
-        flows = ", ".join(sorted(m.name for m in metrics if m.additivity != "level"))
+        flows = ", ".join(sorted(m.name for m in metrics if fields[m.name] is None))
         raise CompileError(
             f"metrics disagree about additivity: {', '.join(sorted(m.name for m in levels))} "
             f"read as the latest snapshot and {flows} as a sum over the window — ask for "
             "them separately"
         )
-    effective = {m.agg_time_field or entity.default_time_field for m in levels}
+    effective: set[str | None] = set()
+    for m in levels:
+        effective |= fields[m.name] or set()
     if len(effective) > 1:
         named = ", ".join(sorted(f or "(none)" for f in effective))
         raise CompileError(
             f"level metrics disagree about which time field holds the snapshot ({named}) "
             "— ask for them separately"
+        )
+    if len({window_reading(m, entity) for m in levels}) > 1:
+        raise CompileError(
+            "level metrics disagree about how a window reads them: "
+            + ", ".join(sorted(f"{m.name} ({window_reading(m, entity)})" for m in levels))
+            + " — ask for them separately"
         )
     field = next(iter(effective))
     if not field:
@@ -453,6 +525,7 @@ def _latest_snapshot(
     zone: str,
     buckets: Sequence[str] = (),
     physical: str | None = None,
+    first: bool = False,
 ) -> str:
     """The predicate that makes a level metric read as a snapshot: the time
     field equals the latest value inside the window (or inside each grain
@@ -469,7 +542,9 @@ def _latest_snapshot(
     Only the window restricts the subquery: a snapshot is of the whole
     population at one date, so a dimension or a metric filter aggregates rows
     AT that date rather than moving the date per group — a group that vanished
-    before the snapshot reads as absent, which is what its stock was."""
+    before the snapshot reads as absent, which is what its stock was.
+
+    *first* reads the earliest snapshot instead ("at the start of Q3")."""
     inner = f"{entity.name}_latest"
     col = f"{quote_ident(inner, dialect)}.{quote_ident(field, dialect)}"
     conds = [
@@ -490,10 +565,50 @@ def _latest_snapshot(
             f"{_realias(expr, entity.name, entity.name, dialect)}"
         )
     table = quote_table(entity.source.table, dialect)
-    sub = f"SELECT MAX({col}) FROM {table} AS {quote_ident(inner, dialect)}"
-    if conds:
-        sub += " WHERE " + " AND ".join(conds)
-    return f"{_qualify(entity, field, dialect)} = ({sub})"
+    where = " WHERE " + " AND ".join(conds) if conds else ""
+    outer = _qualify(entity, field, dialect)
+    if _member_type(entity, field) == "date" and _is_moment(physical):
+        # A snapshot declared by its day, stored as moments: the rows of one
+        # snapshot carry different times on that day, and an equality on the
+        # latest moment keeps only the last of them. The pin is the latest
+        # day, from its midnight to the next one, exclusive.
+        return _latest_day(
+            col,
+            outer,
+            f"FROM {table} AS {quote_ident(inner, dialect)}{where}",
+            dialect,
+            physical,
+            first,
+        )
+    edge = "MIN" if first else "MAX"
+    sub = f"SELECT {edge}({col}) FROM {table} AS {quote_ident(inner, dialect)}{where}"
+    return f"{outer} = ({sub})"
+
+
+def _latest_day(
+    col: str,
+    outer: str,
+    from_where: str,
+    dialect: str,
+    physical: str | None,
+    first: bool = False,
+) -> str:
+    """``outer`` within the latest (or, with *first*, earliest) day ``col``
+    holds over ``from_where``: at or
+    after that day's midnight and before the next one, each bound cast back to
+    the column's own moment type (a DATE beside a TIMESTAMP is a type error on
+    some warehouses)."""
+    read = "bigquery" if dialect == "bigquery" else None
+    try:
+        moment = exp.DataType.build(physical or "TIMESTAMP", dialect=read)
+    except Exception:  # noqa: BLE001 — a type spelling sqlglot cannot parse
+        moment = exp.DataType.build("TIMESTAMP")
+    edge = exp.Min if first else exp.Max
+    day = exp.cast(edge(this=sqlglot.parse_one(col, read=dialect)), exp.DataType.build("DATE"))
+    nxt = exp.DateAdd(this=day.copy(), expression=exp.Literal.number(1), unit=exp.Var(this="DAY"))
+    lo = exp.cast(day, moment).sql(dialect=dialect)
+    hi = exp.cast(nxt, moment).sql(dialect=dialect)
+    return f"{outer} >= (SELECT {lo} {from_where}) AND {outer} < (SELECT {hi} {from_where})"
 
 
 def _realias(expr: str, entity: str, alias: str, dialect: str) -> str:
@@ -733,13 +848,14 @@ def _predicate(
     def lit(v: Any) -> str:
         return _typed_lit(v, ftype, zone, dialect, physical)
 
-    # A day bound on a column the warehouse stores as a moment: `<= '03-31'`
-    # reads as midnight of the 31st and drops that day's events (the declared
-    # `date` cannot say so; the profile can). The day is closed by the next
-    # day's midnight instead, exclusive — on every dialect.
+    # A day bound on a column that holds moments: `<= '03-31'` reads as
+    # midnight of the 31st and drops that day's events. The column holds
+    # moments when it is declared `timestamp`, or declared `date` over a
+    # stored TIMESTAMP or DATETIME (the declaration cannot say so; the profile
+    # can). The day is closed by the next day's midnight instead, exclusive —
+    # on every dialect and every door.
     if (
-        ftype == "date"
-        and _is_moment(physical)
+        (ftype == "timestamp" or (ftype == "date" and _is_moment(physical)))
         and f.op in ("<=", ">", "=")
         and isinstance(f.value, str)
         and _DATE_ONLY.match(f.value)
@@ -1122,14 +1238,23 @@ def _weighted_ratio_sql(
 
 
 def _single_value_columns(predicates: Sequence[str], dialect: str) -> set[str]:
-    """Bare column names each predicate holds to one value (``col = 'x'`` or a
-    one-item IN), read statically."""
+    """Bare column names each predicate holds to one value (``col = 'x'``, a
+    one-item IN, or a boolean column standing as a condition of its own —
+    ``is_trial``, ``NOT is_trial``, ``is_trial IS TRUE``), read statically."""
     out: set[str] = set()
     for pred in predicates:
         try:
             tree = sqlglot.parse_one(pred, read=dialect)
         except Exception:  # noqa: BLE001 — an unparsable predicate pins nothing
             continue
+        for part in tree.flatten() if isinstance(tree, exp.And) else [tree]:
+            node = part.unnest()
+            if isinstance(node, exp.Not):
+                node = node.this.unnest()
+            if isinstance(node, exp.Is) and isinstance(node.expression, exp.Boolean):
+                node = node.this
+            if isinstance(node, exp.Column):
+                out.add(node.name.lower())
         for node in tree.find_all(exp.EQ, exp.In):
             col = node.this if isinstance(node.this, exp.Column) else None
             if col is None:
@@ -1201,7 +1326,9 @@ def _check_pins(
                 )
             ):
                 continue
-            raise UnpinnedDimension(e.name, dim, (domains or {}).get(dim, []))
+            # Dictionaries are keyed by the lowercased column name.
+            known = domains or {}
+            raise UnpinnedDimension(e.name, dim, known.get(dim) or known.get(key) or [])
 
 
 def _distinct_on_sql(
@@ -1514,6 +1641,16 @@ def compile_intent(
             for d, (owner, expr) in zip(intent.dimensions, dim_exprs, strict=True)
             if owner is entity and _member_type(entity, d) in ("date", "timestamp")
         ]
+        # A flag declared `window_reading: any_in_window` counts what it flags
+        # at any snapshot of a stated window or bucket: no pin. Asked over no
+        # period, or at a named edge of one (intent.snapshot), it is a snapshot.
+        if (
+            intent.snapshot is None
+            and (window or intent.grain or buckets)
+            and window_reading(metrics_by[intent.metrics[0]], entity) == "any_in_window"
+        ):
+            snapshot_field = None
+    if snapshot_field is not None:
         predicates.append(
             _latest_snapshot(
                 entity,
@@ -1524,6 +1661,7 @@ def compile_intent(
                 zone if _member_type(entity, snapshot_field) == "timestamp" else "",
                 buckets,
                 _physical_type(column_types, entity, snapshot_field),
+                first=intent.snapshot == "first",
             )
         )
     if predicates:
@@ -1558,6 +1696,95 @@ def compile_intent(
         # `read=` matters now that we emit the dialect's own delimiter: backticks
         # are MySQL/BigQuery quoting and syntax elsewhere, so parsing the string we
         # just built in any other grammar reads our own identifiers wrong.
-        return sqlglot.transpile(sql, read=dialect, write=dialect)[0]
+        tree = sqlglot.parse_one(sql, read=dialect)
     except Exception as exc:  # noqa: BLE001 — any parse/transpile failure → fall back
         raise CompileError(f"could not transpile to {dialect}: {exc}") from exc
+    bind_physical(tree, entity, model, column_types)
+    return tree.sql(dialect=dialect)
+
+
+# The warehouse types a quoted literal is rewritten for (``bind_physical``).
+_BOOL_TYPES = frozenset({"BOOL", "BOOLEAN"})
+_NUMERIC_TYPE = re.compile(
+    r"^(?:U?(?:TINY|SMALL|MEDIUM|BIG|HUGE)?INT(?:EGER)?\d*|NUMERIC|BIGNUMERIC|BIGDECIMAL"
+    r"|DECIMAL|NUMBER|FLOAT\d*|DOUBLE|REAL)\b"
+)
+_TRUE_WORDS = frozenset({"true", "t", "yes", "y", "1"})
+_FALSE_WORDS = frozenset({"false", "f", "no", "n", "0"})
+_NUMBER_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
+_COMPARED = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+
+
+def _physical_literal(literal: exp.Expr, physical: str) -> exp.Expr | None:
+    """The literal the warehouse's own type takes for a quoted *literal*, or
+    None when it stays as written: ``'true'`` against a BOOLEAN is TRUE, ``'5'``
+    against an integer is 5. A value the type cannot hold is left alone, so
+    the warehouse still says so."""
+    if not isinstance(literal, exp.Literal) or not literal.is_string:
+        return None
+    text = literal.this.strip()
+    kind = physical.upper().split("(", 1)[0].strip()
+    if kind in _BOOL_TYPES:
+        if text.lower() in _TRUE_WORDS:
+            return exp.true()
+        if text.lower() in _FALSE_WORDS:
+            return exp.false()
+        return None
+    if _NUMERIC_TYPE.match(kind) and _NUMBER_TEXT.match(text):
+        return exp.Literal.number(text)
+    return None
+
+
+def bind_physical(
+    tree: exp.Expr,
+    base: Entity,
+    model: SemanticModel,
+    column_types: Mapping[str, Mapping[str, str]] | None,
+) -> None:
+    """Rewrite, in place, every quoted literal compared with a column whose
+    profiled warehouse type is boolean or numeric into that type's literal.
+
+    A value reaches the compiler as text from every source — a caller's
+    binding, a profile dictionary (which stores TRUE as 'true'), an authored
+    population filter or metric filter. Most engines coerce ``flag = 'true'``;
+    BigQuery rejects it ("no matching signature for operator ="), so the same
+    question served on one warehouse failed on another. Binding by the type
+    the stored profile recorded makes the compiled SQL the same on every
+    dialect. A column is read through its entity's alias (the entity name, or
+    the snapshot subquery's ``<entity>_latest``); a bare one through the base
+    entity, else through the one type every entity agrees on."""
+    if not column_types:
+        return
+    by_alias: dict[str, Mapping[str, str]] = {}
+    for e in model.entities:
+        own = column_types.get(e.name)
+        if own:
+            by_alias[e.name.lower()] = own
+            by_alias[f"{e.name}_latest".lower()] = own
+    base_types = column_types.get(base.name) or {}
+
+    def physical(col: exp.Column) -> str | None:
+        name = col.name.lower()
+        if col.table and col.table.lower() in by_alias:
+            return by_alias[col.table.lower()].get(name)
+        if name in base_types:
+            return base_types[name]
+        found = {t[name] for t in column_types.values() if name in t}
+        return found.pop() if len(found) == 1 else None
+
+    for node in list(tree.find_all(*_COMPARED, exp.In)):
+        if isinstance(node, exp.In):
+            col, values = node.this, node.expressions
+            kind = physical(col) if isinstance(col, exp.Column) else None
+            for value in values if kind else []:
+                bound = _physical_literal(value, kind or "")
+                if bound is not None:
+                    value.replace(bound)
+            continue
+        left, right = node.this, node.expression
+        for col, value in ((left, right), (right, left)):
+            if isinstance(col, exp.Column) and isinstance(value, exp.Literal):
+                kind = physical(col)
+                bound = _physical_literal(value, kind) if kind else None
+                if bound is not None:
+                    value.replace(bound)

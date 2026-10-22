@@ -14,6 +14,7 @@ import re
 from services.contracts.protocols import CacheableBlock, Decider, LLMProvider, Message, Option
 from services.contracts.resolution import DecisionRecord
 from services.contracts.warehouse import QueryResult
+from services.observability import usage as ai_usage
 from services.reviews.store import Trace
 from services.runtime import decision_policy, faithfulness
 
@@ -153,17 +154,12 @@ def judge_typed(
     question = (
         f"Question: {trace.question}\nSQL: {sql}\nAnswer: {prose or '(structured, no prose)'}"
     )
-    d = decider.decide(question=question, context=context, options=_SCOPE_OPTIONS, allow_none=False)
-    verdict = decision_policy.verdict(d, "judge_scope", policies)
-    record = DecisionRecord(
-        slot="judge_scope",
-        chosen=d.chosen,
-        p=d.p,
-        runner_up=d.runner_up,
-        margin=d.margin,
-        verdict=verdict,
-        provider=d.provider,
-    )
+    with ai_usage.purpose("judge"):
+        d = decider.decide(
+            question=question, context=context, options=_SCOPE_OPTIONS, allow_none=False
+        )
+    record = decision_policy.record(d, "judge_scope", policies)
+    verdict = record.verdict
     if verdict == "act" and d.chosen == "within_scope":
         return "approve", "; ".join([*notes, "within scope"]), [record]
     if verdict == "act":
@@ -203,13 +199,14 @@ def judge_trace(
         f"Stated confidence: {trace.confidence or '(none)'}"
         f"{reference}{governed}"
     )
-    res = llm.complete(
-        system=[CacheableBlock(_SYSTEM)],
-        messages=[Message("user", user)],
-        model=model,
-        temperature=0.0,
-        max_tokens=400,
-    )
+    with ai_usage.purpose("judge"):
+        res = llm.complete(
+            system=[CacheableBlock(_SYSTEM)],
+            messages=[Message("user", user)],
+            model=model,
+            temperature=0.0,
+            max_tokens=400,
+        )
     raw = (res.text or "").strip()
     if not raw:
         # Nothing came back. There is no reasoning to surface and nothing to

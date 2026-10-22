@@ -238,6 +238,8 @@ def run_init(args: argparse.Namespace) -> int:
     root.mkdir(parents=True, exist_ok=True)
 
     # ── dst.yaml ──────────────────────────────────────────────────────────
+    from importlib.util import find_spec
+
     from services.config import ProviderConfig
     from services.project.schema import ConnectionDecl
     from services.project.template import reference_section
@@ -247,6 +249,16 @@ def run_init(args: argparse.Namespace) -> int:
         "  anthropic:",
         "    type: anthropic",
         f"    api_key_env: {_key_env('anthropic')}",
+    ]
+    if find_spec("fastembed") is not None:
+        # Declared, not implied: the project then says it embeds, and an
+        # install of it without the extra is named by plan and apply instead
+        # of serving with certified matching quietly off.
+        lines += [
+            "  embed:",
+            "    type: local   # in-process embeddings: certified matching + routing",
+        ]
+    lines += [
         "  # add any openai-compatible endpoint (deepseek, ollama, vllm, groq ...):",
         "  # budget:",
         "  #   type: openai-compatible",
@@ -267,6 +279,7 @@ def run_init(args: argparse.Namespace) -> int:
         "  # jev:",
         "  #   type: typesafe",
         f"  #   api_key_env: {_key_env('jev')}",
+        "  #   (or type: openai-decisions - OpenAI's Decisions API, key in OPENAI_API_KEY)",
     ]
     # Each reference block sits under the section it documents — appended to the
     # end of the file, the provider fields read as connection config.
@@ -692,7 +705,7 @@ def _embeddings_summary(warehouse: str) -> str:
     from importlib.util import find_spec
 
     if find_spec("fastembed") is not None:
-        return "local, in-process (certified matching on)"
+        return "local, in-process, declared in dst.yaml (certified matching on)"
     hint = "pip install 'dst-core[local-embed]'"
     if warehouse == "demo":
         return (

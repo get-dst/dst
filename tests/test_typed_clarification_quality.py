@@ -15,6 +15,7 @@ from services.contracts.fakes import ScriptedDecider
 from services.contracts.protocols import Decision
 from services.contracts.query_intent import QueryIntent
 from services.contracts.semantic_model import (
+    Definition,
     Dimension,
     Entity,
     EntitySource,
@@ -427,3 +428,92 @@ def test_a_bare_row_count_is_offered_only_for_the_entitys_own_rows() -> None:
     )
     assert any("count" in c["options"] for c in decider.calls)
     assert res.intent is not None and res.intent.metrics == ["count"]  # type: ignore[attr-defined]
+
+
+# ── a clarification offers what a person can answer ─────────────────────────
+
+
+class _ByOptions:
+    """Answers each decision by the options it offers: sure on a known name,
+    split on the given vote, `none` otherwise — order-proof across fan-out."""
+
+    def __init__(self, sure: list[str], split: dict[str, float]) -> None:
+        self._sure, self._split = sure, split
+
+    def decide(self, *, question: str, context: str, options: list, allow_none: bool) -> Decision:  # type: ignore[type-arg]
+        names = {o.name for o in options}
+        if set(self._split) <= names:
+            return _unsure(self._split)
+        return _sure(next((n for n in self._sure if n in names), None))
+
+
+def _harvests() -> Entity:
+    return Entity(
+        name="harvests",
+        source=_src("harvests"),
+        default_time_field="picked_on",
+        fields=[
+            Field(name="parcel_code", type="string"),
+            Field(name="picked_on", type="date"),
+            Field(name="harvest_kg", type="number"),
+        ],
+        metrics=[Metric(name="harvest_kg", agg="sum", expr="harvests.harvest_kg")],
+    )
+
+
+_INTERNAL = {"stated", "unstated", "engaged", "not_engaged", "none"}
+
+
+def test_an_unsure_stated_value_asks_in_words_not_in_the_deciders_labels() -> None:
+    """A field the decider picked, with no dictionary to offer and no value in
+    the question, asks whether the answer is restricted to one of its values
+    — never with the decider's own 'stated' / 'unstated' as the options."""
+    decider = _ByOptions(
+        ["aggregate", "harvest_kg", "parcel_code"], {"stated": 0.5, "unstated": 0.5}
+    )
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "Harvest for the northern parcels", _model(_harvests())
+    )
+    c = res.clarification
+    assert c is not None and c.term == "parcel_code"
+    assert not _INTERNAL & set(c.options), c.options
+    assert c.options == [
+        "one value of 'parcel_code' (the exact stored value)",
+        "every 'parcel_code'",
+    ]
+    assert "restricted to one value of 'parcel_code'" in c.question
+
+
+def test_a_split_value_vote_never_offers_unstated() -> None:
+    decider = _ByOptions(
+        ["aggregate", "harvest_kg", "parcel_code"], {"unstated": 0.5, "north-7": 0.4}
+    )
+    res = TypedResolver(  # type: ignore[arg-type]
+        decider, domains={"parcel_code": ["north-7", "south-2"]}, today=TODAY
+    ).resolve("Harvest for the northern parcels", _model(_harvests()))
+    c = res.clarification
+    assert c is not None and c.term == "parcel_code"
+    assert c.options == ["north-7"]
+
+
+def test_an_unsure_governed_meaning_asks_whether_to_apply_it() -> None:
+    entity = _harvests().model_copy(
+        update={"fields": [*_harvests().fields, Field(name="grade", type="string")]}
+    )
+    model = _model(entity).model_copy(
+        update={
+            "definitions": [
+                Definition(
+                    term="premium",
+                    body="grade A harvests",
+                    about="harvests",
+                    sql_expr="harvests.grade = 'A'",
+                )
+            ]
+        }
+    )
+    decider = _ByOptions(["aggregate", "harvest_kg"], {"engaged": 0.5, "not_engaged": 0.5})
+    res = TypedResolver(decider, today=TODAY).resolve("Premium harvest", model)  # type: ignore[arg-type]
+    c = res.clarification
+    assert c is not None and c.term == "premium"
+    assert c.options == ["apply 'premium'", "do not apply 'premium'"]

@@ -102,7 +102,7 @@ The answer comes back with the SQL that produced it and a confidence grade: the
 ### Optional: a typed-decision provider
 
 With a `typesafe` provider in `dst.yaml` (key in `.env` under the name you
-give `api_key_env`), dst stops asking a model to write SQL: every slot of an
+give `api_key_env`), or an `openai-decisions` one (key in `OPENAI_API_KEY`), dst stops asking a model to write SQL: every slot of an
 answer — lens, entity, metric, dimension, grain, filter, value — becomes a
 decision over the semantic model and the column profiles, and the SQL is
 compiled from the decisions. Nothing else changes in the steps above. See

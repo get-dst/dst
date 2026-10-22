@@ -18,6 +18,7 @@ from typing import Literal
 
 from services.contracts.protocols import CacheableBlock, LLMProvider, Message
 from services.contracts.semantic_model import SemanticModel
+from services.observability import usage as ai_usage
 
 Severity = Literal["blocking", "note"]
 
@@ -80,13 +81,14 @@ def challenge(
         f"SQL: {sql}\n"
         f"Answer: {answer}"
     )
-    res = llm.complete(
-        system=[CacheableBlock(_SYSTEM)],
-        messages=[Message("user", user)],
-        model=model,
-        temperature=0.0,
-        max_tokens=600,
-    )
+    with ai_usage.purpose("judge"):
+        res = llm.complete(
+            system=[CacheableBlock(_SYSTEM)],
+            messages=[Message("user", user)],
+            model=model,
+            temperature=0.0,
+            max_tokens=600,
+        )
     try:
         data = json.loads(res.text.strip())
         raw = data.get("challenges", [])

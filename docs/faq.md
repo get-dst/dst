@@ -37,7 +37,8 @@ figure is not. See [the answer path](concepts/answer-path.md).
 Your models, your keys. Providers are declared in `dst.yaml` by the API shape
 they speak, not by vendor name: `anthropic`, `openai-compatible` (covers
 OpenAI, DeepSeek, Ollama, vLLM, most gateways), `local` for keyless
-in-process embeddings, and `typesafe` for a typed-decision provider — with
+in-process embeddings, and `typesafe` or `openai-decisions` (OpenAI's
+Decisions API) for a typed-decision provider — with
 one of those configured, no model writes SQL at all; every slot of an answer
 is a decision over your semantic model and the SQL is compiled from it
 ([Typed decisions](concepts/typed-decisions.md)). The

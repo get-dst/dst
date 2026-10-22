@@ -1,0 +1,6 @@
+name: membership
+display_name: Membership
+connections: [toolshed]
+select:
+  entities:
+    - name: members

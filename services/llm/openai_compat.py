@@ -2,8 +2,10 @@
 
 One wire shape covers OpenAI, DeepSeek, Ollama, vLLM, Groq, and most self-hosted
 gateways: POST {base_url}/chat/completions with a bearer key. System blocks are
-flattened into a single system message — prompt caching is an Anthropic concept;
-these providers report cache_read_tokens=0 and the trace records that honestly.
+flattened into a single system message. A provider that caches prompts on its
+own (OpenAI, DeepSeek) reports the cached part in the usage's token details:
+it is recorded as cache reads and writes apart from the uncached input, and
+priced at its own rates; one that reports none records none.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import httpx
 from services.contracts.errors import ProviderError
 from services.contracts.protocols import CacheableBlock, LLMResult, Message
 from services.llm.reasoning import completion_text, with_headroom
+from services.observability import usage as ai_usage
 
 
 class OpenAICompatProvider:
@@ -85,9 +88,29 @@ class OpenAICompatProvider:
             finish_reason=choice.get("finish_reason"),
             thinking_chars=len(choice["message"].get("reasoning_content") or ""),
         )
-        usage = data.get("usage", {})
-        return LLMResult(
+        usage = data.get("usage") or {}
+        # `prompt_tokens` counts every input token, cached and written ones
+        # included; the details split them out (`cached_tokens` is billed
+        # reads, `cache_write_tokens` writes, `ttl_12h_tokens` the 12-hour part).
+        details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+        read = int(details.get("cached_tokens") or 0)
+        written = int(details.get("cache_write_tokens") or 0)
+        long = int((details.get("cache_write_tokens_details") or {}).get("ttl_12h_tokens") or 0)
+        result = LLMResult(
             text=text,
-            input_tokens=int(usage.get("prompt_tokens", 0)),
+            input_tokens=max(0, int(usage.get("prompt_tokens", 0)) - read - written),
             output_tokens=int(usage.get("completion_tokens", 0)),
+            cache_read_tokens=read,
+            cache_creation_tokens=written,
+            cache_write_long_tokens=long,
         )
+        ai_usage.record(
+            "openai-compatible",
+            model,
+            result.input_tokens,
+            result.output_tokens,
+            cache_read_tokens=read,
+            cache_write_tokens=written,
+            cache_write_long_tokens=long,
+        )
+        return result

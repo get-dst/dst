@@ -57,6 +57,7 @@ from services.connectors.tagging import is_dst_query, query_context
 from services.contracts.protocols import CacheableBlock, Connector, LLMProvider, Message
 from services.contracts.query_history import QueryRecord
 from services.evals.distill import normalize_sql_shape
+from services.observability import usage as ai_usage
 
 
 class DriftVariant(BaseModel):
@@ -462,16 +463,17 @@ def _llm_name(
         prompt += "\nAlready used in this report (pick something distinct): " + "; ".join(
             sorted(avoid)
         )
-    res = llm.complete(
-        system=[CacheableBlock(_NAME_SYSTEM)],
-        messages=[Message("user", prompt)],
-        model=model,
-        temperature=0.0,
-        # Reasoning-style fast models (deepseek-v4-flash, the default fast tier) spend
-        # output budget thinking before emitting content — 100 starved the response to
-        # an empty string and every production finding kept its fallback name.
-        max_tokens=1000,
-    )
+    with ai_usage.purpose("other"):
+        res = llm.complete(
+            system=[CacheableBlock(_NAME_SYSTEM)],
+            messages=[Message("user", prompt)],
+            model=model,
+            temperature=0.0,
+            # Reasoning-style fast models (deepseek-v4-flash, the default fast tier) spend
+            # output budget thinking before emitting content — 100 starved the response to
+            # an empty string and every production finding kept its fallback name.
+            max_tokens=1000,
+        )
     try:
         parsed = json.loads(res.text.strip())
     except json.JSONDecodeError:

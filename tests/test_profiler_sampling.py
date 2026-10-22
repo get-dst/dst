@@ -566,8 +566,11 @@ def test_bigquery_refuses_over_budget_tables() -> None:
     with pytest.raises(SampleBudgetExceeded):
         conn._sample_query("SELECT COUNT(*) AS n_rows FROM `proj.jaffle.events`")
 
-    # the table is omitted (its catalog profile stands) and nothing was ever executed
-    assert conn.sample_profile([_BQ_SPEC]) == []
+    # the table comes back catalog-only with the reason (its catalog profile
+    # stands) and nothing was ever executed
+    (profile,) = conn.sample_profile([_BQ_SPEC])
+    assert profile.source == "catalog" and not profile.columns
+    assert profile.unsampled and "sampling budget" in profile.unsampled
     assert client.executed == []
     assert len(client.dry_runs) >= 1  # the gate ran; the scan did not
 

@@ -50,6 +50,16 @@ class DriftReport:
     def breaking(self) -> bool:
         return any(wd.is_breaking(f) for f in self.findings)
 
+    def breaks_sql(self, sql: str) -> bool:
+        """Whether a delta here can explain the warehouse rejecting *sql*: a
+        column dropped or retyped, or a table dropped, on a table *sql* reads.
+        A rewritten comment, a gained column or table, or a change on a table
+        the statement never reads cannot."""
+        return any(
+            f.kind in wd.STRUCTURAL_BREAKS and (not sql or wd.reads_table(sql, f.table))
+            for f in self.findings
+        )
+
     def summary(self) -> str:
         """One deterministic paragraph naming what changed and what reads it."""
         heads = "; ".join(f"{f.table}: {f.kind} `{f.detail}`" for f in self.findings[:5])

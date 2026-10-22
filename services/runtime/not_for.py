@@ -97,6 +97,11 @@ def declared_asks(model: SemanticModel) -> list[NotForAsk]:
     return asks
 
 
+def is_avoid_line(line: str) -> bool:
+    """Is this ``use_cases`` line an ``Avoid for:`` line (what the entity is not for)?"""
+    return _AVOID.match(line) is not None
+
+
 def names_ask(question: str, ask: str) -> bool:
     """Does *question* name every content word of *ask*? The one matcher: the
     lens's own door refuses on it and the router drops a candidate on it."""

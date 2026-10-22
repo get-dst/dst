@@ -1,0 +1,7 @@
+toolshed:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: toolshed.duckdb
+      schema: main

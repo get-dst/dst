@@ -6,6 +6,7 @@ GitOps/agent automation share it.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -416,6 +417,24 @@ class LensConfig(Authored):
         "sibling lens. `Avoid for:` lines in an entity's use_cases are read the "
         "same way, with no sibling",
     )
+    # What a lens reads is a fact routing cannot infer from its anchors: two
+    # lenses over one subject, one fed by the ticketing system and one by the
+    # door scanners, describe the same figures. A question naming a system
+    # goes to the lenses that declare it (services/router/sibling.py).
+    sources: StrList = Field(
+        default_factory=list,
+        description="the source systems this lens's data comes from, as people name "
+        "them in questions, e.g. [ticketing, door scanners]. A question naming a "
+        "system some lens declares routes only to lenses declaring it; one naming a "
+        "system no lens it may use declares is uncovered, with that reason. Matched "
+        "as whole words, case ignored, underscores and hyphens read as spaces",
+    )
+    scope: Literal["own", "market"] | None = Field(
+        default=None,
+        description="whose figures this lens holds: 'own' (the organisation's own "
+        "activity) or 'market' (figures about the market or other organisations). "
+        "Shown to the routing decider. Omitted = undeclared",
+    )
     # Retired 2026-08-09: context ingestion was never configured here — every
     # ingest is a POST to /mgmt/lenses/<lens>/context/* whose body carries the
     # repo/paths/scopes. The block only ever existed because the skeleton emitted
@@ -492,6 +511,25 @@ class LensConfig(Authored):
         description="when a question does not type, fall to raw-SQL generation "
         "(disclosed UNTYPED) unless the caller passes allow_untyped: false",
     )
+
+    @field_validator("sources")
+    @classmethod
+    def _distinct_sources(cls, v: list[str]) -> list[str]:
+        """Each system once, spelled as words: an entry with no letter or digit
+        can match no question, and two spellings of one system ("door_scanners",
+        "Door scanners") are one declaration."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in v:
+            name = " ".join(raw.split())
+            key = " ".join(re.findall(r"[a-z0-9]+", name.lower()))
+            if not key:
+                raise ValueError(f"source {raw!r} names no system: use the word people say")
+            if key in seen:
+                raise ValueError(f"source {raw!r} is declared twice")
+            seen.add(key)
+            out.append(name)
+        return out
 
     @model_validator(mode="after")
     def _default_display_name(self) -> LensConfig:

@@ -2598,3 +2598,30 @@ def test_plan_hints_metrics_nobody_can_name_word_for_word(org) -> None:
     hint = next(e for e in plan if e.get("status") == "hint" and "label" in e["hint"])
     assert "orders.otd_rate" in hint["hint"] and "late_rate" not in hint["hint"]
     assert "orders.average_order_value" in hint["hint"]
+
+
+@needs_db
+def test_plan_hints_a_sum_over_a_snapshot_table_without_additivity(org) -> None:
+    """One row per key per day, a SUM metric, no `additivity:`: summed over a
+    window it adds each key's balance once per day. The plan says which."""
+    _oid, headers = org
+    files = _project_files()
+    entity = yaml.safe_load(files["semantic/entities/orders.yaml"])
+    entity["primary_key"] = [entity["default_time_field"], "order_id"]
+    entity["metrics"].append(
+        {"name": "held_balance", "agg": "sum", "expr": "orders.amount", "additivity": "flow"}
+    )
+    files["semantic/entities/orders.yaml"] = yaml.safe_dump(entity, sort_keys=False)
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
+    hint = next(e for e in plan if e.get("status") == "hint" and "additivity" in e["hint"])
+    assert "additivity: level" in hint["hint"] and "held_balance" not in hint["hint"]
+    summed = [
+        m["name"]
+        for m in entity["metrics"]
+        if m.get("agg") == "sum" and m.get("type", "simple") == "simple" and "additivity" not in m
+    ]
+    assert summed and all(f"orders.{n}" in hint["hint"] for n in summed)
+    # a table keyed by its rows alone gets no such hint
+    plain = _project_files()
+    plan = client.post("/mgmt/project/plan", headers=headers, json={"files": plain}).json()
+    assert not any(e.get("status") == "hint" and "additivity" in e["hint"] for e in plan)

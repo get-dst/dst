@@ -17,9 +17,14 @@ names the cause instead of a bare traceback.
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import json
 import logging
+import math
+import uuid
 
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from services.contracts.trace import TraceLog
@@ -56,8 +61,44 @@ _INSERT = text(
 )
 
 
+def _plain(value: object) -> object:
+    """*value* as JSON can hold it, for a jsonb column: a warehouse's Decimal
+    as a number, a date as its ISO string, a non-finite float as null (jsonb
+    refuses NaN), anything else unknown as its text. The row is a record of
+    what was served; a value it cannot spell must not cost the whole row."""
+    if isinstance(value, BaseModel):
+        return _plain(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_plain(v) for v in value]
+    if isinstance(value, bool) or value is None or isinstance(value, str | int):
+        return value
+    if isinstance(value, float | decimal.Decimal):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, datetime.date | datetime.time):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID | bytes):
+        return value.hex() if isinstance(value, bytes) else str(value)
+    return str(value)
+
+
+def _json(value: object) -> str | None:
+    return None if value is None else json.dumps(_plain(value), allow_nan=False)
+
+
 def log_trace(trace: TraceLog) -> None:
-    params = {
+    try:
+        params = _params(trace)
+        with org_session(trace.org_id) as session:
+            session.execute(_INSERT, params)
+    except Exception as exc:
+        _record_write_failure(trace.request_id, exc)
+
+
+def _params(trace: TraceLog) -> dict[str, object]:
+    return {
         "org_id": trace.org_id,
         "request_id": trace.request_id,
         "lens": trace.lens,
@@ -67,16 +108,14 @@ def log_trace(trace: TraceLog) -> None:
         "sql": trace.sql,
         "valid": trace.valid,
         "row_count": trace.row_count,
-        "sample": json.dumps(trace.sample) if trace.sample is not None else None,
+        "sample": _json(trace.sample),
         "answer": trace.answer,
-        "citations": json.dumps([c.model_dump() for c in trace.citations]),
+        "citations": _json(trace.citations),
         "definition_used": trace.definition_used,
         "confidence": trace.confidence,
-        "verification": (
-            json.dumps(trace.verification.model_dump()) if trace.verification else None
-        ),
+        "verification": _json(trace.verification),
         "certification": trace.certification,
-        "latency": json.dumps(trace.latency_ms),
+        "latency": _json(trace.latency_ms),
         "ai_input_tokens": trace.ai_input_tokens,
         "ai_output_tokens": trace.ai_output_tokens,
         "ai_cost_usd": trace.ai_cost_usd,
@@ -89,26 +128,19 @@ def log_trace(trace: TraceLog) -> None:
         "prompt_hash": trace.prompt_hash or PROMPT_HASH,
         "generator_tier": trace.generator_tier,
         "repairs": trace.repairs,
-        "context_refs": json.dumps(trace.context_refs),
+        "context_refs": _json(trace.context_refs),
         # Which governance capabilities could not run for this answer (0037).
-        "degraded": json.dumps(trace.degraded),
+        "degraded": _json(trace.degraded),
         # The resolution ledger and its tag (0063) — None on non-answers.
-        "resolution": json.dumps(trace.resolution.model_dump()) if trace.resolution else None,
+        "resolution": _json(trace.resolution),
         "resolution_tag": trace.resolution_tag,
         # Typed serving (0066): the ledger's typed flag, and the clarification a
         # non-answer asked for.
         "typed": trace.resolution.typed if trace.resolution else None,
-        "clarification": (
-            json.dumps(trace.clarification.model_dump()) if trace.clarification else None
-        ),
+        "clarification": _json(trace.clarification),
         # The caller's purpose sentence (0068) — None unless the lens logs it.
         "purpose": trace.purpose,
     }
-    try:
-        with org_session(trace.org_id) as session:
-            session.execute(_INSERT, params)
-    except Exception as exc:
-        _record_write_failure(trace.request_id, exc)
 
 
 def _record_write_failure(request_id: str, exc: Exception) -> None:

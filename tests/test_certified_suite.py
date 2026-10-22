@@ -294,7 +294,7 @@ def test_cli_test_verb_full_corpus_exit_codes_and_restamp(org, monkeypatch, caps
     # SQL-shaped, so pin the grounded path (same idiom as test_query_api).
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -353,7 +353,7 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
         s.commit()
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -432,7 +432,7 @@ def test_cli_test_runs_behavioral_expectations(org, monkeypatch, capsys) -> None
         s.commit()
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -514,7 +514,7 @@ def test_cli_test_is_org_scoped_and_names_the_org(org, monkeypatch, capsys) -> N
 
         monkeypatch.setattr(
             "services.runtime.assembly.IntentSQLGenerator",
-            lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+            lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
                 llm, model=model, temperature=temperature
             ),
         )
@@ -1037,7 +1037,7 @@ def test_dst_test_exits_one_on_a_divergence_under_json_too(org, monkeypatch, cap
         s.commit()
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -1136,7 +1136,7 @@ def test_dst_test_prints_and_reports_the_lenient_reason(org, monkeypatch, capsys
         s.commit()
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )

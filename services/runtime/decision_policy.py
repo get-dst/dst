@@ -68,6 +68,8 @@ STAMPED_BY: dict[str, str | None] = {
         "all lenses, no cosine — routing calibration run, 2026-09-17 "
         "(measured equal to the cosine shortlist)"
     ),
+    # The same typed-decision regime; no calibration run yet, so no bars.
+    "openai-decisions/*": "act unless none wins (the typed-decision regime of 2026-09-17)",
     "certified_equivalent": None,
     "metric": None,
     "grain": None,
@@ -97,6 +99,7 @@ ARGMAX = Policy(act_p=0.0, act_margin=0.0, decline_p=0.0)
 # before the first ':').
 PROVIDER_DEFAULTS: dict[str, dict[str, Policy]] = {
     "typesafe": dict.fromkeys(DEFAULTS, ARGMAX),
+    "openai-decisions": dict.fromkeys(DEFAULTS, ARGMAX),
 }
 
 # Measured bars, per provider prefix and slot: an ACTED decision below the bar
@@ -162,8 +165,32 @@ def verdict(d: Decision, slot: str, policies: dict[str, Policy] | None = None) -
     return "clarify"
 
 
+def record(d: Decision, slot: str, policies: dict[str, Policy] | None = None) -> DecisionRecord:
+    """The ledger line for one measured decision: the choice, what was
+    measured, the verdict under the slot's policy, and what the decision cost.
+    The one way a Decision becomes a record, so its usage always reaches the
+    answer's row: a record built by hand that drops it is a decision billed
+    and never charged."""
+    return DecisionRecord(
+        slot=slot,
+        chosen=d.chosen,
+        p=d.p,
+        runner_up=d.runner_up,
+        margin=d.margin,
+        votes=d.votes,
+        k=d.k,
+        p_lower=d.p_lower,
+        verdict=verdict(d, slot, policies),
+        provider=d.provider,
+        usage=d.usage.as_dict() if d.usage is not None else None,
+        refused=d.refused,
+    )
+
+
 def describe(d: Decision, options_shown: int) -> str:
     """One audit line: what was chosen, at what probability, against what."""
+    if d.refused:
+        return f"none (refused, {d.provider})"
     if d.probs is None:
         return f"{d.chosen or 'none'} (unmeasured, {d.provider})"
     ranked = sorted(d.probs.items(), key=lambda kv: -kv[1])

@@ -420,3 +420,35 @@ def test_a_slot_verdict_that_flips_between_two_runs_of_the_same_lens_is_listed()
     none = compare.compare_runs(None, [], "fp", second, 0.5)
     assert none["previous_run"] is None and none["flips"] == []
     assert compare.describe(none, "org/sales") == ["compare org/sales: no previous test run"]
+
+
+def test_a_decider_that_fails_partway_still_charges_the_case_what_it_billed() -> None:
+    """The shape is decided and billed, then the provider goes down: the
+    case fails, and the decision it paid for is in its cost."""
+    from services.contracts.errors import ProviderError
+    from services.contracts.protocols import DecisionUsage
+
+    class _DownAfterOne:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, **kw):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            if self.calls > 1:
+                raise ProviderError("vote", "upstream unavailable", status=503)
+            return Decision(
+                chosen="aggregate",
+                probs={"aggregate": 1.0},
+                provider="vote:deepseek-v4-flash:k=5",
+                usage=DecisionUsage(calls=5, input_tokens=100_000, output_tokens=0),
+            )
+
+    out = slot_lane.run_slot_lane(
+        [_answer(1, GOLD)],
+        MODEL,
+        lambda a: TypedResolver(_DownAfterOne(), domains={}),  # type: ignore[arg-type]
+    )
+    (case,) = out.cases
+    assert case.verdict == "failed" and "decider unavailable" in case.evidence
+    assert case.input_tokens == 100_000 and case.calls == 5.0
+    assert case.cost_usd == 0.014 and out.cost_usd == 0.014

@@ -23,7 +23,8 @@ from pathlib import Path
 from services.contracts.protocols import CacheableBlock, ContextChunk, LLMProvider, Message
 from services.contracts.semantic_model import Definition, SemanticModel
 from services.lenses.describe import LensDescription, describe_model
-from services.observability.cost import ai_cost_usd
+from services.observability import usage as ai_usage
+from services.observability.cost import result_cost_usd
 from services.runtime.answer import AnswerComposer
 from services.runtime.generator import FixedSQLGenerator, GroundedSQLGenerator
 from services.runtime.pipeline import run_query
@@ -114,17 +115,18 @@ class BaselineLane:
             "Answer the question with one SQL query. Reply with only the SQL, "
             "no prose. Qualify tables as schema.table."
         )
-        result = self._llm.complete(
-            system=[CacheableBlock(text=prompt, ttl="1h")],
-            messages=[Message(role="user", content=question.question)],
-            model=self._model,
-            temperature=0.0,
-            # Headroom for reasoning-mode models: their thinking bills against
-            # max_tokens BEFORE any SQL lands in content — 1024 starved
-            # deepseek-v4 on Spider-complexity questions into empty replies.
-            max_tokens=8192,
-        )
-        spent = ai_cost_usd(self._model, result.input_tokens, result.output_tokens) or 0.0
+        with ai_usage.purpose("other"):
+            result = self._llm.complete(
+                system=[CacheableBlock(text=prompt, ttl="1h")],
+                messages=[Message(role="user", content=question.question)],
+                model=self._model,
+                temperature=0.0,
+                # Headroom for reasoning-mode models: their thinking bills against
+                # max_tokens BEFORE any SQL lands in content — 1024 starved
+                # deepseek-v4 on Spider-complexity questions into empty replies.
+                max_tokens=8192,
+            )
+        spent = result_cost_usd(self._model, result) or 0.0
 
         tokens = result.input_tokens + result.output_tokens
 

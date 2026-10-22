@@ -562,16 +562,27 @@ def test_demo_init_says_whether_certified_matching_is_on(
     monkeypatch.setattr(
         importlib_util, "find_spec", lambda n: None if n == "fastembed" else real(n)
     )
-    _init(tmp_path, warehouse="demo")
+    from services.project.schema import parse_project_yaml
+
+    root = _init(tmp_path, warehouse="demo")
     out = capsys.readouterr().out
     assert "embeddings: none — certified matching is OFF" in out
     assert "dst-core[local-embed]" in out
+    providers = parse_project_yaml((root / "dst.yaml").read_text(encoding="utf-8")).providers
+    assert "embed" not in providers
 
+    # With the extra installed the project declares the local embedder, so an
+    # install of it without the extra is named by plan and apply.
     monkeypatch.setattr(
         importlib_util, "find_spec", lambda n: object() if n == "fastembed" else real(n)
     )
-    _init(tmp_path / "second", warehouse="demo")
-    assert "embeddings: local, in-process (certified matching on)" in capsys.readouterr().out
+    second = _init(tmp_path / "second", warehouse="demo")
+    assert (
+        "embeddings: local, in-process, declared in dst.yaml (certified matching on)"
+        in capsys.readouterr().out
+    )
+    providers = parse_project_yaml((second / "dst.yaml").read_text(encoding="utf-8")).providers
+    assert providers["embed"].type == "local"
 
 
 def test_compose_project_name_is_salted_with_the_path(tmp_path: Path) -> None:

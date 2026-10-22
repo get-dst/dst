@@ -81,6 +81,13 @@ class QueryIntent(BaseModel):
         description="a LISTING's projection: member names shown per row, no aggregation "
         "and no GROUP BY — the typed resolver's shape for 'list / show / which records'",
     )
+    snapshot: Literal["first", "last"] | None = PField(
+        default=None,
+        description="level metrics only: which snapshot inside the window the figure "
+        "reads — `last` (the period's end) or `first` (its start: 'headcount at the "
+        "beginning of Q3'). Unset, the metric's declared window reading applies "
+        "(the last snapshot unless the metric declares `any_in_window`)",
+    )
     compare: IntentCompare | None = PField(
         default=None,
         description="run the intent over its own date window AND a comparison window "

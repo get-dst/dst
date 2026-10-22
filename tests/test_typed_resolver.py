@@ -171,7 +171,7 @@ def test_best_or_worst_never_types_its_direction_depends_on_the_measure() -> Non
 def test_a_ranking_is_one_figure_per_dimension_ordered_by_it() -> None:
     """'Which country has the highest revenue?' is a ranking: revenue per country,
     highest first — the shape the listing reading dropped to a bare list of names."""
-    decisions = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
+    decisions = [_sure("ranking"), _sure("revenue"), _sure(None)]
     res = _resolver(decisions).resolve("Which country has the highest revenue?", _model())
     assert res.intent is not None, res.clarification
     i = res.intent
@@ -182,7 +182,7 @@ def test_a_ranking_is_one_figure_per_dimension_ordered_by_it() -> None:
 
 
 def test_a_top_n_ranking_carries_its_limit() -> None:
-    decisions = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
+    decisions = [_sure("ranking"), _sure("revenue"), _sure(None)]
     res = _resolver(decisions).resolve("top 3 countries by revenue", _model())
     assert res.intent is not None and res.intent.limit == 3
 
@@ -221,7 +221,7 @@ def _ranked_model(better: str | None) -> SemanticModel:
 def test_best_and_worst_follow_the_declared_better_end() -> None:
     """'Best' orders toward the metric's declared better end, 'worst' away from
     it — the author's fact, never the resolver's guess."""
-    steps = [_sure("ranking"), _sure("revenue"), _sure("country"), _sure(None)]
+    steps = [_sure("ranking"), _sure("revenue"), _sure(None)]
     best = _resolver(list(steps)).resolve(
         "Which country has the best revenue?", _ranked_model("higher")
     )
@@ -344,8 +344,6 @@ def test_a_filter_on_a_ratios_numerator_column_is_refused() -> None:
             [
                 _sure("ranking"),
                 _sure("paid_rate"),
-                _sure("country"),
-                _sure(None),
                 _sure("is_paid"),
                 _sure("true"),
                 _sure(None),
@@ -412,7 +410,7 @@ def test_an_unparsable_window_clarifies_never_guesses() -> None:
         _sure(None),
         _sure(None),
     ]
-    res = _resolver(steps).resolve("revenue Q3 2025 vs Q3 2026", _model())
+    res = _resolver(steps).resolve("revenue Q3 2025 and Q3 2026", _model())
     assert res.clarification is not None and res.clarification.term == "order_date"
     assert "YYYY-Qn" in res.clarification.options[0]
 
@@ -1383,6 +1381,8 @@ def _drafts_model() -> SemanticModel:
         ["hero_name"],
         [Metric(name="hero_first_picks", agg="sum", expr="hero_draft_stats.first_picks")],
     )
+    # The scope the table declares: "in pro drafts" restricts nothing it holds.
+    stats.description = "first picks per hero across pro drafts"
     log = _entity(
         "draft_phases",
         [
@@ -1840,7 +1840,7 @@ def test_with_no_declared_dimensions_the_entity_s_labels_are_offered() -> None:
     res = TypedResolver(  # type: ignore[arg-type]
         decider, today=TODAY, entity_domains={"driver_daily": {"team_code": ["1", "2"]}}
     ).resolve(
-        "which driver delivered the most parcels in August 2026",
+        "who delivered the most parcels in August 2026",
         _daily(key=["day", "driver_name"], dims=[]),
     )
     assert res.intent is not None, res.clarification

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-from services.connectors.sampling import SampleBudgetExceeded, sample_tables
+from services.connectors.sampling import SampleBudgetExceeded, meter_statement, sample_tables
 from services.connectors.tagging import tag_sql
 from services.contracts.profile import (
     LOW_CARDINALITY_MAX,
@@ -284,10 +284,14 @@ class BigQueryConnector:
             "GROUP BY table_name"
         )
         try:
-            rows = self._client.query(sql, timeout=_API_TIMEOUT_S).result(timeout=_JOB_DEADLINE_S)
-            return {str(r[0]): str(r[1]) for r in rows}
+            job = self._client.query(sql, timeout=_API_TIMEOUT_S)
+            latest = {str(r[0]): str(r[1]) for r in job.result(timeout=_JOB_DEADLINE_S)}
         except Exception:
             return {}
+        # A metadata read is a billed job like any other (at the per-job
+        # minimum): it counts in the probe's bill.
+        meter_statement(job.total_bytes_billed)
+        return latest
 
     # ── SamplingProfiler ──────────────────────────────────────────────────────
 

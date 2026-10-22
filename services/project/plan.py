@@ -16,11 +16,14 @@ no longer matches the (current + incoming) asset hashes, recompiled on apply.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from services.project.loader import is_managed
+
+if TYPE_CHECKING:
+    from services.project.lineage import LineageGraph
 
 
 @dataclass
@@ -465,7 +468,7 @@ def _diff(path: str, old: str, new: str) -> str:
 # ── selection: `--select` over the project graph (SQLMesh grammar) ───────────
 
 SCOPES = ("all", "semantic", "certified", "cases", "config")
-_SELECTABLE = ("lens", "entity", "definition")
+_SELECTABLE = ("lens", "entity", "definition", "table")
 _SCOPED_LENS_FILE = {"certified": _CERTIFIED_FILE, "cases": _CASES_FILE}
 
 
@@ -482,6 +485,23 @@ class Selection:
     files: dict[str, str]
     excluded: int = 0
     notes: list[str] = field(default_factory=list)
+    # One row per table pick: the table an entity reads, the entity, and the
+    # lens it reaches (through a definition when ``definition`` is set; no
+    # ``lens`` when nothing reads the entity).
+    paths: list[dict[str, str]] = field(default_factory=list)
+
+    def row(self) -> dict[str, object]:
+        """The ``scope: selection`` row plan and apply lead with."""
+        return {
+            "scope": "selection",
+            "selectors": self.selectors,
+            "kinds": self.scope,
+            "lenses": self.lenses,
+            "assets": self.assets,
+            "excluded": self.excluded,
+            "notes": self.notes,
+            "paths": self.paths,
+        }
 
 
 def _file_keys(path: str, content: str) -> set[str]:
@@ -509,6 +529,94 @@ def _file_keys(path: str, content: str) -> set[str]:
     )
 
 
+def _semantic_facts(semantic: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """({entity: source.table}, {definition term: the entity it is about}) over
+    the pushed semantic files; a file that does not parse contributes nothing."""
+    from services.semantic.files import parse_semantic_files
+
+    tables: dict[str, str] = {}
+    about: dict[str, str] = {}
+    for path, content in semantic.items():
+        try:
+            entities, definitions, _ = parse_semantic_files({path: content})
+        except Exception:  # noqa: BLE001 — apply reports the real error on its row
+            continue
+        tables.update({name: e.source.table for name, e in entities.items()})
+        about.update({t: d.about.split(".", 1)[0] for t, d in definitions.items() if d.about})
+    return tables, about
+
+
+@dataclass
+class _TablePick:
+    nodes: set[str] = field(default_factory=set)
+    paths: list[dict[str, str]] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    unread: set[str] = field(default_factory=set)
+    walked: bool = False
+
+
+def _pick_tables(
+    selector: str,
+    pattern: str,
+    down: bool,
+    tables: dict[str, str],
+    about: dict[str, str],
+    readers: Callable[[str], set[str]],
+    lineage: LineageGraph | None,
+) -> _TablePick:
+    """One ``table/PATTERN[+]`` selector: the entities on the matched tables
+    and, with ``+``, everything downstream — the tables the lineage builds
+    from them, the entities on those, the definitions about those entities,
+    and the lenses reading either. Matching nothing is a note, not an error:
+    a changed model no entity reads is a normal state."""
+    from services.project.lineage import name_matches, same_table
+
+    pick = _TablePick()
+    starts = lineage.matching(pattern) if lineage is not None else set()
+    direct = {t for t in tables.values() if name_matches(pattern, t)}
+    if not starts and not direct:
+        where = (
+            f"no model in the {lineage.tool} lineage"
+            if lineage is not None
+            else "no lineage is configured, so model names are not known"
+        )
+        pick.notes.append(f"{selector}: matches no table an entity reads, and {where}")
+        return pick
+    named = {lineage.nodes[i].relation for i in starts if lineage and lineage.nodes[i].relation}
+    named |= {t for t in direct if not any(same_table(t, n) for n in named)}
+    if len(named) > 1 and not any(c in pattern for c in "*?["):
+        pick.notes.append(
+            f"{selector}: '{pattern}' names {len(named)} tables "
+            f"({', '.join(sorted(named))}) — taking all of them"
+        )
+    reached = set(named)
+    if down and lineage is not None and starts:
+        pick.walked = True
+        built = (lineage.nodes[i].relation for i in lineage.downstream(starts))
+        reached |= {r for r in built if r}
+    pick.unread = {r for r in reached if not any(same_table(r, t) for t in tables.values())}
+    for entity, table in sorted(tables.items()):
+        if not any(same_table(r, table) for r in reached):
+            continue
+        pick.nodes.add(f"entity/{entity}")
+        if not down:
+            pick.paths.append({"table": table, "entity": entity})
+            continue
+        via: list[tuple[str | None, set[str]]] = [(None, readers(f"entity/{entity}"))]
+        for term in sorted(t for t, e in about.items() if e == entity):
+            pick.nodes.add(f"definition/{term}")
+            via.append((term, readers(f"definition/{term}")))
+        for definition, lenses in via:
+            pick.nodes |= lenses
+            row = {"table": table, "entity": entity}
+            if definition is not None:
+                row["definition"] = definition
+            if not lenses and definition is None:
+                pick.paths.append(row)
+            pick.paths += [{**row, "lens": lens.removeprefix("lens/")} for lens in sorted(lenses)]
+    return pick
+
+
 def _lens_selects(tree: dict[str, str]) -> tuple[set[str], set[str]]:
     """(entities, definitions) one pushed lens.yaml selects; '*' kept as is."""
     import yaml as _yaml
@@ -529,6 +637,7 @@ def resolve_selection(
     *,
     db_semantic: dict[str, str],
     db_trees: dict[str, dict[str, str]],
+    lineage: LineageGraph | None = None,
 ) -> Selection:
     """Resolve ``--select`` selectors against the push's own graph and filter
     the push down to them. Grammar: ``kind/name`` (lens, entity, definition),
@@ -536,8 +645,16 @@ def resolve_selection(
     upstream — a lens's selected entities and definitions), ``X+`` (X and
     everything downstream — the pushed lenses that select it), and ``@changed``
     (every node whose files differ from the server: the plan's own diff). A
-    selector that matches nothing is an error. No selectors selects everything,
-    so ``--scope`` alone narrows the kinds of files only.
+    selector that matches nothing is an error. No selectors, or ``*`` among
+    them, selects everything, so ``--scope`` alone narrows the kinds of files only.
+
+    ``table/NAME`` picks the entities whose ``source.table`` is NAME (matched
+    case-insensitively on the qualified name or its trailing parts);
+    ``table/NAME+`` adds the definitions about them and the lenses reading
+    either, and with ``lineage`` (the dbt or SQLMesh model DAG) first walks
+    from NAME, a table or a model, down to every table built from it. A table
+    selector that matches nothing is a note, and so is a selection that
+    reaches no lens; ``paths`` records table → entity → lens for each pick.
 
     ``scope`` narrows what kind of file is pushed: ``semantic`` (semantic/**),
     ``config`` (dst.yaml and the other project-level files), ``certified`` /
@@ -559,6 +676,8 @@ def resolve_selection(
     }
     selects = {lens: _lens_selects(tree) for lens, tree in trees.items()}
     nodes = {f"lens/{n}" for n in trees} | assets
+    by_table = any("table/" in s for s in selectors)
+    tables, about = _semantic_facts(semantic) if by_table else ({}, {})
 
     def upstream(node: str) -> set[str]:
         if not node.startswith("lens/"):
@@ -581,6 +700,12 @@ def resolve_selection(
         return {f"lens/{lens}" for lens, sel in selects.items() if {"*", name} & sel[index]}
 
     picked: set[str] = set()
+    paths: list[dict[str, str]] = []
+    notes: list[str] = []
+    unread: set[str] = set()
+    walked = False
+    if "*" in (s.strip() for s in selectors):
+        selectors = []
     for raw in selectors:
         selector = raw.strip()
         if selector == "@changed":
@@ -595,13 +720,21 @@ def resolve_selection(
                 f"lens/{p.lens}" for p in plan_lenses(db_trees, trees) if p.status != "unchanged"
             }
             continue
-        m = re.fullmatch(r"(\+?)(lens|entity|definition)/([^+\s]+)(\+?)", selector)
+        m = re.fullmatch(r"(\+?)(lens|entity|definition|table)/([^+\s]+)(\+?)", selector)
         if m is None:
             raise ValueError(
                 f"selector '{selector}' is not kind/name (kinds: {', '.join(_SELECTABLE)}), "
-                "a glob on the name, +X / X+, or @changed"
+                "a glob on the name, +X / X+, @changed, or * for everything"
             )
         up, kind, pattern, down = m.groups()
+        if kind == "table":
+            pick = _pick_tables(selector, pattern, bool(down), tables, about, downstream, lineage)
+            picked |= pick.nodes
+            paths += [{"selector": selector, **row} for row in pick.paths]
+            notes += pick.notes
+            unread |= pick.unread
+            walked = walked or pick.walked
+            continue
         matched = {
             n
             for n in nodes
@@ -621,6 +754,17 @@ def resolve_selection(
     chosen_assets = sorted(n for n in picked if not n.startswith("lens/"))
     chosen_entities = {a.removeprefix("entity/") for a in chosen_assets if a.startswith("entity/")}
 
+    if walked and lineage is not None and (skipped := lineage.unwalked()):
+        notes.append(
+            f"{lineage.tool} lineage: {len(skipped)} model(s) not walked, so a table they "
+            f"read does not reach them: {'; '.join(skipped)}"
+        )
+    if by_table and not lenses:
+        notes.append(
+            "the selection reaches no lens"
+            + (f"; no entity reads {', '.join(sorted(unread))}" if unread else "")
+        )
+
     def keep_semantic(path: str) -> bool:
         for key in keys_by_file.get(path, set()):
             if key.startswith("relationship/"):
@@ -632,7 +776,6 @@ def resolve_selection(
         return False
 
     out: dict[str, str] = {}
-    notes: list[str] = []
     if scope in ("all", "semantic"):
         out.update({p: c for p, c in semantic.items() if keep_semantic(p)})
     if scope in ("all", "config"):
@@ -652,6 +795,8 @@ def resolve_selection(
             if only_file in trees[lens]:
                 tree[only_file] = trees[lens][only_file]
             out.update({f"lenses/{lens}/{p}": c for p, c in tree.items()})
+    if selectors and not picked:
+        out = {}  # a selection that reached nothing pushes nothing, config included
     return Selection(
         selectors=[s.strip() for s in selectors],
         scope=scope,
@@ -660,4 +805,5 @@ def resolve_selection(
         files=out,
         excluded=sum(1 for p in files if p not in out),
         notes=notes,
+        paths=paths,
     )

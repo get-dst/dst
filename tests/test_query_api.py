@@ -16,7 +16,7 @@ from services.app import app
 from services.auth.deps import get_caller
 from services.auth.tokens import hash_token, new_admin_token
 from services.config import settings
-from services.contracts.fakes import ScriptedLLM, fake_llm_providers
+from services.contracts.fakes import HashEmbedder, ScriptedLLM, fake_llm_providers
 from services.contracts.response import QueryResponse
 from services.db.session import org_session
 from services.governance.credentials import CallerIdentity
@@ -112,7 +112,7 @@ def test_query_endpoint_e2e(monkeypatch: pytest.MonkeyPatch) -> None:
     # not an intent, so the metric-layer IntentSQLGenerator would reject it.
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -164,7 +164,7 @@ def test_a_refusal_names_the_lens_that_exposes_the_table_asked_for(
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -286,7 +286,7 @@ def test_lens_max_repairs_reaches_the_pipeline(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -433,7 +433,7 @@ def test_purpose_sent_to_a_lens_that_does_not_log_it_leaves_the_column_null(
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )
@@ -458,3 +458,303 @@ def test_purpose_sent_to_a_lens_that_does_not_log_it_leaves_the_column_null(
         assert row[1] is None
     finally:
         _cleanup(settings.database_admin_url, org)
+
+
+@needs_db
+def test_the_routing_deciders_spend_is_charged_to_the_routed_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The routed door's lens choice is the decider's votes: their tokens and
+    cost are part of the answer's AI spend, on its request_log row. They were
+    on no row at all, so `dst observe` undercounted every routed answer."""
+    from services.contracts.protocols import Decision, DecisionUsage
+    from services.router import RouteDecision
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    gen_json = '{"sql": "SELECT count(*) AS n FROM customers", "definition_used": null}'
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.runtime.assembly.IntentSQLGenerator",
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
+            llm, model=model, temperature=temperature
+        ),
+    )
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider",
+        lambda _key, **_: ScriptedLLM([gen_json, "Some customers."] * 2),
+    )
+    vote = Decision(
+        chosen="customer_value",
+        probs={"customer_value": 1.0},
+        provider="vote:claude-haiku-4-5:k=5",
+        usage=DecisionUsage(calls=5, input_tokens=2_000, output_tokens=50),
+    )
+    monkeypatch.setattr(
+        "services.api.route._route",
+        lambda caller, q: RouteDecision(
+            True, "customer_value", 0.8, [], decided_by="decider", decision=vote, verdict="act"
+        ),
+    )
+    headers = {"Authorization": f"Bearer {raw}"}
+
+    def logged(request_id: str) -> tuple[int, int, float | None]:
+        eng = create_engine(settings.database_admin_url)
+        with eng.connect() as c:
+            row = c.execute(
+                text(
+                    "SELECT ai_input_tokens, ai_output_tokens, ai_cost_usd FROM request_log "
+                    "WHERE request_id = :r"
+                ),
+                {"r": request_id},
+            ).first()
+        assert row is not None
+        return int(row[0]), int(row[1]), row[2]
+
+    try:
+        direct = client.post(
+            "/v1/lenses/customer_value/query", json={"q": "how many customers?"}, headers=headers
+        )
+        assert direct.status_code == 200, direct.text
+        routed = client.post("/v1/query", json={"q": "how many customers?"}, headers=headers)
+        assert routed.status_code == 200, routed.text
+        d_in, d_out, d_cost = logged(direct.json()["request_id"])
+        r_in, r_out, r_cost = logged(routed.json()["answer"]["request_id"])
+        assert (r_in - d_in, r_out - d_out) == (2_000, 50)
+        assert d_cost is not None and r_cost is not None and r_cost > d_cost
+    finally:
+        admin = create_engine(settings.database_admin_url)
+        with admin.begin() as c:
+            c.execute(text("DELETE FROM routing_decision WHERE org_id = :o"), {"o": org})
+        _cleanup(settings.database_admin_url, org)
+
+
+def _routing_vote(verdict: str = "act"):  # type: ignore[no-untyped-def]
+    from services.contracts.protocols import Decision, DecisionUsage
+
+    return Decision(
+        chosen="customer_value",
+        probs={"customer_value": 1.0},
+        provider="vote:claude-haiku-4-5:k=5",
+        usage=DecisionUsage(calls=5, input_tokens=2_000, output_tokens=50),
+    )
+
+
+def _observed(org: object) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    from services.observability import observe
+
+    with org_session(org) as s:
+        k = observe.kpis(s)
+        k_all = observe.kpis(s, include_test=True)
+        callers = {str(c["caller"]): c for c in observe.caller_report(s)}
+        audit = observe.audit_statement(s, days=30)
+    return k, k_all, {"callers": callers, "audit": audit}
+
+
+def _routing_cleanup(org: object) -> None:
+    admin = create_engine(settings.database_admin_url)
+    with admin.begin() as c:
+        c.execute(text("DELETE FROM routing_decision WHERE org_id = :o"), {"o": org})
+    _cleanup(settings.database_admin_url, org)
+
+
+@needs_db
+@pytest.mark.parametrize("path", ["decline", "named_refusal", "routed_not_for", "hop_failed"])
+def test_routing_spend_on_an_unserved_question_reaches_observe(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A routed-door question that writes no request_log row (a decline, a
+    lens's named refusal, the routed lens's `not_for`, a second hop that
+    failed) still spent the decider's tokens: they ride the routing row and
+    observe's AI totals count them, once, and leave test traffic out."""
+    from fastapi import HTTPException
+
+    from services.observability import cost
+    from services.router import RouteDecision
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    covered = path in ("routed_not_for", "hop_failed")
+    monkeypatch.setattr(
+        "services.api.route._route",
+        lambda caller, q: RouteDecision(
+            covered,
+            "customer_value" if covered else None,
+            0.6,
+            [("customer_value", 0.6)],
+            "no lens covers this",
+            decided_by="decider",
+            decision=_routing_vote(),
+            verdict="act" if covered else "decline",
+        ),
+    )
+    monkeypatch.setattr(
+        "services.api.route.lens_refusal_named",
+        lambda q, caller: (
+            ("customer_value", "lifetime margin is not computable here")
+            if path == "named_refusal"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        "services.api.route._not_for_named",
+        lambda q, caller, lens: (
+            ("customer_value", "ask the sales lens") if path == "routed_not_for" else None
+        ),
+    )
+
+    def failed_hop(*a: object, **kw: object) -> QueryResponse:
+        raise HTTPException(status_code=429, detail="rate limited")
+
+    monkeypatch.setattr("services.api.route.run_lens_query", failed_hop)
+    headers = {"Authorization": f"Bearer {raw}"}
+    priced = cost.decisions_cost_usd({"vote:claude-haiku-4-5:k=5": (2_000, 50)})
+    assert priced is not None and priced > 0
+    try:
+        r = client.post("/v1/query", json={"q": "lifetime margin per customer?"}, headers=headers)
+        assert r.status_code == (429 if path == "hop_failed" else 200), r.text
+        # The same question from a test agent: recorded, left out by default.
+        r = client.post(
+            "/v1/query",
+            json={"q": "lifetime margin per customer?"},
+            headers={**headers, "X-DST-Agent": "dst-test"},
+        )
+        assert r.status_code == (429 if path == "hop_failed" else 200), r.text
+        k, k_all, rest = _observed(org)
+        assert k["queries"] == 0
+        assert (k["input_tokens"], k["output_tokens"]) == (2_000, 50)
+        assert k["ai_cost_usd"] == round(priced, 4)
+        assert k["routing"] == {
+            "decisions": 1,
+            "ai_cost_usd": round(priced, 4),
+            "input_tokens": 2_000,
+            "output_tokens": 50,
+            "unpriced": 0,
+        }
+        assert (k_all["input_tokens"], k_all["output_tokens"]) == (4_000, 100)
+        assert rest["callers"]["admin"]["ai_cost_usd"] == round(priced, 4)
+        assert rest["callers"]["admin"]["queries"] == 0
+        assert rest["audit"]["ai_cost_usd"] == round(priced, 4)
+    finally:
+        _routing_cleanup(org)
+
+
+@needs_db
+def test_routing_spend_on_a_served_answer_is_counted_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A served route charges the decider's spend to its answer's request_log
+    row; the routing row keeps its own copy and observe skips it, so the
+    totals equal the request_log sums."""
+    from services.router import RouteDecision
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    gen_json = '{"sql": "SELECT count(*) AS n FROM customers", "definition_used": null}'
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(
+        "services.runtime.assembly.IntentSQLGenerator",
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
+            llm, model=model, temperature=temperature
+        ),
+    )
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider",
+        lambda _key, **_: ScriptedLLM([gen_json, "Some customers."]),
+    )
+    monkeypatch.setattr(
+        "services.api.route._route",
+        lambda caller, q: RouteDecision(
+            True,
+            "customer_value",
+            0.8,
+            [],
+            decided_by="decider",
+            decision=_routing_vote(),
+            verdict="act",
+        ),
+    )
+    headers = {"Authorization": f"Bearer {raw}"}
+    try:
+        routed = client.post("/v1/query", json={"q": "how many customers?"}, headers=headers)
+        assert routed.status_code == 200, routed.text
+        rid = routed.json()["answer"]["request_id"]
+        eng = create_engine(settings.database_admin_url)
+        with eng.connect() as c:
+            logged = c.execute(
+                text(
+                    "SELECT ai_input_tokens, ai_output_tokens, ai_cost_usd FROM request_log "
+                    "WHERE org_id = :o"
+                ),
+                {"o": org},
+            ).all()
+            stored = c.execute(
+                text("SELECT decision FROM routing_decision WHERE org_id = :o"), {"o": org}
+            ).scalar_one()
+        assert len(logged) == 1 and logged[0][0] >= 2_000
+        # The routing row records the spend and the answer it was charged to.
+        assert stored["request_id"] == rid
+        assert (stored["tokens_in"], stored["tokens_out"]) == (2_000, 50)
+        k, _k_all, rest = _observed(org)
+        assert k["routing"]["decisions"] == 0
+        assert (k["input_tokens"], k["output_tokens"]) == (logged[0][0], logged[0][1])
+        assert k["ai_cost_usd"] == round(float(logged[0][2]), 4)
+        assert rest["callers"]["admin"]["ai_cost_usd"] == round(float(logged[0][2]), 4)
+        assert rest["audit"]["ai_cost_usd"] == round(float(logged[0][2]), 4)
+    finally:
+        _routing_cleanup(org)
+
+
+@needs_db
+def test_a_routing_outage_records_the_votes_it_was_billed_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coverage decider fails part-way (two of its five votes answered,
+    then the provider went down): the route declines DECIDER_DOWN with no
+    decision, and the two votes' spend still rides the routing row and
+    reaches observe's totals."""
+    from services.llm.vote_decider import VoteDecider
+    from services.observability import cost
+    from services.router import Router
+    from services.router.decider import LlmDecider, route_with_llm
+    from tests.test_decision_spend import ROUTED, _MeteredLLM
+
+    llm = _MeteredLLM(["customer_value"], fail_from=2)
+    decider = LlmDecider(
+        None, "claude-haiku-4-5", decider=VoteDecider(llm, "claude-haiku-4-5", concurrency=1)
+    )
+    monkeypatch.setattr(
+        "services.api.route._route",
+        lambda caller, q: route_with_llm(
+            Router(ROUTED, HashEmbedder()),
+            {p.lens: p for p in ROUTED},
+            decider,
+            q,
+            all_lenses=True,
+        ),
+    )
+    org, raw = _make_org_token(settings.database_admin_url)
+    _seed_lens(org)
+    priced = cost.decisions_cost_usd({"vote:claude-haiku-4-5:k=5": (200, 14)})
+    assert priced is not None and priced > 0
+    try:
+        r = client.post(
+            "/v1/query",
+            json={"q": "what did we invoice?"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["degraded"] == "DECIDER_DOWN"
+        assert (llm.billed_in, llm.billed_out) == (200, 14)
+        k, _k_all, rest = _observed(org)
+        assert k["routing"] == {
+            "decisions": 1,
+            "ai_cost_usd": round(priced, 4),
+            "input_tokens": 200,
+            "output_tokens": 14,
+            "unpriced": 0,
+        }
+        assert (k["input_tokens"], k["output_tokens"]) == (200, 14)
+        assert rest["audit"]["ai_cost_usd"] == round(priced, 4)
+    finally:
+        _routing_cleanup(org)

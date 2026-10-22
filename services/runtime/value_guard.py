@@ -113,22 +113,33 @@ def entity_domains(
     return out
 
 
+def entity_unsampled(model: SemanticModel, profiles: list[TableProfile]) -> dict[str, str]:
+    """entity name -> why its table's values were never sampled (over the
+    sampling budget), for every entity whose stored profile is catalog-only
+    for that reason. No dictionary exists for such an entity's columns, and
+    the places that ask for a value say why."""
+    reasons = {p.table: p.unsampled for p in profiles if p.unsampled}
+    return {
+        e.name: f"its table {e.source.table} is {reasons[e.source.table]}"
+        for e in model.entities
+        if e.source.table in reasons
+    }
+
+
 def entity_column_types(
     model: SemanticModel, profiles: list[TableProfile]
 ) -> dict[str, dict[str, str]]:
     """entity name -> column name (lowercased) -> the warehouse's own type for
     it, as the stored profile recorded it. The compiler casts a window bound
     to it where the declared type cannot say which of a warehouse's moment
-    types the column is."""
+    types the column is, and binds a quoted value to it (``bind_physical``).
+    Every profiled column of the entity's table counts, declared field or
+    not: a population or metric filter may read a column no field names."""
     by_table = {p.table: {c.name: c for c in p.columns} for p in profiles}
     out: dict[str, dict[str, str]] = {}
     for entity in model.entities:
         columns = by_table.get(entity.source.table, {})
-        own = {
-            f.name.lower(): columns[f.name].type
-            for f in entity.fields
-            if f.name in columns and columns[f.name].type
-        }
+        own = {name.lower(): c.type for name, c in columns.items() if c.type}
         if own:
             out[entity.name] = own
     return out
@@ -495,7 +506,7 @@ def unknown_value_clarification(
 def unconfirmed_zero_text(sql: str, dialect: str | None = None) -> str:
     """The ONE narration for an empty result whose emptiness could not be
     confirmed. Written by code, not the composer: left to a model, the same
-    event coin-flips between "zero customers are using AI replies" (a
+    event coin-flips between "zero customers use the booking widget" (a
     board-level wrong answer asserted as fact) and an honest "I cannot provide
     a count". A detected-unsafe zero must never be a business finding, so no
     model writes this sentence.

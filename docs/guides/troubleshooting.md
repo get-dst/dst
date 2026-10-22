@@ -145,7 +145,9 @@ the lens sets `logging.log_samples: true`; the default is off. Owner: configurat
 ## Probe refuses a table over the sampling budget
 
 The refusal names `sample_bytes_budget`. Set it under the connection's `config` in
-`dst.yaml`. Owner: configuration. Never patch the installed package to move a constant:
+`dst.yaml`. Owner: configuration. Until it is raised, the table is catalog-only: its
+values cannot bind from a dictionary, and describe and a clarification on its columns say
+so. Never patch the installed package to move a constant:
 the next upgrade reinstalls the original, and nothing says so.
 
 ## What to send when reporting a dst defect

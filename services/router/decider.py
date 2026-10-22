@@ -20,9 +20,11 @@ outcome; a silent mis-route is the defect.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 
-from services.contracts.protocols import Decider, Decision, LLMProvider, Option
+from services.contracts.protocols import Decider, Decision, LLMProvider, Option, spent_by
 from services.llm.vote_decider import DEFAULT_K, DeciderStarved, VoteDecider
+from services.observability import usage as ai_usage
 from services.router import (
     DECIDER_DOWN,
     CoverageProfile,
@@ -32,9 +34,12 @@ from services.router import (
     Scorer,
 )
 from services.router.sibling import (
+    by_sources,
     certified_owner,
     distinct_profiles,
     drop_not_for,
+    metric_name_owner,
+    shared_metric,
     unique_name_owner,
 )
 from services.runtime import decision_policy
@@ -68,12 +73,19 @@ _CONTEXT = (
 )
 
 
+_SCOPES = {"own": "the organisation's own", "market": "the market's, or other organisations'"}
+
+
 def _options(profiles: list[CoverageProfile]) -> list[Option]:
     return [
         Option(
             p.lens,
             f"governed metrics: {'; '.join(p.anchors)}."
-            + (f" ({p.description})" if p.description else ""),
+            + (f" ({p.description})" if p.description else "")
+            + (f" Over time by: {', '.join(p.time_fields)}." if p.time_fields else "")
+            + (f" Reads: {', '.join(p.sources)}." if p.sources else "")
+            + (f" Figures: {_SCOPES[p.data_scope]}." if p.data_scope in _SCOPES else "")
+            + (f" Not for: {'; '.join(p.not_for)}." if p.not_for else ""),
         )
         for p in profiles
     ]
@@ -125,9 +137,10 @@ class LlmDecider:
             return Decision(chosen=self.decide(question, candidates), probs=None, provider="stub")
         if not candidates:
             return Decision(chosen=None, probs=None, provider="none-offered")
-        return decider.decide(
-            question=question, context=_CONTEXT, options=_options(candidates), allow_none=True
-        )
+        with ai_usage.purpose("route"):
+            return decider.decide(
+                question=question, context=_CONTEXT, options=_options(candidates), allow_none=True
+            )
 
     def decide(self, question: str, candidates: list[CoverageProfile]) -> str | None:
         return self.decide_measured(question, candidates).chosen
@@ -159,13 +172,14 @@ def route_with_llm(
     than falling back to the deleted arm: loud degradation over silent mis-routes.
     """
     scored = router.scored(question)
-    if not scored:
+    unscored = _unscored(router, profiles_by_lens, scored, question)
+    if not scored and not unscored:
         return RouteDecision(False, None, 0.0, [], "no lenses to route to")
-    best_lens, best_score = scored[0]
+    best_lens, best_score = scored[0] if scored else ("", 0.0)
     if all_lenses is None:
         all_lenses = bool(getattr(decider, "typed_decisions", False))
     if all_lenses:
-        k = len(scored)
+        k = len(scored) + len(unscored)
     elif best_score >= router.confident:
         return RouteDecision(
             True,
@@ -177,19 +191,23 @@ def route_with_llm(
         )
 
     if k is None:
-        k = shortlist_k(len(scored))
+        k = shortlist_k(len(scored) + len(unscored))
     shortlist = [profiles_by_lens[lens] for lens, _ in scored[:k] if lens in profiles_by_lens]
+    shortlist += _siblings_of(shortlist, unscored, alone=all_lenses or not scored)
     if len(shortlist) == 2:
         named = unique_name_owner(question, shortlist)
         if named is not None:
             return _named_route(named, scored)
     try:
-        decision = (
-            decider.decide_measured(question, shortlist)
-            if hasattr(decider, "decide_measured")
-            else Decision(chosen=decider.decide(question, shortlist), probs=None, provider="stub")
-        )
-    except Exception:
+        with ai_usage.purpose("route"):
+            decision = (
+                decider.decide_measured(question, shortlist)
+                if hasattr(decider, "decide_measured")
+                else Decision(
+                    chosen=decider.decide(question, shortlist), probs=None, provider="stub"
+                )
+            )
+    except Exception as exc:
         log.exception("coverage decider unavailable — declining (degraded), never mid-band cosine")
         return RouteDecision(
             False,
@@ -199,6 +217,7 @@ def route_with_llm(
             "routing degraded: the coverage decider is unavailable — declining rather than "
             "guessing from the ambiguous cosine band",
             degraded=DECIDER_DOWN,
+            spent=spent_by(exc),
         )
     verdict = decision_policy.verdict(decision, "lens")
     if verdict == "clarify":
@@ -236,7 +255,10 @@ def route_with_llm(
             None,
             best_score,
             scored,
-            "no governed lens covers this (llm)",
+            # A refusal is the provider's, never a coverage finding.
+            f"the decision provider ({decision.provider}) refused to route this"
+            if decision.refused
+            else "no governed lens covers this (llm)",
             decided_by="decider",
             decision=decision,
             verdict=verdict,
@@ -253,6 +275,38 @@ def route_with_llm(
         decision=decision,
         verdict=verdict,
     )
+
+
+def _unscored(
+    router: Router,
+    profiles_by_lens: dict[str, CoverageProfile],
+    scored: list[tuple[str, float]],
+    question: str,
+) -> list[CoverageProfile]:
+    """Candidates similarity did not rank and no ``not_for`` excludes: a lens
+    whose every anchor a sibling carries too (``distinct_profiles`` leaves it
+    none to score)."""
+    ranked = {lens for lens, _ in scored}
+    declined = router.not_for(question)
+    return [
+        p
+        for lens, p in profiles_by_lens.items()
+        if lens not in ranked and lens not in declined and p.anchors
+    ]
+
+
+def _siblings_of(
+    shortlist: list[CoverageProfile], unscored: list[CoverageProfile], *, alone: bool
+) -> list[CoverageProfile]:
+    """The unscored lenses that carry an anchor a shortlisted lens carries: the
+    text describes both equally, so similarity cannot rank one and the decider
+    must see both. When nothing scored at all, every such lens is a sibling of
+    another, and all of them are the shortlist (as they are when the decider
+    sees every lens)."""
+    if alone:
+        return unscored
+    shown = {a for p in shortlist for a in p.anchors}
+    return [p for p in unscored if shown & set(p.anchors)]
 
 
 def _named_route(
@@ -276,17 +330,29 @@ def route_question(
     question: str,
     *,
     scorer: Scorer | None = None,
+    known_sources: Iterable[str] | None = None,
 ) -> RouteDecision:
     """The full routing order, deterministic first (``services/router/sibling.py``):
     drop lenses whose ``not_for`` names the ask; route a certified question to its
-    one owning lens; score only the anchors a lens does not share verbatim; then
-    the decider over the shortlist (pure cosine when none is configured)."""
+    one owning lens; keep the lenses declaring every source system the question
+    names (``known_sources``: every system a lens in the org declares, default
+    the candidates' own; none declaring it is uncovered, saying so); route a
+    metric name or label one lens alone declares to it (never to a lens whose
+    ``not_for`` the question is nearer than its anchors); a metric several
+    lenses declare goes to the one a declared name or a time split picks, else
+    the question is asked which lens; score only the anchors a lens does not
+    share verbatim; then the decider over the shortlist (pure cosine when none
+    is configured)."""
     profiles = drop_not_for(question, profiles)
     owner = certified_owner(question, profiles)
     if owner is not None:
         return RouteDecision(
             True, owner, 1.0, [], "routed (certified question)", decided_by="certified"
         )
+    known = [s for p in profiles for s in p.sources] if known_sources is None else known_sources
+    profiles, uncovered = by_sources(question, profiles, known)
+    if uncovered is not None:
+        return RouteDecision(False, None, 0.0, [], uncovered, decided_by="declared-name")
     scoring = distinct_profiles(profiles)
     if scorer is not None:
         # A stored scorer was built over every accessible lens: keep its ranking
@@ -294,10 +360,32 @@ def route_question(
         keep = {p.lens for p in scoring}
         inner = scorer
 
-        def scorer(q: str) -> list[tuple[str, float]]:
-            return [(n, s) for n, s in inner(q) if n in keep]
+        def scorer(qv: list[float]) -> list[tuple[str, float]]:
+            return [(n, s) for n, s in inner(qv) if n in keep]
 
     router = Router(scoring, embedder, scorer=scorer)
+    declined = router.not_for(question)
+    candidates = [p for p in profiles if p.lens not in declined]
+    named = metric_name_owner(question, candidates)
+    if named is not None:
+        return _named_route(named, router.scored(question))
+    named, ask = shared_metric(question, candidates)
+    if named is not None:
+        return _named_route(named, router.scored(question))
+    if ask is not None:
+        scored = router.scored(question)
+        return RouteDecision(
+            False,
+            None,
+            scored[0][1] if scored else 0.0,
+            scored,
+            ask,
+            decided_by="declared-name",
+            verdict="clarify",
+        )
     if decider is None or not scoring:
         return router.route(question)
-    return route_with_llm(router, {p.lens: p for p in scoring}, decider, question)
+    # The decider reads each lens whole: the anchors a sibling shares are
+    # left out of SCORING only (they separate nothing there), never out of
+    # what the decider is told a lens covers.
+    return route_with_llm(router, {p.lens: p for p in profiles}, decider, question)

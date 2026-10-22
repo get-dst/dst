@@ -340,7 +340,7 @@ def test_answer_carries_data_as_of(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
     monkeypatch.setattr(
         "services.runtime.assembly.IntentSQLGenerator",
-        lambda llm, model, temperature=0.0: GroundedSQLGenerator(
+        lambda llm, model, temperature=0.0, **_: GroundedSQLGenerator(
             llm, model=model, temperature=temperature
         ),
     )

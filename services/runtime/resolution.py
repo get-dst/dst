@@ -30,7 +30,13 @@ from services.contracts.resolution import MEASURE_KINDS, Resolution, Slot, deriv
 from services.contracts.semantic_model import Entity, SemanticModel
 from services.runtime import shape_guard, verification
 from services.runtime.compare import comparison_reading
-from services.runtime.compiler import CompileError, metric_sql
+from services.runtime.compiler import (
+    CompileError,
+    level_time_field,
+    metric_sql,
+    reads_as_level,
+    window_reading,
+)
 
 Domains = dict[str, list[str]]
 
@@ -185,6 +191,10 @@ def from_intent(
 
 
 LEVEL_READING = "latest snapshot in the window"
+FIRST_READING = "first snapshot in the window"
+# A level asked over no period: the newest snapshot the data holds.
+LATEST_READING = "latest snapshot in the data"
+ANY_IN_WINDOW_READING = "distinct count at any snapshot in the window"
 
 
 def level_reading(intent: QueryIntent, model: SemanticModel) -> tuple[str, str] | None:
@@ -202,11 +212,24 @@ def level_reading(intent: QueryIntent, model: SemanticModel) -> tuple[str, str] 
         return None
     entity = owners[0]
     metrics = [m for m in entity.metrics if m.name in intent.metrics]
-    if not metrics or any(m.additivity != "level" for m in metrics):
+    if not metrics or not all(reads_as_level(m, entity) for m in metrics):
         return None
-    field = next((m.agg_time_field for m in metrics if m.agg_time_field), None)
-    field = field or entity.default_time_field or "time"
-    return field, LEVEL_READING + (f" per {intent.grain}" if intent.grain else "")
+    try:
+        field = level_time_field(entity, metrics) or "time"
+    except CompileError:
+        return None
+    windowed = any(f.field.rpartition(".")[2] == field for f in intent.filters)
+    if (
+        intent.snapshot is None
+        and (windowed or intent.grain)
+        and window_reading(metrics[0], entity) == "any_in_window"
+    ):
+        reading = ANY_IN_WINDOW_READING
+    elif not windowed and not intent.grain:
+        reading = LATEST_READING
+    else:
+        reading = FIRST_READING if intent.snapshot == "first" else LEVEL_READING
+    return field, reading + (f" per {intent.grain}" if intent.grain else "")
 
 
 def level_disclosure(intent: QueryIntent, model: SemanticModel) -> str | None:
@@ -217,9 +240,22 @@ def level_disclosure(intent: QueryIntent, model: SemanticModel) -> str | None:
         return None
     names = ", ".join(f"`{m}`" for m in intent.metrics)
     per = f" for each {intent.grain}" if intent.grain else ""
+    if reading[1].startswith(ANY_IN_WINDOW_READING):
+        return (
+            f"Reading applied: {names} is declared `window_reading: any_in_window`, so the "
+            f"figure counts each one flagged at any snapshot on `{reading[0]}` in the "
+            f"window{per}, once — not the last snapshot alone."
+        )
+    if reading[1].startswith(LATEST_READING):
+        return (
+            f"Reading applied: {names} is a level (a snapshot) and the question names no "
+            f"period, so the figure is the {LATEST_READING} on `{reading[0]}`, not a sum "
+            "over every snapshot. Name a period for its snapshot there."
+        )
+    edge = FIRST_READING if intent.snapshot == "first" else LEVEL_READING
     return (
         f"Reading applied: {names} is a level (a snapshot), so the figure is the "
-        f"{LEVEL_READING}{per} on `{reading[0]}`, not a sum over every snapshot in it."
+        f"{edge}{per} on `{reading[0]}`, not a sum over every snapshot in it."
     )
 
 

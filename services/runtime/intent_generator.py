@@ -23,7 +23,9 @@ from services.contracts.protocols import (
 from services.contracts.query_intent import QueryIntent
 from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import SemanticModel
-from services.runtime import ambiguity
+from services.lenses.profile_enrich import lens_today
+from services.observability import usage as ai_usage
+from services.runtime import ambiguity, growth
 from services.runtime.compiler import (
     CompileError,
     UnpinnedDimension,
@@ -319,11 +321,20 @@ class IntentSQLGenerator:
         # Same reasoning-model starvation as GroundedSQLGenerator: intents are
         # small, but the thinking that precedes them is not.
         max_tokens: int = 4096,
+        domains: dict[str, list[str]] | None = None,
+        entity_domains: dict[str, dict[str, list[str]]] | None = None,
+        column_types: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._llm = llm
         self.model = model  # public: the pipeline reads it to attribute cost per call
         self._temperature = temperature
         self._max_tokens = max_tokens
+        # The compile seam's facts, as the typed generator's: the stored values
+        # a pinned-dimension clarification offers, and the physical types a
+        # window bound is cast to.
+        self._domains = domains or {}
+        self._entity_domains = entity_domains or {}
+        self._column_types = column_types
 
     def generate(
         self,
@@ -351,13 +362,14 @@ class IntentSQLGenerator:
         # the wrong field, a grain two metrics cannot share): one repair round
         # before the empty SQL hands the question to the next tier.
         for _attempt in range(2):
-            res = self._llm.complete(
-                system=[system],
-                messages=messages,
-                model=self.model,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-            )
+            with ai_usage.purpose("generate"):
+                res = self._llm.complete(
+                    system=[system],
+                    messages=messages,
+                    model=self.model,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                )
             in_tok += res.input_tokens
             out_tok += res.output_tokens
             intent = parse_intent(res.text)
@@ -371,8 +383,15 @@ class IntentSQLGenerator:
             intent = gate_grain(question, intent, semantic_model)
             intent = gate_dimensions(question, intent, semantic_model)
             intent = govern_literals(intent, semantic_model)
+            sole = semantic_model.entities[0].name if len(semantic_model.entities) == 1 else ""
+            owner = intent.entity or sole
             try:
-                sql = compile_intent(intent, semantic_model)
+                sql = compile_intent(
+                    intent,
+                    semantic_model,
+                    domains={**self._domains, **self._entity_domains.get(owner, {})},
+                    column_types=self._column_types,
+                )
                 error = None
                 break
             except CompileError as exc:
@@ -394,6 +413,38 @@ class IntentSQLGenerator:
             definition_used=intent_term(intent) if sql else None,
             intent=intent if sql else None,
         )
+        if sql and intent is not None:
+            # A ratio over no period blends every period of the table: it reads
+            # the last complete month and says so, as on the typed path.
+            from services.runtime.typed_resolver import pin_intent  # imports this module
+
+            pin = pin_intent(question, intent, semantic_model, lens_today(semantic_model.timezone))
+            if isinstance(pin, ClarificationRequest):
+                gq = GeneratedQuery(sql="", clarification=pin)
+            elif pin is not None:
+                pinned, record = pin
+                try:
+                    gq = GeneratedQuery(
+                        sql=compile_intent(
+                            pinned,
+                            semantic_model,
+                            domains={
+                                **self._domains,
+                                **self._entity_domains.get(pinned.entity or sole, {}),
+                            },
+                            column_types=self._column_types,
+                        ),
+                        definition_used=intent_term(pinned),
+                        intent=pinned,
+                        decisions=[record],
+                    )
+                except CompileError:
+                    gq = GeneratedQuery(
+                        sql="",
+                        clarification=growth.ratio_window(
+                            ", ".join(intent.metrics), lens_today(semantic_model.timezone)
+                        ),
+                    )
         if isinstance(error, UnpinnedDimension):
             # The repair still sums kinds of record that do not add up: which
             # kind is the caller's to say, and a raw tier would sum them anyway.

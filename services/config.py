@@ -59,18 +59,23 @@ _FIRST_CLASS_BARE = frozenset(
 )
 
 
+ProviderType = Literal["anthropic", "openai-compatible", "local", "typesafe", "openai-decisions"]
+
+
 class ProviderConfig(Authored):
     """One configured LLM provider: a name (its key in the providers map), a wire
     type, a secret, and optionally its models. No vendor is special-cased in the
     codebase — the core knows wire shapes; your config knows vendors.
     """
 
-    type: Literal["anthropic", "openai-compatible", "local", "typesafe"] = Field(
+    type: ProviderType = Field(
         description="wire protocol: 'anthropic', 'openai-compatible' (covers OpenAI, "
         "DeepSeek, Ollama, vLLM, Groq, most gateways), "
         "'local' (in-process embeddings, no key — `dst-core[local-embed]` extra), "
-        "or 'typesafe' (a typed-decision provider: closed-set decisions with "
-        "calibrated probabilities — serves the decision seam, never text)"
+        "'typesafe' or 'openai-decisions' (typed-decision providers: closed-set "
+        "decisions with a probability per option — they serve the decision seam, "
+        "never text; openai-decisions reads OPENAI_API_KEY unless api_key_env names "
+        "another, and calls the first of `models`, default gpt-6-luna)"
     )
     api_key: str | None = Field(
         default=None, description="inline secret — only for env-var config, never in files"
@@ -122,6 +127,18 @@ class ProviderConfig(Authored):
         if self.embedding_dim is not None and self.embedding_dim < 1:
             raise ValueError("embedding_dim must be a positive integer")
         return self
+
+
+def check_ai_pricing(v: dict[str, tuple[float, ...]]) -> dict[str, tuple[float, ...]]:
+    """An `ai_pricing` entry is ``[input, output]`` USD per 1M tokens,
+    optionally followed by ``cache read, cache write, long-lived cache write``."""
+    for model, rates in v.items():
+        if not 2 <= len(rates) <= 5:
+            raise ValueError(
+                f"ai_pricing[{model!r}] has {len(rates)} rates — expected [input, output], "
+                "optionally followed by cache read, cache write and long-lived cache write"
+            )
+    return v
 
 
 class Settings(BaseSettings):
@@ -264,9 +281,10 @@ class Settings(BaseSettings):
     # The file-first workspace config; providers/pricing/connections declared there
     # fill any gaps the env leaves (env always wins). Relative to the server's CWD.
     project_file: str = "dst.yaml"
-    # Per-model price overrides/additions, JSON: {"model": [usd_per_mtok_in, usd_per_mtok_out]}.
+    # Per-model price overrides/additions, JSON: {"model": [usd_per_mtok_in, usd_per_mtok_out]},
+    # optionally followed by the prompt-cache read, write and long-lived write rates.
     # Models absent here and from the built-in table trace as "unpriced" (cost NULL).
-    ai_pricing: Annotated[dict[str, tuple[float, float]], NoDecode] = Field(default_factory=dict)
+    ai_pricing: Annotated[dict[str, tuple[float, ...]], NoDecode] = Field(default_factory=dict)
 
     @field_validator("providers", "ai_pricing", mode="before")
     @classmethod
@@ -276,6 +294,11 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return json.loads(v) if v.strip() else {}
         return v
+
+    @field_validator("ai_pricing")
+    @classmethod
+    def _pricing_shape(cls, v: dict[str, tuple[float, ...]]) -> dict[str, tuple[float, ...]]:
+        return check_ai_pricing(v)
 
     # Fernet key(s) for encrypting stored warehouse credentials (DST_SECRET_KEY).
     # COMMA-SEPARATED: the first encrypts, all are tried for decryption — that is what

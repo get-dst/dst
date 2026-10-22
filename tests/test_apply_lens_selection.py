@@ -222,3 +222,59 @@ def test_a_selected_lens_must_be_in_the_push(org) -> None:
     _oid, headers = org
     r = _apply(headers, _files(), lens=["nope"])
     assert r.status_code == 422 and "nope" in r.json()["detail"]
+
+
+def _probe_file(table: str) -> dict[str, str]:
+    """A probe artifact for the jaffle connection profiling one table."""
+    from datetime import UTC, datetime
+
+    from services.contracts.profile import ColumnProfile, TableProfile
+    from services.project.probe import ProbeArtifact
+
+    at = datetime.now(UTC)
+    artifact = ProbeArtifact(
+        connection="jaffle",
+        probed_at=at,
+        tables=[
+            TableProfile(
+                connection="jaffle",
+                table=table,
+                profiled_at=at,
+                columns=[ColumnProfile(name="status", type="VARCHAR", top_values=["placed"])],
+            )
+        ],
+    )
+    return {"profiles/jaffle.probe.json": artifact.model_dump_json()}
+
+
+@needs_db
+def test_a_reprofiled_table_regates_only_the_lenses_that_read_it(org, monkeypatch) -> None:
+    """Re-probing sends the lenses whose scope reads a re-profiled table
+    through the eval gate, and no other: a re-probe of one table used to
+    re-gate every lens, so a flaky case on a lens that never reads it could
+    abort an apply whose plan was clean."""
+    from services.evals import service as eval_service
+
+    _oid, headers = org
+    _garbage_llm(monkeypatch)
+    assert not any(e.get("errors") for e in _apply(headers, _files()).json())
+
+    gated: list[str] = []
+    real = eval_service.publish_gate
+
+    def recording(**kw):  # type: ignore[no-untyped-def]
+        gated.append(kw["lens"])
+        return real(**kw)
+
+    monkeypatch.setattr(eval_service, "publish_gate", recording)
+    # A reads customers and orders; B reads orders only.
+    out = _apply(headers, {**_files(), **_probe_file("customers")}).json()
+    assert not any(e.get("errors") for e in out), out
+    assert gated == [A]
+    rows = {e["lens"]: e["action"] for e in out if e.get("lens")}
+    assert rows == {A: "unchanged", B: "unchanged"}
+
+    gated.clear()
+    out = _apply(headers, {**_files(), **_probe_file("orders")}).json()
+    assert not any(e.get("errors") for e in out), out
+    assert sorted(gated) == [A, B]

@@ -39,6 +39,7 @@ from services.contracts.protocols import (
 from services.contracts.response import Citation
 from services.contracts.semantic_model import Definition, SemanticModel
 from services.contracts.warehouse import QueryResult
+from services.observability import usage as ai_usage
 from services.runtime.assembly import ANSWER_CONTRACT_SOURCE
 from services.runtime.faithfulness import render_number
 
@@ -632,16 +633,17 @@ class AnswerComposer:
             feedback=feedback,
             audience=audience,
         )
-        res = self._llm.complete(
-            # Only the fixed instructions are cacheable — the governed definitions
-            # vary with the result's columns, so they ride the user turn and a
-            # per-question block never busts the cached prefix.
-            system=[CacheableBlock(system)],
-            messages=[Message("user", user)],
-            model=self.model,
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-        )
+        with ai_usage.purpose("compose"):
+            res = self._llm.complete(
+                # Only the fixed instructions are cacheable — the governed definitions
+                # vary with the result's columns, so they ride the user turn and a
+                # per-question block never busts the cached prefix.
+                system=[CacheableBlock(system)],
+                messages=[Message("user", user)],
+                model=self.model,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
         truncated = len(result.rows) > max_rows
         confidence: Literal["high", "low"] = (
             "low" if (truncated or not result.rows or not generated.definition_used) else "high"

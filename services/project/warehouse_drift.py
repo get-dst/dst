@@ -409,6 +409,10 @@ def _comment_drift(previous: TableProfile, current: TableProfile) -> list[Profil
         cur_c = cur.get(prev_c.name)
         if cur_c is None:
             continue
+        if {prev_c.description_source, cur_c.description_source} - {None, "warehouse"}:
+            # A description dst or dbt wrote is not the warehouse's comment:
+            # comparing it with the catalog reports a change on every pass.
+            continue
         before, after = (prev_c.description or "").strip(), (cur_c.description or "").strip()
         if before != after:
             out.append(
@@ -549,8 +553,9 @@ def schema_delta_count(previous: list[TableProfile], current: list[TableProfile]
     """How many schema deltas separate the two — `plan`'s whole question.
 
     The cheap half of this module: a count, no semantic layer loaded, no
-    formatting, nothing that grows with the size of the project."""
-    return len(baseline_drift(previous, current))
+    formatting, nothing that grows with the size of the project. A comment
+    change is not counted: `dst drift` reports it, quietly."""
+    return sum(1 for d in baseline_drift(previous, current) if d.kind not in QUIET_KINDS)
 
 
 # ── the cross-reference: the actual feature ──────────────────────────────────
@@ -580,6 +585,11 @@ def _mentions_qualified(sql: str, token: str) -> bool:
     and `o.unit_price` must count as mentions of `orders` / `unit_price` —
     the authored-expression matcher above deliberately rejects a leading dot."""
     return re.search(rf"(?<!\w){re.escape(token)}(?!\w)", sql, re.IGNORECASE) is not None
+
+
+def reads_table(sql: str, table: str) -> bool:
+    """Whether *sql* names *table* (bare or qualified) as a word."""
+    return _mentions_qualified(sql, _bare(table))
 
 
 class CertifiedRef(BaseModel):
@@ -881,7 +891,14 @@ def cross_reference(
         findings,
         # A definition is a stated meaning, an entity is a table it reads — so a
         # delta under a definition outranks one that only lands on a mapped table.
-        key=lambda f: (not f.referenced, not _has_definition(f), f.table, f.kind, f.detail),
+        key=lambda f: (
+            is_quiet(f),
+            not f.referenced,
+            not _has_definition(f),
+            f.table,
+            f.kind,
+            f.detail,
+        ),
     )
 
 
@@ -897,20 +914,31 @@ def _column_of(drift: ProfileDrift) -> str | None:
 
 
 # The kinds that can BREAK a declared reference: something the layer reads went
-# away, changed type, changed MEANING (its comment, its measured distribution
-# past tolerance, a dictionary member it filters on) under it. A gained
+# away, changed type, or changed MEANING as measured (its distribution past
+# tolerance, a dictionary member it filters on) under it. A gained
 # column/table/value is real signal (the supersession finding) but nothing that
 # referenced it can be broken by it.
 _BREAKING_KINDS: frozenset[str] = frozenset(
     {
         "column_dropped",
         "column_retyped",
-        "column_recommented",
         "column_shifted",
         "dictionary_changed",
         "table_dropped",
     }
 )
+
+# The kinds that break SQL itself: a statement naming the column or table no
+# longer binds, or binds at another type. Only these can explain a warehouse
+# rejecting SQL that compiled against the layer as applied.
+STRUCTURAL_BREAKS: frozenset[str] = frozenset({"column_dropped", "column_retyped", "table_dropped"})
+
+# Reported, never a warning: a rewritten column comment. Comments are edited
+# for wording far more often than for meaning, and a warning on every reader
+# for each one buried the findings that do break something. A meaning that
+# really moved shows in the measured kinds (a shift, a dictionary change) on
+# the next probe; the comment change is a line to read, not a gate to stop.
+QUIET_KINDS: frozenset[str] = frozenset({"column_recommented"})
 
 
 def is_breaking(finding: Finding) -> bool:
@@ -918,20 +946,27 @@ def is_breaking(finding: Finding) -> bool:
 
     Both halves required: a destructive kind AND an asset that reads it. A
     dropped column nothing declares is drift worth a look (exit 2), not a
-    broken layer (exit 1). A semantic delta (comment, shift, dictionary) on a
+    broken layer (exit 1). A measured semantic delta (shift, dictionary) on a
     referenced column is a break exactly like a drop: the answers it feeds
     went on serving as verified."""
     return finding.kind in _BREAKING_KINDS and finding.referenced
 
 
+def is_quiet(finding: Finding) -> bool:
+    """A comment-only change: listed once, with no reader warning and no exit code."""
+    return finding.kind in QUIET_KINDS
+
+
 def exit_code(findings: list[Finding]) -> int:
-    """`dst drift`'s verdict as a gate can read it: 0 clean · 2 changes, none
-    breaking · 1 changes that break declared references. (4 — not armed — is
-    decided before a diff exists; operational errors stay 1, the act-now side.)
+    """`dst drift`'s verdict as a gate can read it: 0 clean (comment-only
+    changes included) · 2 changes, none breaking · 1 changes that break
+    declared references. (4 — not armed — is decided before a diff exists;
+    operational errors stay 1, the act-now side.)
     """
-    if not findings:
+    loud = [f for f in findings if not is_quiet(f)]
+    if not loud:
         return 0
-    return 1 if any(is_breaking(f) for f in findings) else 2
+    return 1 if any(is_breaking(f) for f in loud) else 2
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
@@ -984,10 +1019,6 @@ def _consequence(finding: Finding, ref: LayerRef) -> str:
         return f"{ref.why} — that reference is now broken"
     if finding.kind == "column_retyped":
         return f"{ref.why} — review casts, rounding and comparisons"
-    if finding.kind == "column_recommented":
-        return (
-            f"{ref.why} — the column's stated meaning changed; what this reads may no longer hold"
-        )
     if finding.kind == "column_shifted":
         return (
             f"{ref.why} — the values moved past tolerance; a figure or duration "
@@ -1014,6 +1045,10 @@ def _headline(finding: Finding) -> str:
 def render(finding: Finding) -> list[str]:
     """One line per finding, plus one per semantic asset it implicates."""
     head = _headline(finding)
+    if is_quiet(finding):
+        readers = len(finding.refs)
+        said = f"{readers} asset(s) read this table" if readers else "nothing in semantic/ reads it"
+        return [f"{head} — comment only ({said})"]
     if not finding.refs:
         return [f"{head} — nothing in semantic/ reads this table"]
     return [head] + [

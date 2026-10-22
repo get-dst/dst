@@ -1,0 +1,16 @@
+name: rentals
+description: One row per tool rental.
+source:
+  connection: toolshed
+  table: marts.fct_rentals
+default_time_field: rented_on
+primary_key: [rental_id]
+fields:
+  - {name: rental_id, type: integer}
+  - {name: tool_id, type: integer}
+  - {name: member_id, type: integer}
+  - {name: rented_on, type: date}
+  - {name: returned_on, type: date}
+  - {name: due_on, type: date}
+  - {name: days, type: integer}
+  - {name: rental_fee, type: number}

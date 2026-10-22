@@ -138,3 +138,8 @@ class EvalResult(BaseModel):
     actual_sql: str | None = None
     actual_value: str | None = None
     reason: str | None = None
+    # What the case's provider calls cost: every model call it made, retries
+    # and the judge included (0 when it made none). None cost: unpriced.
+    ai_input_tokens: int = 0
+    ai_output_tokens: int = 0
+    ai_cost_usd: float | None = 0.0

@@ -72,6 +72,9 @@ class ScriptedLLM:
     ) -> LLMResult:
         text = self._responses[min(self._i, len(self._responses) - 1)]
         self._i += 1
+        from services.observability import usage
+
+        usage.record("scripted", model, 1, 1)
         return LLMResult(text=text, input_tokens=1, output_tokens=1)
 
 

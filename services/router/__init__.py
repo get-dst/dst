@@ -39,13 +39,15 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from services.contracts.protocols import Decision
+from services.contracts.protocols import Decision, DecisionUsage
 from services.contracts.protocols import Embedder as Embedder
+from services.runtime.not_for import names_ask
 
-# A pre-scored recall signal: question -> (lens, score) ranked best first. Injected
-# when anchor vectors live elsewhere (pgvector) so the Router never
-# re-embeds anchors at request time; None keeps the in-memory embedding path.
-Scorer = Callable[[str], list[tuple[str, float]]]
+# A pre-scored recall signal: the question's vector -> (lens, score) ranked best
+# first. Injected when anchor vectors live elsewhere (pgvector) so the Router
+# never re-embeds anchors at request time; None keeps the in-memory embedding
+# path. The Router embeds the question once and hands the vector over.
+Scorer = Callable[[list[float]], list[tuple[str, float]]]
 
 # dst-owned defaults, tuned against the routing eval — never a user
 # knob. See services/router/eval.py for the grid search that picked these and the
@@ -93,6 +95,19 @@ class CoverageProfile:
     names: list[str] = field(default_factory=list)
     # Asks the lens declares it is not for: such a question never routes here.
     not_for: list[str] = field(default_factory=list)
+    # What its metrics are called: name and label. A question naming one only
+    # this lens declares routes here ahead of similarity. Aliases are left
+    # out: they widen what the metric slot reads inside the lens, never which
+    # questions the lens takes.
+    metric_names: list[str] = field(default_factory=list)
+    # The fields its figures split over time by (entity default, metric
+    # overrides): the decider reads them, so a trend ask finds a trend lens.
+    time_fields: list[str] = field(default_factory=list)
+    # The source systems the lens declares it reads (lens.yaml ``sources``):
+    # a question naming one goes only to the lenses declaring it.
+    sources: list[str] = field(default_factory=list)
+    # Whose figures it holds (lens.yaml ``scope``): "own", "market" or "".
+    data_scope: str = ""
 
 
 @dataclass
@@ -121,6 +136,26 @@ class RouteDecision:
     # act/clarify split are queries, not archaeology.
     decision: Decision | None = None
     verdict: str | None = None
+    # What the decider billed before an outage cut it short (some of its
+    # votes answered, a reply came back unreadable), as ``(provider, usage)``
+    # pairs: no decision was made, but the spend is recorded on the row.
+    spent: list[tuple[str, DecisionUsage]] = field(default_factory=list)
+
+
+# (embedder model, dim, ask) -> vector: the not_for asks, embedded once per process.
+_ASK_CACHE: dict[tuple[str, int, str], list[float]] = {}
+_ASK_CACHE_MAX = 4096
+
+
+def _ask_vectors(embedder: Embedder, asks: list[str]) -> list[list[float]]:
+    ident = (str(getattr(embedder, "model", type(embedder).__name__)), int(embedder.dim))
+    missing = [a for a in dict.fromkeys(asks) if (*ident, a) not in _ASK_CACHE]
+    if missing:
+        if len(_ASK_CACHE) + len(missing) > _ASK_CACHE_MAX:
+            _ASK_CACHE.clear()
+        for ask, vec in zip(missing, embedder.embed(missing), strict=True):
+            _ASK_CACHE[(*ident, ask)] = vec
+    return [_ASK_CACHE[(*ident, a)] for a in asks]
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -154,6 +189,17 @@ class Router:
         self._margin = margin
         self._scorer = scorer
         self._has_profiles = bool(profiles)
+        # The asks each lens declares it is not for, as text (the literal
+        # match) and as vectors (the similarity match). Few and authored, so
+        # embedded once per process and embedder (``_ask_vectors``).
+        self._not_for = {p.lens: list(p.not_for) for p in profiles if p.not_for}
+        self._not_for_vecs = {
+            lens: _ask_vectors(embedder, asks) for lens, asks in self._not_for.items()
+        }
+        # The last question embedded and ranked: the deterministic routes ask
+        # before the decider does, and neither pays for it twice.
+        self._last: tuple[str, list[float]] | None = None
+        self._ranked: tuple[str, list[tuple[str, float]]] | None = None
         # Score ONLY the specific anchors — the broad description is display-only.
         # With an injected scorer the vectors live elsewhere (publish-time pgvector
         # rows): embed NOTHING here — the request path embeds only the question.
@@ -181,17 +227,62 @@ class Router:
     def scored(self, question: str) -> list[tuple[str, float]]:
         """Every lens ranked by cosine to the question (best first), no gating. This is
         the cheap RECALL signal — exact for a near-verbatim match, but unreliable in the
-        compressed mid-band (an LLM decider reranks the top-k there; see router/decider.py)."""
+        compressed mid-band (an LLM decider reranks the top-k there; see router/decider.py).
+
+        A lens that declares it is not for this ask is never ranked: the question
+        names every content word of one of its ``not_for`` asks (the literal match
+        its own door refuses on), or sits nearer one of those asks than to any
+        anchor the lens covers (the same similarity that ranks it)."""
         if self._scorer is not None:
-            return self._scorer(question) if self._has_profiles else []
-        if not self._lens_vecs:
+            if not self._has_profiles:
+                return []
+        elif not self._lens_vecs:
             return []
-        qv = self._embedder.embed([question])[0]
-        return sorted(
-            ((lens, max(_cosine(qv, v) for v in vecs)) for lens, vecs in self._lens_vecs.items()),
-            key=lambda x: x[1],
-            reverse=True,
-        )
+        if self._ranked is not None and self._ranked[0] == question:
+            return list(self._ranked[1])
+        qv = self._question_vec(question)
+        if self._scorer is not None:
+            ranked = self._scorer(qv)
+        else:
+            ranked = sorted(
+                (
+                    (lens, max(_cosine(qv, v) for v in vecs))
+                    for lens, vecs in self._lens_vecs.items()
+                ),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+        kept = [(lens, s) for lens, s in ranked if not self._declined(lens, s, question, qv)]
+        self._ranked = (question, kept)
+        return list(kept)
+
+    def not_for(self, question: str) -> set[str]:
+        """The lenses that declare they are not for this question, by the rule
+        ``scored`` drops them on — for the deterministic routes taken before
+        any scoring (a declared name). A lens with no anchors of its own has
+        nothing nearer than its asks."""
+        if not self._not_for:
+            return set()
+        qv = self._question_vec(question)
+        ranked = dict(self.scored(question))
+        return {
+            lens
+            for lens in self._not_for
+            if lens not in ranked and self._declined(lens, 0.0, question, qv)
+        }
+
+    def _question_vec(self, question: str) -> list[float]:
+        if self._last is None or self._last[0] != question:
+            self._last = (question, self._embedder.embed([question])[0])
+        return self._last[1]
+
+    def _declined(self, lens: str, score: float, question: str, qv: list[float]) -> bool:
+        asks = self._not_for.get(lens)
+        if not asks:
+            return False
+        if any(names_ask(question, a) for a in asks):
+            return True
+        return max(_cosine(qv, v) for v in self._not_for_vecs[lens]) > score
 
     def route(self, question: str) -> RouteDecision:
         scored = self.scored(question)

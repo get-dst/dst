@@ -49,6 +49,8 @@ from services.contracts.protocols import Connector, QueryGenerator
 from services.contracts.resolution import Resolution
 from services.evals import runner
 from services.evals.runner import _SCALAR_RTOL
+from services.observability import usage as ai_usage
+from services.observability.usage import AICall
 from services.runtime import resolution as resolution_mod
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
@@ -107,6 +109,8 @@ class CertifiedCaseResult:
     # stores on a certified answer that has none, once the rows matched the
     # certified oracle (a green run is the proof the typed intent is right).
     resolution: dict[str, Any] | None = None
+    # Every provider call the case made (generation, decisions, composing).
+    ai_calls: list[AICall] = field(default_factory=list)
 
     @property
     def ungoverned_pass(self) -> bool:
@@ -706,15 +710,19 @@ def run_certified_suite(
     at its own start."""
 
     def _score_answer(a: CertifiedAnswer) -> CertifiedCaseResult | None:
-        return _score_one(
-            a,
-            connector=connector,
-            lens=lens,
-            assemble_for=assemble_for,
-            generators_for=generators_for,
-            composer=composer,
-            model_name=model_name,
-        )
+        with ai_usage.collecting() as calls:
+            r = _score_one(
+                a,
+                connector=connector,
+                lens=lens,
+                assemble_for=assemble_for,
+                generators_for=generators_for,
+                composer=composer,
+                model_name=model_name,
+            )
+        if r is not None:
+            r.ai_calls = calls
+        return r
 
     from services.config import settings
 

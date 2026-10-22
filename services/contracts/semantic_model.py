@@ -196,6 +196,12 @@ class Dimension(Authored):
     expr: str | None = None  # defaults to the field of the same name
     type: FieldType = PField(default="string", description=_FIELD_TYPE_DESC)
     description: str | None = None
+    aliases: StrList = PField(
+        default_factory=list,
+        description="further phrasings that name this dimension word for word "
+        "(e.g. ['region'] for store_region): a breakdown ('by region'), a ranking "
+        "('which region') and a binding key read them exactly like the name",
+    )
 
     @field_validator("type", mode="before")
     @classmethod
@@ -291,6 +297,16 @@ class Metric(Authored):
         "headcount, a balance) and a period's figure is the LAST snapshot inside it, "
         "never a sum of snapshots; needs a time field (agg_time_field or the entity's "
         "default_time_field). The author's judgment — the product never guesses one.",
+    )
+
+    window_reading: Literal["snapshot", "any_in_window"] | None = PField(
+        default=None,
+        description="level only: how a stated period reads this level. snapshot (the "
+        "default): one snapshot inside the period, its last. any_in_window: for a flag "
+        "counted with count_distinct, the distinct things flagged at ANY snapshot inside "
+        "the period (accounts overdue at some point in Q3). Asked over no period, or at "
+        "a named edge of one ('at the end of Q3'), both read the snapshot. The "
+        "author's judgment — the product never guesses one.",
     )
 
     period_weight: Literal["weeks", "days"] | None = PField(
@@ -478,6 +494,16 @@ class Entity(Authored):
         "A hidden column is absent from the lens: naming it is out of scope",
     )
 
+    # Columns the lens keeps but never offers a question: a surrogate key a
+    # listing, a join or a distinct count still reads (so `hide` cannot take
+    # it) and nobody filters or groups by.
+    internal: StrList = PField(
+        default_factory=list,
+        description="column patterns never offered as a filter, a breakdown or a "
+        "ranked member, fnmatch on the column name like `hide` (e.g. ['member_sk']); "
+        "unlike a hidden column it stays readable, so it may be a key",
+    )
+
     def hidden_columns(self) -> set[str]:
         """The field names `hide` withholds — the compile keeps the fields off
         the entity, and the allow-list subtracts them again so a column an
@@ -490,7 +516,11 @@ def column_hidden(column: str, entity: Entity) -> bool:
     case-insensitively against the bare name, `entity.column`, and the source
     table's `table.column` (bare or qualified), so every spelling an author
     reaches for reads naturally."""
-    if not entity.hide:
+    return _patterned(column, entity, entity.hide)
+
+
+def _patterned(column: str, entity: Entity, patterns: list[str]) -> bool:
+    if not patterns:
         return False
     table = entity.source.table
     forms = (
@@ -499,7 +529,13 @@ def column_hidden(column: str, entity: Entity) -> bool:
         f"{table}.{column}",
         f"{table.rsplit('.', 1)[-1]}.{column}",
     )
-    return any(fnmatchcase(f.lower(), p.lower()) for p in entity.hide for f in forms)
+    return any(fnmatchcase(f.lower(), p.lower()) for p in patterns for f in forms)
+
+
+def column_internal(column: str, entity: Entity) -> bool:
+    """Does one of the entity's `internal` patterns name this column? Matched
+    like `hide`: case-insensitively, bare or qualified."""
+    return _patterned(column, entity, entity.internal)
 
 
 class Join(Authored):

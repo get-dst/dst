@@ -25,9 +25,11 @@ Top-level keys (`services/project/schema.py`):
 | `name` | project name |
 | `providers` | LLM providers, keyed by name; see fields below |
 | `default_provider` | which entry bare model refs fall back to (else the first declared) |
-| `ai_pricing` | per-model prices, `{"model": [usd_per_mtok_in, usd_per_mtok_out]}`. **This is the authority.** dst ships a dated fallback list (`AI_PRICES_AS_OF` in `services/observability/cost.py`) so a fresh install traces something, but a released package cannot track vendor pricing, your negotiated rate, or a model newer than it — declare the models you actually run. A model absent from both traces as unpriced, and its whole trace's cost is `NULL`, never a default |
+| `ai_pricing` | per-model prices, `{"model": [usd_per_mtok_in, usd_per_mtok_out]}`, optionally followed by the prompt-cache read, cache write and long-lived cache write rates (`[in, out, read, write, write_long]`; the long-lived write is Anthropic's 1-hour cache, OpenAI's 12-hour). A key `"<endpoint>:<model>"` (`"openai-decisions:gpt-6-luna"`) prices the model only when called through that endpoint. **This is the authority.** dst ships a dated fallback list (`AI_PRICES_AS_OF` in `services/observability/cost.py`) so a fresh install traces something, but a released package cannot track vendor pricing, your negotiated rate, or a model newer than it — declare the models you actually run. A model absent from both traces as unpriced, and its whole trace's cost is `NULL`, never a default. The list covers every model the built-in provider types resolve to by default, Anthropic's and OpenAI's current models from their published pricing pages (standard rate; Claude Haiku 5.5's prompts over 100,000 tokens at its long-prompt rate), and a dated snapshot id (`claude-haiku-4-5-20251001`) prices as its model. Any model your providers can call with no price is named on `/ready` (`ai_pricing`) and by `dst doctor`, and logged the first time it is called. Prompt-cache reads and writes are priced at the model's cache rates from the same pages; a call that reports cache tokens its model has no cache rate for is unpriced, never charged as if they were free, and an `anthropic` provider's model with no cache rate is named on `/ready` and by `dst doctor` (that client caches its system prompt). A model is priced by the endpoint it is called through where that changes the price: `gpt-6-luna` over the Decisions API bills input only, over chat completions input and output |
 | `connections` | warehouse declarations, keyed by name |
 | `demo` | what a public demo's `/demo` page shows besides what dst derives itself; see [Demo page](#demo-page-demo) |
+| `probe` | how `dst probe` samples and how old its profile may get; see [Probe](#probe-probe) |
+| `lineage` | where the dbt or SQLMesh model DAG lives, for `table/X+` selection; see [Lineage](#lineage-lineage) |
 
 ### Provider fields (`providers.<name>`)
 
@@ -37,12 +39,12 @@ provider first.
 
 | Field | What |
 |---|---|
-| `type` | wire protocol: `anthropic`, `openai-compatible` (covers OpenAI, DeepSeek, Ollama, vLLM, Groq, most gateways), `local` (in-process embeddings, no key; the `dst-core[local-embed]` extra), or `typesafe` (a typed-decision provider: closed-set decisions with a probability per option — [Typed decisions](../concepts/typed-decisions.md)) |
-| `api_key_env` | name of the env var holding the key (convention: `DST_API_KEY_<NAME>`); the only right choice in a committed file |
+| `type` | wire protocol: `anthropic`, `openai-compatible` (covers OpenAI, DeepSeek, Ollama, vLLM, Groq, most gateways), `local` (in-process embeddings, no key; the `dst-core[local-embed]` extra), or a typed-decision provider, `typesafe` or `openai-decisions` (closed-set decisions with a probability per option — [Typed decisions](../concepts/typed-decisions.md)) |
+| `api_key_env` | name of the env var holding the key (convention: `DST_API_KEY_<NAME>`; `openai-decisions` reads `OPENAI_API_KEY` when this is unset); the only right choice in a committed file |
 | `base_url` | API base URL; required for `openai-compatible` |
 | `fast_model` | this provider's cheap first-pass model; the first declared provider with one carries the fast tier |
 | `smart_model` | this provider's quality model |
-| `models` | extra model names this provider serves, for bare-ref resolution |
+| `models` | extra model names this provider serves, for bare-ref resolution; for `openai-decisions`, the first one is the decision model (default `gpt-6-luna`) |
 | `embedding_model` | embedding model this provider serves (`openai-compatible` uses `POST {base_url}/embeddings`) |
 | `embedding_dim` | embedding vector dimension (default 1024). Changing it on an install that already holds vectors requires `dst reindex`; the write-path guard blocks mismatched writes until then |
 | `reasoning` | do this provider's models bill their thinking against `max_tokens`? Leave unset and dst decides per model name; set `true`/`false` to override; see below |
@@ -54,12 +56,30 @@ out three postures (`services/cli/init.py`):
 
 - **poc**, `{type: local}`: in-process, no API key
   (`pip install 'dst-core[local-embed]'`); matching bands auto-adjust.
+  `dst init` writes this entry when the extra is installed.
 - **production**: an `openai-compatible` entry with `embedding_model` +
   `base_url`.
 - **none**: omit it entirely. Generation, guards and evals still work, but
   certified matching cannot run and routing falls back to lexical. Every answer
-  then carries a degraded line saying certified matching could not run:
-  degraded visibly, never silently wrong.
+  on a lens that holds certified answers then carries a `DEGRADED` line saying
+  certified matching is off, how many of the lens's certified answers cannot
+  serve, and what to install or declare: degraded visibly, never silently
+  wrong. A lens with no certified answers gets no line. A configured embedder
+  that fails puts a line naming the failure on every answer. `dst plan` and `dst apply` also
+  print a `DEGRADED` line on every lens that declares certified answers,
+  naming what is missing (no provider, or a declared provider whose extra or
+  key this install lacks).
+
+The serve bands (the similarity a question needs to serve an approved answer
+outright, to be checked as a paraphrase, or to be used as an example) are
+measured per embedding model. `BAAI/bge-small-en-v1.5`, the local default, has
+its own; any other model runs on the defaults (0.95, 0.90, 0.83), and plan,
+apply and `/ready` (`certified_bands`) say that the bands were not calibrated
+for it. A model whose similarities spread wider than the defaults assume can
+generate answers for paraphrases that should have served. `dst calibrate-bands`
+fits the bands for the configured model from labelled paraphrase pairs and stores
+them for that model; a stored fit wins over the built-in bands
+([CLI](cli.md)).
 
 #### Reasoning models and token caps
 
@@ -122,7 +142,10 @@ and the value is reviewed in the repo instead of living in one operator's enviro
 `DST_BIGQUERY_MAX_BYTES_BILLED` still overrides globally.
 `sample_bytes_budget` (BigQuery, default 2 GB) is the separate cap on one probe sampling
 query: a table whose dry-run estimate exceeds it is left unsampled (its catalog profile
-stands) and the probe says so — raise it here, or narrow the probe with `--tables`.
+stands) and the probe says so — raise it here, or narrow the probe with `--tables`. The
+profile records why. Such a table has no value dictionaries, so no value of its columns
+can bind from one: describe says so on each entity that reads it (`values_note`), and a
+question asked for a value of one of its columns gives the same reason.
 
 A wide-warehouse BigQuery connection, fully scoped:
 
@@ -169,6 +192,20 @@ providers:
     type: typesafe
     api_key_env: DST_API_KEY_JEV
 ```
+
+OpenAI's Decisions API is the other typed-decision type. It reads
+`OPENAI_API_KEY` unless `api_key_env` names another variable, calls
+`gpt-6-luna` unless `models` names a model, and takes a `base_url` for a
+gateway (default `https://api.openai.com/v1`):
+
+```yaml
+providers:
+  openai:
+    type: openai-decisions
+```
+
+With more than one typed-decision provider declared, the first one in
+declaration order that has a key decides; a keyless one is skipped.
 
 !!! warning "Snowflake: move off passwords"
     Snowflake is retiring single-factor password authentication, with final
@@ -229,8 +266,8 @@ scheduled job, a deploy step); this section is how dst notices when it stops.
 | Key | What |
 |---|---|
 | `max_age` | how old the newest profile in scope may be before every surface says so. A duration: `7d` (the default), `48h`, `30m`; `0` turns the age rails off. Past it, an answer carries `PROFILE: last probed N days ago (max M) — run dst probe` in `degraded`, the freshness and date-coverage checks skip instead of failing on a stamp that only dates the last probe, the value guard consults no dictionary (a stale one cannot prove a new value absent), `dst observe` and `/ready` carry the oldest age and the stale connections, `dst plan` and `dst apply` warn when the pushed artifact is older than this, and `dst test --all` skips the lens and exits 4 |
-| `recent_partitions` | how much of each table the sampling pass reads on a refresh: the latest `n` partitions of a time-partitioned table, or the last `n` days of the entity's `default_time_field` for an unpartitioned one. Default 7; `0` reads whole tables. The catalog pass (every table, row counts, whole-table freshness and date span) is never narrowed. The very first probe of a connection reads whole tables, so the dictionaries it proves complete are kept through every windowed refresh as the dated union; the artifact records the slice per table under `sample_window` |
-| `drift_tolerance` | how far a column's measured distribution may move between the drift baseline (`profiles/<connection>.json`) and the newest probe artifact before `dst drift` reports it as breaking. `time_shift` bounds a time column's median offset from the entity's `default_time_field` (default `1h`; `30m`, `1d`; `0` reports any move). `numeric_shift` bounds a numeric column's mean, relative to the baseline (default `0.2`, twenty percent; `0` reports any move). A changed column comment and a complete dictionary losing a member are never within tolerance |
+| `recent_partitions` | how much of each table the sampling pass reads on a refresh: the latest `n` partitions of a time-partitioned table, or the last `n` days of the entity's `default_time_field` for an unpartitioned one. Default 7; `0` reads whole tables. The catalog pass (every table, row counts, whole-table freshness and date span) is never narrowed. A table the stored artifact never read whole (the first probe of a connection, a table an earlier run did not sample) is read whole, so the dictionaries it proves complete are kept through every windowed refresh as the dated union; the artifact records the slice per table under `sample_window`. A refresh that leaves a dictionary partial which the previous probe held complete names it in a warning |
+| `drift_tolerance` | how far a column's measured distribution may move between the drift baseline (`profiles/<connection>.json`) and the newest probe artifact before `dst drift` reports it as breaking. `time_shift` bounds a time column's median offset from the entity's `default_time_field` (default `1h`; `30m`, `1d`; `0` reports any move). `numeric_shift` bounds a numeric column's mean, relative to the baseline (default `0.2`, twenty percent; `0` reports any move). A complete dictionary losing a member is never within tolerance; a changed column comment is reported as comment only and never breaks |
 
 ```yaml
 probe:
@@ -243,6 +280,27 @@ probe:
 
 Apply stores the section per org, so a server reads the limit the project declared,
 and a pushed `dst.yaml` without the section stores the defaults.
+
+### Lineage (`lineage`)
+
+The transformation tool whose model DAG a `table/X+` selector walks
+([Tables and the model DAG](cli.md#tables-and-the-model-dag)). Exactly one key, a path
+relative to the project root:
+
+| Key | What |
+|---|---|
+| `dbt` | a dbt target directory holding `manifest.json` (`dbt parse` writes it), or the dbt project directory whose `target/` holds it |
+| `sqlmesh` | a SQLMesh project directory; its `models/` files are read |
+
+```yaml
+lineage:
+  dbt: ../transform/target
+```
+
+The CLI reads the DAG and sends it with the selection; the server stores nothing.
+`--lineage PATH` on `dst plan`, `dst apply` and `dst test` overrides the key. A lineage
+that is configured but cannot be read (no `manifest.json` yet, no `models/`) is an error
+before any request, never a walk over an empty graph.
 
 ## Entity rails (`semantic/entities/<name>.yaml`)
 
@@ -261,7 +319,7 @@ for the full mechanism table):
 
 ## Lens serve-time contracts (`lenses/<name>/lens.yaml`)
 
-Three lens keys declare contracts the server enforces at serve time; the
+These lens keys declare contracts the server enforces at serve time; the
 scaffold's reference block carries the full key list
 (`services/contracts/lens_config.py`):
 
@@ -269,6 +327,8 @@ scaffold's reference block carries the full key list
 |---|---|---|
 | `stale_after_days` (top level) | unset | the freshness contract: days after the scope's measured last-update at which answers flag stale: the freshness check fails, the grade caps at `partial`, and the answer says so. Unset = undeclared; the check reports skip, never a vacuous pass. Read [how `data_as_of` is measured](../guides/project-files.md#freshness-is-a-declared-contract) before setting it |
 | `not_for` (top level) | `[]` | asks this lens must refuse although its tables could produce a figure, each `{ask, sibling}`: a question naming every content word of the ask is refused before typing or generation, naming the sibling lens. `Avoid for:` lines in a single entity's `use_cases` are read the same way |
+| `sources` (top level) | `[]` | the source systems the lens's data comes from, as people name them, e.g. `[ticketing, door scanners]`: a question naming a system some lens declares routes only to lenses declaring it, and is uncovered, naming the system, when no lens the caller may use does. Whole words, case ignored; an entry twice or with no letter or digit is an error, and one spelled like a metric of the lens is a plan warning |
+| `scope` (top level) | unset | whose figures the lens holds: `own` or `market`. Shown to the routing decider |
 | `model.answer_contract` | `strict` | the output-grid contract in every generation prompt: project exactly the asked quantities at the asked grain, full precision. `off` removes the block (a bare `off` is fine; YAML 1.1 parses it as a boolean and the loader coerces it back) |
 
 ### Tables without definitions (`expose`)
@@ -302,7 +362,7 @@ older installs. The interesting ones:
 | `DATABASE_ADMIN_URL` | local dev URL | migrations + bootstrap (role/org creation) |
 | `DST_SECRET_KEY` | — | Fernet key(s) encrypting stored warehouse/context credentials, **comma-separated**: the first encrypts, all decrypt. `dst secret` mints one; `dst init` generates it into `.env`. To rotate, deploy `<new>,<old>`, run `dst rotate-key`, then drop `<old>`. Changing it without that sequence makes stored credentials unreadable; the server checks the key against an encrypted sentinel at startup and refuses to boot on a mismatch |
 | `DST_PROVIDERS` | `{}` | providers as JSON, same shape as the `dst.yaml` `providers` map; inline `api_key` is allowed *here* (env-only), never in files |
-| `DST_TYPED_SERVING` | `auto` | `auto`: typed serving whenever a `typesafe` provider resolves; `on`: typed serving on any decider (a voting chat model, five samples per decision); `off`: the one-shot intent emission ([Typed decisions](../concepts/typed-decisions.md)) |
+| `DST_TYPED_SERVING` | `auto` | `auto`: typed serving whenever a typed-decision provider (`typesafe` or `openai-decisions`) resolves; `on`: typed serving on any decider (a voting chat model, five samples per decision); `off`: the one-shot intent emission ([Typed decisions](../concepts/typed-decisions.md)) |
 | `DST_GATE_CONCURRENCY` | `16` | workers for the test lanes and the apply gate — the slot lane's wall time is the provider's round trips divided by this |
 | `DST_DEFAULT_PROVIDER` | first declared | bare-model-ref fallback |
 | `DST_LLM_DESCRIPTIONS` | `true` | the profiling chain's LLM description pass, which sends table/column names and sampled values to the configured provider to fill undocumented columns. `false` turns it off; profiling then stays entirely between dst and the warehouse. See [Security and data flow](../security.md) |

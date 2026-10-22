@@ -32,6 +32,62 @@ def _test_requests(
     )
 
 
+# A routing decision whose decider spend reached no request_log row: a decline,
+# a refusal on the routed door, or a route whose second hop wrote no row. A
+# served route stamps its answer's request id on the routing row and charges
+# the spend to that answer's row, so the anti-join counts each spend once.
+_ROUTING_UNCHARGED = (
+    "d.decision->>'tokens_in' IS NOT NULL AND (d.decision->>'request_id' IS NULL "
+    "OR NOT EXISTS (SELECT 1 FROM request_log r WHERE r.request_id = d.decision->>'request_id'))"
+)
+_ROUTING_TEST = "COALESCE(d.decision->>'agent', '') IN ('dst-test', 'benchmark')"
+
+
+def _routing_spend(
+    session: Session,
+    where: str = "TRUE",
+    params: dict[str, object] | None = None,
+    include_test: bool = False,
+    lens: str | None = None,
+) -> dict[str, dict[str, float]]:
+    """The routing decider's spend on decisions no request_log row carries,
+    per caller: ``decisions``, ``ai_cost_usd`` (priced ones), ``input_tokens``,
+    ``output_tokens``, ``unpriced``. Test traffic is out unless *include_test*,
+    as for request_log rows; *lens* keeps the decisions that named that lens
+    (a refusal's), never a decline's."""
+    clauses = [_ROUTING_UNCHARGED, where]
+    if not include_test:
+        clauses.append(f"NOT {_ROUTING_TEST}")
+    if lens:
+        clauses.append("d.routed_lens = :rlens")
+    rows = session.execute(
+        text(
+            "SELECT COALESCE(d.decision->>'caller', ''), count(*), "
+            "COALESCE(SUM((d.decision->>'cost_usd')::float8), 0), "
+            "COALESCE(SUM((d.decision->>'tokens_in')::bigint), 0), "
+            "COALESCE(SUM((d.decision->>'tokens_out')::bigint), 0), "
+            "count(*) FILTER (WHERE d.decision->>'cost_usd' IS NULL) "
+            f"FROM routing_decision d WHERE {' AND '.join(clauses)} GROUP BY 1"
+        ),
+        {**(params or {}), **({"rlens": lens} if lens else {})},
+    ).all()
+    return {
+        str(r[0]): {
+            "decisions": int(r[1]),
+            "ai_cost_usd": float(r[2]),
+            "input_tokens": int(r[3]),
+            "output_tokens": int(r[4]),
+            "unpriced": int(r[5]),
+        }
+        for r in rows
+    }
+
+
+def _routing_total(by_caller: dict[str, dict[str, float]]) -> dict[str, float]:
+    keys = ("decisions", "ai_cost_usd", "input_tokens", "output_tokens", "unpriced")
+    return {k: sum(v[k] for v in by_caller.values()) for k in keys}
+
+
 def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
     """Headline numbers, with the outcome vocabulary kept honest.
 
@@ -61,6 +117,10 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
 
     Test traffic (``TEST_AGENTS``) is out of every figure here unless
     *include_test*; ``test_requests`` says how many rows that left out.
+
+    The AI spend and token totals include the routing decider's spend on
+    routed-door questions that reached no request_log row (declines and
+    refusals); ``routing`` carries that part on its own.
     """
     serving = _serving(include_test)
     governed = f"COALESCE(generator_tier, '') <> 'probe' AND {serving}"
@@ -124,19 +184,29 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
     # reported as `unknown`, never folded into "not governed".
     resolution_histogram = _resolution_histogram(session, f"status = 'ok' AND {governed}", {})
     basis = _basis(session, include_test=include_test)
+    routing = _routing_total(_routing_spend(session, include_test=include_test))
     from services.lenses.profile_age import connection_ages
 
     return {
         "queries": int(row[0]),
-        "ai_cost_usd": round(float(row[1]), 4),
+        "ai_cost_usd": round(float(row[1]) + routing["ai_cost_usd"], 4),
         "warehouse_cost_usd": round(float(row[2]), 4),
-        "input_tokens": int(row[3]),
-        "output_tokens": int(row[4]),
+        "input_tokens": int(row[3]) + int(routing["input_tokens"]),
+        "output_tokens": int(row[4]) + int(routing["output_tokens"]),
         "errors": int(row[5]),
         "declined": int(row[6]),
         # Requests whose model had no configured price: their AI spend is unknown,
         # not $0 — the headline must not launder the gap (same rule as caller_report).
-        "unpriced": int(row[7]),
+        "unpriced": int(row[7]) + int(routing["unpriced"]),
+        # The routing decider's spend on questions no request_log row carries
+        # (a decline, a refusal on the routed door) — inside the totals above.
+        "routing": {
+            "decisions": int(routing["decisions"]),
+            "ai_cost_usd": round(routing["ai_cost_usd"], 4),
+            "input_tokens": int(routing["input_tokens"]),
+            "output_tokens": int(routing["output_tokens"]),
+            "unpriced": int(routing["unpriced"]),
+        },
         # Served answers whose warehouse scan has no price (Snowflake bills
         # credit-seconds the cursor can't see): the wh_cost sum above EXCLUDES
         # them, and this count is what keeps that exclusion legible.
@@ -170,6 +240,55 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
         # the project's probe.max_age: a probe job that stopped shows here
         # before it shows as a wrong answer.
         "profiles": connection_ages(session),
+        # The AI spend split by what each provider call was for (ai_call,
+        # one row per call; requests from before it carry none), and what
+        # eval runs (`dst test`, the publish gate) spent: test traffic,
+        # recorded apart and never in the totals above.
+        "ai_by_purpose": _ai_by_purpose(session, include_test),
+        "eval_spend": _eval_spend(session),
+    }
+
+
+def _ai_by_purpose(session: Session, include_test: bool) -> dict[str, dict[str, object]]:
+    """purpose -> calls, tokens, cost (priced calls only) and unpriced calls."""
+    rows = session.execute(
+        text(
+            "SELECT purpose, count(*), COALESCE(SUM(input_tokens), 0), "
+            "COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0), "
+            "count(*) FILTER (WHERE cost_usd IS NULL) "
+            f"FROM ai_call WHERE {_serving(include_test)} GROUP BY purpose ORDER BY 5 DESC, 1"
+        )
+    ).all()
+    return {
+        str(r[0]): {
+            "calls": int(r[1]),
+            "input_tokens": int(r[2]),
+            "output_tokens": int(r[3]),
+            "ai_cost_usd": round(float(r[4]), 6),
+            "unpriced": int(r[5]),
+        }
+        for r in rows
+    }
+
+
+def _eval_spend(session: Session) -> dict[str, object]:
+    """What recorded eval runs spent on AI: runs, tokens, cost of the priced
+    ones, and how many runs carry an unpriced call."""
+    row = session.execute(
+        text(
+            "SELECT count(*), COALESCE(SUM(ai_input_tokens), 0), "
+            "COALESCE(SUM(ai_output_tokens), 0), COALESCE(SUM(ai_cost_usd), 0), "
+            "count(*) FILTER (WHERE ai_cost_usd IS NULL) "
+            "FROM eval_run WHERE ai_input_tokens IS NOT NULL"
+        )
+    ).first()
+    assert row is not None
+    return {
+        "runs": int(row[0]),
+        "input_tokens": int(row[1]),
+        "output_tokens": int(row[2]),
+        "ai_cost_usd": round(float(row[3]), 6),
+        "unpriced_runs": int(row[4]),
     }
 
 
@@ -416,7 +535,11 @@ def caller_report(
     questions: model bill vs bytes scanned); ``cost_usd`` keeps the blend for
     totals. ``unpriced`` counts requests whose model had no configured price —
     cost.py deliberately stores NULL there, and COALESCE-ing that to $0 in the
-    rollup laundered the gap into "free". The count keeps it visible."""
+    rollup laundered the gap into "free". The count keeps it visible.
+
+    A caller's AI spend includes the routing decider's spend on that caller's
+    routed-door questions that reached no request_log row; a caller who only
+    ever got declines appears with ``queries`` 0 and that spend."""
     # Probe rows are excluded like kpis(): an admin's passthrough
     # statements are not that caller "querying".
     governed = f"COALESCE(generator_tier, '') <> 'probe' AND {_serving(include_test)}"
@@ -436,19 +559,26 @@ def caller_report(
         ),
         {"lens": lens} if lens else {},
     ).all()
-    return [
-        {
-            "caller": r[0],
-            "queries": int(r[1]),
-            "ai_cost_usd": round(float(r[2]), 4),
-            "wh_cost_usd": round(float(r[3]), 4),
-            "cost_usd": round(float(r[2]) + float(r[3]), 4),
-            "unpriced": int(r[4]),
-            "errors": int(r[5]),
-            "declined": int(r[6]),
-        }
-        for r in rows
-    ]
+    routing = _routing_spend(session, include_test=include_test, lens=lens)
+    out: list[dict[str, object]] = []
+    seen = {r[0] for r in rows}
+    only_routed = [(c, 0, 0.0, 0.0, 0, 0, 0) for c in routing if c not in seen]
+    for r in [*rows, *only_routed]:
+        spent = routing.get(str(r[0]), {})
+        ai = float(r[2]) + spent.get("ai_cost_usd", 0.0)
+        out.append(
+            {
+                "caller": r[0],
+                "queries": int(r[1]),
+                "ai_cost_usd": round(ai, 4),
+                "wh_cost_usd": round(float(r[3]), 4),
+                "cost_usd": round(ai + float(r[3]), 4),
+                "unpriced": int(r[4]) + int(spent.get("unpriced", 0)),
+                "errors": int(r[5]),
+                "declined": int(r[6]),
+            }
+        )
+    return out
 
 
 def audit_statement(
@@ -463,7 +593,9 @@ def audit_statement(
 
     One round trip on purpose: the page is skimmed by someone with thirty
     seconds, and a fan of sequential endpoints would make the fast path the
-    stale path. Test traffic is out unless *include_test*, like kpis()."""
+    stale path. Test traffic is out unless *include_test*, like kpis(). The AI
+    spend includes the routing decider's spend that no request_log row carries,
+    like kpis()."""
     governed = f"COALESCE(generator_tier, '') <> 'probe' AND {_serving(include_test)}"
     win = "created_at >= NOW() - make_interval(days => :d)"
     prior = (
@@ -502,16 +634,20 @@ def audit_statement(
             {"d": days, "d2": days * 2},
         ).first()
         assert row is not None
+        # The routing decider's spend on routed-door questions no row carries.
+        routing = _routing_total(
+            _routing_spend(session, where, {"d": days, "d2": days * 2}, include_test)
+        )
         return {
             "asked": int(row[0]),
             "answered": int(row[1]),
             "clarified": int(row[2]),
             "refused": int(row[3]),
             "faults": int(row[4]),
-            "ai_cost_usd": round(float(row[5]), 4),
+            "ai_cost_usd": round(float(row[5]) + routing["ai_cost_usd"], 4),
             "wh_cost_usd": round(float(row[6]), 4),
             "verified": int(row[7]),
-            "unpriced": int(row[8]),
+            "unpriced": int(row[8]) + int(routing["unpriced"]),
             "declared": int(row[9]),
             "resolution_unknown": int(row[10]),
             "typed": int(row[11]),

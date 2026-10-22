@@ -57,6 +57,7 @@ from services.project.compile import (
     shared_entity_hash,
     shared_relationship_hash,
 )
+from services.project.lineage import LineageGraph
 from services.project.loader import load_lens_source, split_by_lens, split_semantic
 from services.project.schema import ConnectionDecl, parse_project_yaml
 from services.runtime.bounded import APPLY_ABORTED_PREFIX, ApplyStepTimeout
@@ -83,14 +84,24 @@ def _apply_lock_key(org_id: uuid.UUID) -> int:
 
 class ProjectFiles(BaseModel):
     files: dict[str, str]
+    # The dbt or SQLMesh model DAG the client read (`lineage:` in dst.yaml, or
+    # --lineage), so a `table/X+` selector walks from a model to the tables
+    # entities read. Only selection reads it.
+    lineage: LineageGraph | None = None
 
 
 def _select(
-    session: Session, files: dict[str, str], select: list[str], scope: str
+    session: Session,
+    files: dict[str, str],
+    select: list[str],
+    scope: str,
+    lineage: LineageGraph | None = None,
 ) -> tuple[plan_engine.Selection | None, dict[str, str]]:
     """``--select``/``--scope`` → (selection, the filtered push). No selector
     and scope ``all`` is the whole push, exactly as before."""
     selectors = [s.strip() for s in select if s.strip()]
+    if "*" in selectors:  # everything: the same push as no selector
+        selectors = []
     if not selectors and scope == "all":
         return None, files
     try:
@@ -100,22 +111,11 @@ def _select(
             scope,
             db_semantic=_db_semantic(session),
             db_trees=_db_trees(session),
+            lineage=lineage,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return selection, selection.files
-
-
-def _selection_row(selection: plan_engine.Selection) -> dict[str, object]:
-    return {
-        "scope": "selection",
-        "selectors": selection.selectors,
-        "kinds": selection.scope,
-        "lenses": selection.lenses,
-        "assets": selection.assets,
-        "excluded": selection.excluded,
-        "notes": selection.notes,
-    }
 
 
 def _declared_tables(session: Session, files: dict[str, str]) -> dict[str, list[str]]:
@@ -557,9 +557,9 @@ def plan_project(
     With a selection, the first row names it and everything after describes
     the selected push only."""
     out: list[dict[str, object]] = []
-    selection, files = _select(session, body.files, select, scope)
+    selection, files = _select(session, body.files, select, scope, body.lineage)
     if selection is not None:
-        out.append(_selection_row(selection))
+        out.append(selection.row())
         body = ProjectFiles(files=files)
 
     # ── shared layer: per-path diffs + FULL validation (a plan never mutates) ─
@@ -797,6 +797,31 @@ def plan_project(
                 "path to reach it",
             }
         )
+    # A table keyed by a date and another column holds one row per key per
+    # day: a snapshot. A SUM over it adds each key's balance once per day of
+    # the window unless the metric says it is a level. A hint: a flow may be
+    # what the author means, and declaring it says so.
+    if summed := sorted(
+        f"{name}.{m.name}"
+        for name, entity in incoming_entities.items()
+        if entity.default_time_field
+        and entity.default_time_field in entity.primary_key
+        and len(entity.primary_key) > 1
+        for m in entity.metrics
+        if m.type == "simple" and m.agg == "sum" and m.additivity is None
+    ):
+        out.append(
+            {
+                "scope": "semantic",
+                "status": "hint",
+                "hint": "metrics summed over a table with one row per key per day, with no "
+                "`additivity:`: "
+                + ", ".join(summed)
+                + " — over a window the sum counts each key's balance once per day; declare "
+                "`additivity: level` for a balance (the window's last day is read), or "
+                "`additivity: flow` when the sum is meant",
+            }
+        )
     unselected = _unselected_definitions(session, incoming_definitions, incoming_configs)
     if unselected:
         out.append(
@@ -876,7 +901,7 @@ def apply_project(
         )
     gate_override = override_reason.strip() if (allow_failing_cases or allow_case) else None
     allow_cases = frozenset(c.strip() for c in allow_case if c.strip()) if allow_case else None
-    selection, files = _select(session, body.files, select, scope)
+    selection, files = _select(session, body.files, select, scope, body.lineage)
     kwargs: dict[str, object] = {
         "probe_certified": probe_certified,
         "refresh_samples": refresh_samples,
@@ -963,7 +988,7 @@ def _apply(
     out: list[dict[str, object]] = []
     push_lenses = set(split_by_lens(body.files))
     if selection is not None:
-        out.append(_selection_row(selection))
+        out.append(selection.row())
         body = ProjectFiles(files=selection.files)
         # Selectors narrow the lenses that may publish; --scope alone narrows
         # file kinds only, and every lens it leaves stale recompiles as usual.
@@ -1015,7 +1040,10 @@ def _apply(
     # They are also the catalog an `expose:` grant resolves against, the same
     # way the plan read them.
     pushed_profiles = apply_engine.incoming_profiles(body.files)
-    profile_applied, profile_warnings = apply_engine.apply_profiles(session, body.files)
+    landed_tables: set[tuple[str, str]] = set()
+    profile_applied, profile_warnings = apply_engine.apply_profiles(
+        session, body.files, landed_tables
+    )
     if profile_applied or profile_warnings:
         out.append(
             {
@@ -1094,7 +1122,7 @@ def _apply(
     # and republishes stale lenses whether or not the push carried them.
     # --probe-certified is an explicit ask to (re)walk the certified surface —
     # its "probed 0 new entries" note must not be skipped away.
-    inputs_touched = bool(conn_applied or profile_applied or probe_certified or refresh_samples)
+    inputs_touched = bool(conn_applied or probe_certified or refresh_samples)
     # The lenses nothing in this push changes: managed files that match the
     # DB (plan's own comparison), and no reason to recompile either way.
     same_files: set[str] = set()
@@ -1114,8 +1142,18 @@ def _apply(
         # not deferred to the recompile pass's rejected-recompile.
         same_files -= set(_stale_map(session, semantic_store.asset_hashes(session)))
     # Skipped outright unless a touched input sends them through the publish
-    # path — where the row still says unchanged, as the plan did.
+    # path — where the row still says unchanged, as the plan did. A landed
+    # profile touches only the lenses whose scope reads a re-profiled table:
+    # re-probing one connection must not re-run every other lens's eval gate.
     unchanged: set[str] = set(same_files) if not inputs_touched else set()
+    if unchanged and landed_tables:
+        published = {name: bundle for name, _dn, _desc, bundle in store.list_published(session)}
+        unchanged = {
+            lens
+            for lens in unchanged
+            if lens in published
+            and not apply_engine.reads_landed_table(published[lens], landed_tables)
+        }
     if only is not None:
         # The lenses not selected: unchanged by decree, whatever their files
         # say — the refusals above guarantee none of them is stale.

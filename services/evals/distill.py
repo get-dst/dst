@@ -47,6 +47,7 @@ from services.certify import store as certify_store
 from services.contracts.protocols import CacheableBlock, LLMProvider, Message
 from services.contracts.semantic_model import SemanticModel
 from services.lenses import store as lens_store
+from services.observability import usage as ai_usage
 from services.reviews import patch_store
 from services.reviews.patch import PatchCandidate
 
@@ -155,19 +156,20 @@ def _instruction_candidate(
     name, instruction = "", ""
     if llm is not None:
         sample = "\n".join(f"- {q}" for q in questions[:_MAX_SAMPLE_QUESTIONS])
-        res = llm.complete(
-            system=[CacheableBlock(_NAME_SYSTEM)],
-            messages=[
-                Message(
-                    "user",
-                    f"SQL shape: {cluster.shape}\nQuestions ({len(cluster.rows)} verified):\n"
-                    f"{sample}",
-                )
-            ],
-            model=model,
-            temperature=0.0,
-            max_tokens=300,
-        )
+        with ai_usage.purpose("other"):
+            res = llm.complete(
+                system=[CacheableBlock(_NAME_SYSTEM)],
+                messages=[
+                    Message(
+                        "user",
+                        f"SQL shape: {cluster.shape}\nQuestions ({len(cluster.rows)} verified):\n"
+                        f"{sample}",
+                    )
+                ],
+                model=model,
+                temperature=0.0,
+                max_tokens=300,
+            )
         parsed = _strict_json(res.text)
         name = str(parsed.get("name") or "").strip()
         instruction = str(parsed.get("instruction") or "").strip()
@@ -215,21 +217,22 @@ def _definition_candidates(
         return []
     questions = list(dict.fromkeys(r.question.strip() for r in rows))
     defined = _defined_terms(semantic_model)
-    res = llm.complete(
-        system=[CacheableBlock(_TERMS_SYSTEM)],
-        messages=[
-            Message(
-                "user",
-                "Questions:\n"
-                + "\n".join(f"- {q}" for q in questions)
-                + "\nAlready defined: "
-                + (", ".join(sorted(defined)) or "(none)"),
-            )
-        ],
-        model=model,
-        temperature=0.0,
-        max_tokens=500,
-    )
+    with ai_usage.purpose("other"):
+        res = llm.complete(
+            system=[CacheableBlock(_TERMS_SYSTEM)],
+            messages=[
+                Message(
+                    "user",
+                    "Questions:\n"
+                    + "\n".join(f"- {q}" for q in questions)
+                    + "\nAlready defined: "
+                    + (", ".join(sorted(defined)) or "(none)"),
+                )
+            ],
+            model=model,
+            temperature=0.0,
+            max_tokens=500,
+        )
     raw_terms = _strict_json(res.text).get("terms")
     if not isinstance(raw_terms, list):
         return []

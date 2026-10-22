@@ -73,6 +73,11 @@ def main() -> int:
         action="store_true",
         help="add the typed-decision provider as an arm (TYPESAFE_KEY in the env)",
     )
+    ap.add_argument(
+        "--openai-decisions",
+        action="store_true",
+        help="add OpenAI's Decisions API as an arm (OPENAI_API_KEY in the env)",
+    )
     ap.add_argument("--out", default=None, help="directory for the JSON results")
     args = ap.parse_args()
     ks = [int(k) for k in args.k.split(",")]
@@ -112,6 +117,18 @@ def main() -> int:
         # router), and the typed decider over every lens with no cosine at all.
         arms.append(("typesafe", typed, False))
         arms.append(("typesafe-all-lenses", typed, True))
+    if args.openai_decisions:
+        import os
+
+        from services.llm.openai_decisions import OpenAIDecisionsDecider
+
+        key = os.environ.get("OPENAI_API_KEY", "")
+        if not key:
+            print("--openai-decisions needs OPENAI_API_KEY in the env", file=sys.stderr)
+            return 1
+        oad = LlmDecider(None, "", decider=OpenAIDecisionsDecider(key))
+        arms.append(("openai-decisions", oad, False))
+        arms.append(("openai-decisions-all-lenses", oad, True))
     for label, decider, all_lenses in arms:
         started = time.monotonic()
         recs = calibrate.lens_decisions(

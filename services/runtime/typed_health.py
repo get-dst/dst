@@ -19,6 +19,7 @@ import threading
 from datetime import UTC, datetime
 
 from services.contracts.errors import ProviderError
+from services.contracts.protocols import DecisionUsage
 from services.llm.vote_decider import DeciderStarved
 
 log = logging.getLogger("dst")
@@ -27,10 +28,14 @@ UNAVAILABLE = "typed decisions unavailable"
 
 
 class TypedUnavailable(RuntimeError):
-    """The typed lane could not run for this question: its provider failed."""
+    """The typed lane could not run for this question: its provider failed.
+    ``spent``: what the resolution billed before the failure, as
+    ``(provider, usage)`` pairs (``contracts.protocols.spent_by``) — the
+    pipeline charges it to the answer's row."""
 
-    def __init__(self, what: str) -> None:
+    def __init__(self, what: str, spent: list[tuple[str, DecisionUsage]] | None = None) -> None:
         self.what = what
+        self.spent = list(spent or [])
         super().__init__(f"{UNAVAILABLE}: {what}")
 
 

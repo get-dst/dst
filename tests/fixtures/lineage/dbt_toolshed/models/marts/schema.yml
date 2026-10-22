@@ -1,0 +1,10 @@
+version: 2
+models:
+  - name: fct_rentals
+    columns:
+      - name: rental_id
+        data_tests: [unique, not_null]
+  - name: dim_tools
+    columns:
+      - name: tool_id
+        data_tests: [unique, not_null]

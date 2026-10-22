@@ -107,6 +107,9 @@ class _StubRouter:
     def scored(self, question: str) -> list[tuple[str, float]]:
         return list(self._scored)
 
+    def not_for(self, question: str) -> set[str]:
+        return set()
+
 
 _STUB_BY_LENS = {
     "board": CoverageProfile(lens="board", anchors=["board kpis"], description="board reporting"),

@@ -168,6 +168,10 @@ class TableProfile(BaseModel):
     profiled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: Literal["catalog", "sampled", "mixed"] = "catalog"
     columns: list[ColumnProfile] = Field(default_factory=list)
+    # Why the sampling pass could not read this table (over the sampling
+    # budget): its profile is catalog facts only, so no value of its columns
+    # can be checked or bound from a dictionary. None = nothing stopped it.
+    unsampled: str | None = None
 
 
 class ColumnSampleSpec(BaseModel):

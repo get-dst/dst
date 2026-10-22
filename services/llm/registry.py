@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import Literal
 
-from services.config import ProviderConfig, resolve_env_ref, settings
+from services.config import ProviderConfig, ProviderType, resolve_env_ref, settings
 from services.contracts.errors import ProviderError
 from services.contracts.protocols import Decider, Embedder, LLMProvider
 
@@ -24,12 +24,14 @@ log = logging.getLogger("dst")
 # protocol, so its model family is type knowledge — config can override both.
 _ANTHROPIC_FAST = "claude-haiku-4-5"
 _ANTHROPIC_SMART = "claude-sonnet-4-6"
+# Provider types that serve the decision seam only, never text.
+_TYPED = frozenset({"typesafe", "openai-decisions"})
 
 
 @dataclass(frozen=True)
 class ProviderSpec:
     name: str
-    type: Literal["anthropic", "openai-compatible", "local", "typesafe"]
+    type: ProviderType
     api_key: str | None
     key_hint: str  # what to set to supply the secret (for actionable 503s)
     base_url: str | None
@@ -43,10 +45,14 @@ class ProviderSpec:
 
 
 def _spec(name: str, cfg: ProviderConfig) -> ProviderSpec:
-    key = cfg.api_key or resolve_env_ref(cfg.api_key_env)
+    # OpenAI's own key name is the openai-decisions default (type knowledge).
+    key_env = cfg.api_key_env or (
+        "OPENAI_API_KEY" if cfg.type == "openai-decisions" and not cfg.api_key else None
+    )
+    key = cfg.api_key or resolve_env_ref(key_env)
     fast = cfg.fast_model or (_ANTHROPIC_FAST if cfg.type == "anthropic" else None)
     smart = cfg.smart_model or (_ANTHROPIC_SMART if cfg.type == "anthropic" else None)
-    hint = cfg.api_key_env or f"DST_PROVIDERS['{name}'].api_key"
+    hint = key_env or f"DST_PROVIDERS['{name}'].api_key"
     if cfg.type == "local":
         # The pinned in-process model — its band preset keys off this name.
         from services.context.local_embedder import LOCAL_EMBED_DIM, LOCAL_EMBED_MODEL
@@ -229,7 +235,7 @@ def resolve(ref: str) -> ResolvedModel | None:
     spec = specs().get(provider_name) if provider_name else None
     if spec is None or not spec.api_key or not model:
         return None
-    if spec.type == "typesafe":
+    if spec.type in _TYPED:
         return None  # a typed-decision provider serves decisions, never text
     from services.llm.retry import RetryingLLM
 
@@ -250,20 +256,92 @@ def resolve(ref: str) -> ResolvedModel | None:
 
 
 def resolve_decider(*, k: int | None = None) -> Decider | None:
-    """The install's closed-set decider: a configured typed-decision provider
-    with a key wins; else the voting chat decider on the fast tier; None when
-    nothing qualifies (callers fall back to pure cosine / no gate)."""
+    """The install's closed-set decider: the FIRST DECLARED typed-decision
+    provider (``typesafe`` or ``openai-decisions``) with a key wins —
+    declaration order, the same rule the tiers follow; a keyless one is
+    skipped. Else the voting chat decider on the fast tier; None when nothing
+    qualifies (callers fall back to pure cosine / no gate)."""
     for s in specs().values():
-        if s.type == "typesafe" and s.api_key:
+        if s.type not in _TYPED or not s.api_key:
+            continue
+        if s.type == "typesafe":
             from services.llm.typesafe import TypesafeDecider
 
             return TypesafeDecider(s.api_key, s.base_url)
+        from services.llm.openai_decisions import DEFAULT_MODEL, OpenAIDecisionsDecider
+
+        model = s.models[0] if s.models else DEFAULT_MODEL
+        return OpenAIDecisionsDecider(s.api_key, s.base_url, model=model)
     fast = resolve(tier("fast"))
     if fast is None:
         return None
     from services.llm.vote_decider import DEFAULT_K, VoteDecider
 
     return VoteDecider(fast.llm, fast.name, k=DEFAULT_K if k is None else k)
+
+
+def resolvable_models() -> list[str]:
+    """Every model name this install can call: each declared provider's tier
+    and catalog models (the anthropic type's default tiers included), and
+    the model each typed-decision provider decides with. What a price must
+    exist for."""
+    from services.llm.openai_decisions import DEFAULT_MODEL as DECISIONS_DEFAULT
+    from services.llm.typesafe import DEFAULT_MODEL as TYPESAFE_DEFAULT
+
+    out: list[str] = []
+    for s in specs().values():
+        if s.type == "typesafe":
+            out.append(TYPESAFE_DEFAULT)
+        elif s.type == "openai-decisions":
+            out.append(s.models[0] if s.models else DECISIONS_DEFAULT)
+        else:
+            out += [m for m in (s.fast_model, s.smart_model, *s.models) if m]
+    return list(dict.fromkeys(out))
+
+
+def unpriced_note() -> str | None:
+    """The sentence naming every model this install can call that has no
+    price, or None. A call to one records a NULL cost, so every AI total it
+    is part of is a floor, and observe counts it as unpriced."""
+    from services.observability import cost
+
+    missing = cost.unpriced(resolvable_models())
+    no_cache = cache_unpriced_models()
+    notes = []
+    if missing:
+        notes.append(
+            f"no price for model(s) {', '.join(missing)}: their calls are recorded UNPRICED "
+            "and every AI cost total is a floor — declare `ai_pricing: {<model>: [input, "
+            "output]}` (USD per 1M tokens) in dst.yaml or DST_AI_PRICING"
+        )
+    if no_cache:
+        notes.append(
+            f"no prompt-cache price for model(s) {', '.join(no_cache)}: their calls read "
+            "and write the prompt cache, so they are recorded UNPRICED — declare "
+            "`ai_pricing: {<model>: [input, output, cache read, cache write, long-lived "
+            "cache write]}` (USD per 1M tokens) in dst.yaml or DST_AI_PRICING"
+        )
+    return "; ".join(notes) or None
+
+
+def cache_unpriced_models() -> list[str]:
+    """The priced models an anthropic provider can call with no full set of
+    prompt-cache rates. That client marks its system prompt cacheable, so
+    its calls report cache reads and writes, and a call whose cache tokens
+    have no rate is unpriced."""
+    from services.observability import cost
+
+    out: set[str] = set()
+    for s in specs().values():
+        if s.type != "anthropic":
+            continue
+        for m in (s.fast_model, s.smart_model, *s.models):
+            if not m or cost.price_of(m) is None:
+                continue
+            rates = cost.cache_price_of(m)
+            if rates is None or None in rates:
+                out.add(m)
+    return sorted(out)
 
 
 def unservable_reason(ref: str) -> str | None:
@@ -492,6 +570,28 @@ def embedding_model_name() -> str | None:
     ``embedding_identity``."""
     ident = embedding_identity()
     return ident[0] if ident else None
+
+
+def embedder_gap() -> str | None:
+    """Why this install has no embedder, in a sentence that names the fix —
+    or None when one resolves. Read without constructing anything."""
+    if embedding_identity() is not None:
+        return None
+    for s in specs().values():
+        if not s.embedding_model or s.type not in ("local", "openai-compatible"):
+            continue
+        sdk = _EMBED_SDK.get(s.type)
+        if sdk is not None and find_spec(sdk[0]) is None:
+            return (
+                f"provider '{s.name}' declares embeddings, but this install lacks the "
+                f"{sdk[1]} extra (pip install 'dst-core[{sdk[1]}]')"
+            )
+        if s.type != "local" and not s.api_key:
+            return f"provider '{s.name}' declares embeddings, but {s.key_hint} is not set"
+    return (
+        "no embedding provider is configured (pip install 'dst-core[local-embed]' for "
+        "the in-process embedder, or declare a provider with embedding_model in dst.yaml)"
+    )
 
 
 EMBEDDER_HINT = (

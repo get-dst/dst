@@ -33,12 +33,24 @@ from typing import Any
 import httpx
 
 from services.contracts.errors import ProviderError
-from services.contracts.protocols import Decision, DecisionUsage, Option
+from services.contracts.protocols import Decision, DecisionUsage, Option, spend_on
+from services.observability import cost
+from services.observability import usage as ai_usage
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
 _NONE = "none"
 _RETRY_STATUSES = {429, 529}
+
+
+def _record(provider: str, usage: DecisionUsage) -> None:
+    """One billed call, for the request's usage records."""
+    ai_usage.record(
+        provider,
+        cost.decision_model(provider),
+        round(usage.input_tokens),
+        round(usage.output_tokens),
+    )
 
 
 class TypesafeDecider:
@@ -181,10 +193,16 @@ class TypesafeDecider:
         started = time.perf_counter()
         data = self._post(body)
         usage = self._usage(data, time.perf_counter() - started)
-        answer = data["answers"].get("decision")
-        if not isinstance(answer, dict):
-            raise ProviderError("typesafe", "malformed response: missing the decision answer")
-        d = self._to_decision(answer, options, self.provider)
+        _record(self.provider, usage)
+        try:
+            answer = data["answers"].get("decision")
+            if not isinstance(answer, dict):
+                raise ProviderError("typesafe", "malformed response: missing the decision answer")
+            d = self._to_decision(answer, options, self.provider)
+        except ProviderError as exc:
+            # The call was billed although its reply is unusable.
+            spend_on(exc, self.provider, usage)
+            raise
         d.usage = usage
         return d
 
@@ -198,13 +216,22 @@ class TypesafeDecider:
         started = time.perf_counter()
         data = self._post(self.request_many(question, questions))
         # One call, several decisions: each carries its share of the call.
-        share = self._usage(data, time.perf_counter() - started).split(len(questions))
+        usage = self._usage(data, time.perf_counter() - started)
+        _record(self.provider, usage)
+        shares = usage.split(len(questions))
         out: dict[str, Decision] = {}
-        for key, (_context, options, _allow_none) in questions.items():
-            answer = data["answers"].get(key)
-            if not isinstance(answer, dict):
-                raise ProviderError("typesafe", f"malformed response: missing answer {key!r}")
-            d = self._to_decision(answer, options, self.provider)
-            d.usage = share
-            out[key] = d
+        try:
+            for (key, (_context, options, _allow_none)), share in zip(
+                questions.items(), shares, strict=True
+            ):
+                answer = data["answers"].get(key)
+                if not isinstance(answer, dict):
+                    raise ProviderError("typesafe", f"malformed response: missing answer {key!r}")
+                d = self._to_decision(answer, options, self.provider)
+                d.usage = share
+                out[key] = d
+        except ProviderError as exc:
+            # The call was billed although its reply is unusable.
+            spend_on(exc, self.provider, usage)
+            raise
         return out

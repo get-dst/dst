@@ -94,13 +94,16 @@ _METER: ContextVar[SampleMeter | None] = ContextVar("sample_meter", default=None
 
 
 @contextmanager
-def metered() -> Iterator[SampleMeter]:
-    """Count every sampling statement run inside the block, with its bytes.
+def metered(meter: SampleMeter | None = None) -> Iterator[SampleMeter]:
+    """Count every probe statement run inside the block, with its bytes:
+    the sampling statements, and any metadata read a catalog pass bills
+    (``meter_statement``). ``meter``: one to keep adding to, so the catalog
+    pass and the sampling pass sum into one bill.
 
     A context, not a parameter: the connectors' ``sample_profile`` signature is
     a protocol every engine implements, and the bill is the caller's concern
     (`dst probe` prints it per connection), not the connector's."""
-    meter = SampleMeter()
+    meter = meter if meter is not None else SampleMeter()
     token = _METER.set(meter)
     try:
         yield meter
@@ -108,16 +111,24 @@ def metered() -> Iterator[SampleMeter]:
         _METER.reset(token)
 
 
+def meter_statement(bytes_billed: int | None) -> None:
+    """Record one statement in the active meter, if any: the bytes the engine
+    billed for it, or None when it reported none (the bill is then unpriced,
+    never a partial sum)."""
+    meter = _METER.get()
+    if meter is None:
+        return
+    meter.statements += 1
+    if bytes_billed is None:
+        meter.priced = False
+    else:
+        meter.bytes_scanned += bytes_billed
+
+
 def _metered(run: RunQuery) -> RunQuery:
     def inner(sql: str) -> QueryResult:
         result = run(sql)
-        meter = _METER.get()
-        if meter is not None:
-            meter.statements += 1
-            if result.bytes_scanned is None:
-                meter.priced = False
-            else:
-                meter.bytes_scanned += result.bytes_scanned
+        meter_statement(result.bytes_scanned)
         return result
 
     return inner
@@ -242,9 +253,15 @@ def sample_table(
             )
         except SampleBudgetExceeded as exc:
             # Too big to read within budget — the catalog profile stands. Said
-            # out loud: a silent cap reads as coverage.
+            # out loud: a silent cap reads as coverage. The reason rides the
+            # profile, so describe and a value question can say it too.
             logger.warning("table %s not sampled (%s)", spec.table, exc)
-            return None
+            return TableProfile(
+                connection=connection,
+                table=spec.table,
+                source="catalog",
+                unsampled=f"over the sampling budget: {exc}",
+            )
         columns = _fold_stats(
             specs, result, exact=exact, max_distinct_for_enum=max_distinct_for_enum
         )

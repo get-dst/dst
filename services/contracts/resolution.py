@@ -62,6 +62,8 @@ class DecisionRecord(BaseModel):
     p_lower: float | None = None
     verdict: str  # act | clarify | decline
     provider: str
+    # The provider refused the question instead of choosing (recorded as none).
+    refused: bool = False
     # calls / input_tokens / output_tokens / latency_s — the decision's share
     # of what its provider call(s) cost; summed per answer, priced per provider.
     usage: dict[str, float] | None = None

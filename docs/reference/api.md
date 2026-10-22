@@ -38,7 +38,7 @@ row-level security whose failure mode is *no rows*, never cross-tenant
 | Route | Description |
 |---|---|
 | `GET /health` | Liveness: the process is up |
-| `GET /ready` | Readiness. Five checks gate `status`: DB, MCP session manager, schema state, whether trace writes are landing, and `typed_decisions` (`ok`, `off`, or `degraded (…)` while the typed-decision provider is failing, until a typed decision succeeds again). Reported but never gating: `embeddings`, `certified_matching`, `plugins`, and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
+| `GET /ready` | Readiness. Five checks gate `status`: DB, MCP session manager, schema state, whether trace writes are landing, and `typed_decisions` (`ok`, `off`, or `degraded (…)` while the typed-decision provider is failing, until a typed decision succeeds again). Reported but never gating: `embeddings`, `certified_matching`, `certified_bands` (`calibrated`, `uncalibrated (…)` or `n/a`), `ai_pricing` (`ok`, or `UNPRICED (…)` naming each model your providers can call that has no price, and each `anthropic` provider model with no prompt-cache price), `plugins`, and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
 | `GET /SKILL.md` | The file an agent reads to connect itself: the instance name, the MCP URL, the setup for Claude, Claude Code, Codex, ChatGPT and Cursor with the key as a placeholder, which of them sign in through OAuth instead, and in demo mode the topics and the limits. Public, `text/markdown`, cached for five minutes. Outside demo mode it needs `DST_PUBLIC_BASE_URL` and answers 404 with the reason without it |
 
 `/SKILL.md` is how a person connects their AI with one line: they paste
@@ -323,7 +323,9 @@ Notable:
 - `POST /mgmt/project/apply`: the single deployment door (`dst apply`):
   blue/green, one transaction under a per-org advisory lock; a concurrent apply gets a
   409 (`services/project/apply.py`).
-- `POST /mgmt/project/plan`: the dry run behind `dst plan`.
+- `POST /mgmt/project/plan`: the dry run behind `dst plan`. Both take the body
+  `{"files": {path: content}, "lineage": …}`; `lineage` is optional, the dbt or
+  SQLMesh model DAG the CLI reads for `table/X+` selectors (`services/project/lineage.py`).
 - `GET /mgmt/observe/requests/{request_id}`: the full trace drill-down for one
   request: question, SQL, cost, outcome.
 - `GET /mgmt/requests?since=&until=&lens=&caller=&format=csv|json`: the request

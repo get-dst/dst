@@ -222,6 +222,39 @@ def test_sampling_scopes_to_the_layer_and_says_what_it_skipped(
     assert next(c for c in noise.columns if c.name == "status").top_values == ["A", "B"]
 
 
+def test_a_targeted_probe_keeps_what_it_did_not_sample(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--tables a` refreshes `a` and merges into the artifact: every other
+    table keeps the facts the previous probe sampled, under fresh catalog
+    metadata, except a column the warehouse has since retyped."""
+    root = _project(tmp_path)
+    con = duckdb.connect(str(root / "wh.duckdb"))
+    con.execute("CREATE TABLE ops.noise (status VARCHAR, code VARCHAR)")
+    con.execute("INSERT INTO ops.noise VALUES ('A', '1'), ('B', '2')")
+    con.close()
+    assert _cli(monkeypatch, ["probe", "--dir", str(root), "--sample-all"]) == 0
+
+    con = duckdb.connect(str(root / "wh.duckdb"))
+    con.execute("ALTER TABLE ops.noise ALTER code TYPE INTEGER")
+    con.execute("INSERT INTO ops.customers VALUES ('cy@corp.example', 'SE')")
+    con.close()
+    capsys.readouterr()
+    assert _cli(monkeypatch, ["probe", "--dir", str(root), "--tables", CUSTOMERS]) == 0
+    assert "1 table(s) not sampled this run keep the sampled facts" in capsys.readouterr().err
+    read = probe.read_probe(root, "warehouse")
+    assert read is not None
+    noise = next(t for t in read.tables if t.table == "ops.noise")
+    assert noise.source != "catalog"
+    status = next(c for c in noise.columns if c.name == "status")
+    assert status.top_values == ["A", "B"] and status.values_complete
+    code = next(c for c in noise.columns if c.name == "code")
+    assert code.type == "INTEGER" and code.top_values is None  # retyped: nothing carried
+    customers = next(t for t in read.tables if t.table == CUSTOMERS)
+    country = next(c for c in customers.columns if c.name == "country")
+    assert sorted(country.top_values or []) == ["DK", "FI", "SE"]  # the refreshed table
+
+
 def test_an_empty_layer_samples_everything(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -307,3 +340,32 @@ def test_join_cardinality_lint_names_the_counts_from_the_probe() -> None:
     ].on = "appointments.clinic_code IN (clinics.clinic_code, clinics.legacy_clinic_code)"
     profiles["marts.fct_appointments"] = _table("marts.fct_appointments", "clinic_code", 28)
     assert probe.join_cardinality_warnings(model, profiles) == []
+
+
+def test_the_probe_bill_counts_the_catalog_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A billed metadata read in the catalog pass (BigQuery's partitions read)
+    is in the connection's bill. It was not: a probe whose sampling statements
+    were all served from the warehouse cache reported 0 B billed while the
+    metadata read billed the per-job minimum."""
+    import re
+
+    from services.connectors import sampling
+    from services.lenses import profiler_catalog
+
+    root = _project(tmp_path)
+    assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 0
+    before = re.search(r"(\d+) probe statement", capsys.readouterr().err)
+    assert before is not None
+
+    real = profiler_catalog.catalog_profiles
+
+    def billed_catalog(*a: object, **k: object) -> object:
+        sampling.meter_statement(10_485_760)
+        return real(*a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(profiler_catalog, "catalog_profiles", billed_catalog)
+    assert _cli(monkeypatch, ["probe", "--dir", str(root)]) == 0
+    after = re.search(r"(\d+) probe statement", capsys.readouterr().err)
+    assert after is not None and int(after.group(1)) == int(before.group(1)) + 1
