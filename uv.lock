@@ -388,7 +388,7 @@ wheels = [
 
 [[package]]
 name = "dst-core"
-version = "0.12.0"
+version = "0.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -429,8 +429,8 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "anthropic", specifier = ">=0.105.2,<1" },
     { name = "cryptography", specifier = ">=43" },
-    { name = "duckdb", specifier = ">=1.5.3" },
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "duckdb", specifier = ">=1.5.3,<2.1" },
+    { name = "fastapi", specifier = ">=0.115,<0.159" },
     { name = "fastembed", marker = "extra == 'local-embed'", specifier = ">=0.5" },
     { name = "google-cloud-bigquery", specifier = ">=3.41.0" },
     { name = "httpx", specifier = ">=0.27" },
@@ -443,7 +443,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "snowflake-connector-python", specifier = ">=3.12" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "sqlglot", specifier = ">=30.8.0" },
+    { name = "sqlglot", specifier = ">=30.8.0,<30.25" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 provides-extras = ["local-embed"]

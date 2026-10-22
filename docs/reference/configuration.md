@@ -255,18 +255,20 @@ for the full mechanism table):
 |---|---|---|
 | `population` | string | Declares who/what the rows cover; the `population_declared` serve check requires answers to carry the scope |
 | `population_filter` | SQL predicate | The compiler ANDs it into **every** query against the entity; scope bound no phrasing can smuggle past |
-| `pinned_dimensions` | list of fields | Each must be pinned or GROUPed before any aggregate (`aggregation_scope` check); "never sum across currencies", structurally |
+| `pinned_dimensions` | list of fields | Each must be pinned or GROUPed before any aggregate: the compiler refuses an unpinned aggregate naming the dimension and its values, and the `aggregation_scope` check holds generated SQL to it; "never sum across currencies", structurally |
 | `filters:` (on a metric) | SQL predicates | Part of the metric's meaning; the filter guard rejects the metric computed without them |
+| `agg: sum_distinct_on` + `distinct_on:` (on a metric) | aggregate + list of SQL expressions | Sums one value per distinct key (a monthly quota on daily rows counted once per rep-month); plan rejects it without `distinct_on` |
 
 ## Lens serve-time contracts (`lenses/<name>/lens.yaml`)
 
-Two lens keys declare contracts the server enforces at serve time; the
+Three lens keys declare contracts the server enforces at serve time; the
 scaffold's reference block carries the full key list
 (`services/contracts/lens_config.py`):
 
 | Key | Default | What it declares |
 |---|---|---|
 | `stale_after_days` (top level) | unset | the freshness contract: days after the scope's measured last-update at which answers flag stale: the freshness check fails, the grade caps at `partial`, and the answer says so. Unset = undeclared; the check reports skip, never a vacuous pass. Read [how `data_as_of` is measured](../guides/project-files.md#freshness-is-a-declared-contract) before setting it |
+| `not_for` (top level) | `[]` | asks this lens must refuse although its tables could produce a figure, each `{ask, sibling}`: a question naming every content word of the ask is refused before typing or generation, naming the sibling lens. `Avoid for:` lines in a single entity's `use_cases` are read the same way |
 | `model.answer_contract` | `strict` | the output-grid contract in every generation prompt: project exactly the asked quantities at the asked grain, full precision. `off` removes the block (a bare `off` is fine; YAML 1.1 parses it as a boolean and the loader coerces it back) |
 
 ### Tables without definitions (`expose`)

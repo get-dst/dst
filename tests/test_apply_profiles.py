@@ -121,11 +121,36 @@ def test_a_newer_stored_profile_is_never_downgraded_by_an_old_commit() -> None:
             applied, warnings = apply_profiles(
                 session, {"profiles/jaffle.probe.json": _artifact(probed_at=old, values=False)}
             )
-            assert applied == ["profiles 'jaffle': landed 0 table(s), kept 1 newer server-side"]
-            assert warnings == []
+            # Nothing landed: said, but not an applied input (that would send
+            # every lens back through the publish gate on a clean plan).
+            assert applied == []
+            assert warnings == ["profiles 'jaffle': landed 0 table(s), kept 1 newer server-side"]
             stored = profile_store.get_profile(session, "jaffle", CUSTOMERS)
             assert stored is not None
             assert stored.profile.columns[0].top_values == ["FI", "DK"]  # not blanked
+    finally:
+        _cleanup(org)
+
+
+@needs_db
+def test_the_same_artifact_pushed_again_is_no_change() -> None:
+    """A clean plan re-pushes the committed artifact on every apply. Landing it
+    again reported an applied input, which sent every lens back through
+    recompile and the eval gate, and overwrote the stored previous profile
+    with the same one."""
+    org = _org()
+    body = _artifact()
+    try:
+        with org_session(org) as session:
+            connection_store.create_connection(session, "jaffle", "duckdb", {"path": ":m:"}, None)
+            first, _ = apply_profiles(session, {"profiles/jaffle.probe.json": body})
+            assert first == ["profiles 'jaffle': landed 1 table(s)"]
+            prior = profile_store.get_profile(session, "jaffle", CUSTOMERS)
+            again, warnings = apply_profiles(session, {"profiles/jaffle.probe.json": body})
+            assert again == [] and warnings == []
+            stored = profile_store.get_profile(session, "jaffle", CUSTOMERS)
+            assert stored is not None and prior is not None
+            assert stored.previous == prior.previous  # history kept, not overwritten
     finally:
         _cleanup(org)
 

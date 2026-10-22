@@ -166,7 +166,7 @@ def test_repeat_measures_determinism_and_fails_a_wobbling_resolution() -> None:
             if "aggregate" in names:
                 return _sure("aggregate")
             if "revenue" in names and "order_count" in names and "none" not in names:
-                return _sure("order_count" if self.calls > 6 else "revenue")
+                return _sure("order_count" if self.calls > 4 else "revenue")
             return _sure(None)
 
     wobble = _Wobble()
@@ -278,9 +278,10 @@ def test_the_lane_grades_latency_and_cost_per_case() -> None:
 
     out = slot_lane.run_slot_lane([_answer(1, GOLD)], MODEL, resolver_for, repeat=2)
     (case,) = out.cases
-    # the dimension is read off the question ("by country") and costs nothing
+    # the dimension is read off the question ("by country") and costs nothing,
+    # and the column it groups by is not also offered as a filter
     n = sum(1 for d in case.decisions if d.usage is not None)
-    assert n == 3 and len(case.decisions) == 4
+    assert n == 2 and len(case.decisions) == 3
     assert case.verdict == "passed" and case.calls == 5.0 * n and case.elapsed_s >= 0.0
     # n decisions × 100k tokens at $0.14/M per resolution, two resolutions in the lane
     assert case.cost_usd == round(n * 0.014, 6) and out.cost_usd == round(2 * n * 0.014, 6)

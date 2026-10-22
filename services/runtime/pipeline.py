@@ -13,7 +13,7 @@ import functools
 import re
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -91,6 +91,7 @@ from services.runtime.bounded import (
     warehouse_bounded,
 )
 from services.runtime.compiler import CompileError, metric_sql
+from services.runtime.not_for import not_for_refusal
 
 FETCH_CAP = 5000
 
@@ -122,6 +123,11 @@ class PipelineResult:
     # warehouse's (provider outage, compose timeout), where a drift check would be
     # noise.
     error_kind: str | None = None
+    # The failing SQL was compiled by dst from an intent (the metrics door, a
+    # typed reading), not written by a model or certified by a person: a
+    # warehouse that rejects it while the schema still matches what was
+    # applied has rejected dst's own SQL, which is no data-team incident.
+    compiled: bool = False
 
 
 _SCOPE_COLUMN = re.compile(r"^column '([^']+)' is out of lens scope$")
@@ -743,6 +749,26 @@ def run_query(
     ai_in = 0
     ai_out = 0
     ai_cost: float | None = 0.0
+    # A decider's calls are AI spend like a generator's: every measured
+    # decision carries its usage, charged once, as it is made — the typed
+    # resolver's slot votes, a reading's, a paraphrase gate's, the typed judge's.
+    charged: set[int] = set()
+
+    def _charge(records: Iterable[DecisionRecord]) -> None:
+        nonlocal ai_in, ai_out, ai_cost
+        for r in records:
+            if id(r) in charged or not r.usage:
+                continue
+            charged.add(id(r))
+            tokens_in = round(r.usage.get("input_tokens") or 0)
+            tokens_out = round(r.usage.get("output_tokens") or 0)
+            ai_in += tokens_in
+            ai_out += tokens_out
+            ai_cost = cost.add_cost(
+                ai_cost, cost.decisions_cost_usd({r.provider or "": (tokens_in, tokens_out)})
+            )
+
+    _charge([*(decisions or []), *(untyped[1] if untyped else [])])
     # Real per-stage latency. Generate accumulates across repair attempts.
     started = time.perf_counter()
     latency_ms: dict[str, float] = {}
@@ -755,7 +781,12 @@ def run_query(
         )
 
     def _trace_failure(
-        status: str, sql: str | None, reason: str | None, *, error_kind: str | None = None
+        status: str,
+        sql: str | None,
+        reason: str | None,
+        *,
+        error_kind: str | None = None,
+        compiled: bool = False,
     ) -> PipelineResult:
         reason = reason or "unknown reason"
         if status == "rejected":
@@ -825,6 +856,7 @@ def run_query(
                 request_id=rid,
             ),
             error_kind=error_kind,
+            compiled=compiled,
             trace=TraceLog(
                 request_id=rid,
                 org_id=org,
@@ -937,6 +969,11 @@ def run_query(
         nc = deterministic_refusal_not_computable(rails_text, semantic_model)
         if nc is not None:
             return _trace_failure("refused", None, nc)
+        # An ask the lens declares it does not answer (`not_for`, or an
+        # entity's `Avoid for:` use case): its tables could produce a figure,
+        # and that figure is a different measure under the asked name.
+        if (refusal := not_for_refusal(rails_text, semantic_model)) is not None:
+            return _trace_failure("refused", None, refusal)
 
     # An ambiguity the question already settles must not clarify (a refusal is
     # an outcome, but a clarify on a resolved ask is the rail misfiring): when
@@ -1000,6 +1037,7 @@ def run_query(
                 typed_health.failed(reader_down)
                 break
             pre_records.append(record)
+            _charge([record])
             if picked is None:
                 break
             semantic_model = ambiguity.pin(semantic_model, [picked])
@@ -1121,6 +1159,7 @@ def run_query(
         ai_cost = cost.add_cost(
             ai_cost, cost.ai_cost_usd(gen_model, gen.input_tokens, gen.output_tokens)
         )
+        _charge(gen.decisions)
 
         if (
             attempt == 0
@@ -1482,7 +1521,13 @@ def run_query(
                     )
                     attempt += 1
                     continue
-                return _trace_failure("error", guard.sql, reason, error_kind="warehouse")
+                return _trace_failure(
+                    "error",
+                    guard.sql,
+                    reason,
+                    error_kind="warehouse",
+                    compiled=gen.intent is not None,
+                )
 
         exec_started = time.perf_counter()
         try:
@@ -1507,7 +1552,13 @@ def run_query(
                 feedback = f"The previous SQL failed to execute: {exc}. Previous SQL: {guard.sql}"
                 attempt += 1
                 continue
-            return _trace_failure("error", guard.sql, str(exc), error_kind="warehouse")
+            return _trace_failure(
+                "error",
+                guard.sql,
+                str(exc),
+                error_kind="warehouse",
+                compiled=gen.intent is not None,
+            )
         _mark("execute", exec_started)
 
         # Probe-on-empty (generation path only): zero EVIDENCE behind a
@@ -2113,6 +2164,7 @@ def run_query(
             verdict, reasoning, _judge_decisions = judge_typed(
                 review_trace, typed_judge, governed_context=governed_context or None
             )
+            _charge(_judge_decisions)
         except Exception:  # noqa: BLE001 — the rubric judge is the fallback, never a 500
             verdict, reasoning = judge_trace(
                 inline_judge_llm,

@@ -1,4 +1,4 @@
-.PHONY: install hooks up down lint fmt test dev migrate seed ci ci-clean benchmark benchmark-selftest
+.PHONY: install hooks up down lint fmt test dev migrate seed ci ci-clean ci-newest benchmark benchmark-selftest
 
 install:        ## install backend deps into the uv venv
 	uv sync
@@ -66,6 +66,23 @@ ci-clean:       ## clean-clone gate: committed HEAD must work from scratch
 	git clone -q --depth 1 "file://$(CURDIR)" $(CI_CLONE)
 	cd $(CI_CLONE) && uv sync -q && $(REQUIRE_DB) uv run pytest
 	@echo "clean clone: green ($(CI_CLONE))"
+
+# The lockfile pins sqlglot and duckdb at their floors, so `ci` proves the floor.
+# A fresh `pip install dst-core` resolves the newest versions pyproject allows,
+# and sqlglot's optimizer has changed behaviour between minor releases (the SQL
+# equivalence proof, gold attribution and the guards all read through it). This
+# runs the suite with every other package at its locked version and those two
+# lifted to the newest the declared range allows.
+NEWEST_VENV := /tmp/dst-newest-$(notdir $(CURDIR))
+
+ci-newest:      ## the suite on the newest sqlglot + duckdb pyproject allows
+	rm -rf $(NEWEST_VENV)
+	uv venv -q $(NEWEST_VENV)
+	uv export -q --frozen --no-hashes --no-emit-project -o $(NEWEST_VENV)/locked.txt
+	uv pip install -q --python $(NEWEST_VENV)/bin/python -r $(NEWEST_VENV)/locked.txt
+	uv pip install -q --python $(NEWEST_VENV)/bin/python --upgrade-package sqlglot --upgrade-package duckdb -e .
+	$(NEWEST_VENV)/bin/python -c "import sqlglot, duckdb; print('sqlglot', sqlglot.__version__, '/ duckdb', duckdb.__version__)"
+	DST_TEST_DB=dst_test_newest_$(subst -,_,$(notdir $(CURDIR))) $(REQUIRE_DB) $(NEWEST_VENV)/bin/python -m pytest
 
 
 dev:            ## run the backend with reload

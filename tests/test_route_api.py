@@ -425,3 +425,78 @@ def test_a_decline_a_lens_would_refuse_returns_that_lens_refusal(
             for table in ("lens_version", "lens"):
                 c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
         _cleanup(org)
+
+
+def _publish_with_not_for(org: object) -> None:
+    from services.contracts.lens_config import NotFor
+    from services.db.session import org_session
+    from services.lenses import store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    bundle = jaffle_customer_value_bundle()
+    entry = NotFor(ask="door-scan attendance", sibling="attendance")
+    bundle.config.not_for = [entry]
+    bundle.semantic_model.not_for = [entry.model_dump(mode="json")]
+    with org_session(org) as session:
+        store.create_lens(session, bundle)
+        store.publish(session, "customer_value")
+
+
+def _drop_lenses(org: object) -> None:
+    eng = create_engine(settings.database_admin_url)
+    with eng.begin() as c:
+        for table in ("lens_version", "lens"):
+            c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
+
+
+@needs_db
+@pytest.mark.parametrize("covered", [True, False])
+def test_a_not_for_ask_returns_the_lens_refusal_naming_the_sibling(
+    monkeypatch: pytest.MonkeyPatch, covered: bool
+) -> None:
+    """A lens that declares it is not for an ask refuses it on the routed door
+    as on its own: routed there, or dropped by the router and so declined,
+    the answer is its refusal naming the sibling, never a serve and never
+    'uncovered'."""
+    org, raw = _make_org_token()
+    _publish_with_not_for(org)
+
+    def boom(*a: object, **k: object) -> QueryResponse:
+        raise AssertionError("run_lens_query must not be called for a not_for ask")
+
+    decision = (
+        RouteDecision(True, "customer_value", 0.8, [])
+        if covered
+        else RouteDecision(False, None, 0.3, [], "no governed lens covers this")
+    )
+    monkeypatch.setattr("services.api.route._route", lambda caller, q: decision)
+    monkeypatch.setattr("services.api.route.run_lens_query", boom)
+    try:
+        r = client.post(
+            "/v1/query",
+            json={"q": "Show me door-scan attendance against capacity"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["covered"] is True
+        assert body["routed_to"]["lens"] == "customer_value"
+        assert body["routed_to"]["decided_by"] == ("cosine" if covered else "refusal")
+        answer = body["answer"]
+        assert answer["status"] == "refused"
+        assert answer["answer"] == (
+            "this lens does not answer door-scan attendance; ask attendance"
+        )
+        eng = create_engine(settings.database_admin_url)
+        with eng.connect() as c:
+            row = c.execute(
+                text(
+                    "SELECT id FROM routing_decision "
+                    "WHERE org_id = :o ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"o": org},
+            ).first()
+        assert row is not None and answer["request_id"] == str(row[0])
+    finally:
+        _drop_lenses(org)
+        _cleanup(org)

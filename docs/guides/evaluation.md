@@ -113,7 +113,26 @@ dst test --rows          # execute every case — the data-drift check
 
 Answers certified before typed serving carry no typed gold; they grade against
 gold attributed from their certified SQL, and a green typed run stores the
-typed gold for next time.
+typed gold for next time. Attributed gold is the answer's metric: the measures
+in the certified SQL's outer projection, matched to declared metrics by column
+name, compiled expression or attribution. A column read only inside a filter or
+a subquery is not the answer, and neither is the numerator or denominator
+projected beside a ratio: SQL that returns opening ARR, its change and NRR over
+them grades against NRR.
+
+A compiled SQL proves a case when it is identical or equivalent to the
+certified text: equivalent once both are optimised, with aliases (table and
+output column), predicate order, a wrapping subquery and a latest-snapshot
+subquery's correlated or scalar spelling treated as spelling. One written
+another way is `differs`; when the data lane then returns the certified rows it
+is reported `differs (data equal)`, never a failure.
+
+The data lane compares rows on what they mean. On a declared time grain (week,
+month, quarter, year, from the gold or the typed reading), dated rows match by
+bucket: a month certified on its last snapshot day and generated on its first is
+the same month, and the pass says `bucket-match:`. Without a grain, only the two
+canonical month labels (every row a month start on one side, a month end on the
+other) match that way. Two rows that would fold into one bucket stay a failure.
 
 ## Behavioral cases: pinning shape
 
@@ -121,10 +140,14 @@ typed gold for next time.
 *shape* of a response, not its value. A case declares
 `expect: clarify | refuse | answer`, plus an optional `term` — the term a
 clarify must name, ignored on the other two shapes.
-Each case runs through the real pipeline — including the deterministic clarify
-and exclusion pre-checks, since that is the behavior being pinned — and passes
-only if the response comes back in the expected shape: a clarification, a
-refusal with no data served, or a data answer. Shape is the one thing a value
+Each case is asked the way the query door asks it: the server's typed serving
+and its decider, the lens's `untyped_fallback`, its certified answers, caps and
+answer mode, and the deterministic clarify and exclusion pre-checks, since that
+is the behavior being pinned. On a typed-only lens a question that does not type
+clarifies in the gate exactly as it does for a caller, so a case pinned to what
+the door serves passes. A case passes only if the response comes back in the
+expected shape: a clarification, a refusal with no data served, or a data
+answer. Shape is the one thing a value
 test can't express, and `expect: answer` measures refusal in both directions:
 a lens that drifts into refusing an answerable question was previously
 invisible unless that question was certified. Approved behavioral cases run
@@ -140,7 +163,10 @@ fresh lens with nothing certified publishes with a loud "gate SKIPPED" line,
 never a refusal. One shared check runs inside interactive publish *and* inside
 `dst apply`; apply cannot bypass it. A blocked publish returns `409` with the
 score, the bar it was judged against, and the failing cases. Under `warn`, the
-same findings surface loudly and publish proceeds.
+same findings surface loudly and publish proceeds. A lens whose files match what
+is published, with nothing else in the push changed, is not republished and not
+gated: an apply after a clean `dst plan` runs no eval. A probe artifact pushed
+again unchanged is no change.
 
 [![dst apply blocked by the eval gate: the certified answer diverged under a changed definition, accuracy regressed, nothing deployed](../assets/term/apply_blocked.svg)](../assets/term/apply_blocked.svg)
 

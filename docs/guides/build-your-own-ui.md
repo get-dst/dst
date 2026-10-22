@@ -105,7 +105,7 @@ allowed automatically outside production.
   `POST /v1/chat/completions` with a `dst_` key, set `model` to `dst/<lens>`.
   `stream: true` is accepted and returns a valid SSE stream, but composition is
   synchronous, so it arrives as one content delta then `[DONE]` — not token-by-token.
-- **Agent surfaces** get the same powers over MCP: twelve tools, same governance
+- **Agent surfaces** get the same powers over MCP: fourteen tools, same governance
   ([Agents over MCP](agents-mcp.md)).
 
 ## The control plane is yours too

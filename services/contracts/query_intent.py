@@ -30,6 +30,15 @@ class IntentOrder(BaseModel):
 TimeGrain = Literal["hour", "day", "week", "month", "quarter", "year"]
 
 
+class IntentCompare(BaseModel):
+    to: str = PField(
+        description="the comparison window: `previous_period` (the window of equal "
+        "length just before the intent's own), `previous_year` (the same window a year "
+        "earlier), or an explicit range — YYYY, YYYY-MM, or YYYY-MM-DD/YYYY-MM-DD with "
+        "both days inclusive",
+    )
+
+
 class QueryIntent(BaseModel):
     entity: str | None = None
     metrics: list[str] = PField(default_factory=list)
@@ -71,4 +80,11 @@ class QueryIntent(BaseModel):
         default_factory=list,
         description="a LISTING's projection: member names shown per row, no aggregation "
         "and no GROUP BY — the typed resolver's shape for 'list / show / which records'",
+    )
+    compare: IntentCompare | None = PField(
+        default=None,
+        description="run the intent over its own date window AND a comparison window "
+        "derived from it; every metric gains <metric>_compare, <metric>_delta and "
+        "<metric>_delta_pct columns. Needs the intent's window bounded on both ends on "
+        "the metrics' time field — without one the compile is refused",
     )

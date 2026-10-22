@@ -17,10 +17,10 @@ extracted from prose.
 | shape | a figure, a listing, or neither | — |
 | entity | the lens's entities | `semantic/entities/` |
 | reading | the declared readings of an ambiguous term | `definitions` with `possible_mappings` |
-| metric, dimension, grain | the entity's declared metrics, dimensions and time grains; a metric the question names word for word — by its identifier read as words, its `label`, or one of its `aliases` (`otd_rate` with `label: on-time delivery rate`) — is read off the text, and a question naming exactly one and nothing else is compiled without any decision | the entity file |
+| metric, dimension, grain | the entity's declared metrics, dimensions and time grains (an entity that declares no `dimensions:` groups, when the question asks a breakdown such as "per SDR", "by source" or a ranking, by its string, boolean and date fields and by an integer field whose profile holds a complete value dictionary: the dimensions its metric catalog lists); a metric the question names word for word — by its identifier read as words, its `label`, or one of its `aliases` (`otd_rate` with `label: on-time delivery rate`) — is read off the text, and a question naming exactly one and nothing else is compiled without any decision | the entity file |
 | ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
 | filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this; a value spelled like a common word, such as a team named `Most`, only where the question writes it as a name: capitalised mid-sentence, quoted, or possessive), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
-| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"); on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
+| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"), days included ("on 28 August 2026", "August 28, 2026", "between 5 and 12 October", "5–12 Oct", "the week of 5 October", "the first half of August 2026", "the first 7 days of October", "the last 3 days of August", "the start of August", "the end of last month"); a day written without a year is its most recent occurrence on or before the lens clock, and a day window on a month-form period column asks rather than serving the month. A vague part of a month ("early", "mid-", "late August") asks, offering the days each reading would use, and so does any other day-level qualifier beside a month the parser cannot turn into days ("the first few days of August"): neither is ever served as the whole month. A level metric reads "the end of August" as August's last snapshot; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
 
 A slot the question does not settle is asked back as a **clarification naming
 the slot**: which metric, which value of `status`. The asking agent answers by
@@ -39,6 +39,42 @@ line names the failure: `typed decisions unavailable: typesafe HTTP 402`. A
 typed-only question is refused with the same reason; asked again once the
 provider recovers, it types. The server logs the failure once until a typed
 decision succeeds again, and `/ready` reports it under `typed_decisions`.
+
+## Rails that ask instead of acting
+
+A few facts are read off the text and the lens, never decided, and each one
+can only move an answer toward a clarification:
+
+- **Candidates are answerable.** A field, dimension or filter is never offered
+  when it is a key (the declared `primary_key`, a column named `*_id`,
+  `*_key` or `unique_key`, a hidden column), nor a date or timestamp when the
+  question is not about time, unless the question names the column. A text
+  column that is one part of a composite key (`host_name` in `[day,
+  host_name]`) is not a key on its own: it is what a per-host question groups
+  by. A listing with nothing left asks which metric is meant, and a
+  breakdown nothing on offer groups asks with the entity's fields as the
+  options.
+- **One measure, several settings.** When the chosen metric's siblings differ
+  from it by one parameter token (`rebooked_within_7d`, `_30d`, `_90d`) and the
+  question states none, the answer asks which one, whatever the probability.
+  The ledger records it as a `parameter` clarification.
+- **A measure the lens does not declare.** A question naming a measure that
+  the entity holds only as a numeric column or a measure definition ("desk
+  hours" where every metric counts bookings) asks, rather than answering in
+  the nearest metric's unit. A bare `COUNT(*)` metric answers only a question
+  counting the entity's own rows ("how many records", "number of movements").
+- **A value no column can take.** A code-form value after a preposition ("for
+  APAC") that is no declared name, no period and no stored value, on an
+  entity whose text columns all have complete dictionaries, asks: "this lens
+  has no field for APAC".
+- **A shape `none` is not always a decline.** A question naming a governed
+  metric word for word is a figure; a question matching an entity's
+  `common_questions` or a "Use when" `use_cases` line asks for the shape
+  instead of refusing.
+- **The current period is to date.** "This month", "this week", "today"
+  resolve on the lens clock from the period's first day through today, and
+  the ledger carries the window it used. A `level` metric over a window asks
+  no further restriction: the window and the snapshot rule settle it.
 
 ## The policy: act unless none
 

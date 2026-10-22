@@ -22,7 +22,7 @@ and the pipeline falls back to the raw-SQL path.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -31,16 +31,45 @@ import sqlglot
 from sqlglot import exp
 
 from services.contracts.query_intent import IntentFilter, QueryIntent
+from services.contracts.response import ClarificationRequest
 from services.contracts.semantic_model import Entity, Join, Metric, SemanticModel
 from services.runtime.identifiers import is_reserved, quote_ident, quote_table
 
 _AGG = {"sum": "SUM", "count": "COUNT", "avg": "AVG", "min": "MIN", "max": "MAX"}
 _COMPARISON = {"=", "!=", ">", "<", ">=", "<="}
-_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 
 class CompileError(Exception):
     """The intent could not be compiled against the model (unknown name, ambiguous, …)."""
+
+
+class UnpinnedDimension(CompileError):
+    """An aggregate over an entity with ``pinned_dimensions`` that neither pins
+    one of them to a single value nor groups by it. Carries what a
+    clarification needs: the entity, the dimension, and its known values."""
+
+    def __init__(self, entity: str, dimension: str, values: Sequence[str]) -> None:
+        self.entity = entity
+        self.dimension = dimension
+        self.values = list(values)
+        shown = f" ({', '.join(self.values)})" if self.values else ""
+        super().__init__(
+            f"'{entity}' holds several kinds of rows told apart by {dimension}{shown}, and "
+            f"a figure across them adds different things together — name one {dimension} "
+            f"value, or ask for the figure by {dimension}"
+        )
+
+    def clarification(self) -> ClarificationRequest:
+        """The question to ask instead of declining: which kind, or one row per kind."""
+        shown = f" ({', '.join(self.values)})" if self.values else ""
+        return ClarificationRequest(
+            kind="unresolved_slot",
+            term=self.dimension,
+            question=f"The {self.entity} table holds several kinds of record in "
+            f"`{self.dimension}`{shown}: which one, or one row per kind?",
+            options=self.values,
+        )
 
 
 def _resolve_entity(model: SemanticModel, name: str | None, metrics: list[str]) -> Entity:
@@ -120,6 +149,15 @@ def _expand(
         chain = " -> ".join((*seen, metric.name))
         raise CompileError(f"metric '{metric.name}' is defined in terms of itself ({chain})")
     seen = (*seen, metric.name)
+    if metric.agg == "sum_distinct_on":
+        # One value per key is a property of the rows the whole query keeps,
+        # not of one aggregate over them: no expression placed in a SELECT
+        # list says it. compile_intent builds the deduplicated form itself.
+        raise CompileError(
+            f"metric '{metric.name}' sums one value per {', '.join(metric.distinct_on)}, "
+            "which only the metric compiler can emit — ask for it on its own, not "
+            "inside another metric"
+        )
     if metric.type == "simple":
         assert metric.agg is not None and metric.expr is not None  # pydantic enforces
         expr = metric.expr
@@ -147,7 +185,7 @@ def _expand(
         ref = _ref(m.group(1), by_name, metric.name)
         return "(" + _expand(ref, by_name, filters, seen, True) + ")"
 
-    return _PLACEHOLDER.sub(_sub, metric.expr)
+    return PLACEHOLDER.sub(_sub, metric.expr)
 
 
 def foreign_entity_refs(
@@ -200,6 +238,8 @@ def metric_entity_refs(
         expanded: str | None = metric_sql(metric, entity, inline_filters=True)
     except CompileError:
         expanded = None
+    if metric.agg == "sum_distinct_on":
+        expanded = ", ".join([metric.expr or "1", *metric.distinct_on])
     names = {e.name for e in model.entities}
     out: dict[str, list[str]] = {}
     for ref in foreign_entity_refs(
@@ -412,6 +452,7 @@ def _latest_snapshot(
     dialect: str,
     zone: str,
     buckets: Sequence[str] = (),
+    physical: str | None = None,
 ) -> str:
     """The predicate that makes a level metric read as a snapshot: the time
     field equals the latest value inside the window (or inside each grain
@@ -431,7 +472,15 @@ def _latest_snapshot(
     before the snapshot reads as absent, which is what its stock was."""
     inner = f"{entity.name}_latest"
     col = f"{quote_ident(inner, dialect)}.{quote_ident(field, dialect)}"
-    conds = [_predicate(col, f, dialect, zone) for f in window]
+    conds = [
+        _predicate(col, f, dialect, zone, _member_type(entity, field), physical) for f in window
+    ]
+    # The population bound rides the subquery too: the latest snapshot is the
+    # latest date the declared population has rows on. Read over the whole
+    # table, a later date held only by rows outside the bound becomes the
+    # snapshot, and the outer WHERE then keeps nothing of it.
+    if (entity.population_filter or "").strip():
+        conds.append(f"({_realias(entity.population_filter or '', entity.name, inner, dialect)})")
     if grain:
         same_bucket = _trunc_sql(entity.name, field, grain, dialect)
         conds.append(f"{_trunc_sql(inner, field, grain, dialect)} = {same_bucket}")
@@ -601,13 +650,106 @@ def _in_zone(value: Any, zone: str) -> Any:
     return moment.isoformat(sep=" ")
 
 
-def _predicate(col: str, f: IntentFilter, dialect: str, zone: str = "") -> str:
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _physical_type(
+    column_types: Mapping[str, Mapping[str, str]] | None, owner: Entity, name: str
+) -> str | None:
+    """The warehouse's own type for an entity's column, as its stored profile
+    recorded it (``column_types``: entity -> column -> type), or None."""
+    return ((column_types or {}).get(owner.name) or {}).get(name.rpartition(".")[2].lower())
+
+
+def _is_moment(physical: str | None) -> bool:
+    """Does the warehouse's own type hold a time of day (TIMESTAMP, DATETIME,
+    TIMESTAMP_NTZ, ``timestamp with time zone`` ...)?"""
+    known = (physical or "").upper()
+    return "TIMESTAMP" in known or "DATETIME" in known
+
+
+# The BigQuery types a date or moment bound can be cast to exactly.
+_BQ_MOMENT_TYPES = frozenset({"DATE", "DATETIME", "TIMESTAMP"})
+
+
+def _typed_lit(
+    value: Any, ftype: str | None, zone: str, dialect: str, physical: str | None = None
+) -> str:
+    """A literal bound on a date or timestamp column, cast to the column's
+    declared type. A bare string is coerced by the warehouse, and the
+    coercion differs: compared beside a date-typed expression it can read as
+    a DATE against a TIMESTAMP column, which some warehouses reject outright
+    rather than convert. The cast states the type once, in the dialect's own
+    spelling. A value that is not a plain date or moment (a month label, a
+    number) is written as it is, and so is a moment placed in the lens
+    timezone: the declared type does not say whether the column carries a
+    zone, and the bare literal with its offset is what lets each kind keep
+    its own reading (wall clock against a zone-less column, the instant
+    against a zoned one).
+
+    BigQuery has two moment types, and a column declared ``timestamp`` may
+    be either: ``DATETIME >= CAST(... AS TIMESTAMP)`` is a type error there.
+    So a BigQuery bound is cast to the column's ``physical`` type when its
+    profile recorded one, and otherwise a timestamp bound stays a bare
+    string, which BigQuery reads as whichever of the two the column is."""
+    if zone and ftype == "timestamp":
+        return _lit(_in_zone(value, zone))
+    if not isinstance(value, str) or ftype not in ("date", "timestamp"):
+        return _lit(value)
+    if dialect == "bigquery":
+        known = (physical or "").upper()
+        if known:  # stored as text or a number, no cast reads it: left bare
+            target = known if known in _BQ_MOMENT_TYPES else ""
+        else:
+            target = "DATE" if ftype == "date" else ""
+        shape = _DATE_ONLY if target == "DATE" else _NAIVE_MOMENT
+        if not target or not shape.match(value):
+            return _lit(value)
+    elif ftype == "date" and _DATE_ONLY.match(value):
+        target = "DATE"
+    elif ftype == "timestamp" and _NAIVE_MOMENT.match(value):
+        target = "TIMESTAMP"
+    else:
+        return _lit(value)
+    # Read in BigQuery's own spelling there: its TIMESTAMP is the zoned instant.
+    built = exp.DataType.build(target, dialect="bigquery" if dialect == "bigquery" else None)
+    node = exp.cast(exp.Literal.string(value), built)
+    return node.sql(dialect=dialect)
+
+
+def _predicate(
+    col: str,
+    f: IntentFilter,
+    dialect: str,
+    zone: str = "",
+    ftype: str | None = None,
+    physical: str | None = None,
+) -> str:
     """``zone``: the lens timezone when ``col`` is a timestamp whose bounds are
-    placed in it; empty otherwise."""
+    placed in it; empty otherwise. ``ftype``: the column's declared type, so a
+    date or timestamp bound is cast to it (``_typed_lit``); ``physical``: the
+    warehouse's own type for it, where the profile recorded one."""
 
     def lit(v: Any) -> str:
-        return _lit(_in_zone(v, zone) if zone else v)
+        return _typed_lit(v, ftype, zone, dialect, physical)
 
+    # A day bound on a column the warehouse stores as a moment: `<= '03-31'`
+    # reads as midnight of the 31st and drops that day's events (the declared
+    # `date` cannot say so; the profile can). The day is closed by the next
+    # day's midnight instead, exclusive — on every dialect.
+    if (
+        ftype == "date"
+        and _is_moment(physical)
+        and f.op in ("<=", ">", "=")
+        and isinstance(f.value, str)
+        and _DATE_ONLY.match(f.value)
+    ):
+        nxt = (date.fromisoformat(f.value) + timedelta(days=1)).isoformat()
+        if f.op == "<=":
+            return f"{col} < {lit(nxt)}"
+        if f.op == ">":
+            return f"{col} >= {lit(nxt)}"
+        return f"({col} >= {lit(f.value)} AND {col} < {lit(nxt)})"
     if f.op == "in":
         vals = f.value if isinstance(f.value, list) else [f.value]
         return f"{col} IN ({', '.join(lit(v) for v in vals)})"
@@ -686,12 +828,103 @@ def _governed_columns(metric: Metric, by_name: dict[str, Metric], dialect: str) 
                 cols |= {c.name.lower() for c in when.this.find_all(exp.Column)}
     refs = [metric.numerator, metric.denominator] if metric.type == "ratio" else []
     if metric.type == "derived" and metric.expr:
-        refs = _PLACEHOLDER.findall(metric.expr)
+        refs = PLACEHOLDER.findall(metric.expr)
     for ref in refs:
         sibling = by_name.get(ref or "")
         if sibling is not None and sibling is not metric:
             cols |= _governed_columns(sibling, by_name, dialect)
     return cols
+
+
+def _selection(node: exp.Expr) -> tuple[str, set[str]] | None:
+    """``(column, values)`` when *node* requires one column to equal one of a
+    set of string literals — ``col = 'v'``, ``col IN ('v', 'w')`` or an OR of
+    those on that one column — else None."""
+    node = node.unnest()
+    if isinstance(node, exp.EQ):
+        col, lit = node.this, node.expression
+        if isinstance(lit, exp.Column):
+            col, lit = lit, col
+        if isinstance(col, exp.Column) and isinstance(lit, exp.Literal) and lit.is_string:
+            return col.name.lower(), {lit.this}
+        return None
+    if isinstance(node, exp.In) and isinstance(node.this, exp.Column):
+        if node.args.get("query"):
+            return None
+        values = node.expressions
+        if values and all(isinstance(v, exp.Literal) and v.is_string for v in values):
+            return node.this.name.lower(), {v.this for v in values}
+        return None
+    if isinstance(node, exp.Or):
+        parts = [_selection(p) for p in node.flatten()]
+        if all(parts) and len({p[0] for p in parts if p}) == 1:
+            return parts[0][0], set().union(*(p[1] for p in parts if p))  # type: ignore[index]
+    return None
+
+
+def _pins_of(cond: exp.Expr) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    conjuncts = cond.unnest().flatten() if isinstance(cond.unnest(), exp.And) else [cond]
+    for part in conjuncts:
+        if (sel := _selection(part)) is not None:
+            col, values = sel
+            out[col] = out[col] & values if col in out else values
+    return out
+
+
+def metric_pins(metric: Metric, dialect: str | None) -> dict[str, set[str]]:
+    """column (bare, lowercased) -> the stored values a SIMPLE metric's own
+    meaning restricts its rows to: equality/IN conjuncts of its ``filters``,
+    and of the single WHEN of an aggregate over ``CASE WHEN … THEN x END``
+    (no ELSE, ELSE NULL, or ELSE 0 under SUM — anything else counts the other
+    rows too and pins nothing). ``overnight_minutes`` with
+    ``trip_type = 'overnight'`` pins trip_type to {'overnight'}: it can never
+    answer for 'one-way' rows. Ratio and derived metrics pin nothing here."""
+    if metric.type != "simple":
+        return {}
+    pins: dict[str, set[str]] = {}
+
+    def merge(found: dict[str, set[str]]) -> None:
+        for col, values in found.items():
+            pins[col] = pins[col] & values if col in pins else set(values)
+
+    for frag in metric.filters:
+        try:
+            merge(_pins_of(sqlglot.parse_one(frag, read=dialect or None)))
+        except sqlglot.errors.ParseError:
+            continue
+    if metric.expr:
+        try:
+            tree = sqlglot.parse_one(metric.expr, read=dialect or None)
+        except sqlglot.errors.ParseError:
+            tree = None
+        case = tree.this if isinstance(tree, exp.AggFunc) else tree
+        sum_like = isinstance(tree, exp.Sum) or (metric.agg or "").lower() == "sum"
+        if isinstance(case, exp.Case) and len(case.args.get("ifs") or []) == 1:
+            default = case.args.get("default")
+            selects = (
+                default is None
+                or isinstance(default, exp.Null)
+                or (sum_like and isinstance(default, exp.Literal) and default.this in ("0", "0.0"))
+            )
+            if selects:
+                merge(_pins_of(case.args["ifs"][0].this))
+    return pins
+
+
+def contradicted_literal(
+    metric: Metric, column: str, values: Sequence[Any], dialect: str | None
+) -> set[str] | None:
+    """The values *metric* pins *column* to, when the asked *values* include
+    one outside them (case-insensitively) — the metric counts other rows than
+    the ones asked for — else None."""
+    pinned = metric_pins(metric, dialect).get(column.lower())
+    if not pinned:
+        return None
+    allowed = {v.lower() for v in pinned}
+    if all(str(v).lower() in allowed for v in values):
+        return None
+    return pinned
 
 
 def prefer_weighted_ratio(intent: QueryIntent, model: SemanticModel) -> QueryIntent:
@@ -750,6 +983,21 @@ def govern_literals(intent: QueryIntent, model: SemanticModel) -> QueryIntent:
         owner, _, col = f.field.rpartition(".")
         if f.op in ("=", "in") and (not owner or owner == entity.name) and col.lower() in governed:
             value = f.value if isinstance(f.value, list) else [f.value]
+            # A literal the metric's own filter EXCLUDES is not a restatement:
+            # 'one-way' beside a metric counting only `trip_type = 'overnight'`
+            # asks for rows the metric never counts. Dropping it would serve one
+            # value's rows as another's; the metric choice is wrong, and that is
+            # said, not hidden.
+            for name in governed[col.lower()]:
+                metric = by_name.get(name)
+                pinned = metric and contradicted_literal(metric, col, value, model.dialect)
+                if pinned:
+                    raise CompileError(
+                        f"the question restricts {col} to {', '.join(_lit(v) for v in value)}, "
+                        f"but metric '{name}' counts only {col} = "
+                        f"{', '.join(_lit(v) for v in sorted(pinned))} — it cannot answer for "
+                        f"other rows; choose a metric that does not fix {col} to another value"
+                    )
             literal = f"{col} {'IN' if f.op == 'in' else '='} {', '.join(_lit(v) for v in value)}"
             dropped.append(f"{literal} (governed by {', '.join(governed[col.lower()])})")
             continue
@@ -810,6 +1058,7 @@ def _weighted_ratio_sql(
     filter_owners: Sequence[Entity],
     dialect: str,
     zone: str,
+    column_types: Mapping[str, Mapping[str, str]] | None = None,
 ) -> str:
     """A ratio across additivities, compiled as the handbook writes it: the
     flow operand summed over the window, the level operand read at the
@@ -853,7 +1102,15 @@ def _weighted_ratio_sql(
     weight = f"({days} / 7.0)" if metric.period_weight == "weeks" else str(days)
     # The pin's literals are zoned only for a timestamp field, as the WHERE's are.
     pin_zone = zone if _member_type(entity, field) == "timestamp" else ""
-    pin = _latest_snapshot(entity, field, window, None, dialect, pin_zone)
+    pin = _latest_snapshot(
+        entity,
+        field,
+        window,
+        None,
+        dialect,
+        pin_zone,
+        physical=_physical_type(column_types, entity, field),
+    )
     assert level.agg is not None and level.expr is not None
     conds = " AND ".join([pin, *metric.filters, *level.filters])
     level_sql = f"{_AGG[level.agg]}(CASE WHEN {conds} THEN {level.expr} END) * {weight}"
@@ -864,7 +1121,171 @@ def _weighted_ratio_sql(
     return f"CAST({level_sql} AS DOUBLE) / NULLIF({flow_sql}, 0)"
 
 
-def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
+def _single_value_columns(predicates: Sequence[str], dialect: str) -> set[str]:
+    """Bare column names each predicate holds to one value (``col = 'x'`` or a
+    one-item IN), read statically."""
+    out: set[str] = set()
+    for pred in predicates:
+        try:
+            tree = sqlglot.parse_one(pred, read=dialect)
+        except Exception:  # noqa: BLE001 — an unparsable predicate pins nothing
+            continue
+        for node in tree.find_all(exp.EQ, exp.In):
+            col = node.this if isinstance(node.this, exp.Column) else None
+            if col is None:
+                continue
+            if isinstance(node, exp.In) and len(node.expressions) != 1:
+                continue
+            out.add(col.name.lower())
+    return out
+
+
+def _check_pins(
+    intent: QueryIntent,
+    entity: Entity,
+    joined: Sequence[Entity],
+    metrics: Sequence[Metric],
+    definition_exprs: Sequence[str],
+    group_exprs: Sequence[str],
+    dialect: str,
+    domains: Mapping[str, Sequence[str]] | None,
+) -> None:
+    """Raise UnpinnedDimension when an aggregate leaves a pinned dimension of
+    any entity it reads neither held to one value nor grouped by. A metric
+    whose own meaning conditions on the dimension (its filters, its CASE)
+    pins it for itself, and so does one that declares its ``currency`` (the
+    author said what it is denominated in, the serve-time aggregation_scope
+    check's own exemption); the query pins it for every metric through an
+    equality or one-value IN in its filters, a definition, or a population
+    bound."""
+    by_name = {m.name: m for m in entity.metrics}
+    for e in joined:
+        if not e.pinned_dimensions:
+            continue
+        query_level = {
+            f.field.rpartition(".")[2].lower()
+            for f in intent.filters
+            if f.field.partition(".")[0] in (e.name, f.field)
+            and (
+                f.op == "="
+                or (f.op == "in" and len(f.value if isinstance(f.value, list) else [f.value]) == 1)
+            )
+        }
+        query_level |= _single_value_columns(
+            [*definition_exprs, *([e.population_filter] if e.population_filter else [])], dialect
+        )
+        grouped = {
+            d.rpartition(".")[2].lower()
+            for d in intent.dimensions
+            if d.partition(".")[0] in (e.name, d)
+        }
+        for expr in group_exprs:
+            try:
+                grouped |= {
+                    c.name.lower()
+                    for c in sqlglot.parse_one(expr, read=dialect).find_all(exp.Column)
+                    if c.table in ("", e.name)
+                }
+            except Exception:  # noqa: BLE001 — an unparsable expression groups nothing
+                continue
+        for dim in e.pinned_dimensions:
+            key = dim.lower()
+            if key in query_level or key in grouped:
+                continue
+            if (
+                e is entity
+                and metrics
+                and all(
+                    bool(m.currency) or key in _governed_columns(m, by_name, dialect)
+                    for m in metrics
+                )
+            ):
+                continue
+            raise UnpinnedDimension(e.name, dim, (domains or {}).get(dim, []))
+
+
+def _distinct_on_sql(
+    from_where: str,
+    group: Sequence[str],
+    aliases: Sequence[str],
+    items: Sequence[tuple[str, list[str]]],
+    metrics_by: dict[str, Metric],
+    snapshot_field: str | None,
+    dialect: str,
+) -> str:
+    """The aggregate query for metrics where one selects ``sum_distinct_on``.
+
+    The rows the query keeps (``from_where``: its FROM, joins and WHERE) are
+    read once in a subquery that projects each group expression, each
+    metric's row value (its filters and own window as CASE conditions) and,
+    for a distinct-on metric, a ROW_NUMBER over its key within each group,
+    ordered so a row the metric's conditions keep comes first. The outer
+    query aggregates those: a plain metric over every row, a distinct-on
+    metric over the first row of each key. Numbering after the WHERE means
+    a window that keeps only part of a key's rows still counts the key's
+    value once, and never loses it."""
+    if snapshot_field is not None:
+        raise CompileError(
+            "a metric summed once per key cannot be read as a latest snapshot — ask "
+            "for it on its own"
+        )
+    inner: list[str] = [f"{g} AS _dst_g{i}" for i, g in enumerate(group)]
+    outer: list[str] = []
+    for i, alias in enumerate(aliases):
+        outer.append(f"_dst_g{i} AS {quote_ident(alias, dialect)}")
+    for j, (name, own_window) in enumerate(items):
+        metric = metrics_by[name]
+        if metric.type != "simple":
+            raise CompileError(
+                f"metric '{name}' is a {metric.type} metric, and a query summing a metric "
+                "once per key compiles only simple metrics beside it — ask for it separately"
+            )
+        assert metric.agg is not None and metric.expr is not None
+        conds = [*own_window, *metric.filters]
+        value = f"CASE WHEN {' AND '.join(conds)} THEN {metric.expr} END" if conds else metric.expr
+        inner.append(f"{value} AS _dst_v{j}")
+        alias = quote_ident(name, dialect)
+        if metric.agg == "sum_distinct_on":
+            partition = ", ".join(dict.fromkeys([*group, *metric.distinct_on]))
+            # Some warehouses refuse a constant window ORDER BY; the key's own
+            # first expression orders nothing within a partition and is legal
+            # everywhere.
+            first = (
+                f"CASE WHEN {' AND '.join(conds)} THEN 0 ELSE 1 END"
+                if conds
+                else metric.distinct_on[0]
+            )
+            inner.append(
+                f"ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY {first}) AS _dst_n{j}"
+            )
+            outer.append(f"SUM(CASE WHEN _dst_n{j} = 1 THEN _dst_v{j} END) AS {alias}")
+        elif metric.agg == "count_distinct":
+            outer.append(f"COUNT(DISTINCT _dst_v{j}) AS {alias}")
+        else:
+            outer.append(f"{_AGG[metric.agg]}(_dst_v{j}) AS {alias}")
+    sql = f"SELECT {', '.join(outer)} FROM (SELECT {', '.join(inner)}{from_where}) AS _dst_rows"
+    if group:
+        sql += " GROUP BY " + ", ".join(f"_dst_g{i}" for i in range(len(group)))
+    return sql
+
+
+def compile_intent(
+    intent: QueryIntent,
+    model: SemanticModel,
+    *,
+    domains: Mapping[str, Sequence[str]] | None = None,
+    column_types: Mapping[str, Mapping[str, str]] | None = None,
+) -> str:
+    """``domains``: column -> known values, named in a pinned-dimension
+    refusal (``UnpinnedDimension``) so the caller can offer them.
+    ``column_types``: entity -> column (lowercased) -> the warehouse's own
+    type from the stored profile, which a window bound is cast to where the
+    declared type cannot say (``_typed_lit``)."""
+    if intent.compare is not None:
+        # Two windows, each compiled by this same function, joined in one statement.
+        from services.runtime.compare import compile_comparison
+
+        return compile_comparison(intent, model, domains=domains, column_types=column_types)
     # Before resolving anything: an empty intent has no entity to be ambiguous
     # about, and "ambiguous entity" is a confusing way to say "you asked for nothing".
     if not intent.metrics and not intent.dimensions and not intent.fields:
@@ -893,7 +1314,10 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     window_fields, window_filters = _per_metric_windows(
         intent, entity, [metrics_by[m] for m in intent.metrics]
     )
-    mixed = len(filter_sets) > 1 or compound or bool(window_fields)
+    # A metric summed once per key compiles through a deduplicating subquery
+    # (see _distinct_on_sql), where every metric carries its own conditions.
+    distinct_mode = any(metrics_by[m].agg == "sum_distinct_on" for m in intent.metrics)
+    mixed = len(filter_sets) > 1 or compound or bool(window_fields) or distinct_mode
     shared_metric_filters = list(next(iter(filter_sets))) if intent.metrics and not mixed else []
 
     # Every identifier this function emits is quoted when a bare emission would be
@@ -954,6 +1378,7 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     # A bound on a timestamp is a moment in the lens's declared clock; an
     # undeclared clock is never invented, and the literal then stays plain.
     zone = model.timezone if dialect in _ZONED_DIALECTS else ""
+    distinct_items: list[tuple[str, list[str]]] = []
     for m in intent.metrics:
         own_window = [
             _predicate(
@@ -961,13 +1386,24 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
                 f,
                 dialect,
                 zone if _member_type(entity, window_fields[m]) == "timestamp" else "",
+                _member_type(entity, window_fields[m]),
+                _physical_type(column_types, entity, window_fields[m]),
             )
             for f in window_filters
             if m in window_fields
         ]
+        if distinct_mode:
+            distinct_items.append((m, own_window))
+            continue
         if metrics_by[m].type == "ratio" and metrics_by[m].period_weight:
             weighted = _weighted_ratio_sql(
-                metrics_by[m], entity, intent, [o for o, _ in filter_exprs], dialect, zone
+                metrics_by[m],
+                entity,
+                intent,
+                [o for o, _ in filter_exprs],
+                dialect,
+                zone,
+                column_types,
             )
             select.append(f"{weighted} AS {quote_ident(m, dialect)}")
             continue
@@ -980,6 +1416,7 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
         f"SELECT {', '.join(select)} FROM {quote_table(entity.source.table, dialect)} "
         f"AS {quote_ident(entity.name, dialect)}"
     )
+    from_at = sql.index(" FROM ")
     # A metric's OWN expression may reach into a joined entity
     # (e.g. dollars_spent = quantity * prices.price across a declared
     # many_to_one). Those entities belong in the FROM clause exactly
@@ -1014,6 +1451,17 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
             f" {join.type.upper()} JOIN {quote_table(target.source.table, dialect)} "
             f"AS {quote_ident(target.name, dialect)} ON {join.on}"
         )
+    if intent.metrics:
+        _check_pins(
+            intent,
+            entity,
+            joined_entities,
+            [metrics_by[m] for m in intent.metrics],
+            definition_exprs,
+            [expr for _owner, expr in dim_exprs],
+            dialect,
+            domains,
+        )
     # A declared population bound rides EVERY query against its entity — the
     # same mechanism metric filters use: prose stays explanation, the filter
     # does the enforcing.
@@ -1030,7 +1478,12 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
     for pred in (
         [
             _predicate(
-                expr, f, dialect, zone if _member_type(owner, f.field) == "timestamp" else ""
+                expr,
+                f,
+                dialect,
+                zone if _member_type(owner, f.field) == "timestamp" else "",
+                _member_type(owner, f.field),
+                _physical_type(column_types, owner, f.field),
             )
             for f, (owner, expr) in zip(intent.filters, filter_exprs, strict=True)
             if id(f) not in lifted
@@ -1070,15 +1523,31 @@ def compile_intent(intent: QueryIntent, model: SemanticModel) -> str:
                 dialect,
                 zone if _member_type(entity, snapshot_field) == "timestamp" else "",
                 buckets,
+                _physical_type(column_types, entity, snapshot_field),
             )
         )
     if predicates:
         sql += " WHERE " + " AND ".join(predicates)
-    if intent.metrics and group:
+    if distinct_mode:
+        sql = _distinct_on_sql(
+            sql[from_at:],
+            group,
+            [*([bucket[0]] if bucket else []), *intent.dimensions],
+            distinct_items,
+            metrics_by,
+            snapshot_field,
+            dialect,
+        )
+    elif intent.metrics and group:
         sql += " GROUP BY " + ", ".join(group)
     if intent.order_by:
         parts: list[str] = []
         for o, resolved in zip(intent.order_by, order_exprs, strict=True):
+            if distinct_mode and resolved is not None:
+                raise CompileError(
+                    f"a metric summed once per key orders only by what it selects — "
+                    f"'{o.field}' is not selected"
+                )
             ref = quote_ident(o.field, dialect) if resolved is None else resolved[1]
             parts.append(f"{ref} {o.dir.upper()}")
         sql += " ORDER BY " + ", ".join(parts)

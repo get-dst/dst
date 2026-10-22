@@ -29,6 +29,7 @@ from services.contracts.query_intent import QueryIntent
 from services.contracts.resolution import MEASURE_KINDS, Resolution, Slot, derive_tag
 from services.contracts.semantic_model import Entity, SemanticModel
 from services.runtime import shape_guard, verification
+from services.runtime.compare import comparison_reading
 from services.runtime.compiler import CompileError, metric_sql
 
 Domains = dict[str, list[str]]
@@ -127,6 +128,11 @@ def from_intent(
         # window slot), always on the ledger: a snapshot figure that reads as a
         # period total is the silent-wrong class this slot exists to name.
         slots.append(Slot(kind="window", name=reading[0], source="declared", value=reading[1]))
+    if (compared := comparison_reading(intent, model)) is not None:
+        # The second window is the caller's own declaration (compare.to) read
+        # against the first: on the ledger, so the compare columns never read
+        # as figures of the asked window.
+        slots.append(Slot(kind="window", name=compared[0], source="declared", value=compared[1]))
     time_fields = _time_fields(model)
     bool_fields = {
         f.name.lower() for e in _governed(model) for f in e.fields if f.type == "boolean"
@@ -612,6 +618,120 @@ def attribute(
     return Resolution(method="attributed", slots=slots, tag=derive_tag(slots))
 
 
+def _output_name(proj: exp.Expr) -> str:
+    return (proj.alias_or_name or "").lower()
+
+
+def _single_projection(select: exp.Select, proj: exp.Expr) -> str:
+    """*select* reduced to one projection, without its CTEs and with every
+    nested query blanked: what that one output column computes, and nothing a
+    filter subquery or a sibling CTE reads."""
+    one = select.copy()
+    one.set("expressions", [proj.copy()])
+    one.set("with_", None)
+    for sub in [s for s in one.find_all(exp.Select) if s is not one]:
+        if sub.parent is not None:
+            sub.replace(exp.Null())
+    return one.sql()
+
+
+def _ratio_inputs(projections: list[exp.Expr]) -> set[int]:
+    """Indexes of the projections that are the numerator or denominator of
+    another projected ratio: by name (a CTE column the division reads) or by
+    expression (``SUM(bop)`` beside ``(SUM(bop) + SUM(chg)) / SUM(bop)``)."""
+    out: set[int] = set()
+    for j, other in enumerate(projections):
+        node = other.this if isinstance(other, exp.Alias) else other
+        for div in node.find_all(exp.Div):
+            names = {c.name.lower() for c in div.find_all(exp.Column)}
+            canons = {_canon(a) for a in div.find_all(exp.AggFunc)}
+            for i, proj in enumerate(projections):
+                if i == j:
+                    continue
+                inner = proj.this if isinstance(proj, exp.Alias) else proj
+                bare = inner.name.lower() if isinstance(inner, exp.Column) else None
+                if (
+                    _output_name(proj) in names
+                    or (bare is not None and bare in names)
+                    or _canon(inner) in canons
+                ):
+                    out.add(i)
+    return out
+
+
+def _projection_metrics(
+    stmt: exp.Expr,
+    select: exp.Select,
+    proj: exp.Expr,
+    model: SemanticModel,
+    declared: dict[str, str],
+    dialect: str,
+    depth: int = 0,
+) -> list[Slot]:
+    """The metric one output column IS: a declared metric it is named after,
+    else (a bare column of a derived table) what that table computes under the
+    name, else what the column's own expression attributes to."""
+    name = _output_name(proj)
+    if name in declared:
+        return [Slot(kind="metric", name=declared[name], source="declared")]
+    inner = proj.this if isinstance(proj, exp.Alias) else proj
+    if isinstance(inner, exp.Column):
+        if depth >= 4:
+            return []
+        wanted = inner.name.lower()
+        for sel in stmt.find_all(exp.Select):
+            if sel is select:
+                continue
+            for p in sel.expressions:
+                if _output_name(p) == wanted:
+                    return _projection_metrics(stmt, sel, p, model, declared, dialect, depth + 1)
+        return []
+    if not list(inner.find_all(exp.AggFunc)):
+        return []
+    one = attribute(_single_projection(select, proj), model, dialect=dialect)
+    return [s for s in one.slots if s.kind == "metric" and s.source != "unknown"]
+
+
+def answer_measures(
+    res: Resolution, sql: str, model: SemanticModel, dialect: str | None = None
+) -> Resolution:
+    """*res* (``attribute`` of *sql*) with its metric slots narrowed to the
+    answer's metric: the measures in the outer projection, matched to declared
+    metrics by output name, compiled expression or attribution. A column read
+    only inside a filter, a subquery or a sibling CTE is not the answer, and
+    neither is a projected numerator or denominator of a projected ratio
+    (bop and change beside nrr = (bop + change) / bop: the answer is nrr).
+
+    This is the reading a certified SQL's gold needs — the figure a human
+    approved — and not the serving ledger's, which records everything the
+    SQL reads. A projected measure no declared metric names stays the
+    inferred aggregate it is, so a gold that reads only a filter's metric
+    governed is not one. Unchanged when the outer projection carries no
+    measure at all (a listing) or the SQL does not parse."""
+    read = dialect or model.dialect
+    try:
+        stmt = sqlglot.parse_one(sql, read=read)
+    except Exception:  # noqa: BLE001 — unparseable: the attribution stands as it is
+        return res
+    outer = stmt.this if isinstance(stmt, exp.SetOperation) else stmt
+    if not isinstance(outer, exp.Select):
+        return res
+    declared = {m.name.lower(): m.name for e in _governed(model) for m in e.metrics if m.name}
+    projections = list(outer.expressions)
+    inputs = _ratio_inputs(projections)
+    picked: list[Slot] = []
+    for i, proj in enumerate(projections):
+        if i in inputs:
+            continue
+        for slot in _projection_metrics(stmt, outer, proj, model, declared, read):
+            if all((slot.name, slot.source) != (s.name, s.source) for s in picked):
+                picked.append(slot)
+    if not picked:
+        return res
+    slots = [*picked, *(s for s in res.slots if s.kind != "metric")]
+    return res.model_copy(update={"slots": slots, "tag": derive_tag(slots)})
+
+
 def governed_terms(sql: str, model: SemanticModel, dialect: str | None = None) -> list[str]:
     """What a certified answer's SQL reads, by name, for the lexical veto: the
     declared metric and definition names attribution finds, and the columns
@@ -735,16 +855,45 @@ def grade(expected: Resolution, got: Resolution | None) -> tuple[str, str]:
     want, have = _governed_names(expected, kinds), _governed_names(got, kinds)
     if not want:
         return "skipped", "oracle SQL names no declared metric, definition or dimension"
+    # One date axis grouped raw on one side and bucketed on the other (the
+    # certified SQL groups by month_end_date, the reading has grain: month on
+    # it) is the same breakdown: the data lane matches those rows on the
+    # bucket, and the slot lane reads the pair the same way, said in the
+    # evidence. The bucketed side's grain then has nothing to compare against.
+    want_grains = {s.name for s in expected.slots if s.kind == "grain" and s.source in GOVERNED}
+    have_grains = {s.name for s in got.slots if s.kind == "grain" and s.source in GOVERNED}
+    raw_vs_bucket = {
+        n for k, n in want if k == "dimension" and ("dimension", n) not in have and n in have_grains
+    }
+    bucket_vs_raw = {
+        n for k, n in have if k == "dimension" and ("dimension", n) not in want and n in want_grains
+    }
+    axes = raw_vs_bucket | bucket_vs_raw
+    if axes:
+        want = {(k, n) for k, n in want if n not in axes or k not in ("dimension", "grain")}
+        have = {(k, n) for k, n in have if n not in axes or k not in ("dimension", "grain")}
+    bucket_note = (
+        "bucket-match: "
+        + ", ".join(sorted(axes))
+        + " grouped by its date on one side and by its period bucket on the other — the "
+        "same axis"
+        if axes
+        else ""
+    )
     # Subset, not equality: a human-written oracle often sums a raw column
     # where generation used the declared metric. Generation resolving to MORE
     # governed names than the oracle is not a miss — the miss is a governed
     # name the oracle carries and generation did not.
     if want <= have:
         want_grain = {
-            s.value or "" for s in expected.slots if s.kind == "grain" and s.source in GOVERNED
+            s.value or ""
+            for s in expected.slots
+            if s.kind == "grain" and s.source in GOVERNED and s.name not in axes
         }
         have_grain = {
-            s.value or "" for s in got.slots if s.kind == "grain" and s.source in GOVERNED
+            s.value or ""
+            for s in got.slots
+            if s.kind == "grain" and s.source in GOVERNED and s.name not in axes
         }
         if want_grain != have_grain:
             return "failed", f"grain: expected {sorted(want_grain)}, got {sorted(have_grain)}"
@@ -759,7 +908,7 @@ def grade(expected: Resolution, got: Resolution | None) -> tuple[str, str]:
                 ", ".join(sorted(n for k, n in have - want if k in MEASURE_KINDS))
                 or "a declared name"
             )
-        return "passed", ""
+        return "passed", bucket_note
 
     def _show(names: set[tuple[str, str]], res: Resolution) -> str:
         # The same name under two kinds (a metric and a definition both called

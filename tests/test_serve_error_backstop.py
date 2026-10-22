@@ -13,6 +13,7 @@ degraded until an apply clears it, and a certified answer that errors serves
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ from services.app import app
 from services.auth.tokens import hash_token, new_admin_token
 from services.config import settings
 from services.contracts.fakes import FakeConnector, fake_llm_providers
+from services.contracts.query_intent import QueryIntent
 from services.contracts.response import QueryResponse
 from services.contracts.trace import TraceLog
 from services.db.session import org_session
@@ -78,6 +80,25 @@ def test_warehouse_execution_error_is_tagged_for_the_backstop() -> None:
     res = _run("none")
     assert res.response.status == "error"
     assert res.error_kind == "warehouse"
+    assert res.compiled is False  # written SQL, not the compiler's
+
+
+def test_a_failure_of_compiled_sql_says_the_sql_was_compiled() -> None:
+    """SQL built from an intent (the metrics door, a typed reading) is dst's own;
+    the backstop needs to know that to attribute the failure."""
+    res = run_query(
+        question="revenue",
+        lens_name="customer_value",
+        org_id="org-1",
+        caller="analyst",
+        semantic_model=jaffle_customer_value(),
+        connector=FailingConnector(),
+        generator=FixedSQLGenerator(
+            "SELECT sum(amount) AS revenue FROM orders", intent=QueryIntent(metrics=["revenue"])
+        ),
+        composer=None,
+    )
+    assert res.error_kind == "warehouse" and res.compiled is True
     assert res.trace.error is not None and "Binder Error" in res.trace.error
 
 
@@ -175,7 +196,9 @@ def _cleanup(org: object) -> None:
         c.execute(text("DELETE FROM org WHERE id = :o"), {"o": org})
 
 
-def _fake_pipeline(monkeypatch: pytest.MonkeyPatch, *, fail: bool) -> None:
+def _fake_pipeline(
+    monkeypatch: pytest.MonkeyPatch, *, fail: bool, error: str = RAW_ERROR, compiled: bool = False
+) -> None:
     """Pin run_query's outcome; the wiring under test starts where it returns."""
     monkeypatch.setattr(settings, "providers", fake_llm_providers())
 
@@ -186,7 +209,7 @@ def _fake_pipeline(monkeypatch: pytest.MonkeyPatch, *, fail: bool) -> None:
                 response=QueryResponse(
                     lens=str(kw["lens_name"]),
                     status="error",
-                    answer=f"The query could not be executed: {RAW_ERROR}",
+                    answer=f"The query could not be executed: {error}",
                     sql="SELECT 1",
                     request_id=rid,
                 ),
@@ -199,9 +222,10 @@ def _fake_pipeline(monkeypatch: pytest.MonkeyPatch, *, fail: bool) -> None:
                     sql="SELECT 1",
                     valid=False,
                     status="error",
-                    error=RAW_ERROR,
+                    error=error,
                 ),
                 error_kind="warehouse",
+                compiled=compiled,
             )
         return PipelineResult(
             response=QueryResponse(
@@ -380,5 +404,108 @@ def test_a_generation_fault_opens_no_data_team_ticket(
         assert "hit a data problem" not in str(body["answer"])  # the old misattribution
         assert "no data-team ticket" in str(body["answer"])
         assert _tickets(org) == []
+    finally:
+        _cleanup(org)
+
+
+# ── SQL the compiler wrote: dst's own fault unless the schema moved ──────────
+
+
+def _baseline(monkeypatch: pytest.MonkeyPatch, applied: bool) -> None:
+    """Whether the backstop finds an applied profile baseline for the connection."""
+    stored = SimpleNamespace(
+        list_profiles=lambda session, connection: [object()] if applied else []
+    )
+    monkeypatch.setattr(query_api, "profile_store", stored)
+
+
+BQ_COMPILED_ERROR = (
+    "400 POST https://bigquery.googleapis.com/bigquery/v2/projects/p/jobs: DATE_SUB does "
+    "not support the MONTH date part when the argument is TIMESTAMP type at [1:1138]"
+)
+
+
+@needs_db
+def test_compiled_sql_the_warehouse_rejects_is_dsts_defect_not_a_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The schema matches the applied baseline, so the compiled SQL itself is
+    wrong: no data-team ticket, no degraded mark, and the answer says the SQL
+    is dst's own and that asking again will not help."""
+    org, raw = _org_and_token()
+    _seed_lens(org)
+    monkeypatch.setattr(drift_watch, "check_connection", lambda s, c, o: None)
+    _baseline(monkeypatch, True)
+    _fake_pipeline(monkeypatch, fail=True, error=BQ_COMPILED_ERROR, compiled=True)
+    try:
+        body = _query(raw)
+        assert body["status"] == "error"
+        answer = str(body["answer"])
+        assert answer.startswith("This question hit a dst defect: the warehouse rejected")
+        assert "the SQL dst compiled" in answer and "schema still matches" in answer
+        assert "no data-team ticket" in answer and body["request_id"] in answer
+        assert "data problem" not in answer and "DATE_SUB" not in answer
+        assert not any("schema drift" in d for d in body["degraded"])
+        assert _tickets(org) == []
+        # A vocabulary error with no baseline to compare is still dst's, said
+        # without claiming the schema held.
+        _baseline(monkeypatch, False)
+        _fake_pipeline(
+            monkeypatch, fail=True, error="No matching signature for operator >=", compiled=True
+        )
+        bare = str(_query(raw)["answer"])
+        assert "dst defect" in bare and "schema still matches" not in bare
+        assert _tickets(org) == []
+    finally:
+        _cleanup(org)
+
+
+@needs_db
+def test_compiled_sql_broken_by_drift_is_still_the_data_teams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A column renamed since apply breaks compiled SQL too: that is drift,
+    ticketed and marked, whatever the engine called the error."""
+    org, raw = _org_and_token()
+    _seed_lens(org)
+    report = drift_watch.DriftReport(
+        connection="jaffle",
+        fingerprint=drift_watch.fingerprint("jaffle", ["orders:column_type:ordered_at"]),
+        findings=[],
+    )
+    monkeypatch.setattr(drift_watch, "check_connection", lambda s, c, o: report)
+    _fake_pipeline(
+        monkeypatch, fail=True, error="No matching signature for operator >=", compiled=True
+    )
+    try:
+        body = _query(raw)
+        (ticket,) = _tickets(org)
+        assert body["answer"] == (
+            "This question hit a data problem (the warehouse schema changed since the layer "
+            f"was applied) — ticket {ticket[0]} opened for the data team."
+        )
+        assert any("DEGRADED: schema drift" in d for d in body["degraded"])
+    finally:
+        _cleanup(org)
+
+
+@needs_db
+def test_compiled_sql_without_a_baseline_keeps_the_incident_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no applied baseline nothing says the schema held, so a missing
+    column on compiled SQL is ticketed as before; a refused grant is the
+    warehouse's whatever SQL it was sent."""
+    org, raw = _org_and_token()
+    _seed_lens(org)
+    monkeypatch.setattr(drift_watch, "check_connection", lambda s, c, o: None)
+    _baseline(monkeypatch, False)
+    try:
+        _fake_pipeline(monkeypatch, fail=True, compiled=True)
+        assert "a column the query needs is missing" in str(_query(raw)["answer"])
+        _baseline(monkeypatch, True)
+        _fake_pipeline(monkeypatch, fail=True, error="403 Permission denied", compiled=True)
+        assert "the warehouse refused access" in str(_query(raw)["answer"])
+        assert len(_tickets(org)) == 2
     finally:
         _cleanup(org)

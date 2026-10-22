@@ -76,14 +76,14 @@ def _wide_warehouse() -> dict[str, dict[str, str]]:
     # One dataset that sorts first and alone overflows the cap, then the one
     # that holds what the author actually wants — the field shape exactly.
     filler = {f"t{i:04d}": "TABLE" for i in range(BigQueryConnector._MAX_INTROSPECT_TABLES + 5)}
-    return {"AAA_CENSUS": filler, "finance_marts": {"finance_kpis": "TABLE"}}
+    return {"AAA_CENSUS": filler, "store_marts": {"store_kpis": "TABLE"}}
 
 
 def test_capped_listing_says_truncated() -> None:
     snap = _connector(_wide_warehouse()).introspect()
     assert len(snap.tables) == BigQueryConnector._MAX_INTROSPECT_TABLES
     assert snap.truncated is True
-    assert not any(t.name.endswith("finance_kpis") for t in snap.tables)
+    assert not any(t.name.endswith("store_kpis") for t in snap.tables)
 
 
 def test_uncapped_listing_is_not_truncated() -> None:
@@ -96,12 +96,12 @@ def test_tables_resolve_against_the_full_catalog() -> None:
     assert isinstance(conn, TargetedIntrospect)
     # Every qualification depth reaches past the cap.
     for spelling in (
-        "finance_kpis",
-        "finance_marts.finance_kpis",
-        "proj.finance_marts.finance_kpis",
+        "store_kpis",
+        "store_marts.store_kpis",
+        "proj.store_marts.store_kpis",
     ):
         snap = conn.introspect_tables([spelling])
-        assert [t.name for t in snap.tables] == ["proj.finance_marts.finance_kpis"], spelling
+        assert [t.name for t in snap.tables] == ["proj.store_marts.store_kpis"], spelling
 
 
 def test_views_have_no_fake_row_count() -> None:

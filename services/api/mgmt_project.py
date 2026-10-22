@@ -28,9 +28,13 @@ auth and RLS stay server-side.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -40,6 +44,7 @@ from services.certify import store as certify_store
 from services.contracts.lens_config import LensConfig
 from services.contracts.semantic_model import Definition
 from services.contracts.shared_semantic import SharedEntity, SharedRelationship
+from services.db.session import org_session
 from services.evals import store as eval_store
 from services.lenses import connection_store, store
 from services.lenses.repo import render_lens_repo
@@ -64,6 +69,7 @@ from services.semantic.files import (
 from services.validate.report import definition_double_truth
 
 router = APIRouter(prefix="/mgmt/project", tags=["project"])
+log = logging.getLogger("dst")
 
 _APPLY_LOCK_NS = 0x4B_41_50_4C  # 'KAPL' — namespace for the per-org apply lock
 
@@ -77,6 +83,161 @@ def _apply_lock_key(org_id: uuid.UUID) -> int:
 
 class ProjectFiles(BaseModel):
     files: dict[str, str]
+
+
+def _select(
+    session: Session, files: dict[str, str], select: list[str], scope: str
+) -> tuple[plan_engine.Selection | None, dict[str, str]]:
+    """``--select``/``--scope`` → (selection, the filtered push). No selector
+    and scope ``all`` is the whole push, exactly as before."""
+    selectors = [s.strip() for s in select if s.strip()]
+    if not selectors and scope == "all":
+        return None, files
+    try:
+        selection = plan_engine.resolve_selection(
+            files,
+            selectors,
+            scope,
+            db_semantic=_db_semantic(session),
+            db_trees=_db_trees(session),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return selection, selection.files
+
+
+def _selection_row(selection: plan_engine.Selection) -> dict[str, object]:
+    return {
+        "scope": "selection",
+        "selectors": selection.selectors,
+        "kinds": selection.scope,
+        "lenses": selection.lenses,
+        "assets": selection.assets,
+        "excluded": selection.excluded,
+        "notes": selection.notes,
+    }
+
+
+def _declared_tables(session: Session, files: dict[str, str]) -> dict[str, list[str]]:
+    """{connection: tables its shared entities read} — the stored layer with
+    the push's entity files layered on. What the apply-time connection probe
+    reads one row-less page of, instead of introspecting every dataset."""
+    entities = {
+        e.name: e
+        for e in (
+            SharedEntity.model_validate(a.body)
+            for a in semantic_store.list_assets(session, "entity")
+        )
+    }
+    try:
+        entities.update(parse_semantic_files(split_semantic(files))[0])
+    except ValueError:
+        pass  # the semantic pass reports it; the probe falls back to the stored layer
+    out: dict[str, list[str]] = {}
+    for entity in entities.values():
+        out.setdefault(entity.source.connection, []).append(entity.source.table)
+    return out
+
+
+# ── apply jobs: an apply runs in the background and is polled by id ──────────
+# State lives in the org's `setting` table (key apply_job:<id>, RLS-scoped),
+# written from its own short transactions so a poll sees progress while the
+# apply's own transaction is still open.
+_JOB_PREFIX = "apply_job:"
+_LIVE = ("queued", "running")
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _job_write(org_id: uuid.UUID, job_id: str, value: dict[str, object]) -> None:
+    import json
+
+    with org_session(org_id) as s:
+        s.execute(
+            text(
+                "INSERT INTO setting (org_id, key, value) VALUES (:o, :k, CAST(:v AS jsonb)) "
+                "ON CONFLICT (org_id, key) DO UPDATE SET value = EXCLUDED.value"
+            ),
+            {"o": org_id, "k": _JOB_PREFIX + job_id, "v": json.dumps(value, default=str)},
+        )
+
+
+def _job_read(session: Session, job_id: str) -> dict[str, object] | None:
+    value = session.execute(
+        text("SELECT value FROM setting WHERE key = :k"), {"k": _JOB_PREFIX + job_id}
+    ).scalar()
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _live_job(session: Session) -> str | None:
+    """The id of this org's apply job still queued or running, if any."""
+    rows = session.execute(
+        text(
+            "SELECT key, value FROM setting WHERE key LIKE :p "
+            "AND value->>'state' IN ('queued', 'running') ORDER BY created_at DESC"
+        ),
+        {"p": _JOB_PREFIX + "%"},
+    ).all()
+    return str(rows[0][0]).removeprefix(_JOB_PREFIX) if rows else None
+
+
+def _lock_free(org_id: uuid.UUID) -> bool:
+    """Whether no transaction holds the org's apply lock right now (probed in
+    a transaction of its own, which releases it on commit)."""
+    with org_session(org_id) as s:
+        return bool(
+            s.execute(
+                text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _apply_lock_key(org_id)}
+            ).scalar()
+        )
+
+
+def _busy_detail(job_id: str | None) -> str:
+    if job_id is None:
+        return "another apply is in progress for this org — retry shortly"
+    return (
+        f"another apply is in progress for this org (job {job_id}) — "
+        f"`dst apply status {job_id}` attaches to it"
+    )
+
+
+def _run_job(
+    job_id: str,
+    org_id: uuid.UUID,
+    identity: AdminIdentity,
+    body: ProjectFiles,
+    job: dict[str, object],
+    kwargs: dict[str, object],
+) -> None:
+    """The background half of `POST /apply?background=true`: the apply itself,
+    in its own org session under the org's lock, recording per-lens progress
+    and the final rows (or the HTTP error a synchronous apply would raise)."""
+    progress: list[dict[str, object]] = []
+    job.update(state="running", started_at=_now(), progress=progress)
+    _job_write(org_id, job_id, job)
+
+    def on_row(row: dict[str, object]) -> None:
+        progress.append({k: row[k] for k in ("lens", "action") if k in row})
+        job["updated_at"] = _now()
+        _job_write(org_id, job_id, job)
+
+    try:
+        with org_session(org_id) as session:
+            try:
+                out = _apply(session, body, org_id, identity, progress=on_row, **kwargs)  # type: ignore[arg-type]
+            except ApplyStepTimeout as exc:
+                session.rollback()
+                raise HTTPException(status_code=504, detail=f"{APPLY_ABORTED_PREFIX}{exc}") from exc
+        job.update(state="done", result=out)
+    except HTTPException as exc:
+        job.update(state="failed", status_code=exc.status_code, detail=exc.detail)
+    except Exception as exc:  # noqa: BLE001 — the job must end in a state, never hang 'running'
+        log.exception("apply job %s failed", job_id)
+        job.update(state="failed", status_code=500, detail=str(exc))
+    job["finished_at"] = _now()
+    _job_write(org_id, job_id, job)
 
 
 def _db_tree(session: Session, name: str, bundle: store.LensBundle) -> dict[str, str]:
@@ -372,16 +533,34 @@ def _dormant_definition_warnings(session: Session) -> list[str]:
     return warnings
 
 
+def _unselected_stale_error(lens: str, assets: list[str]) -> str:
+    return (
+        f"not selected, but the selection changes what it compiles against "
+        f"({', '.join(assets)}) — apply refuses; select it too (`{assets[0]}+` takes "
+        "every lens downstream of it) or drop --select"
+    )
+
+
 @router.post("/plan")
 def plan_project(
     body: ProjectFiles,
     session: Session = Depends(get_app_session),
     org_id: uuid.UUID = Depends(get_admin_org),
+    # `dst plan --select` / `--scope`: preview exactly what the same flags on
+    # apply would push (repeatable selectors; see plan.resolve_selection).
+    select: list[str] = Query(default=[]),
+    scope: str = Query(default="all"),
 ) -> list[dict[str, object]]:
     """Dry-run of apply for a pushed file tree: per-path diffs and statuses with
     full validation — a plan never mutates, and its whole job is to predict
-    apply. A final `unchecked` row names the gates only a real apply can run."""
+    apply. A final `unchecked` row names the gates only a real apply can run.
+    With a selection, the first row names it and everything after describes
+    the selected push only."""
     out: list[dict[str, object]] = []
+    selection, files = _select(session, body.files, select, scope)
+    if selection is not None:
+        out.append(_selection_row(selection))
+        body = ProjectFiles(files=files)
 
     # ── shared layer: per-path diffs + FULL validation (a plan never mutates) ─
     # Plan's whole job is to predict apply. Without this it renders a clean
@@ -418,7 +597,7 @@ def plan_project(
     # DB assets no pushed file mentions — advisory only (absence never deletes),
     # and only when the push actually carries semantic/ files: a lens-only push
     # must not spam orphans.
-    if incoming_semantic and semantic_ok:
+    if incoming_semantic and semantic_ok and selection is None:
         incoming_keys = (
             {f"entity/{n}" for n in incoming_entities}
             | {f"definition/{t}" for t in incoming_definitions}
@@ -526,6 +705,9 @@ def plan_project(
     )
     for lens in sorted(set(stale) - set(incoming)):
         errors = broken_recompiles.get(lens, [])
+        if selection is not None and lens not in selection.lenses:
+            # Apply refuses a selection that leaves a lens stale it did not select.
+            errors = [_unselected_stale_error(lens, stale[lens])]
         row = {
             "lens": lens,
             "status": "invalid" if errors else "stale",
@@ -565,7 +747,7 @@ def plan_project(
     # cloud-authored, or legacy. Advisory (adopt or leave for its owner —
     # deletion is never the default), scoped like semantic orphans: lenses only
     # when the push carries lenses/ files, connections only with dst.yaml.
-    if incoming:
+    if incoming and selection is None:
         for name in plan_engine.server_only(store.lens_names(session), incoming):
             out.append(
                 {
@@ -633,9 +815,25 @@ def plan_project(
     return out
 
 
-@router.post("/apply")
+@router.get("/apply/jobs/{job_id}")
+def apply_job(
+    job_id: str,
+    session: Session = Depends(get_app_session),
+    org_id: uuid.UUID = Depends(get_admin_org),
+) -> dict[str, object]:
+    """One background apply's state: queued | running | done | failed, its
+    per-lens progress, and — once done — the same rows a synchronous apply
+    returns (failed: the HTTP status and detail it would have raised)."""
+    job = _job_read(session, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"apply job '{job_id}' not found")
+    return {"job_id": job_id, **job}
+
+
+@router.post("/apply", response_model=None)
 def apply_project(
     body: ProjectFiles,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_app_session),
     org_id: uuid.UUID = Depends(get_admin_org),
     identity: AdminIdentity = Depends(get_admin_identity),
@@ -655,7 +853,14 @@ def apply_project(
     # Publish only these lenses of the push (repeatable); the rest are treated
     # as unchanged. Refused when the push would leave one of them stale.
     lens: list[str] = Query(default=[]),
-) -> list[dict[str, object]]:
+    # `dst apply --select` / `--scope`: push only the selection (see
+    # plan.resolve_selection); unselected lenses are not validated or touched.
+    select: list[str] = Query(default=[]),
+    scope: str = Query(default="all"),
+    # Run the apply as a background job and answer 202 with its id at once;
+    # `GET /apply/jobs/{id}` reports progress and, when done, the rows.
+    background: bool = Query(default=False),
+) -> list[dict[str, object]] | JSONResponse:
     """Apply a pushed file tree — the single deployment door (`dst apply`).
     One transaction per org under an advisory lock (a concurrent apply gets a
     409), landing connections → profiles → semantic layer → lenses blue/green.
@@ -671,19 +876,51 @@ def apply_project(
         )
     gate_override = override_reason.strip() if (allow_failing_cases or allow_case) else None
     allow_cases = frozenset(c.strip() for c in allow_case if c.strip()) if allow_case else None
-    try:
-        return _apply(
-            session,
-            body,
-            org_id,
-            identity,
-            probe_certified=probe_certified,
-            refresh_samples=refresh_samples,
-            require_gates=require_gates,
-            gate_override=gate_override,
-            allow_cases=allow_cases,
-            only=frozenset(n.strip() for n in lens if n.strip()) or None,
+    selection, files = _select(session, body.files, select, scope)
+    kwargs: dict[str, object] = {
+        "probe_certified": probe_certified,
+        "refresh_samples": refresh_samples,
+        "require_gates": require_gates,
+        "gate_override": gate_override,
+        "allow_cases": allow_cases,
+        "only": frozenset(n.strip() for n in lens if n.strip()) or None,
+        "selection": selection,
+    }
+    if background:
+        running = _live_job(session)
+        if running is not None and _lock_free(org_id):
+            # A job recorded as live whose apply no longer holds the lock died
+            # with its process: say so on it, and let this one run.
+            stale = _job_read(session, running) or {}
+            if stale.get("state") == "running":
+                _job_write(
+                    org_id,
+                    running,
+                    {
+                        **stale,
+                        "state": "failed",
+                        "status_code": 500,
+                        "detail": "the server stopped before this apply "
+                        "finished — nothing it staged was committed",
+                    },
+                )
+                running = None
+        if running is not None or not _lock_free(org_id):
+            raise HTTPException(status_code=409, detail=_busy_detail(running))
+        job_id = uuid.uuid4().hex[:12]
+        job: dict[str, object] = {"state": "queued", "created_at": _now(), "progress": []}
+        _job_write(org_id, job_id, job)
+        background_tasks.add_task(_run_job, job_id, org_id, identity, body, job, kwargs)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "job_id": job_id,
+                "state": "queued",
+                "attach": f"dst apply status {job_id}",
+            },
         )
+    try:
+        return _apply(session, body, org_id, identity, **kwargs)  # type: ignore[arg-type]
     except ApplyStepTimeout as exc:
         # The wedge that held the org's apply lock for as long as the process
         # lived: a warehouse step that never returned, with the transaction —
@@ -707,10 +944,14 @@ def _apply(
     refresh_samples: bool = False,
     allow_cases: frozenset[str] | None,
     only: frozenset[str] | None = None,
+    selection: plan_engine.Selection | None = None,
+    progress: Callable[[dict[str, object]], None] | None = None,
 ) -> list[dict[str, object]]:
     """The apply itself, under the org's lock: one transaction, blue/green.
-    ``only``: the lenses to publish (``dst apply --lens``); None is every lens
-    of the push."""
+    ``only``: the lenses to publish (``?lens=``); None is every lens of the
+    push. ``selection``: a resolved ``--select``/``--scope`` — the push is
+    narrowed to it and only its lenses publish. ``progress`` sees each lens
+    row as it lands (a background job's per-lens progress)."""
     # One apply per org at a time: a transaction-scoped advisory lock, released
     # with this request's commit/rollback. A concurrent apply would interleave
     # asset upserts and recompiles halfway through another's — refuse it cleanly.
@@ -718,10 +959,18 @@ def _apply(
         text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _apply_lock_key(org_id)}
     ).scalar()
     if not locked:
-        raise HTTPException(
-            status_code=409, detail="another apply is in progress for this org — retry shortly"
-        )
+        raise HTTPException(status_code=409, detail=_busy_detail(_live_job(session)))
     out: list[dict[str, object]] = []
+    push_lenses = set(split_by_lens(body.files))
+    if selection is not None:
+        out.append(_selection_row(selection))
+        body = ProjectFiles(files=selection.files)
+        # Selectors narrow the lenses that may publish; --scope alone narrows
+        # file kinds only, and every lens it leaves stale recompiles as usual.
+        only = frozenset(selection.lenses) if selection.selectors else None
+        if selection.scope == "cases":
+            return _apply_cases_only(session, body, org_id, out, progress)
+    flag = "--select" if selection is not None else "--lens"
     conn_applied: list[str] = []
     if "dst.yaml" in body.files:
         try:
@@ -730,7 +979,7 @@ def _apply(
             out.append({"scope": "project", "action": "rejected", "errors": [str(exc)]})
             return _abort(session, out)
         conn_applied, warnings, errors, capabilities = apply_engine.apply_connections(
-            session, project
+            session, project, _declared_tables(session, body.files)
         )
         out.append(
             {
@@ -791,7 +1040,7 @@ def _apply(
     rejected: set[str] = set()
     incoming_trees = split_by_lens(body.files)
     if only is not None:
-        if missing := sorted(only - set(incoming_trees)):
+        if selection is None and (missing := sorted(only - set(incoming_trees))):
             session.rollback()
             raise HTTPException(
                 status_code=422,
@@ -807,12 +1056,17 @@ def _apply(
         stale = _stale_map(session, semantic_store.asset_hashes(session))
         if left := sorted(set(stale) - only):
             session.rollback()
+            way_out = (
+                f"select them too (`{stale[left[0]][0]}+` takes every lens downstream of it)"
+                if selection is not None
+                else "add them to --lens"
+            )
             raise HTTPException(
                 status_code=422,
-                detail=f"--lens would leave {', '.join(left)} stale against the shared "
+                detail=f"{flag} would leave {', '.join(left)} stale against the shared "
                 "layer this push changes ("
                 + "; ".join(f"{name}: {', '.join(stale[name])}" for name in left)
-                + ") — add them to --lens, or drop --lens to apply every lens",
+                + f") — {way_out}, or drop {flag} to apply every lens",
             )
         # A changed connection recompiles every lens of the push that declares
         # it; a non-selected one would keep its old compile.
@@ -822,16 +1076,14 @@ def _apply(
                 for name, _dn, _desc, bundle in store.list_published(session)
             }
             if behind := sorted(
-                name
-                for name in set(incoming_trees) - only
-                if declared.get(name, set()) & set(conn_applied)
+                name for name in push_lenses - only if declared.get(name, set()) & set(conn_applied)
             ):
                 session.rollback()
                 raise HTTPException(
                     status_code=422,
-                    detail=f"--lens would leave {', '.join(behind)} compiled against a "
+                    detail=f"{flag} would leave {', '.join(behind)} compiled against a "
                     f"connection this push changes ({', '.join(conn_applied)}) — add them "
-                    "to --lens, or drop --lens to apply every lens",
+                    f"to {flag}, or drop {flag} to apply every lens",
                 )
     # A lens whose managed files match the DB (plan's own comparison) and whose
     # inputs this apply didn't touch skips the publish path: recompile, version
@@ -876,6 +1128,8 @@ def _apply(
             ):
                 row["warnings"] = standing
             out.append(row)
+            if progress:
+                progress(row)
             continue
         try:
             source = load_lens_source(tree)
@@ -898,6 +1152,8 @@ def _apply(
         if result.action == "updated" and lens in same_files and not result.errors:
             result.action = "unchanged"
         out.append(_lens_row(result))
+        if progress:
+            progress(out[-1])
         if result.errors:
             rejected.add(lens)
     # A lens rejected above must not resurrect through the recompile pass: its
@@ -907,6 +1163,8 @@ def _apply(
     # keeps the output honest and saves a doomed re-score.
     for result in apply_engine.recompile_stale(session, org_id=org_id, skip=rejected):
         out.append(_lens_row(result))
+        if progress:
+            progress(out[-1])
     if require_gates:
         # Fail closed on demand: a pipeline that asked for
         # gates must be able to tell "gate passed" from "gate never ran" — by
@@ -952,6 +1210,30 @@ def _apply(
                 "errors": [],
             }
         )
+    return out
+
+
+def _apply_cases_only(
+    session: Session,
+    body: ProjectFiles,
+    org_id: uuid.UUID,
+    out: list[dict[str, object]],
+    progress: Callable[[dict[str, object]], None] | None,
+) -> list[dict[str, object]]:
+    """``--scope cases``: each selected lens's evals/cases.yaml lands against
+    its published model — no compile, no publish, no gate (cases are a gate's
+    input; the next publishing apply scores against them)."""
+    for lens, tree in sorted(split_by_lens(body.files).items()):
+        try:
+            source = load_lens_source(tree)
+        except (ValueError, KeyError) as exc:
+            out.append({"lens": lens, "action": "rejected", "errors": [str(exc)]})
+            continue
+        out.append(_lens_row(apply_engine.apply_cases(session, lens, source, org_id=org_id)))
+        if progress:
+            progress(out[-1])
+    if any(row.get("errors") for row in out):
+        return _abort(session, out)
     return out
 
 

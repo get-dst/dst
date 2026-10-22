@@ -1064,10 +1064,16 @@ def test_each_metric_takes_the_window_on_its_own_time_field() -> None:
         QueryIntent(entity="invoices", metrics=["invoiced", "collected"], filters=_SEPTEMBER),
         _two_clock_model(),
     )
-    assert "SUM(CASE WHEN invoices.invoice_date >= '2026-09-01'" in sql
-    assert "invoices.invoice_date <= '2026-09-30' THEN invoices.amount END) AS invoiced" in sql
-    assert "SUM(CASE WHEN invoices.paid_date >= '2026-09-01'" in sql
-    assert "invoices.paid_date <= '2026-09-30' THEN invoices.paid_amount END) AS collected" in sql
+    assert "SUM(CASE WHEN invoices.invoice_date >= CAST('2026-09-01' AS DATE)" in sql
+    assert (
+        "invoices.invoice_date <= CAST('2026-09-30' AS DATE) THEN invoices.amount END) AS invoiced"
+        in sql
+    )
+    assert "SUM(CASE WHEN invoices.paid_date >= CAST('2026-09-01' AS DATE)" in sql
+    assert (
+        "invoices.paid_date <= CAST('2026-09-30' AS DATE) THEN invoices.paid_amount END) "
+        "AS collected" in sql
+    )
     assert "WHERE" not in sql  # the window moved inside the aggregates
 
 
@@ -1094,7 +1100,7 @@ def test_one_metric_keeps_a_plain_where_window() -> None:
         QueryIntent(entity="invoices", metrics=["invoiced"], filters=_SEPTEMBER),
         _two_clock_model(),
     )
-    assert "WHERE invoices.paid_date >= '2026-09-01'" in sql and "CASE" not in sql
+    assert "WHERE invoices.paid_date >= CAST('2026-09-01' AS DATE)" in sql and "CASE" not in sql
 
 
 def test_a_metric_without_a_time_field_cannot_take_its_own_window() -> None:
@@ -1193,7 +1199,7 @@ def test_a_definition_the_question_never_names_is_not_compiled() -> None:
         prose_context=[],
         dialect="duckdb",
     )
-    assert "amount < 0" not in gq.sql and "invoice_date >= '2026-10-01'" in gq.sql
+    assert "amount < 0" not in gq.sql and "invoice_date >= CAST('2026-10-01' AS DATE)" in gq.sql
     assert gq.intent is not None and gq.intent.definitions == []
     res = from_intent(gq.intent, _defined_model(), None)
     assert res.definition_suggested == ["disputed"]

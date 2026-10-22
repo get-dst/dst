@@ -11,8 +11,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from services.certdefs import CertifiedDefinition, load_certified_defs
+from services.contracts.semantic_model import SemanticModel
 from services.lenses.store import LensBundle
 from services.router import CoverageProfile
+from services.runtime.not_for import declared_asks
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -61,9 +63,28 @@ def coverage_profile(
         anchors += [m.question for m in pages if m.question]
         anchors += [m.summary for m in pages if m.summary]
 
+    names = [e.name for e in governed] + [e.source.table for e in governed]
+    names += [m.name for e in governed for m in e.metrics] + [d.term for d in sm.definitions]
     return CoverageProfile(
         lens=cfg.name,
         anchors=_dedupe(anchors),
         scope=frozenset(sm.allowed_tables()),
         description=description,
+        certified=_dedupe([m.question for m in pages or [] if m.question]),
+        names=_dedupe(names),
+        not_for=_not_for(cfg, sm),
     )
+
+
+def _not_for(cfg: object, sm: SemanticModel) -> list[str]:
+    """The asks the lens declares it does not answer — the same list its own
+    door refuses on (``not_for.declared_asks``: ``not_for`` and a single
+    governed entity's ``Avoid for:`` use cases), plus the config's entries
+    for a model compiled before it carried them. Read defensively: each entry
+    is an ``{ask, sibling}`` mapping or model."""
+    out = [a.ask for a in declared_asks(sm)]
+    for item in getattr(cfg, "not_for", None) or []:
+        ask = item.get("ask") if isinstance(item, dict) else getattr(item, "ask", None)
+        if isinstance(ask, str):
+            out.append(ask)
+    return _dedupe(out)

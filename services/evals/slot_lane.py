@@ -33,6 +33,7 @@ decider and the assembly seam.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -75,6 +76,15 @@ class SlotCase:
     # (no warehouse needed), differs = written another way, None = no compiled
     # SQL (the question did not type).
     sql_match: SqlMatch | None = None
+    # Set by the caller once the rows lane executed a ``differs`` case: True
+    # when its rows matched the certified oracle — the data lane is the oracle,
+    # so a compiled SQL written another way that returns the certified rows is
+    # "differs (data equal)", never a lane failure. None when not executed.
+    data_equal: bool | None = None
+    # What the first run generated: the typed intent (JSON) and the SQL it
+    # compiled to — the slot lane's actual value, recorded on eval_result.
+    intent: str | None = None
+    compiled_sql: str | None = None
     # Per resolution (mean over runs): wall seconds, provider calls, tokens,
     # and USD from the provider's price (None when unpriced).
     elapsed_s: float = 0.0
@@ -196,15 +206,53 @@ def canonical_sql(sql: str, dialect: str) -> str:
         return " ".join(sql.split()).lower()
 
 
+def _distinct_aliases(tree: exp.Expr) -> exp.Expr:
+    """Every table read without an alias gets one of its own, scope by scope,
+    with the columns that name it moved along: ``FROM t`` in a query and
+    ``FROM t`` in its filter subquery are two readings of ``t``, and the
+    optimizer would otherwise qualify both as ``t`` and fold them into one
+    name where a compiled ``t`` / ``t_latest`` pair keeps two."""
+    from sqlglot.optimizer.scope import traverse_scope
+
+    n = 0
+    for scope in traverse_scope(tree):
+        for name, source in list(scope.sources.items()):
+            if isinstance(source, exp.Table) and not source.alias:
+                fresh = f"_s{n}"
+                n += 1
+                source.set("alias", exp.TableAlias(this=exp.to_identifier(fresh)))
+                for col in scope.columns:
+                    if col.table == name:
+                        col.set("table", exp.to_identifier(fresh))
+        # A column read in a scope with ONE source is that source's. Spelled
+        # out here, not left to the optimizer: sqlglot 30.8 inferred it with
+        # no schema, 30.24 refuses an unqualified column without one, and every
+        # hand-written certified SQL was then unprovable.
+        if len(scope.sources) == 1:
+            (only,) = scope.sources.values()
+            if isinstance(only, exp.Table) and only.alias:
+                selected = set(getattr(scope.expression, "named_selects", ()))
+                for col in scope.columns:
+                    if not col.table and not (
+                        col.name in selected and col.find_ancestor(exp.Order, exp.Having)
+                    ):
+                        col.set("table", exp.to_identifier(only.alias))
+    return tree
+
+
 def _equivalence_form(sql: str, dialect: str) -> str | None:
     """The query as sqlglot's optimizer writes it (columns qualified, predicates
-    normalised, mergeable subqueries merged), with table aliases renamed in
-    order of appearance so ``orders o`` and ``orders AS orders`` read the same.
-    Literals survive untouched: a different filter value stays a different
-    query. None when the text does not parse or optimise (no schema is given,
-    so an unqualified column two tables could own is one such case)."""
+    normalised, mergeable subqueries merged, a scalar subquery decorrelated
+    into a join), with table aliases renamed in order of appearance so
+    ``orders o`` and ``orders AS orders`` read the same, and the output
+    columns renamed by position: an alias labels a value and never changes it,
+    so ``SUM(arr) AS arr`` and ``SUM(arr) AS total_arr`` are one query. Literals
+    survive untouched: a different filter value stays a different query. None
+    when the text does not parse or optimise (no schema is given, so an
+    unqualified column two tables could own is one such case)."""
     try:
-        tree = optimize(_unwrapped(sqlglot.parse_one(sql, read=dialect)), dialect=dialect)
+        parsed = _distinct_aliases(_unwrapped(sqlglot.parse_one(sql, read=dialect)))
+        tree = optimize(parsed, dialect=dialect)
     except Exception:  # noqa: BLE001 — not provable this way; the plain compare decides
         return None
     aliases: dict[str, str] = {}
@@ -219,7 +267,19 @@ def _equivalence_form(sql: str, dialect: str) -> str | None:
             node.set("table", exp.to_identifier(aliases[node.table]))
         return node
 
-    return tree.transform(rename).sql(dialect=dialect).lower()
+    def ordered(node: exp.Expression) -> exp.Expression:
+        # ``a = b`` is ``b = a``: the decorrelated join writes the operands in
+        # whichever order the subquery stood.
+        if isinstance(node, exp.EQ) and node.left.sql() > node.right.sql():
+            return exp.EQ(this=node.right.copy(), expression=node.left.copy())
+        return node
+
+    tree = tree.transform(rename).transform(ordered)
+    if isinstance(tree, exp.Select):
+        for i, proj in enumerate(tree.selects):
+            if isinstance(proj, exp.Alias):
+                proj.set("alias", exp.to_identifier(f"_c{i}"))
+    return tree.sql(dialect=dialect).lower()
 
 
 def _unwrapped(tree: exp.Expr) -> exp.Expr:
@@ -316,7 +376,10 @@ def gold_for(a: CertifiedAnswer, model: SemanticModel, resolver: Any) -> Resolut
         # attribution is a cache of the attributor, re-read with today's.
         if stored.method == "construction":
             return stored
-    attributed = ledger.attribute(a.sql, model, resolver._domains)
+    # The answer's metric, not every column the SQL reads (see answer_measures).
+    attributed = ledger.answer_measures(
+        ledger.attribute(a.sql, model, resolver._domains), a.sql, model
+    )
     if any(s.kind in MEASURE_KINDS and s.source in GOVERNED for s in attributed.slots):
         return attributed
     return None
@@ -346,6 +409,7 @@ class _Run:
     intent_key: str | None
     sql_match: SqlMatch | None = None
     elapsed_s: float = 0.0
+    compiled_sql: str | None = None
     usage: dict[str, tuple[float, float, float]] = field(
         default_factory=dict
     )  # provider -> (calls, in, out)
@@ -413,6 +477,7 @@ def _run_once(
         match,
         elapsed_s=elapsed,
         usage=usage,
+        compiled_sql=compiled,
     )
 
 
@@ -450,6 +515,8 @@ def _fold(a: CertifiedAnswer, runs: list[_Run], gold: str) -> SlotCase:
         sql_match=(
             first.sql_match if all(r.sql_match == first.sql_match for r in runs) else "differs"
         ),
+        intent=first.intent_key,
+        compiled_sql=first.compiled_sql,
         elapsed_s=round(sum(r.elapsed_s for r in runs) / len(runs), 3),
         calls=round(sum(c for r in runs for c, _i, _o in r.usage.values()) / len(runs), 3),
         input_tokens=round(sum(i for r in runs for _c, i, _o in r.usage.values()) / len(runs), 1),
@@ -552,6 +619,15 @@ def run_slot_lane(
     )
 
 
+def metric_slot_passed(case: SlotCase) -> bool:
+    """Did every metric decision of the case pick its gold? The rows lane runs
+    its own generation, so its rows matching the certified oracle say nothing
+    about a compiled SQL that read another metric: "differs (data equal)" is
+    claimed only for a case whose metric slot is right."""
+    metric = [g for g in case.graded if g.slot == "metric"]
+    return bool(metric) and all(g.chosen == g.gold for g in metric)
+
+
 def eval_results(cases: list[SlotCase]) -> list[EvalResult]:
     """The lane's cases as eval results, so a run records them beside the rows
     lane's (``slots:<answer id>``) and a run-over-run compare can see a slot
@@ -568,10 +644,17 @@ def eval_results(cases: list[SlotCase]) -> list[EvalResult]:
                 "typed": c.typed,
                 "gold": c.gold,
                 "sql_match": c.sql_match,
+                **({"sql_data_equal": c.data_equal} if c.data_equal is not None else {}),
                 "runs": c.runs,
                 "agreement": c.agreement,
             },
             reason=c.evidence or None,
+            actual_sql=c.compiled_sql,
+            # The lane's generated value: the typed intent the question resolved
+            # to (JSON), or the case's verdict when nothing typed.
+            actual_value=c.intent
+            if c.intent is not None
+            else json.dumps({"typed": False, "evidence": c.evidence}),
         )
         for c in cases
     ]
@@ -595,6 +678,14 @@ def summary(lanes: list[tuple[str, SlotLaneOutcome]], *, repeat: int) -> dict[st
         ),
         "sql_equivalent": sum(
             1 for _lens, lane in lanes for c in lane.cases if c.sql_match == "equivalent"
+        ),
+        # Written another way, but the rows lane returned the certified rows:
+        # the data lane is the oracle, so these are not failures of anything.
+        "sql_differs_data_equal": sum(
+            1
+            for _lens, lane in lanes
+            for c in lane.cases
+            if c.sql_match == "differs" and c.data_equal is True
         ),
         # Active answers the lane did not grade — graded + skipped is the corpus.
         "skipped": [{"lens": lens, **sk.as_dict()} for lens, lane in lanes for sk in lane.skipped],

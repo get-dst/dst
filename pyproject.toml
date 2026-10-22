@@ -1,6 +1,6 @@
 [project]
 name = "dst-core"
-version = "0.12.0"
+version = "0.13.0"
 description = "dst, the data serve tool — governed data access layer (backend)"
 dynamic = ["readme"]
 license = "Apache-2.0"
@@ -24,15 +24,19 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
+    "fastapi>=0.115,<0.159",
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.2",
     "alembic>=1.13",
-    "duckdb>=1.5.3",
-    "sqlglot>=30.8.0",
+    # Both bounds are versions the suite has passed on. The lockfile pins the
+    # floor; `make ci-newest` runs the suite on the newest the range allows,
+    # which is what a fresh install resolves. Lift a ceiling only after that
+    # target is green on the new version.
+    "duckdb>=1.5.3,<2.1",
+    "sqlglot>=30.8.0,<30.25",
     # <1: anthropic 1.0 removed temperature/top_p/top_k from messages.create();
     # our providers pass temperature unconditionally. A 1.x
     # port must re-decide determinism (output_config.effort) before lifting this.

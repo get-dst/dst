@@ -73,6 +73,131 @@ No schema change.
   `dst runs` message now says the same, and the docs name the failure mode (FAQ,
   Evaluation, Environments and CI).
 
+## [0.13.0] — 2026-10-22
+
+No schema change. New `lens.yaml` key `not_for`; new metric `agg: sum_distinct_on` with
+`distinct_on`; new endpoints for the metric catalog, batch metrics and apply jobs; new
+`compare` field on structured intents. Behaviour changes: `dst apply` runs as a server-side job
+the CLI polls; the publish gate and `dst test` grade behavioural cases through the query door's
+own serving path; an aggregate over an entity with `pinned_dimensions` that neither pins nor
+groups by them now asks which kind instead of summing them; sqlglot, duckdb and fastapi are
+bounded to tested ranges.
+
+### Added
+
+- **Metric catalog.** `GET /v1/lenses/{name}` lists `metrics` (label, aliases, unit,
+  additivity, grains, callable dimensions, `depends_on`, linked certified answers) and
+  `dimensions` (with complete value lists from the profile). `GET /v1/lenses/{name}/catalog`
+  returns them with a `tree` view built from `depends_on`. New MCP tool `metric_catalog`.
+- **Batch metrics.** `POST /v1/lenses/{name}/metrics/batch` runs up to 50 structured intents in
+  one request at one `data_as_of`, on one shared snapshot on Postgres. Results are keyed by id,
+  each with its own `request_id` and receipt; one failing intent does not fail the rest, and an
+  intent whose answer errored reports `ok: false`. New MCP tool `query_metrics_batch`.
+- **Period comparison.** `compare: {to: previous_period | previous_year | <range>}` on a
+  structured intent adds `<metric>_compare`, `_delta` and `_delta_pct`; level metrics compare
+  snapshot to snapshot and flows sum to sum. An intent without a bounded date window is refused.
+  Runs on DuckDB, Postgres, Snowflake and BigQuery, including month, quarter and year grains on
+  BigQuery TIMESTAMP columns.
+- **Guide: Building data apps.** The pattern for apps on dst: a node is a typed intent, the tree
+  lives in dst as derived metrics, certified answers for signed nodes by `cert_id`.
+- **Asks a lens does not answer.** `not_for: [{ask, sibling}]` in `lens.yaml` refuses a question
+  that names every word of the ask, on the direct and the routed door, before typing or
+  generation, naming the lens that answers it. `Avoid for:` lines in a single entity's
+  `use_cases` are read the same way.
+- **One value per key.** `agg: sum_distinct_on` with `distinct_on: [...]` sums one value per
+  distinct key, so a monthly target joined onto daily rows counts once per month.
+- **`dst plan` and `dst apply --select`** take `lens/`, `entity/` and `definition/` selectors,
+  globs, `+X`, `X+` and `@changed`; `--scope {all,semantic,certified,cases,config}` limits what
+  is pushed, and `--scope cases` lands eval cases without a gate. `--lens` is an alias for
+  `lens/NAME`.
+- **Apply runs as a server-side job.** `dst apply` polls it; `--no-wait` and
+  `dst apply status <id>` let you leave and come back; a concurrent apply's 409 names the job.
+- **Request-ledger export:** `GET /mgmt/requests` and `dst observe export`. **`dst runs --all`**
+  in one call. **`dst test --json`** gains `calibration_by_slot`, `case_id` and
+  `certified_answer_id` on every row. **Every answer carries `source`** (certified, compiled or
+  generated) and `certified_answer_id`.
+- **`make ci-newest`** runs the suite against the newest sqlglot and duckdb the bounds allow.
+
+### Changed
+
+- **Routing separates sibling lenses deterministically.** A question equal to one lens's
+  certified question routes to that lens; text two or more lenses carry word for word no
+  longer counts toward routing; a declared table, entity or metric name breaks a two-way tie.
+- **The publish gate and `dst test` grade what the door serves.** Behavioural cases run through
+  the query door's own path: typed serving and its decider, the lens's `untyped_fallback`,
+  certified matching, caps and answer mode. A case pinned to a clarification the door gives
+  passes.
+- **`dst plan` right after `dst apply` reports zero changes.** Server-stamped values no longer
+  appear as plan changes, an eval case removed from `evals/cases.yaml` is retired, and an
+  unchanged probe artifact is not re-landed, so an apply after a clean plan runs no gate.
+- **Test and benchmark traffic** (agent `dst-test` or `benchmark`) is left out of observe KPIs,
+  the basis line and the audit statement by default; `--include-test` shows it. `dst query`
+  and `dst sql` send `X-Dst-Agent: dst-cli`.
+- **Decider calls count in AI tokens and cost**, per request and in `dst observe`.
+- **The apply-time connection probe reads each declared table once** instead of scanning every
+  dataset; step timeouts name the connection's table and dataset counts.
+- **`dst probe --tables`** accepts a table as the entity names it (`dataset.table` on BigQuery)
+  and warns about a name that matches nothing.
+- **A SQL error dst compiled is reported as dst's.** When the warehouse rejects compiled SQL and
+  the schema has not changed since apply, no data-team ticket is opened.
+
+### Fixed
+
+- **A value the question names is never overridden by a metric's own filter.** A metric whose
+  filter pins a column to another value is not chosen when the question names a stored value
+  of that column; the value binds as a filter, or the question is clarified.
+- **Days are read as days.** "On 28 August 2026", "between 5 and 12 October", "5–12 Oct", "the
+  week of 5 October", "the first 7 days of October", "the last 3 days of August" and "the start
+  or end of August" are those days, not the whole month; "early/mid/late August" and any other
+  day qualifier the parser cannot place ask for the days. `window_applied` fails an answer whose
+  window is wider than the days asked.
+- **The population filter applies on every compiled query**, including a level metric's
+  latest-snapshot pin.
+- **Pinned dimensions are enforced when a query is compiled**; an aggregate that neither pins
+  nor groups by one asks which kind, naming the stored values.
+- **Window bounds carry the column's type.** Date bounds are cast to the profiled physical type
+  on every door, including the metrics and batch doors; a day bound on a timestamp column
+  closes at the next midnight; on BigQuery a `timestamp` declaration over a `DATETIME` column
+  no longer fails.
+- **Clarifications ask the right thing.** Key columns and unasked timestamps are never offered
+  as candidates; a question declared in `common_questions` or `use_cases` clarifies instead of
+  declining; sibling metrics that differ only by a parameter (a window size, a unit) ask which; "this month" resolves
+  on the lens clock; a level metric over a window asks no restricting field; a value no column can
+  take asks instead of vanishing; a measure the entity declares no metric for asks
+  instead of answering in another unit; a bare row count answers only questions counting the
+  entity's own rows; a question naming a measure gets a clarification, not a raw listing.
+- **Breakdowns answer.** A text column inside a composite primary key can be a dimension, and
+  an entity with no declared `dimensions:` groups "by X" by its label fields; a breakdown
+  clarification always names the fields.
+- **A certified answer is not served exact for a breakdown its SQL does not group by.**
+- **Eval and test surface:** gold attributed from certified SQL is the answer's projected
+  metric; rows on a declared grain match by bucket in both lanes; the slot lane proves a scalar
+  latest-date subquery equivalent under both supported sqlglot versions; `eval_result.actual_value`
+  is written on every row; `sql_data_equal` is only claimed beside the right metric.
+- **Quarters and halves are read as their months.** "The third quarter of 2026", "the 3rd
+  quarter", "the second half of 2026", "the last quarter of 2026" and H1/H2 with a year resolve
+  to their months instead of the whole year; without a year, the most recent one on or before
+  the lens clock. `window_applied` fails an answer covering a whole year when the question asked
+  for a quarter or a half.
+- **A number inside a window phrase is not a limit.** "The first 2 days of October" is a window,
+  never a top-2; a breakdown over a window of days sums the days per group instead of adding an
+  unasked grouping by day.
+- **"The end of the month"** (also "month end", "end of month", "quarter-end", "the end of the
+  quarter/year") with no period named means the last completed period's last day.
+- **The figure asked for must be one the chosen metric measures.** When the question asks for a
+  measure (an acronym, a measure column's word, a measure definition) the chosen metric does not
+  measure, or a count the chosen count metric does not count, typed serving asks instead of
+  answering; an acronym spelled out in a metric's description, its columns or a definition maps
+  to that metric.
+- **A rejected lens says why in the default output.** `dst apply` lists every rejected lens with
+  its reasons above the counts line, `rejected-recompile` rows included; `dst plan` prints the
+  compile error of an invalid lens even when it is also stale, and counts any lens row carrying
+  errors as invalid in the summary and the exit code.
+- **Examples, fixtures and comments use invented data throughout.** Repro values that had been
+  copied into tests, docs, code comments and the changelog are replaced with invented examples.
+- **Package installs match CI.** sqlglot (`>=30.8,<30.25`), duckdb (`>=1.5.3,<2.1`) and fastapi
+  (`>=0.115,<0.159`) are bounded to the versions the suite was run on.
+
 ## [0.12.0] — 2026-10-18
 
 No schema change. New fields: definition `period:`, metric `period_weight:`; new checks
@@ -636,20 +761,20 @@ Schema change: migration 0068 adds `request_log.purpose`. Run `dst migrate`.
   run minted a new token, overwrote the `.env` line without revoking the old one, and `--email`
   silently reset an existing user's password.
 - **Two metrics named in the question are the answer's metrics, not a clarification.** "The
-  split between subscription ARR and payment ARR" used to divide the metric vote and fall to
+  split between member revenue and guest revenue" used to divide the metric vote and fall to
   untyped serving; governed names said word for word are now read off the text when the first
   pick cannot settle between them. Names on different entities still clarify, and the
   clarification says why.
-- **"by <dimension>" is read, not decided, and a further metric must be named.** "ARR by
-  customer tier" typed as three metrics and no dimension: the word "customer" pulled the
-  `customers` metric through the "another metric?" round. The breakdown phrase now sets the
+- **"by <dimension>" is read, not decided, and a further metric must be named.** "Revenue by
+  member plan" typed as three metrics and no dimension: the word "member" pulled the
+  `members` metric through the "another metric?" round. The breakdown phrase now sets the
   first dimension deterministically, and further metrics are offered only when the question
   names them outside that phrase.
 - **A routed refusal keeps its reason.** Pinned by test: on `/v1/query` a lens's refusal
   arrives as `answer.status: refused` with the reason in `answer.answer`, for both audiences.
 - **Slot-lane gold no longer lists a metric twice.** A definition that shares its name with a
-  metric read as a second governed slot ("expected arr, arr"), failing a typed answer that
-  resolved to the metric once. It is now one slot; a genuine duplicate prints with its kind.
+  metric read as a second governed slot ("expected revenue, revenue"), failing a typed answer
+  that resolved to the metric once. It is now one slot; a genuine duplicate prints with its kind.
 - **Templated and no-gold certified answers are no longer skipped silently by the slot lane.**
   Templates are graded on their first sample binding; every answer not graded is listed with
   its reason in the output and in the JSON `slot_lane.skipped`, so graded plus skipped is

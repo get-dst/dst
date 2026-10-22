@@ -364,7 +364,9 @@ def parse_generation(text: str) -> GeneratedQuery:
 
 class FixedSQLGenerator:
     """A `QueryGenerator` that returns a pre-approved SQL string (a certified answer),
-    skipping the LLM entirely. Consumes no tokens; still passes through guard + execute."""
+    skipping the LLM entirely. Consumes no tokens; still passes through guard + execute.
+    With empty SQL and a ``clarification``, it asks that instead (a compiled door
+    that knows the question is open)."""
 
     def __init__(
         self,
@@ -372,10 +374,12 @@ class FixedSQLGenerator:
         *,
         definition_used: str | None = None,
         intent: QueryIntent | None = None,
+        clarification: ClarificationRequest | None = None,
     ) -> None:
         self._sql = sql
         self._definition_used = definition_used
         self._intent = intent
+        self._clarification = clarification
         self.model = "certified"
 
     def generate(
@@ -388,7 +392,10 @@ class FixedSQLGenerator:
         feedback: str | None = None,
     ) -> GeneratedQuery:
         return GeneratedQuery(
-            sql=self._sql, definition_used=self._definition_used, intent=self._intent
+            sql=self._sql,
+            definition_used=self._definition_used,
+            intent=self._intent,
+            clarification=self._clarification,
         )
 
 

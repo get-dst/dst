@@ -1,9 +1,10 @@
 """The eval runner — behavioral mode and health mode.
 
   - **behavioral** (the shape pins): ``expect: clarify | refuse | answer`` cases run
-    through the real pipeline and assert the RESPONSE SHAPE — the things certification
-    cannot express (must-clarify, must-refuse, and must-answer: refusal
-    measured in both directions), and exactly what pinned the clarify regression.
+    through the lens door's own serving core and assert the RESPONSE SHAPE — the
+    things certification cannot express (must-clarify, must-refuse, and must-answer:
+    refusal measured in both directions), and exactly what pinned the clarify
+    regression.
   - **health** (the monitor): run each case against *live* data and judge-score it (reusing
     the review judge). Catches drift / null-explosion / freshness.
 
@@ -11,18 +12,19 @@ The value-case regression lane (push-down diff against a frozen ``__dst``
 snapshot) was removed: certified answers are the sole value-level eval
 mechanism — the certified suite is the gate's regression run.
 
-Generation inputs come per question from the assembly seam:
-lanes take ``assemble_for(question)`` + ``generators_for(assembled)`` instead of a
-fixed model/generator, so they grade the pipeline production runs. Production
-callers build the pair with ``assembly.question_harness(bundle, org_id, llm)``.
+The health lane takes its generation inputs per question from the assembly
+seam: ``assemble_for(question)`` + ``generators_for(assembled)``, built with
+``assembly.question_harness(bundle, org_id, llm)``. The behavioral lane takes
+one ``serve(question)`` callable instead, the same core the query door runs.
 
-All are pure orchestration over injected fakes (connector / harness / composer / llm),
+All are pure orchestration over injected fakes (connector / harness / serve / llm),
 so the whole thing is testable without a cloud warehouse or a live model.
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,7 +36,7 @@ from services.reviews.judge import judge_trace
 from services.reviews.store import Trace as ReviewTrace
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs, GeneratorsFor
-from services.runtime.pipeline import run_query
+from services.runtime.pipeline import PipelineResult, run_query
 
 # Relative tolerance for the certified suite's single-scalar comparison: float
 # noise (aggregation order alone can wiggle a DOUBLE's last bits), not a
@@ -108,19 +110,18 @@ def _finish(lens: str, mode: str, results: list[EvalResult]) -> RunOutcome:
 
 def run_behavioral(
     *,
-    connector: Connector,
     lens: str,
     cases: list[EvalCase],
-    assemble_for: Callable[[str], AssembledInputs],
-    generators_for: GeneratorsFor,
-    composer: AnswerComposer,
-    model_name: str = "claude-sonnet-4-6",
+    serve: Callable[[str], PipelineResult],
     concurrency: int | None = None,
 ) -> RunOutcome:
     """Score behavioral expectations by RESPONSE SHAPE: each ``expect`` case runs
-    through the real pipeline (deterministic clarify/exclusion pre-checks
-    included — that's the behavior being pinned) and passes iff the response
-    came back in the expected shape. ``clarify`` → a clarification, on the
+    through ``serve``, which production callers build from the lens door's own
+    core (``evals.service.lens_serve``: the install's typed serving and decider,
+    the lens's ``untyped_fallback``, its caps and answer mode), so a pin grades
+    the response a caller would get — deterministic clarify/exclusion pre-checks
+    included, that's the behavior being pinned — and passes iff it came back in
+    the expected shape. ``clarify`` → a clarification, on the
     pinned term when given; ``refuse`` → a refused/rejected response with no
     data served; ``answer`` → a data answer (refusal is measured in
     BOTH directions — a lens that regresses into refusing an answerable
@@ -143,36 +144,23 @@ def run_behavioral(
     def _score(c: EvalCase) -> EvalResult:
         ok, reason, grade = False, None, "fail"
         sql: str | None = None
+        # What the case got back, as the row's actual value: the response's
+        # status and text (the answer, the clarification's question or the
+        # refusal) — a behavioural row is graded on its shape, and the shape
+        # it had is what a later reader needs to see.
+        actual: str | None = None
         for attempt in range(GATE_ATTEMPTS):
-            assembled = assemble_for(c.question)
-            generator, escalate = generators_for(assembled)
             try:
-                pr = run_query(
-                    question=c.question,
-                    lens_name=lens,
-                    org_id="eval",
-                    caller="eval",
-                    semantic_model=assembled.model,
-                    value_domains=assembled.value_domains,
-                    table_domains=assembled.table_domains,
-                    connector=connector,
-                    generator=generator,
-                    escalate_generator=escalate,
-                    composer=composer,
-                    prose_context=assembled.prose,
-                    model_name=model_name,
-                    data_as_of=assembled.data_as_of,
-                    table_as_of=assembled.table_as_of,
-                    entity_coverage=assembled.entity_coverage,
-                    profile_age=assembled.profile_age,
-                )
+                pr = serve(c.question)
             except ProviderError as exc:
                 # One dropped provider call is this case's errored attempt, retried
                 # like any failure; it must not take the rest of the suite with it.
                 ok, reason, grade, sql = False, f"model provider failed: {exc}", "errored", None
+                actual = json.dumps({"status": "errored", "text": reason})
                 continue
             t = pr.trace
             sql = t.sql
+            actual = json.dumps({"status": t.status, "text": pr.response.answer or t.error})
             if t.status == "error":
                 ok, reason, grade = False, t.error, "errored"
                 continue
@@ -181,8 +169,11 @@ def run_behavioral(
                 clar = pr.response.clarification
                 if clar is None:
                     ok = False
-                    reason = (
-                        f"expected a clarification, got status={t.status} (the response answered)"
+                    # A refusal is not an answer: name what came back instead.
+                    reason = f"expected a clarification, got status={t.status}" + (
+                        " (the response answered)"
+                        if t.status == "ok"
+                        else f": {pr.response.answer or t.error or 'no text'}"
                     )
                 elif c.term and clar.term != c.term:
                     ok = False
@@ -216,6 +207,7 @@ def run_behavioral(
             passed=ok,
             grade=grade,
             actual_sql=sql,
+            actual_value=actual,
             reason=reason,
         )
 

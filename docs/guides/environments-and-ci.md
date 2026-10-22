@@ -138,7 +138,17 @@ serving. `--require-gates` makes it fail closed when a lens configured for an
 eval gate had that gate skipped (empty suite, provider error, unreachable
 warehouse) — without it, a skipped gate publishes with a warning, which is not
 what a deploy gate wants. `--quiet` keeps a large apply to the lines that need a
-human.
+human. The apply runs on the server as a job that the CLI polls, so a CI runner's
+request timeout or a proxy in front of the server cannot lose the result; a job
+that wants to return early uses `dst apply --no-wait` and checks back with `dst
+apply status <job id>`. A second apply started while one runs fails with a 409 that
+names the running job.
+
+**Shipping part of the project.** `dst apply --select +lens/finance` pushes one lens
+and what it reads; `--select @changed` pushes only what differs from the server.
+A selection that changes a shared asset another published lens reads is refused,
+naming that lens, until the selection takes it too (`entity/orders+`).
+`--scope cases` lands eval-case edits without re-running any gate.
 
 **On a schedule — probe, then drift, then apply when green, then test.** `dst
 probe` refreshes the committed warehouse profile (value dictionaries, freshness

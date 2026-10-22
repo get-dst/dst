@@ -29,6 +29,7 @@ from services.certify import binding as certify_binding
 from services.certify import store as certify_store
 from services.certify.lexical import (
     answer_names,
+    breakdown_mismatch,
     declared_units,
     governed_names,
     lexical_mismatch,
@@ -173,6 +174,9 @@ class AssembledInputs:
     # typed resolver's own view, one entity at a time, so a column name shared
     # across entities with different values still has a dictionary.
     entity_domains: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # entity name -> column -> the warehouse's own type (value_guard.
+    # entity_column_types): what a compiled window bound is cast to.
+    column_types: dict[str, dict[str, str]] = field(default_factory=dict)
     # entity name -> its month-period string field (value_guard.period_fields):
     # the window compiles to a range on it; proven by the profile's sample.
     period_fields: dict[str, str] = field(default_factory=dict)
@@ -466,6 +470,10 @@ def certified_lookup(
             # folds as an exemplar below, and generation handles the asked
             # window (the matcher is the wrong path here, not generation).
             pass
+        elif (grain_reason := breakdown_mismatch(question, top.question, top.sql)) is not None:
+            # "per SDR" never takes the single total: the same fall through,
+            # to assisted, with the reason in the log.
+            log.info("certified hit vetoed on breakdown for lens %s: %s", lens, grain_reason)
         elif hits[0].score >= bands.exact:
             return top, [], "certified", "exact", None
         elif (pair := assist_llm()) is not None:
@@ -587,6 +595,7 @@ def assemble(
     domains: dict[str, list[str]] = {}
     per_table: dict[str, dict[str, list[str]]] = {}
     per_entity: dict[str, dict[str, list[str]]] = {}
+    types: dict[str, dict[str, str]] = {}
     periods: dict[str, str] = {}
     coverage: dict[str, profile_enrich.EntityCoverage] = {}
     if profiles:
@@ -599,6 +608,7 @@ def assemble(
             domains = value_guard.value_domains(model, profiles)
             per_table = value_guard.table_domains(model, profiles)
         per_entity = value_guard.entity_domains(model, profiles)
+        types = value_guard.entity_column_types(model, profiles)
         periods = value_guard.period_fields(model, profiles)
         coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
 
@@ -639,6 +649,7 @@ def assemble(
         value_domains=domains,
         table_domains=per_table,
         entity_domains=per_entity,
+        column_types=types,
         period_fields=periods,
         entity_coverage=coverage,
         decisions=decisions,
@@ -818,7 +829,7 @@ def select_generators(
                 today=business_today_date(assembled.model.timezone),
             )
             return (
-                TypedIntentGenerator(resolver),
+                TypedIntentGenerator(resolver, column_types=assembled.column_types),
                 GroundedSQLGenerator(llm, model=model_name, temperature=gen_temp)
                 if assembled.allow_untyped
                 else None,

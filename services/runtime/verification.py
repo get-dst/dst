@@ -35,9 +35,13 @@ from services.runtime.answer import grounding_notes
 from services.runtime.canon import canon_cell
 from services.runtime.timewindow import (
     breakdown_unit,
+    is_day_window,
+    month_end_as_month,
     sql_engages_time,
     temporal_terms,
+    unplaced_days,
     window_ranges,
+    year_parts,
 )
 
 _DISTINCT_ASK = re.compile(r"\b(unique|distinct|individual|deduplicated)\b", re.IGNORECASE)
@@ -556,6 +560,130 @@ def _level_grain(
     return VerificationCheck(name="level_grain", status="pass")
 
 
+_LITERAL_DAY = re.compile(
+    r"((?:19|20)\d{2})-(0[1-9]|1[0-2])"
+    r"(?:-(0[1-9]|[12]\d|3[01])(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?)?"
+)
+_TRUNC_UNITS = ("day", "week", "month", "quarter", "year")
+
+
+def _unit_end(day: date, unit: str) -> date:
+    if unit == "day":
+        return day
+    if unit == "week":
+        return day + timedelta(days=6)
+    months = {"month": 1, "quarter": 3, "year": 12}[unit]
+    total = day.year * 12 + day.month - 1 + months
+    return date(total // 12, total % 12 + 1, 1) - timedelta(days=1)
+
+
+def _literal_span(node: exp.Expression) -> tuple[date, date, bool] | None:
+    """``(first day, last day, at midnight)`` a date literal names, through
+    any cast: '2026-08-28' is one day, '2026-08' (a month-form period) the
+    whole month; ``at midnight`` is False for a literal with a later time."""
+    while isinstance(node, exp.Cast | exp.TryCast | exp.Date | exp.TsOrDsToDate):
+        node = node.this
+    if not (isinstance(node, exp.Literal) and node.is_string):
+        return None
+    m = _LITERAL_DAY.fullmatch(node.this.strip())
+    if m is None:
+        return None
+    y, mo, d = int(m.group(1)), int(m.group(2)), m.group(3)
+    try:
+        first = date(y, mo, int(d) if d else 1)
+    except ValueError:
+        return None
+    if not d:
+        return first, _unit_end(first, "month"), True
+    midnight = not any(int(g or 0) for g in m.groups()[3:])
+    return first, first, midnight
+
+
+def _column_unit(node: exp.Expression) -> tuple[str, str] | None:
+    """``(column, unit)`` for a column, a cast of one, or a calendar
+    truncation of one (``DATE_TRUNC('month', day)`` → ``('day', 'month')``)."""
+    unit = "day"
+    while not isinstance(node, exp.Column):
+        if isinstance(node, exp.Cast | exp.TryCast | exp.Date | exp.TsOrDsToDate):
+            node = node.this
+        elif isinstance(node, exp.DateTrunc | exp.TimestampTrunc | exp.DatetimeTrunc):
+            raw = node.args.get("unit")
+            unit = (raw.name if raw is not None else "").lower()
+            if unit not in _TRUNC_UNITS:
+                return None
+            node = node.this
+        else:
+            return None
+    return node.name.lower(), unit
+
+
+def _date_bounds(
+    sql: str, dialect: str | None, dates: frozenset[str] = frozenset()
+) -> dict[str, tuple[date, date]]:
+    """The days each column's WHERE predicates admit, read off its date
+    literals — only columns bounded on both sides. ``dates`` names the
+    columns declared DATE, where ``<= '2026-10-12'`` holds the 12th; on any
+    other column the reading is the narrowest the SQL allows (``<=`` a
+    midnight ends the day before). Predicates under an OR are not read, and
+    an unparseable query bounds nothing: a caller failing on a WIDER window
+    then never fails on a guess."""
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:  # noqa: BLE001 — unparseable SQL is sql_guard's problem
+        return {}
+    if not isinstance(tree, exp.Expression):
+        return {}
+    lows: dict[str, date] = {}
+    highs: dict[str, date] = {}
+
+    def bound(col: str, lo: date | None, hi: date | None) -> None:
+        if lo is not None:
+            lows[col] = max(lo, lows.get(col, lo))
+        if hi is not None:
+            highs[col] = min(hi, highs.get(col, hi))
+
+    one = timedelta(days=1)
+    for where in tree.find_all(exp.Where):
+        for node in where.find_all(exp.EQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between):
+            ancestor = node.parent
+            ored = False
+            while ancestor is not None and ancestor is not where:
+                if isinstance(ancestor, exp.Or | exp.Not | exp.Case | exp.If):
+                    ored = True
+                    break
+                ancestor = ancestor.parent
+            if ored:
+                continue
+            side = _column_unit(node.this)
+            if side is None:
+                continue
+            col, unit = side
+            whole_day = col in dates and unit == "day"
+            if isinstance(node, exp.Between):
+                lo_lit = _literal_span(node.args["low"])
+                hi_lit = _literal_span(node.args["high"])
+                if lo_lit and hi_lit:
+                    early = hi_lit[2] and hi_lit[0] == hi_lit[1] and not whole_day
+                    bound(col, lo_lit[0], hi_lit[1] - one if early else hi_lit[1])
+                continue
+            lit = _literal_span(node.expression)
+            if lit is None:
+                continue
+            first, last, midnight = lit
+            if isinstance(node, exp.EQ):
+                bound(col, first, _unit_end(last, unit))
+            elif isinstance(node, exp.GTE):
+                bound(col, first, None)
+            elif isinstance(node, exp.GT):
+                bound(col, last + one, None)
+            elif isinstance(node, exp.LT):
+                bound(col, None, first - one if midnight else first)
+            else:  # LTE
+                early = midnight and first == last and not whole_day
+                bound(col, None, last - one if early else last)
+    return {c: (lows[c], highs[c]) for c in lows.keys() & highs.keys()}
+
+
 def _window_applied(
     question: str,
     sql: str,
@@ -576,6 +704,31 @@ def _window_applied(
     `partial` (never unverified): a legitimately pre-windowed source view is
     the false-positive to stay safe against, and the reason says so."""
     terms = temporal_terms(question)
+    dates = frozenset(f.name.lower() for e in model.entities for f in e.fields if f.type == "date")
+    # Part of a month the window parser could not turn into days ("early
+    # August", "the first few days of August") is still a day-level ask: SQL
+    # whose every date-bounded column covers that whole month answers wider.
+    partial = unplaced_days(question, _lens_today(model.timezone))
+    if partial and not (
+        certification == "certified"
+        and certified_question is not None
+        and unplaced_days(certified_question, _lens_today(model.timezone)) == partial
+    ):
+        bounds = _date_bounds(sql, model.dialect, dates)
+        if bounds and all(
+            any(lo <= first and hi >= last for _p, first, last in partial)
+            for lo, hi in bounds.values()
+        ):
+            return VerificationCheck(
+                name="window_applied",
+                status="fail",
+                reason=(
+                    "the question asks about "
+                    + ", ".join(f"'{phrase}'" for phrase, _a, _b in partial)
+                    + " but the SQL's date filters cover the whole month — a wider window "
+                    "than the days asked"
+                ),
+            )
     if not terms:
         return VerificationCheck(
             name="window_applied", status="skip", reason="the question states no time window"
@@ -591,6 +744,30 @@ def _window_applied(
                 status="pass",
                 reason="certified SQL: the approved question states the asked window",
             )
+    parts = year_parts(terms)
+    if parts is not None and not {1, 2, 3, 4} <= parts:
+        # A quarter or a half served as its whole year: "the third quarter of
+        # 2026" answered by `>= '2026-01-01' AND <= '2026-12-31'` is the
+        # year's figure. Fails only when every column the SQL bounds by date
+        # literals on both sides admits a whole calendar year.
+        bounds = _date_bounds(sql, model.dialect, dates)
+        if bounds and all(
+            any(lo <= date(y, 1, 1) and hi >= date(y, 12, 31) for y in range(lo.year, hi.year + 1))
+            for lo, hi in bounds.values()
+        ):
+            served = "; ".join(
+                f"{col} {lo.isoformat()} to {hi.isoformat()}"
+                for col, (lo, hi) in sorted(bounds.items())
+            )
+            return VerificationCheck(
+                name="window_applied",
+                status="fail",
+                reason=(
+                    f"the question asks about part of a year ({', '.join(sorted(terms))}) but "
+                    f"the SQL's date filters cover {served} — a whole year, a wider window "
+                    "than asked"
+                ),
+            )
     time_fields = {e.default_time_field for e in model.entities if e.default_time_field}
     time_fields |= {
         f.name
@@ -598,6 +775,36 @@ def _window_applied(
         for f in e.fields
         if "date" in (f.type or "").lower() or "time" in (f.type or "").lower()
     }
+    if sql_engages_time(sql, time_fields) and is_day_window(terms, relative=False):
+        # A day or a span of days must not be served as the month around it:
+        # "on 28 August 2026" answered by `>= '2026-08-01' AND <= '2026-08-31'`
+        # is August's figure. Only a day the question writes out: "today"
+        # served as the latest loaded day is a snapshot reading, not a
+        # widening. Fails only when every column the SQL bounds on
+        # both sides by date literals admits days outside the asked ones —
+        # relative SQL (CURRENT_DATE arithmetic) is not read, never guessed.
+        if _aggregates_only_levels(sql, model):
+            # A level metric at a month's end reads the month's last
+            # snapshot: the month's bounds are the reading, not a widening.
+            terms = month_end_as_month(terms)
+        ranges = window_ranges(terms, _lens_today(model.timezone))
+        bounds = _date_bounds(sql, model.dialect, dates)
+        if len(ranges) == 1 and bounds and is_day_window(terms, relative=False):
+            start, end = ranges[0]
+            if all(lo < start or hi > end for lo, hi in bounds.values()):
+                served = "; ".join(
+                    f"{col} {lo.isoformat()} to {hi.isoformat()}"
+                    for col, (lo, hi) in sorted(bounds.items())
+                )
+                return VerificationCheck(
+                    name="window_applied",
+                    status="fail",
+                    reason=(
+                        f"the question asks about {start.isoformat()} to {end.isoformat()} "
+                        f"but the SQL's date filters cover {served} — a wider window than "
+                        "the days asked"
+                    ),
+                )
     if sql_engages_time(sql, time_fields):
         # The latest-snapshot-pin refinement: a question about a
         # CALENDAR PERIOD ("last month") whose SQL's only date handling is
@@ -609,7 +816,7 @@ def _window_applied(
         period_ask = any(
             g in t
             for t in terms
-            for g in ("week", "month", "quarter", "year", "q1", "q2", "q3", "q4")
+            for g in ("week", "month", "quarter", "year", "q1", "q2", "q3", "q4", "h1", "h2")
         )
         from services.runtime.timewindow import _SQL_DATE_EVIDENCE
 
@@ -661,9 +868,9 @@ def _window_applied(
 def ratio_population_mismatch(sql: str, dialect: str | None) -> str | None:
     """A ratio whose DENOMINATOR filters on the very column the NUMERATOR
     aggregates unfiltered mixes populations: SUM(quota) over ALL
-    rows divided by COUNT(DISTINCT rep) over rows WHERE quota > 0 served
-    200,849 where the answer is 16,411 — a figure that is not a valid measure
-    of anything, identical across model tiers.
+    rows divided by COUNT(DISTINCT rep) over rows WHERE quota > 0 serves
+    a figure an order of magnitude off — one that is not a valid measure of
+    anything, identical across model tiers.
 
     Deliberately narrow (rule: serve-time guards must not false-positive):
     share-of-total ratios (numerator-subset) pass, and 'total revenue per

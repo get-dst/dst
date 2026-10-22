@@ -4,11 +4,13 @@ A thin MCP server that proxies to the dst REST data plane with a caller's API ke
 Mirrors Omni's pickModel -> pickTopic -> getData:
 
   list_lenses       ->  the governed lenses this caller may use
-  describe_lens     ->  a lens's entities, fields, definitions + certified library size
+  describe_lens     ->  a lens's entities, fields, definitions, metric catalog, certified count
+  metric_catalog    ->  the metric catalog alone, with the metric tree
   search_certified  ->  find human-approved question→SQL pairs (the deterministic path)
   run_certified     ->  run an approved answer with zero AI SQL generation
   query             ->  ask a governed question; returns a grounded, cited answer
   query_metrics     ->  name the metrics/dimensions directly; compiled, no generation
+  query_metrics_batch -> up to 50 structured intents read at one moment
 
 Every tool returns a structured envelope so agents can branch programmatically
 success is ``{"ok": true, ...payload}``; failure is ``{"ok": false,
@@ -341,8 +343,11 @@ async def list_lenses(ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
 @mcp.tool()
 async def describe_lens(name: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
     """Describe a lens: its entities, typed fields, business definitions, sample
-    questions, and the size of its certified library. Use this to learn what a lens
-    can answer before calling query.
+    questions, the size of its certified library, and its metric catalog — every
+    metric with label, unit, grains, callable dimensions and depends_on, and every
+    dimension with its value list when the profile holds a complete one. Use this to
+    learn what a lens can answer before calling query; metric_catalog returns the
+    catalog alone, with the metric tree.
 
     If certified_count > 0, prefer search_certified before query — a certified answer
     is human-approved and served deterministically (no AI generation).
@@ -353,6 +358,23 @@ async def describe_lens(name: str, ctx: Context) -> dict[str, Any]:  # type: ign
         name: the lens name from list_lenses.
     """
     payload, failure = await _request(ctx, "GET", f"/v1/lenses/{name}")
+    if failure is not None:
+        return failure
+    return {"ok": True, **payload}
+
+
+@mcp.tool()
+async def metric_catalog(lens: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
+    """The lens's metric catalog alone: metrics (name, label, aliases, unit, additivity,
+    time grains, the dimensions each can be cut by, depends_on, certified_answer_ids),
+    dimensions (with their complete value lists where the profile has one), and `tree`,
+    the metrics arranged by what each is computed from. Names here are exactly what
+    query_metrics accepts.
+
+    Args:
+        lens: the lens name from list_lenses.
+    """
+    payload, failure = await _request(ctx, "GET", f"/v1/lenses/{lens}/catalog")
     if failure is not None:
         return failure
     return {"ok": True, **payload}
@@ -566,6 +588,7 @@ async def query_metrics(
     limit: int | None = None,
     entity: str | None = None,
     grain: str | None = None,
+    compare: dict[str, Any] | None = None,
     format: AnswerFormat = "structured",
 ) -> dict[str, Any]:
     """Ask for named metrics and dimensions directly — no SQL, no generation, no guessing.
@@ -598,6 +621,10 @@ async def query_metrics(
             entity's time field is bucketed to that period and grouped by it — do not
             also pass the raw time field as a dimension.
         entity: the entity owning the metrics; usually inferred, pass it to disambiguate.
+        compare: {"to": "previous_period"}, {"to": "previous_year"}, or an explicit range
+            {"to": "2025-09"} / {"to": "2025-09-01/2025-09-30"}. Needs filters bounding
+            the metric's time field on both ends; each metric then also returns
+            <metric>_compare, <metric>_delta and <metric>_delta_pct.
         format: 'structured' (default) returns rows with no written answer. 'both' adds
             dst's own prose, at the cost of a model call.
     """
@@ -610,10 +637,42 @@ async def query_metrics(
         ("limit", limit),
         ("entity", entity),
         ("grain", grain),
+        ("compare", compare),
     ):
         if value is not None:
             body[key] = value
     payload, failure = await _request(ctx, "POST", f"/v1/lenses/{lens}/metrics", json_body=body)
+    if failure is not None:
+        return failure
+    return {"ok": True, **payload}
+
+
+@mcp.tool()
+async def query_metrics_batch(
+    lens: str,
+    intents: list[dict[str, Any]],
+    ctx: Context,  # type: ignore[type-arg]
+    format: AnswerFormat = "structured",
+) -> dict[str, Any]:
+    """Run up to 50 structured intents in one call, all read at one moment — every
+    node of a metric tree, or every tile of a dashboard, from the same data.
+
+    Each intent is what query_metrics takes (metrics, dimensions, filters, order_by,
+    limit, entity, grain, compare) plus an `id` of your choosing; results come back
+    keyed by that id, each with its own request_id and receipt. One failing intent
+    (an unknown metric, say) fails alone with its own `status` and `error`; the rest
+    still answer. `snapshot` says whether the warehouse could hold one snapshot for
+    the whole batch ('shared') or read each query at its own moment ('per_query').
+
+    Args:
+        lens: the lens name from list_lenses.
+        intents: [{"id": "arr", "metrics": ["arr"], "filters": [...]}, ...] — at most 50.
+        format: 'structured' (default) returns rows with no written answer.
+    """
+    body = {"intents": intents, "format": format}
+    payload, failure = await _request(
+        ctx, "POST", f"/v1/lenses/{lens}/metrics/batch", json_body=body
+    )
     if failure is not None:
         return failure
     return {"ok": True, **payload}

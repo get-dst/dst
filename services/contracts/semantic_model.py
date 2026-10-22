@@ -56,7 +56,7 @@ def _source_needs_two_keys(v: object) -> object:
 
 
 FieldType = Literal["string", "number", "integer", "boolean", "timestamp", "date", "json"]
-AggType = Literal["sum", "count", "count_distinct", "avg", "min", "max"]
+AggType = Literal["sum", "count", "count_distinct", "avg", "min", "max", "sum_distinct_on"]
 # flow: the rows are events, and a period's figure aggregates every row in it.
 # level: the rows are snapshots of a stock (ARR, headcount, a balance), and a
 # period's figure is its LAST snapshot — summing snapshots across a quarter
@@ -262,6 +262,16 @@ class Metric(Authored):
         "Set, the composer states it and writes the amount in that currency; unset, "
         "the answer carries a bare number and asserts no currency at all.",
     )
+    # One value per key, then summed: a monthly quota joined onto daily rows
+    # repeats on every day of the month, and a plain SUM counts it thirty
+    # times. The key is the author's fact about the data (which columns name
+    # one copy of the value); the compiler keeps one row per key and sums those.
+    distinct_on: StrList = PField(
+        default_factory=list,
+        description="sum_distinct_on only: the SQL expressions that identify one copy "
+        "of the value (e.g. [quotas.rep_id, quotas.month]) — the sum counts one row "
+        "per distinct key, so a value repeated across joined rows is added once",
+    )
     agg_time_field: str | None = PField(
         default=None,
         description="field this metric aggregates over time by, when it differs "
@@ -340,11 +350,22 @@ class Metric(Authored):
                 "type: ratio, numerator: <flow metric>, denominator: <level metric>, "
                 "period_weight: weeks"
             )
+        if self.agg == "sum_distinct_on" and not self.distinct_on:
+            raise ValueError(
+                f"metric '{self.name}' uses `agg: sum_distinct_on` but names no key — add "
+                "`distinct_on:` with the expressions that identify one copy of the value, "
+                "e.g. distinct_on: [quotas.rep_id, quotas.month]"
+            )
+        if self.distinct_on and self.agg != "sum_distinct_on":
+            raise ValueError(
+                f"metric '{self.name}' sets `distinct_on:` but its agg is "
+                f"{self.agg or self.type} — the key applies only to agg: sum_distinct_on"
+            )
         if self.type == "simple" and (self.agg is None or self.expr is None):
             raise ValueError(
                 f"simple metric '{self.name}' needs keys `agg:` and `expr:` — "
                 "e.g. agg: sum, expr: orders.amount (agg is one of sum/count/"
-                "count_distinct/avg/min/max; `agg: count` alone, with no expr, "
+                "count_distinct/avg/min/max/sum_distinct_on; `agg: count` alone, with no expr, "
                 "is a plain row count)"
             )
         if self.type == "ratio" and not (self.numerator and self.denominator):
@@ -697,6 +718,10 @@ class SemanticModel(BaseModel):
     # written for a paraphrase names its column after the measure it computed,
     # the deterministic hook no phrase list can give the question side.
     not_computable: list[dict[str, Any]] = PField(default_factory=list)
+    # Asks the lens declares it does not answer, each {ask, sibling}
+    # (LensConfig.not_for): refused before typing or generation when the
+    # question names every content word of the ask (services/runtime/not_for).
+    not_for: list[dict[str, Any]] = PField(default_factory=list)
     # The dropped metrics' full definitions, keyed by selected entity name —
     # the name list refuses a question that ASKS for a dropped metric; these
     # shapes let the runtime's shape guard refuse SQL that REBUILDS one from

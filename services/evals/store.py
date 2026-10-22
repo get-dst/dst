@@ -334,6 +334,43 @@ def last_run_score(session: Session, lens: str, mode: str) -> float | None:
     return float(row[0])
 
 
+def recent_runs_by_lens(session: Session, last: int) -> dict[str, list[EvalRunRow]]:
+    """Every lens's ``last`` most recent runs, newest first, in one query — a
+    lens with no recorded run maps to an empty list, and a lens since deleted
+    keeps the history it recorded."""
+    rows = session.execute(
+        text(
+            "SELECT l.name, r.id, r.lens_version, r.mode, r.score, r.passed, r.failed, "
+            "r.errored, r.telemetry_ref, r.started_at "
+            "FROM (SELECT name FROM lens UNION SELECT lens FROM eval_run) l LEFT JOIN LATERAL ("
+            "  SELECT * FROM eval_run e WHERE e.lens = l.name "
+            "  ORDER BY e.started_at DESC LIMIT :k"
+            ") r ON TRUE ORDER BY l.name, r.started_at DESC"
+        ),
+        {"k": max(last, 0)},
+    ).all()
+    out: dict[str, list[EvalRunRow]] = {}
+    for r in rows:
+        runs = out.setdefault(r[0], [])
+        if r[1] is None:
+            continue
+        runs.append(
+            EvalRunRow(
+                str(r[1]),
+                r[0],
+                r[2],
+                r[3],
+                float(r[4]) if r[4] is not None else None,
+                int(r[5]),
+                int(r[6]),
+                int(r[7]),
+                r[8],
+                r[9].isoformat() if r[9] else None,
+            )
+        )
+    return out
+
+
 def last_run(session: Session, lens: str, mode: str) -> EvalRunRow | None:
     """The most recent run for this lens+mode, fingerprint included — what a
     run-over-run compare loads BEFORE it records the new run."""

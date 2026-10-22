@@ -36,6 +36,9 @@ if TYPE_CHECKING:  # httpx is imported per-verb (CLI startup cost) — types onl
 PLAN_WAREHOUSE_TIMEOUT = 5.0
 
 _MIGRATE_LOCK_KEY = 0x4B_55_52_4D  # 'KURM'
+# The agent the CLI's serving requests name (`X-Dst-Agent`): the request ledger
+# and `dst observe` tell a terminal ask from a caller's by it.
+CLI_AGENT = "dst-cli"
 
 
 def _migrate_result(before: SchemaState) -> str:
@@ -548,10 +551,26 @@ def _runs(args: argparse.Namespace) -> int:
         if not args.all:
             print("error: name a lens, or --all for every lens", file=sys.stderr)
             return 1
-        names = [lens["name"] for lens in get(url, headers, "/mgmt/lenses")]
-        by_lens = {
-            n: get(url, headers, f"/mgmt/lenses/{n}/evals/runs")[: max(args.last, 0)] for n in names
-        }
+        # One call on a server that has the cross-lens endpoint; a lens at a
+        # time on one that predates it.
+        r = httpx.get(
+            f"{url}/mgmt/observe/runs",
+            params={"last": max(args.last, 0)},
+            headers=headers,
+            timeout=args.timeout,
+        )
+        if r.status_code == 404:
+            names = [lens["name"] for lens in get(url, headers, "/mgmt/lenses")]
+            by_lens = {
+                n: get(url, headers, f"/mgmt/lenses/{n}/evals/runs")[: max(args.last, 0)]
+                for n in names
+            }
+        elif r.status_code >= 400:
+            print(f"error: {_detail(r)}", file=sys.stderr)
+            return 1
+        else:
+            by_lens = {e["lens"]: e["runs"] for e in r.json()["runs"]}
+            names = list(by_lens)
         if args.as_json:
             print(json.dumps({"runs": [{"lens": n, "runs": rs} for n, rs in by_lens.items()]}))
             return 0
@@ -866,7 +885,8 @@ def _query(args: argparse.Namespace) -> int:
     url, headers = _client(args, caller_key_ok=True)
     r = httpx.post(
         f"{url}/v1/lenses/{args.lens}/query",
-        headers=headers,
+        # named, so the request ledger tells a terminal ask from a caller's
+        headers={**headers, "X-Dst-Agent": CLI_AGENT},
         json={"q": args.question},
         timeout=args.timeout,
     )
@@ -1103,7 +1123,7 @@ def _sql(args: argparse.Namespace) -> int:
     scope = {"connection": args.connection} if args.connection else {"lens": args.lens}
     r = httpx.post(
         f"{url}/v1/sql",
-        headers=headers,
+        headers={**headers, "X-Dst-Agent": CLI_AGENT},
         json={"sql": args.sql, "limit": args.limit, **scope},
         timeout=args.timeout,
     )
@@ -1573,10 +1593,24 @@ def _sample_scope(
     tables the semantic layer maps on this connection, then — no layer to scope
     by — everything (the bootstrap probe that precedes authoring)."""
     from services.project.warehouse_drift import same_table
+    from services.runtime.sql_guard import _names_table
 
     if getattr(args, "tables", None):
-        wanted = {t.strip() for t in args.tables.split(",") if t.strip()}
-        return {p.table for p in profiles if p.table in wanted}
+        # Named as an entity names it: `raw_shopify.orders` means the catalog's
+        # `acme-prod.raw_shopify.orders`, and a name that leaves out a leading
+        # qualifier still binds — the rule the guard reads table references by.
+        # Exact equality sampled nothing on a warehouse that lists tables fully
+        # qualified, and said only "sampled 0".
+        wanted = [t.strip() for t in args.tables.split(",") if t.strip()]
+        scope = {p.table for p in profiles if any(_names_table(w, p.table) for w in wanted)}
+        for w in wanted:
+            if not any(_names_table(w, p.table) for p in profiles):
+                print(
+                    f"warning: --tables names '{w}', which matches no table '{connection}' "
+                    "lists — nothing sampled for it",
+                    file=sys.stderr,
+                )
+        return scope
     if getattr(args, "sample_all", False):
         return {p.table for p in profiles}
     mapped = {
@@ -1774,9 +1808,12 @@ def _probe_connections(
                 file=sys.stderr,
             )
         if len(scope) < len(profiles):
+            chose = (
+                "--tables names" if getattr(args, "tables", None) else "the semantic layer reads"
+            )
             print(
-                f"sampled {sampled} of {len(profiles)} table(s) — the semantic layer "
-                f"reads {len(scope)}; catalog metadata covers the rest (--sample-all "
+                f"sampled {sampled} of {len(profiles)} table(s) — {chose} "
+                f"{len(scope)}; catalog metadata covers the rest (--sample-all "
                 "samples every table, --tables a,b exactly those)",
                 file=sys.stderr,
             )
@@ -2992,6 +3029,18 @@ def _warehouse_entries(args: argparse.Namespace) -> list[dict[str, object]]:
     return out
 
 
+def _selection_line(entry: dict[str, Any]) -> str:
+    """The resolved --select/--scope, printed before anything it selected."""
+    selectors = " ".join(entry.get("selectors") or []) or "(everything)"
+    lenses = ", ".join(entry.get("lenses") or []) or "none"
+    assets = ", ".join(entry.get("assets") or []) or "none"
+    line = (
+        f"selection: {selectors} (scope: {entry.get('kinds')}) → lenses: {lenses}; "
+        f"assets: {assets}; {entry.get('excluded', 0)} file(s) left out"
+    )
+    return "\n".join([line, *(f"  ! {n}" for n in entry.get("notes") or [])])
+
+
 def _render_plan(plan: list[dict[str, Any]], write: Callable[[str], None]) -> int:
     """Print the server's plan; return how many files apply would reject.
 
@@ -2999,6 +3048,9 @@ def _render_plan(plan: list[dict[str, Any]], write: Callable[[str], None]) -> in
     two implementations of "would apply reject this?" is one too many."""
     invalid = 0
     for entry in plan:
+        if entry.get("scope") == "selection":
+            write(_selection_line(entry))
+            continue
         if entry.get("scope") == "server_only":
             write(f"server-only: {entry['note']}")
             continue
@@ -3028,7 +3080,7 @@ def _render_plan(plan: list[dict[str, Any]], write: Callable[[str], None]) -> in
                     write(entry["diff"])
             continue
         errors = entry.get("errors") or ([entry["error"]] if entry.get("error") else [])
-        if entry.get("status") == "invalid":
+        if entry.get("status") == "invalid" or errors:
             invalid += 1
         # One error still reads on the status line; a lens rejected on several
         # gates at once gets one per line — apply prints them that way, and a
@@ -3086,6 +3138,9 @@ def _summarize_plan(plan: list[dict[str, Any]]) -> None:
         rows.append(f"  {head}" + (f" — {note}" if note else ""))
 
     for entry in plan:
+        if entry.get("scope") == "selection":
+            rows.append(_selection_line(entry))
+            continue
         if entry.get("scope") == "server_only":
             # Verbatim, not a glyph row: the note IS the adoption pointer.
             rows.append(f"server-only: {entry.get('note')}")
@@ -3117,16 +3172,23 @@ def _summarize_plan(plan: list[dict[str, Any]]) -> None:
         # lens rows
         status = str(entry.get("status") or "")
         errors = entry.get("errors") or ([entry["error"]] if entry.get("error") else [])
-        if status == "invalid":
+        stale_note = (
+            f"STALE compile (shared changed: {', '.join(entry['stale'])})"
+            if entry.get("stale")
+            else ""
+        )
+        if status == "invalid" or errors:
+            # The state alone ("invalid", "STALE compile") names no cause: every
+            # error apply would reject on prints here, one per line.
             counts["invalid"] = counts.get("invalid", 0) + 1
-            row("invalid", str(entry.get("lens") or ""), str(errors[0]) if errors else "invalid")
+            errors = errors or ["no reason on the row — --json shows it whole"]
+            head = " — ".join(n for n in (str(errors[0]), stale_note) if n)
+            row("invalid", str(entry.get("lens") or ""), head)
             for message in errors[1:]:
                 rows.append(f"      {message}")
             continue
         counts[status] = counts.get(status, 0) + 1
-        note = ""
-        if entry.get("stale"):
-            note = f"STALE compile (shared changed: {', '.join(entry['stale'])})"
+        note = stale_note
         if status != "unchanged" or note:
             row(entry.get("status") or "update", str(entry.get("lens") or ""), note or status)
         for line in entry.get("semantics", []):
@@ -3179,8 +3241,19 @@ def _plan(args: argparse.Namespace) -> int:
 
     body = {"files": _project_files(args, "plan")}
     url, headers = _client(args)
+    params: dict[str, str | list[str]] = {}
+    if selectors := _selectors(args):
+        params["select"] = selectors
+    if (scope := getattr(args, "scope", None) or "all") != "all":
+        params["scope"] = scope
     try:
-        r = httpx.post(f"{url}/mgmt/project/plan", headers=headers, json=body, timeout=args.timeout)
+        plan_url = f"{url}/mgmt/project/plan"
+        if params:
+            r = httpx.post(
+                plan_url, headers=headers, params=params, json=body, timeout=args.timeout
+            )
+        else:  # an unselected plan sends no query string at all
+            r = httpx.post(plan_url, headers=headers, json=body, timeout=args.timeout)
     except httpx.TimeoutException:
         # A raw ReadTimeout traceback tells the operator nothing.
         # plan takes no lock and writes nothing — say so, and name the knob.
@@ -3190,6 +3263,9 @@ def _plan(args: argparse.Namespace) -> int:
             "retry with --timeout SECONDS.",
             file=sys.stderr,
         )
+        return 1
+    if r.status_code == 422:
+        print(f"error: {_error_detail(r) or r.text[:300]}", file=sys.stderr)
         return 1
     plan = r.raise_for_status().json()
     warehouse = _warehouse_entries(args)
@@ -3296,20 +3372,26 @@ def _summarize_apply(out: list[dict[str, Any]], quiet: bool = False) -> None:
             warn_counts[str(note)] = warn_counts.get(str(note), 0) + 1
             warn_where.setdefault(str(note), []).append(row_name)
     deduped: set[str] = set()
+    refusals: list[dict[str, Any]] = []
     for entry in out:
         if entry.get("scope") == "apply":
             continue  # the abort row becomes the banner below
+        if entry.get("scope") == "selection":
+            print(_selection_line(entry))
+            continue
         head = str(entry.get("lens") or entry.get("scope") or "")
         action = str(entry.get("action") or "")
         version = entry.get("version")
         label = style.accent(f"lens {head}" if entry.get("lens") else head)
         loud = bool(entry.get("errors")) or action.startswith("rejected")
+        if action.startswith("rejected"):
+            refusals.append(entry)
         if entry.get("lens"):
             verdict = action or "unchanged"
             if action == "published":
                 published += 1
                 verdict = style.good(f"published v{version}" if version is not None else action)
-            elif action == "rejected":
+            elif action.startswith("rejected"):
                 rejected += 1
                 verdict = style.bad(action)
             if not quiet or loud:
@@ -3360,6 +3442,17 @@ def _summarize_apply(out: list[dict[str, Any]], quiet: bool = False) -> None:
         for note, rows in warn_where.items():
             where = ", ".join(rows[:3]) + (f", +{len(rows) - 3} more" if len(rows) > 3 else "")
             print(f"{style.warn('warning:')} {note} {style.dim(f'({where})')}")
+    if refusals and not quiet:
+        # A big apply's report runs to hundreds of lines and a rejection's reason
+        # scrolls past mid-stream, leaving only "1 rejected" on the counts line.
+        # Repeat each refusal with its reasons (the row's own `errors`, as --json
+        # carries them) right above that line, where it is read.
+        print(style.bad("rejected:"))
+        for entry in refusals:
+            name = entry.get("lens") or entry.get("scope") or ""
+            print(f"  {'lens ' if entry.get('lens') else ''}{name}: {entry.get('action')}")
+            for err in entry.get("errors") or ["no reason on the row — --json shows it whole"]:
+                print(f"    - {err}")
     bits = []
     if published:
         bits.append(f"{published} lens(es) published")
@@ -3399,6 +3492,8 @@ def _summarize_apply(out: list[dict[str, Any]], quiet: bool = False) -> None:
 def _apply(args: argparse.Namespace) -> int:
     import httpx
 
+    if getattr(args, "action", None) == "status":
+        return _apply_status(args)
     body = {"files": _project_files(args, "apply")}
     url, headers = _client(args)
     params: dict[str, str | list[str]] = {}
@@ -3408,8 +3503,14 @@ def _apply(args: argparse.Namespace) -> int:
         params["refresh_samples"] = "true"
     if getattr(args, "require_gates", False):
         params["require_gates"] = "true"
-    if selected := [n for n in (getattr(args, "lens", None) or []) if n.strip()]:
-        params["lens"] = selected
+    if selectors := _selectors(args):
+        params["select"] = selectors
+    if (scope := getattr(args, "scope", None) or "all") != "all":
+        params["scope"] = scope
+    # The server runs the apply as a job and answers with its id at once; this
+    # client polls it, so a client timeout or a proxy cut never loses the
+    # result. A server that predates jobs ignores the flag and answers rows.
+    params["background"] = "true"
     # --allow-failing-cases is None when absent, [] when bare (blanket), and
     # a list of ids when it names the cases it covers.
     named = getattr(args, "allow_failing_cases", None)
@@ -3448,66 +3549,164 @@ def _apply(args: argparse.Namespace) -> int:
             timeout=args.timeout,
         )
     except httpx.TimeoutException:
-        # The zombie apply: the handler is sync `def`, so the client
-        # disconnect CANNOT cancel it — the apply keeps running in the
-        # threadpool and commits minutes after the CLI gave up. A raw httpx
-        # traceback here made the operator believe nothing landed and retry
-        # into a 409. Name what the server is still doing instead.
         print(
             f"error: no response from {url} within {args.timeout}s — {_APPLY_IN_FLIGHT} "
-            "Raise --timeout SECONDS to wait longer. What costs the time is the "
-            "certify self-test: one full generation per certified answer the push "
-            "lands (~30s each measured, bounded by DST_CERTIFY_SELFTEST_BUDGET_S — read "
-            "that budget in ANSWERS, not seconds: the 120s default covered 4 of a "
-            "7-answer push), plus the eval gate when eval_gate is warn/block.",
+            "Raise --timeout SECONDS to wait longer.",
             file=sys.stderr,
         )
         return 1
+    if r.status_code == 202:
+        job_id = str(r.json()["job_id"])
+        if getattr(args, "no_wait", False):
+            print(f"apply job {job_id} started — `dst apply status {job_id}` shows its progress")
+            return 0
+        job = _wait_apply_job(args, url, headers, job_id)
+        if job is None:
+            return 1
+        if job.get("state") == "failed":
+            return _apply_failure(
+                url, int(str(job.get("status_code") or 500)), str(job.get("detail") or ""), ""
+            )
+        return _apply_report(args, list(job.get("result") or []))
+    if r.status_code >= 400:
+        return _apply_failure(url, r.status_code, _error_detail(r), r.text)
+    return _apply_report(args, r.json())
+
+
+def _selectors(args: argparse.Namespace) -> list[str]:
+    """--select selectors, with --lens NAME as the alias for lens/NAME."""
+    lenses = [f"lens/{n.strip()}" for n in (getattr(args, "lens", None) or []) if n.strip()]
+    return [*(s.strip() for s in getattr(args, "select", None) or [] if s.strip()), *lenses]
+
+
+def _job_line(job: dict[str, Any]) -> str:
+    done = job.get("progress") or []
+    lenses = ", ".join(f"{p.get('lens')} {p.get('action')}" for p in done) or "no lens yet"
+    return f"{job.get('state')} — {len(done)} lens(es): {lenses}"
+
+
+def _wait_apply_job(
+    args: argparse.Namespace, url: str, headers: dict[str, str], job_id: str
+) -> dict[str, Any] | None:
+    """Poll one apply job until it ends; print each lens as it lands. A poll
+    that fails is retried — the job runs on the server either way — and when
+    the client gives up it says how to re-attach, never that nothing landed."""
+    import time
+
+    import httpx
+
+    seen = 0
+    failures = 0
+    quiet = bool(getattr(args, "quiet", False) or getattr(args, "as_json", False))
+    while True:
+        try:
+            r = httpx.get(
+                f"{url}/mgmt/project/apply/jobs/{job_id}", headers=headers, timeout=args.timeout
+            )
+            r.raise_for_status()
+            job: dict[str, Any] = r.json()
+            failures = 0
+        except (httpx.HTTPError, ValueError) as exc:
+            failures += 1
+            if failures >= 10:
+                print(
+                    f"error: lost contact with {url} while apply job {job_id} ran ({exc}) — "
+                    f"the apply continues on the server; `dst apply status {job_id}` "
+                    "re-attaches",
+                    file=sys.stderr,
+                )
+                return None
+            time.sleep(2)
+            continue
+        progress = job.get("progress") or []
+        if not quiet:
+            for row in progress[seen:]:
+                print(style.dim(f"  … {row.get('lens')}: {row.get('action')}"), file=sys.stderr)
+        seen = len(progress)
+        if job.get("state") in ("done", "failed"):
+            return job
+        time.sleep(1)
+
+
+def _apply_status(args: argparse.Namespace) -> int:
+    """`dst apply status <job id>`: the job's state and per-lens progress, and
+    once it is done, the same report `dst apply` prints."""
+    import httpx
+
+    job_id = getattr(args, "job_id", None)
+    if not job_id:
+        print(
+            "error: `dst apply status` needs the job id `dst apply --no-wait` printed",
+            file=sys.stderr,
+        )
+        return 2
+    url, headers = _client(args)
+    r = httpx.get(f"{url}/mgmt/project/apply/jobs/{job_id}", headers=headers, timeout=args.timeout)
+    if r.status_code == 404:
+        print(f"error: no apply job '{job_id}' on {url}", file=sys.stderr)
+        return 1
+    job = r.raise_for_status().json()
+    if getattr(args, "as_json", False) and job.get("state") != "done":
+        print(json.dumps(job, indent=2, ensure_ascii=False))
+        return 0
+    print(f"apply job {job_id}: {_job_line(job)}")
+    if job.get("state") == "failed":
+        return _apply_failure(
+            url, int(str(job.get("status_code") or 500)), str(job.get("detail") or ""), ""
+        )
+    if job.get("state") == "done":
+        return _apply_report(args, list(job.get("result") or []))
+    return 0
+
+
+def _apply_failure(url: str, status_code: int, detail: str | None, body_text: str) -> int:
+    """Name an apply's HTTP failure (from the request, or from a failed job)."""
     from services.runtime.bounded import APPLY_ABORTED_PREFIX
 
-    detail = _error_detail(r)
-    if r.status_code in (502, 503, 504) and not (detail or "").startswith(APPLY_ABORTED_PREFIX):
+    if status_code in (502, 503, 504) and not (detail or "").startswith(APPLY_ABORTED_PREFIX):
         # A proxy's verdict, not the server's: upstream never answered, so the
         # apply may be running still. The one 5xx family that must NOT claim
         # "nothing was deployed" (the incident that taught this arrived as a 502).
         # dst's own 504 — a warehouse step past its deadline, rolled back — says
         # so in its detail and is reported below with what it says.
         print(
-            f"error: apply got HTTP {r.status_code} from a gateway, not from dst — "
+            f"error: apply got HTTP {status_code} from a gateway, not from dst — "
             f"{_APPLY_IN_FLIGHT}",
             file=sys.stderr,
         )
         return 1
-    if r.status_code == 409:  # another apply holds the per-org lock
+    if status_code == 409:  # another apply holds the per-org lock
         # The holder is a live apply, not a stuck one — it will
         # commit. "Retry shortly" alone let the operator read the lock as
         # wreckage from the run they thought had failed.
         print(
-            f"error: {r.json()['detail']} — that apply is still running and will "
+            f"error: {detail} — that apply is still running and will "
             "commit when it finishes; `dst plan` shows committed state.",
             file=sys.stderr,
         )
         return 1
-    if r.status_code >= 400:
-        # A server error must name itself, not become a raw traceback: a 500's
-        # actual cause is only in the server's log, so say where to look. It
-        # said "check serve.log", which nothing ever writes: the
-        # server logs to the TERMINAL running it, so name that instead.
-        where = "the server's log (locally: the terminal running `dst dev`/`serve`)"
-        # Apply has been read as non-atomic ("half of it is live"). Measured: it is
-        # not — semantic assets, lens publishes, eval cases and certified
-        # upserts share ONE request transaction, and an unhandled error rolls it
-        # all back (tests/test_certified_gates.py). Say so: the operator was
-        # left guessing which stages survived, and guessed wrong.
-        print(
-            f"error: apply failed (HTTP {r.status_code}): "
-            f"{detail or r.text[:300] or 'no detail'} — nothing was deployed "
-            "(one transaction: certified answers, eval cases and the lens publish "
-            f"rolled back together) — full traceback in {where}",
-            file=sys.stderr,
-        )
-        return 1
-    out = r.json()
+    # A server error must name itself, not become a raw traceback: a 500's
+    # actual cause is only in the server's log, so say where to look. It
+    # said "check serve.log", which nothing ever writes: the
+    # server logs to the TERMINAL running it, so name that instead.
+    where = "the server's log (locally: the terminal running `dst dev`/`serve`)"
+    # Apply has been read as non-atomic ("half of it is live"). Measured: it is
+    # not — semantic assets, lens publishes, eval cases and certified
+    # upserts share ONE request transaction, and an unhandled error rolls it
+    # all back (tests/test_certified_gates.py). Say so: the operator was
+    # left guessing which stages survived, and guessed wrong.
+    print(
+        f"error: apply failed (HTTP {status_code}): "
+        f"{detail or body_text[:300] or 'no detail'} — nothing was deployed "
+        "(one transaction: certified answers, eval cases and the lens publish "
+        f"rolled back together) — full traceback in {where}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _apply_report(args: argparse.Namespace, out: list[dict[str, Any]]) -> int:
+    """Render an apply's rows and turn them into the exit code."""
     if getattr(args, "as_json", False):
         # ensure_ascii=False: server rows carry prose warnings (em dashes, quotes);
         # \uXXXX escapes would make the one surface a CLI user reads unreadable.
@@ -4332,9 +4531,9 @@ def _test(args: argparse.Namespace) -> int:
     from services.evals import compare as run_compare
     from services.evals import slot_lane as slot_lane_mod
     from services.evals import store as eval_store
-    from services.evals.certified_suite import format_result, run_certified_suite
+    from services.evals.certified_suite import format_result, run_certified_suite, value_json
     from services.evals.runner import run_behavioral
-    from services.evals.service import _row_to_case
+    from services.evals.service import _row_to_case, lens_serve
     from services.lenses import store as lens_store
     from services.lenses.connections import resolve_connector
     from services.llm import registry
@@ -4497,6 +4696,7 @@ def _test(args: argparse.Namespace) -> int:
                 rows_all = bool(getattr(args, "rows", False))
                 proven: set[str] = set()
                 slot_results: list[EvalResult] = []
+                slot_rows: dict[str, dict[str, object]] = {}
                 lane = _slot_lane_for_lens(
                     bundle,
                     oid,
@@ -4529,28 +4729,32 @@ def _test(args: argparse.Namespace) -> int:
                         ok = slot_case.verdict == "passed"
                         if not ok:
                             failed += 1
-                        rows.append(
-                            {
-                                "org": org_name,
-                                "lens": name,
-                                "lane": "slots",
-                                "answer_id": slot_case.answer_id,
-                                "question": slot_case.question,
-                                "verdict": "pass" if ok else "fail",
-                                "typed": slot_case.typed,
-                                "reason": slot_case.evidence or None,
-                                "decisions": [d.model_dump() for d in slot_case.decisions],
-                                "gold": slot_case.gold,
-                                "runs": slot_case.runs,
-                                "agreement": slot_case.agreement,
-                                "sql_match": slot_case.sql_match,
-                                "elapsed_s": slot_case.elapsed_s,
-                                "calls": slot_case.calls,
-                                "input_tokens": slot_case.input_tokens,
-                                "output_tokens": slot_case.output_tokens,
-                                "cost_usd": slot_case.cost_usd,
-                            }
-                        )
+                        slot_row: dict[str, object] = {
+                            "org": org_name,
+                            "lens": name,
+                            "lane": "slots",
+                            # eval_result.case_id of this row, and the
+                            # certified answer it grades: the join keys.
+                            "case_id": f"slots:{slot_case.answer_id}",
+                            "certified_answer_id": slot_case.answer_id,
+                            "answer_id": slot_case.answer_id,
+                            "question": slot_case.question,
+                            "verdict": "pass" if ok else "fail",
+                            "typed": slot_case.typed,
+                            "reason": slot_case.evidence or None,
+                            "decisions": [d.model_dump() for d in slot_case.decisions],
+                            "gold": slot_case.gold,
+                            "runs": slot_case.runs,
+                            "agreement": slot_case.agreement,
+                            "sql_match": slot_case.sql_match,
+                            "elapsed_s": slot_case.elapsed_s,
+                            "calls": slot_case.calls,
+                            "input_tokens": slot_case.input_tokens,
+                            "output_tokens": slot_case.output_tokens,
+                            "cost_usd": slot_case.cost_usd,
+                        }
+                        rows.append(slot_row)
+                        slot_rows[slot_case.answer_id] = slot_row
                         why = f" ({slot_case.evidence})" if slot_case.evidence and not ok else ""
                         sql_mark = {
                             "identical": " [sql identical]",
@@ -4589,7 +4793,6 @@ def _test(args: argparse.Namespace) -> int:
                         if c.verdict == "passed" and c.sql_match in ("identical", "equivalent")
                     }
                     proven_n += len(proven)
-                    slot_results = slot_lane_mod.eval_results(lane.cases)
                 # --slots executes nothing: the rows lane and the behavioral
                 # pins sit out, but the slot verdicts are still RECORDED below.
                 to_execute = (
@@ -4633,6 +4836,8 @@ def _test(args: argparse.Namespace) -> int:
                                 # The certified answer's id: stable across a
                                 # rewording, and what eval_result.case_id carries
                                 # (`certified:<id>`), so a report joins on it.
+                                "case_id": f"certified:{r.answer_id}",
+                                "certified_answer_id": r.answer_id,
                                 "answer_id": r.answer_id,
                                 "question": r.question,
                                 "verdict": "pass" if r.passed else "fail",
@@ -4715,18 +4920,39 @@ def _test(args: argparse.Namespace) -> int:
                             f"{label}: stored typed gold for {gold_stored} certified answer(s) "
                             "from this green run — the slot lane grades them from now on"
                         )
+                if lane is not None:
+                    # The data lane is the oracle: a compiled SQL written another
+                    # way than the certified text that returned the certified
+                    # rows is "differs (data equal)", never a failure of either.
+                    executed = {r.answer_id: r.passed for r in outcome.results} if outcome else {}
+                    equal_n = 0
+                    for c in lane.cases:
+                        if (
+                            c.sql_match == "differs"
+                            and c.answer_id in executed
+                            and slot_lane_mod.metric_slot_passed(c)
+                        ):
+                            c.data_equal = executed[c.answer_id]
+                            slot_rows[c.answer_id]["sql_data_equal"] = c.data_equal
+                            equal_n += int(c.data_equal)
+                    if equal_n:
+                        say(
+                            f"{label}: {equal_n} slot case(s) compiled SQL that differs from "
+                            "the certified text and returned the certified rows — differs "
+                            "(data equal)"
+                        )
+                    slot_results = slot_lane_mod.eval_results(lane.cases)
                 if behavioral and not slots_only:
                     # The slim rest of evals/cases.yaml: expect: clarify|refuse
                     # pins run alongside the corpus, as the scaffold promises.
-                    assemble_q, b_generators_for = assembly.question_harness(bundle, oid, resolved)
+                    # Through the query door's own core, so a pin grades the
+                    # response a caller gets (typed serving, untyped_fallback).
                     b_outcome = run_behavioral(
-                        connector=connector,
                         lens=name,
                         cases=behavioral,
-                        assemble_for=assemble_q,
-                        generators_for=b_generators_for,
-                        composer=composer,
-                        model_name=model_name,
+                        serve=lens_serve(
+                            name, bundle, org_id=oid, connector=connector, resolved=resolved
+                        ),
                     )
                     by_case = {res.case_id: res for res in b_outcome.results}
                     for case in behavioral:
@@ -4740,6 +4966,7 @@ def _test(args: argparse.Namespace) -> int:
                                 "org": org_name,
                                 "lens": name,
                                 "case_id": case.id,
+                                "certified_answer_id": None,
                                 "question": case.question,
                                 "expect": case.expect,
                                 "verdict": "pass" if res.passed else "fail",
@@ -4798,7 +5025,9 @@ def _test(args: argparse.Namespace) -> int:
                                 },
                                 reason=cr.reason,
                                 actual_sql=cr.generated_sql,
-                                actual_value=format_result(cr.generated_result),
+                                # JSON-native, cells canonical: the shape a
+                                # verified_value has, so the two compare.
+                                actual_value=value_json(cr.generated_result),
                             )
                         )
                 if behavioral and not slots_only:
@@ -4846,6 +5075,7 @@ def _test(args: argparse.Namespace) -> int:
     if args.lens and not found_lens:
         print(f"error: no published lens '{args.lens}' in org {scope}", file=sys.stderr)
         return 1
+    from services.evals.calibration import by_slot as calibration_by_slot
     from services.evals.calibration import format_report
     from services.evals.calibration import report as calibration_report
 
@@ -4887,6 +5117,9 @@ def _test(args: argparse.Namespace) -> int:
                     # The deciders' calibration over this corpus (advisory —
                     # never a gate until the defaults are stamped from it).
                     "calibration": calibration,
+                    # The same figures per decision slot: n, accuracy, the
+                    # unanimous bin's accuracy and ECE (None below the n floor).
+                    "calibration_by_slot": calibration_by_slot(calibration),
                     "untyped_answers": untyped_n,
                     "proven_by_slots": proven_n,
                     "slot_lane": slot_lane_mod.summary(
@@ -5006,8 +5239,11 @@ def _observe(args: argparse.Namespace) -> int:
       dst observe callers         who, how many, how much, declines and errors
       dst observe requests        what they actually asked
       dst observe show <req_id>   one request: question, SQL, confidence
+      dst observe export          the request ledger (--since/--until, --format csv|json)
 
     `--json` on any of them for the parseable form; agents should prefer it.
+    Test traffic (agent `dst-test` or `benchmark`) is out of the headline,
+    the basis line and the caller rollup unless `--include-test`.
     """
     import httpx
 
@@ -5026,6 +5262,33 @@ def _observe(args: argparse.Namespace) -> int:
         return r.json()
 
     action = getattr(args, "action", None) or "summary"
+    include_test = True if getattr(args, "include_test", False) else None
+
+    if action == "export":
+        # The ledger at /mgmt/requests: every row in the window, written as the
+        # server renders it (CSV bytes or a JSON list) so a pipe gets a file.
+        fmt = "json" if args.json else (getattr(args, "format", None) or "csv")
+        r = httpx.get(
+            f"{url}/mgmt/requests",
+            headers=headers,
+            params={
+                k: v
+                for k, v in {
+                    "since": getattr(args, "since", None),
+                    "until": getattr(args, "until", None),
+                    "lens": args.lens,
+                    "caller": getattr(args, "caller", None),
+                    "format": fmt,
+                }.items()
+                if v is not None
+            },
+            timeout=args.timeout,
+        )
+        if r.status_code >= 400:
+            print(f"error: {_detail(r)}", file=sys.stderr)
+            return 1
+        sys.stdout.write(r.text if fmt == "csv" else json.dumps(r.json(), indent=2) + "\n")
+        return 0
 
     if action == "show":
         trace = get(f"/requests/{args.request_id}")
@@ -5086,13 +5349,13 @@ def _observe(args: argparse.Namespace) -> int:
             )
         return 0
 
-    callers = get("/callers", lens=args.lens)
+    callers = get("/callers", lens=args.lens, include_test=include_test)
     assert isinstance(callers, list)
     if action == "callers" and args.json:
         print(json.dumps(callers, indent=2))
         return 0
 
-    kpis = get("/kpis") if action == "summary" else None
+    kpis = get("/kpis", include_test=include_test) if action == "summary" else None
     if args.json:
         print(json.dumps({"kpis": kpis, "callers": callers}, indent=2))
         return 0
@@ -5135,6 +5398,14 @@ def _observe(args: argparse.Namespace) -> int:
             order = ("certified", "declared", "mixed", "inferred", "unknown")
             split = " · ".join(f"{hist.get(k, 0)} {k}" for k in order if hist.get(k))
             print(f"{style.accent('basis:')} {split}")
+        if test_n := int(kpis.get("test_requests") or 0):
+            # Left out, and said: a filter that hides rows names how many.
+            print(
+                style.dim(
+                    f"{test_n:,} test request(s) (agent dst-test / benchmark) not counted "
+                    "above — --include-test counts them"
+                )
+            )
         if isinstance(profiles := kpis.get("profiles"), dict):
             # How old the facts behind every answer are: a probe job that
             # stopped shows here before it shows as a wrong answer.
@@ -6935,13 +7206,22 @@ def main() -> int:
     p.add_argument(
         "action",
         nargs="?",
-        choices=["callers", "requests", "show"],
-        help="omit for the headline + per-caller usage",
+        choices=["callers", "requests", "show", "export"],
+        help="omit for the headline + per-caller usage; `export` writes the request ledger",
     )
     p.add_argument("request_id", nargs="?", help="with `show`: the request to print")
     p.add_argument("--lens", help="restrict to one lens")
     p.add_argument("--status", help="with `requests`: ok | refused | error")
     p.add_argument("--limit", type=int, default=50, help="with `requests` (max 200)")
+    p.add_argument("--since", help="with `export`: ISO date or instant, inclusive")
+    p.add_argument("--until", help="with `export`: ISO date or instant, exclusive")
+    p.add_argument("--caller", help="with `export`: one caller")
+    p.add_argument("--format", choices=["csv", "json"], help="with `export`: csv (default) or json")
+    p.add_argument(
+        "--include-test",
+        action="store_true",
+        help="count test traffic (agent dst-test or benchmark) in the headline and callers",
+    )
     p.add_argument("--json", action="store_true")
     p.add_argument("--timeout", type=float, default=60)
     p.add_argument("--dir", default=".", help="project root whose .env holds URL and credentials")
@@ -7129,15 +7409,47 @@ def main() -> int:
                 choices=["bigquery", "duckdb", "postgres", "mysql", "snowflake"],
                 help="osi only: which dialect the emitted expressions are written in",
             )
-        if name == "apply":
+        if name in ("plan", "apply"):
+            p.add_argument(
+                "--select",
+                nargs="+",
+                action="extend",
+                metavar="SELECTOR",
+                help="push only these nodes of the project graph: definition/NAME, "
+                "entity/NAME, lens/NAME, a glob on the name (lens/finance_*), +X (X and "
+                "what it reads), X+ (X and the lenses that read it), @changed (what "
+                "differs from the server). Unselected lenses are not validated or "
+                "touched; a selection that changes an asset an unselected published "
+                "lens reads is refused, naming it",
+            )
             p.add_argument(
                 "--lens",
                 action="append",
                 metavar="NAME",
-                help="publish only this lens of the project (repeatable); the other "
-                "lenses in the tree are treated as unchanged — refused when the push "
-                "changes shared inputs (semantic/, connections) a non-selected "
-                "published lens is compiled against: add it to --lens, or drop --lens",
+                help="alias for --select lens/NAME (repeatable)",
+            )
+            p.add_argument(
+                "--scope",
+                choices=["all", "semantic", "certified", "cases", "config"],
+                default="all",
+                help="which kinds of files to push: semantic/**, certified_answers.yaml, "
+                "evals/cases.yaml, or dst.yaml and other project files (default: all); "
+                "--scope cases lands eval cases only and runs no gate",
+            )
+        if name == "apply":
+            p.add_argument(
+                "action",
+                nargs="?",
+                choices=["status"],
+                help="`dst apply status JOB_ID`: a running or finished apply's state, "
+                "per-lens progress and, when done, its report",
+            )
+            p.add_argument("job_id", nargs="?", help="the job id `dst apply --no-wait` printed")
+            p.add_argument(
+                "--no-wait",
+                action="store_true",
+                help="start the apply on the server and print its job id at once; "
+                "`dst apply status JOB_ID` attaches",
             )
             p.add_argument(
                 "--probe-certified",

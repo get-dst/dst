@@ -337,7 +337,9 @@ def test_probe_verified_value_survives_reapply(org) -> None:
         first = certify_store.list_for_lens(s, "customer_value")[0]
         assert first.verified_value is not None
     row = _apply(headers, files)
-    assert "certified answers: created 0, updated 0, unchanged 1" in row["applied"]
+    # Identical files plan clean (the stamped value is not a difference), so
+    # the lens skips the publish path outright.
+    assert row["action"] == "unchanged" and "applied" not in row
     with org_session(oid) as s:
         again = certify_store.list_for_lens(s, "customer_value")[0]
         assert again.verified_value == first.verified_value

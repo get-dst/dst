@@ -544,11 +544,16 @@ def test_h1_intent_path_compiles_runnable_sql(tmp_path) -> None:
 
 def _snapshot_model(filter_sql: str) -> SemanticModel:
     entity = Entity(
-        name="finance_kpis",
-        source=EntitySource(connection="bq", table="p.d.finance_kpis"),
-        fields=[Field(name="status_date", type="date"), Field(name="arr", type="number")],
+        name="store_kpis",
+        source=EntitySource(connection="bq", table="p.d.store_kpis"),
+        fields=[Field(name="snapshot_date", type="date"), Field(name="revenue_eur", type="number")],
         metrics=[
-            Metric(name="current_arr", agg="sum", expr="finance_kpis.arr", filters=[filter_sql])
+            Metric(
+                name="current_revenue",
+                agg="sum",
+                expr="store_kpis.revenue_eur",
+                filters=[filter_sql],
+            )
         ],
     )
     return SemanticModel(lens="l", name="m", dialect="bigquery", entities=[entity])
@@ -561,22 +566,22 @@ def test_unaliased_subquery_source_table_is_self_aliased() -> None:
     # correct form, and says so.
     out, errors, warnings = resolve_model(
         _snapshot_model(
-            "finance_kpis.status_date = "
-            "(SELECT MAX(finance_kpis.status_date) FROM `p.d.finance_kpis`)"
+            "store_kpis.snapshot_date = "
+            "(SELECT MAX(store_kpis.snapshot_date) FROM `p.d.store_kpis`)"
         )
     )
     assert errors == []
     assert len(warnings) == 1 and "self-aliased" in warnings[0]
     assert (
-        out.entities[0].metrics[0].filters[0] == "finance_kpis.status_date = "
-        "(SELECT MAX(finance_kpis.status_date) FROM `p.d.finance_kpis` AS finance_kpis)"
+        out.entities[0].metrics[0].filters[0] == "store_kpis.snapshot_date = "
+        "(SELECT MAX(store_kpis.snapshot_date) FROM `p.d.store_kpis` AS store_kpis)"
     )
 
 
 def test_already_self_aliased_subquery_passes_untouched() -> None:
     good = (
-        "finance_kpis.status_date = "
-        "(SELECT MAX(finance_kpis.status_date) FROM `p.d.finance_kpis` AS finance_kpis)"
+        "store_kpis.snapshot_date = "
+        "(SELECT MAX(store_kpis.snapshot_date) FROM `p.d.store_kpis` AS store_kpis)"
     )
     out, errors, warnings = resolve_model(_snapshot_model(good))
     assert (errors, warnings) == ([], [])
@@ -589,8 +594,8 @@ def test_subquery_local_aliases_are_that_scopes_sql() -> None:
     # subquery's own FROM is not an entity ref.
     out, errors, warnings = resolve_model(
         _snapshot_model(
-            "finance_kpis.status_date = "
-            "(SELECT MAX(snap.status_date) FROM `p.d.finance_kpis` AS snap)"
+            "store_kpis.snapshot_date = "
+            "(SELECT MAX(snap.snapshot_date) FROM `p.d.store_kpis` AS snap)"
         )
     )
     assert (errors, warnings) == ([], [])
@@ -599,12 +604,12 @@ def test_subquery_local_aliases_are_that_scopes_sql() -> None:
 def test_bare_columns_inside_a_from_bearing_subquery_pass() -> None:
     out, errors, warnings = resolve_model(
         _snapshot_model(
-            "finance_kpis.status_date = (SELECT MAX(status_date) FROM `p.d.finance_kpis` AS s)"
+            "store_kpis.snapshot_date = (SELECT MAX(snapshot_date) FROM `p.d.store_kpis` AS s)"
         )
     )
     assert (errors, warnings) == ([], [])
 
 
 def test_entity_refs_outside_subqueries_still_resolve_strictly() -> None:
-    _, errors, _ = resolve_model(_snapshot_model("finance_kpis.no_such_column = 1"))
+    _, errors, _ = resolve_model(_snapshot_model("store_kpis.no_such_column = 1"))
     assert len(errors) == 1 and "no member 'no_such_column'" in errors[0]

@@ -235,3 +235,50 @@ def test_a_metric_named_by_its_label_constructs_through_the_api_door(
             assert "avg(" in body["sql"].lower() and "otd_rate" in body["sql"].lower()
     finally:
         _cleanup(settings.database_admin_url, org)
+
+
+@needs_db
+def test_a_sole_metric_over_kinds_that_do_not_add_asks_which_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The structured door compiles "What is the revenue?" itself; on an
+    entity whose rows are several kinds told apart by a pinned dimension,
+    the compiled figure would add them, so the door asks which kind — before
+    any generation, rather than handing the question to a model."""
+    from sqlalchemy import create_engine, text
+
+    from services.db.session import org_session
+    from services.lenses import store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    org, raw = _make_org_token(settings.database_admin_url)
+    bundle = jaffle_customer_value_bundle()
+    bundle.semantic_model.entities = [
+        e.model_copy(update={"pinned_dimensions": ["status"]}) if e.name == "orders" else e
+        for e in bundle.semantic_model.entities
+    ]
+    with org_session(org) as session:
+        store.create_lens(session, bundle)
+        store.publish(session, "customer_value")
+    monkeypatch.setattr(settings, "providers", fake_llm_providers())
+    monkeypatch.setattr(settings, "typed_serving", "off")
+    monkeypatch.setattr(
+        "services.llm.anthropic_provider.AnthropicProvider", lambda _key, **_: _NeverGenerates()
+    )
+    _dead_embedder(monkeypatch)
+    try:
+        r = client.post(
+            "/v1/lenses/customer_value/query",
+            json={"q": "What is the revenue?", "format": "structured"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "clarification", body
+        assert body["clarification"]["term"] == "status"
+        assert body["answer"].startswith("The orders table holds several kinds of record")
+    finally:
+        with create_engine(settings.database_admin_url).begin() as c:
+            for table in ("lens_version", "lens"):
+                c.execute(text(f"DELETE FROM {table} WHERE org_id = :o"), {"o": org})
+        _cleanup(settings.database_admin_url, org)

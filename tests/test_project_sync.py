@@ -1156,11 +1156,12 @@ def test_apply_upserts_certified_answers_and_eval_cases(org, monkeypatch) -> Non
         cases = eval_store.list_cases(s, "customer_value")
         assert len(cases) == 1 and cases[0].expected_sql == "SELECT 2"
 
-    # Identical re-apply: counted as unchanged, honestly.
+    # Identical re-apply: the files match the server (stamped values the file
+    # never carried do not count as a difference), so the lens skips the
+    # publish path outright and says unchanged.
     out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
     row = next(e for e in out if e.get("lens") == "customer_value")
-    assert "certified answers: created 0, updated 0, unchanged 1" in row["applied"]
-    assert "eval cases: created 0, updated 0, unchanged 1" in row["applied"]
+    assert row["action"] == "unchanged" and "applied" not in row
 
     # A keyless environment still lands an edit: the embedding is of the (unchanged)
     # question, so updates need no embedder — only new questions warn + skip.
@@ -1222,7 +1223,7 @@ def test_eval_case_tags_round_trip(org) -> None:
     files["lenses/customer_value/evals/cases.yaml"] = yaml.safe_dump(
         [
             {
-                "question": "How are we tracking to the ARR goal in EMEA?",
+                "question": "How is the harbour location tracking to its membership target?",
                 "expect": "answer",
                 "status": "approved",
                 "tags": ["persona:cro", "intent:discriminator"],
@@ -1236,7 +1237,7 @@ def test_eval_case_tags_round_trip(org) -> None:
     assert "eval cases: created 2, updated 0, unchanged 0" in row["applied"]
     with org_session(_oid) as s:
         by_q = {c.question: c for c in eval_store.list_cases(s, "customer_value")}
-        assert by_q["How are we tracking to the ARR goal in EMEA?"].tags == [
+        assert by_q["How is the harbour location tracking to its membership target?"].tags == [
             "persona:cro",
             "intent:discriminator",
         ]
@@ -1254,7 +1255,7 @@ def test_eval_case_tags_round_trip(org) -> None:
     export = client.get("/mgmt/project/export", headers=headers).json()["files"]
     cases = yaml.safe_load(export["lenses/customer_value/evals/cases.yaml"])
     by_question = {c["question"]: c for c in cases}
-    tagged = by_question["How are we tracking to the ARR goal in EMEA?"]
+    tagged = by_question["How is the harbour location tracking to its membership target?"]
     assert tagged["tags"] == ["persona:cro", "intent:headline"]
     assert "tags" not in by_question["Untagged?"]
 
@@ -1332,10 +1333,11 @@ def test_apply_behavioral_cases_and_the_value_deprecation_nudge(org) -> None:
     must_answer = stored["How many repeat customers do we have?"]
     assert (must_answer.expect, must_answer.term) == ("answer", None)
 
-    # Identical re-apply: the column comparison is stable — unchanged, not updated.
+    # Identical re-apply: the comparison is stable — the lens plans unchanged
+    # and skips the publish path, not updated.
     out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
     row = next(e for e in out if e.get("lens") == "customer_value")
-    assert "eval cases: created 0, updated 0, unchanged 3" in row["applied"]
+    assert row["action"] == "unchanged" and "applied" not in row
 
     # Export decodes the marker back into the authored expect/term keys.
     export = client.get("/mgmt/project/export", headers=headers).json()["files"]

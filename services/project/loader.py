@@ -182,6 +182,9 @@ class LensSource:
     # win: file-originated answers absent from it delete on apply).
     certified_answers: list[dict[str, Any]] | None = None
     eval_cases: list[dict[str, Any]] = field(default_factory=list)
+    # True when the tree carries evals/cases.yaml (empty included): the file
+    # then owns the lens's approved cases, and one absent from it retires.
+    cases_file: bool = False
     # evals/known_divergences.yaml: certified answers generation is not
     # expected to reproduce, each with a reason — the publish gate reports
     # those divergences as covered instead of blocking on them.
@@ -239,6 +242,7 @@ def load_lens_source(files: dict[str, str]) -> LensSource:
         sample_queries=sample_queries,
         certified_answers=certified_answers,
         eval_cases=_yaml_list(files.get("evals/cases.yaml"), "evals/cases.yaml"),
+        cases_file="evals/cases.yaml" in files,
         known_divergences=_yaml_list(
             files.get("evals/known_divergences.yaml"), "evals/known_divergences.yaml"
         ),

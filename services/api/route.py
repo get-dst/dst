@@ -26,6 +26,7 @@ import logging
 import math
 import re
 import uuid
+from dataclasses import replace
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
@@ -44,6 +45,8 @@ from services.api.query import (
     run_lens_query,
 )
 from services.auth.deps import get_caller
+from services.certify import store as certified_store
+from services.certify.binding import render_question
 from services.contracts.response import ConsumerAnswer, QueryResponse
 from services.db import embedding_meta
 from services.db.session import org_session
@@ -60,8 +63,9 @@ from services.router import (
     Scorer,
     anchor_store,
 )
-from services.router.decider import LlmDecider, route_with_llm
+from services.router.decider import LlmDecider, route_question
 from services.router.profiles import coverage_profile
+from services.runtime.not_for import not_for_refusal
 
 log = logging.getLogger("dst")
 
@@ -120,7 +124,31 @@ def _accessible_profiles(caller: CallerIdentity) -> list[CoverageProfile]:
         ok, _ = authorize(caller, bundle.config)
         if ok:
             profiles.append(coverage_profile(bundle))
-    return profiles
+    certified = _certified_questions(caller, [p.lens for p in profiles])
+    return [
+        replace(p, certified=list(dict.fromkeys(p.certified + certified.get(p.lens, []))))
+        for p in profiles
+    ]
+
+
+def _certified_questions(caller: CallerIdentity, lenses: list[str]) -> dict[str, list[str]]:
+    """Each lens's active certified-answer questions, a template at its first
+    sample rendering (the one its match anchors on). Best-effort: without them
+    routing still runs, it just cannot take the certified shortcut."""
+    out: dict[str, list[str]] = {}
+    try:
+        with org_session(caller.org_id) as session:
+            for lens in lenses:
+                for a in certified_store.list_for_lens(session, lens):
+                    if not certified_store.is_active(a.status):
+                        continue
+                    q = a.question
+                    if a.slots and a.sample_bindings:
+                        q = render_question(q, a.sample_bindings[0])
+                    out.setdefault(lens, []).append(q)
+    except Exception:
+        log.exception("certified questions unavailable for routing")
+    return out
 
 
 def _resolve_decider() -> LlmDecider | None:
@@ -168,8 +196,10 @@ def _stored_scorer(
 
 
 def _route(caller: CallerIdentity, question: str) -> RouteDecision:
-    """Route the question: cosine prefilter → LLM coverage decision (with a confident-match
-    fast-path), or pure cosine when no LLM is configured. Blocking (embedder + decider over
+    """Route the question: the deterministic sibling rules (not_for, certified question,
+    distinct anchors, declared name — services/router/sibling.py), then cosine prefilter
+    → LLM coverage decision (with a confident-match fast-path), or pure cosine when no
+    LLM is configured. Blocking (embedder + decider over
     sync httpx) — call it off the event loop (the handler uses asyncio.to_thread)."""
     profiles = _accessible_profiles(caller)
     embedder = _resolve_embedder()
@@ -178,12 +208,11 @@ def _route(caller: CallerIdentity, question: str) -> RouteDecision:
         # The lexical fallback stays in-memory: its vectors are a different dim and
         # cost nothing to rebuild — only provider embeddings are worth persisting.
         scorer = _stored_scorer(caller, profiles, embedder)
-    router = Router(profiles, embedder, scorer=scorer)
     decider = _resolve_decider()
-    if decider is None or not profiles:
-        return router.route(question)
+    if not profiles:
+        return Router(profiles, embedder).route(question)
     try:
-        return route_with_llm(router, {p.lens: p for p in profiles}, decider, question)
+        return route_question(profiles, embedder, decider, question, scorer=scorer)
     except Exception:
         # Never 500 the "just ask" path — but never silently route from the
         # mid-band cosine arm either (the deleted mid-confidence path must not
@@ -201,6 +230,28 @@ def _route(caller: CallerIdentity, question: str) -> RouteDecision:
         )
 
 
+def _not_for_named(
+    question: str, caller: CallerIdentity, lens: str | None
+) -> tuple[str, str] | None:
+    """``(lens, refusal)`` when a lens this caller may use (*lens* only, when
+    given; else the first by name) declares in ``not_for`` that it does not
+    answer this ask — the sentence its own door refuses with, sibling named.
+    A failed lookup finds nothing."""
+    try:
+        bundles = list_published_for_org(caller.org_id)
+    except Exception:
+        log.exception("not_for lookup failed")
+        return None
+    for name, _display, _desc, bundle in sorted(bundles, key=lambda b: b[0]):
+        if lens is not None and name != lens:
+            continue
+        if not authorize(caller, bundle.config)[0]:
+            continue
+        if (wording := not_for_refusal(question, bundle.semantic_model)) is not None:
+            return name, wording
+    return None
+
+
 class JustAskBody(BaseModel):
     q: str = Field(description="the natural-language question — the only required field")
     format: AnswerFormat = Field(default="both", description=FORMAT_HELP)
@@ -216,7 +267,9 @@ class RouteProvenance(BaseModel):
     a decision confidence. Do not threshold on it: a wrong lens can score near
     1.0 while a correct route scores well below it; separability
     lives in the DECIDER, which is why ``decided_by`` names what made the
-    call ("decider" = LLM coverage decision over the shortlist,
+    call ("certified" = the question is the lens's certified question,
+    "declared-name" = it names what only one of two candidates declares,
+    "decider" = LLM coverage decision over the shortlist,
     "cosine-verbatim" = near-exact anchor match, "cosine" = no decider
     configured — pure similarity, the weakest basis)."""
 
@@ -327,7 +380,24 @@ async def just_ask(
         # Persist BEFORE the second hop: the routing decision happened regardless of
         # whether the routed lens's query then succeeds — persisting after meant a
         # routed-then-errored request left no row and was invisible to surface area.
-        _persist(caller, body.q, decision.lens, decision.score, True, decision=decision)
+        decision_id = _persist(
+            caller, body.q, decision.lens, decision.score, True, decision=decision
+        )
+        # The routed lens declares it is not for this ask: its own refusal,
+        # naming the sibling, before any serve (the lens's door runs the same rail).
+        declared = await asyncio.to_thread(_not_for_named, body.q, caller, decision.lens)
+        if declared is not None:
+            return RoutedAnswer(
+                routed_to=RouteProvenance(
+                    lens=decision.lens, score=decision.score, decided_by=decision.decided_by
+                ),
+                answer=QueryResponse(
+                    lens=decision.lens,
+                    status="refused",
+                    answer=declared[1],
+                    request_id=decision_id,
+                ),
+            )
         # Second hop: the routed lens's full governed pipeline (allow-list, rate
         # limit, certified definitions, certified answers, guard, trace) — like a direct call.
         # Off the event loop too: the second hop blocks exactly as long as the first
@@ -360,7 +430,11 @@ async def just_ask(
     # its wording (the reason, where to ask instead) is what the caller needs;
     # "no lens covers this" would hide it. Deterministic: the same word-boundary
     # match the lens's own door runs, no model consulted.
+    # So would one whose `not_for` names this ask: the router dropped it, and
+    # its refusal names the sibling to ask instead.
     refusal = await asyncio.to_thread(lens_refusal_named, body.q, caller)
+    if refusal is None:
+        refusal = await asyncio.to_thread(_not_for_named, body.q, caller, None)
     if refusal is not None:
         lens, wording = refusal
         decision_id = _persist(caller, body.q, lens, decision.score, True, decision=decision)

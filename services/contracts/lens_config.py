@@ -260,6 +260,24 @@ class NotComputable(Authored):
     )
 
 
+class NotFor(Authored):
+    """An ask this lens must not answer although its tables could produce a
+    number for it: "door-scan attendance" on a lens that measures tickets
+    sold, or booking-level refunds on a seat-level table. The figure would be
+    well-formed and wrong. Matched before any typing or generation on the
+    ask's own words (all of them, word for word), and refused naming the lens
+    that does answer it."""
+
+    ask: str = Field(
+        description="the ask as people say it, e.g. 'door-scan attendance'; a question naming "
+        "every content word of it is refused",
+    )
+    sibling: str = Field(
+        default="",
+        description="optional: the lens that answers this ask — the refusal names it",
+    )
+
+
 class ExposeGrant(Authored):
     """Tables a lens reads WITHOUT definitions — a declared grant, resolved at
     apply against the connection's stored table profiles (`dst probe`).
@@ -389,6 +407,14 @@ class LensConfig(Authored):
         "deterministic (a refusal, enforced in code, holds across phrasings that "
         "name the measure or an alias); each entry may route_to the lens that "
         "can compute it",
+    )
+    not_for: list[NotFor] = Field(
+        default_factory=list,
+        description="asks this lens must refuse although its tables could produce "
+        "a figure for them, each {ask, sibling}: a question naming every content "
+        "word of the ask is refused before typing or generation, naming the "
+        "sibling lens. `Avoid for:` lines in an entity's use_cases are read the "
+        "same way, with no sibling",
     )
     # Retired 2026-08-09: context ingestion was never configured here — every
     # ingest is a POST to /mgmt/lenses/<lens>/context/* whose body carries the

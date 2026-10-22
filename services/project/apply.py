@@ -187,7 +187,9 @@ _PROBED_TYPES = {"duckdb", "bigquery", "postgres", "mysql", "snowflake"}
 
 
 def apply_connections(
-    session: Session, project: ProjectConfig
+    session: Session,
+    project: ProjectConfig,
+    declared_tables: Mapping[str, list[str]] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Declared connections → DB, applied BEFORE lenses (dependency order —
     the Octavia lesson). Missing secrets skip the declaration with a warning;
@@ -200,7 +202,13 @@ def apply_connections(
     reports its CAPABILITIES (query, query history) so a permission gap is a
     visible degradation at deploy time, not a silent nightly skip; unchanged
     connections skip the probe and report nothing — absence of the line, never
-    a false ✓."""
+    a false ✓.
+
+    ``declared_tables`` ({connection: tables its entities read}) keeps the
+    probe proportional to the layer, not the warehouse: connectivity plus one
+    cheap read per declared table, instead of introspecting every dataset the
+    credential can see. A connection with no declared table falls back to the
+    introspection probe."""
     from services.lenses.connections import build_connector, config_warnings
 
     applied: list[str] = []
@@ -251,9 +259,11 @@ def apply_connections(
                 # first, under its own bound, so the deadline measures the probe.
                 connector = build_connector(decl.type, decl.config, probe_secret)
                 apply_first_open(name, connector)
-                result, report = apply_bounded(
-                    f"the probe of connection '{name}'", partial(_probe_declaration, connector)
+                tables = sorted(set((declared_tables or {}).get(name, [])))
+                result, report, table_warnings = _probe_connection(
+                    name, connector, tables, _dataset_count(decl.config)
                 )
+                warnings.extend(table_warnings)
             except ApplyStepTimeout:
                 raise  # the deadline is the apply's verdict, not this connection's error
             except Exception as exc:  # noqa: BLE001 — bad params must not land either
@@ -282,6 +292,73 @@ def apply_connections(
                 "(run `dst secret`, add it to .env)"
             )
     return applied, warnings, errors, capabilities
+
+
+def _dataset_count(config: Mapping[str, Any]) -> int:
+    """How many datasets/schemas a declaration pins (0 = whatever the
+    credential sees) — named in a step-timeout message, since the
+    introspection probe's cost scales with it."""
+    pins = config.get("datasets") or config.get("schemas") or []
+    single = config.get("dataset") or config.get("schema")
+    return len(pins) if isinstance(pins, list) and pins else (1 if single else 0)
+
+
+def _probe_connection(
+    name: str, connector: Connector, tables: list[str], datasets: int
+) -> tuple[EvalResult, str | None, list[str]]:
+    """(result, capability report, warnings) for one declared connection.
+
+    With declared tables: connectivity (``SELECT 1``) plus one cheap read per
+    table (``LIMIT 0``), each its own bounded step — the probe costs what the
+    layer reads, not what the warehouse holds. A table that cannot be read is
+    a warning naming it; every declared table failing is the read failure
+    itself. Without declared tables: the introspection probe, as before. Every
+    step name carries the connection's table and dataset counts, so a
+    ``DST_APPLY_STEP_TIMEOUT_S`` message says how big the thing was."""
+    from services.lenses.connection_eval import AccessCheck, EvalResult
+
+    size = f"{len(tables)} declared table(s), {datasets or 'all visible'} dataset(s)"
+    step = f"the probe of connection '{name}' ({size})"
+    if not tables:
+        probed, probed_report = apply_bounded(step, partial(_probe_declaration, connector))
+        return probed, probed_report, []
+
+    def _connect() -> None:
+        connector.execute("SELECT 1", read_only=True, row_limit=1)
+
+    try:
+        apply_bounded(step, _connect)
+    except ApplyStepTimeout:
+        raise
+    except Exception as exc:  # noqa: BLE001 — no connectivity means no read
+        return EvalResult(ok=False, checks=[AccessCheck("read", False, str(exc))]), None, []
+    failures: list[str] = []
+    for table in tables:
+        try:
+            apply_bounded(
+                f"the read of table '{table}' on connection '{name}' ({size})",
+                partial(
+                    connector.execute, f"SELECT * FROM {table} LIMIT 0", read_only=True, row_limit=1
+                ),
+            )
+        except ApplyStepTimeout:
+            raise
+        except Exception as exc:  # noqa: BLE001 — reported per table below
+            failures.append(f"{table}: {str(exc).splitlines()[0][:160]}")
+    if len(failures) == len(tables):
+        detail = "no declared table is readable — " + "; ".join(failures)
+        return EvalResult(ok=False, checks=[AccessCheck("read", False, detail)]), None, []
+    result = EvalResult(ok=True, checks=[AccessCheck("read", True)], tables=len(tables))
+    try:
+        from services.lenses.connection_eval import capability_report
+
+        report: str | None = apply_bounded(step, partial(capability_report, connector))
+    except ApplyStepTimeout:
+        raise
+    except Exception:  # noqa: BLE001 — the report must never fail an apply
+        report = None
+    warnings = [f"connection '{name}': cannot read declared table {f}" for f in failures]
+    return result, report, warnings
 
 
 def _probe_declaration(connector: Connector) -> tuple[EvalResult, str | None]:
@@ -369,20 +446,33 @@ def apply_profiles(session: Session, files: dict[str, str]) -> tuple[list[str], 
 
         landed = kept = 0
         for profile in artifact.tables:
+            # The name inside decides (read_probe's rule) — a table row must not
+            # ride in under a different connection than its artifact claims.
+            incoming = profile.model_copy(update={"connection": artifact.connection})
             stored = profile_store.get_profile(session, artifact.connection, profile.table)
             if stored is not None and _aware(stored.profile.profiled_at) > _aware(
                 profile.profiled_at
             ):
                 kept += 1
                 continue
-            # The name inside decides (read_probe's rule) — a table row must not
-            # ride in under a different connection than its artifact claims.
-            profile_store.upsert_profile(
-                session, profile.model_copy(update={"connection": artifact.connection})
-            )
+            if stored is not None and stored.profile.model_dump(mode="json") == incoming.model_dump(
+                mode="json"
+            ):
+                # Already landed by an earlier apply. Re-landing it is no change:
+                # it would overwrite the stored previous profile with this same
+                # one, and report a touched input that sends every lens back
+                # through recompile and the eval gate on an apply whose plan
+                # is clean.
+                continue
+            profile_store.upsert_profile(session, incoming)
             landed += 1
         note = f", kept {kept} newer server-side" if kept else ""
-        applied.append(f"profiles '{artifact.connection}': landed {landed} table(s){note}")
+        line = f"profiles '{artifact.connection}': landed {landed} table(s){note}"
+        if landed:
+            applied.append(line)
+        elif kept:
+            # Nothing landed, so nothing changed: said, but not as an applied input.
+            warnings.append(line)
     return applied, warnings
 
 
@@ -1353,6 +1443,27 @@ def recompile_stale(
     return results
 
 
+def apply_cases(
+    session: Session, name: str, source: LensSource, *, org_id: uuid.UUID | str
+) -> LensApplyResult:
+    """``--scope cases``: land one lens's evals/cases.yaml against its PUBLISHED
+    model and nothing else — no compile, no publish, no version, no eval gate.
+    Cases are what a gate reads, not what it guards, so changing them re-gates
+    nothing; the next apply that publishes the lens scores against them."""
+    row = store.get_lens(session, name)
+    raw = (row or {}).get("published")
+    if raw is None:
+        return LensApplyResult(
+            lens=name,
+            action="rejected",
+            errors=[f"lens '{name}' is not published — --scope cases cannot create it"],
+        )
+    model = store.LensBundle.model_validate(raw).semantic_model
+    result = LensApplyResult(lens=name, action="unchanged")
+    _apply_eval_cases(session, name, source, result, model, org_id)
+    return result
+
+
 def _apply_eval_cases(
     session: Session,
     name: str,
@@ -1363,7 +1474,10 @@ def _apply_eval_cases(
 ) -> None:
     """Upsert evals/cases.yaml keyed by question: unseen questions insert, an
     edited expected_sql/expected_answer updates in place (an edit used to be a
-    silent no-op reported as success). Absence never deletes.
+    silent no-op reported as success). A pushed cases.yaml owns the lens's
+    approved cases: one absent from it retires (reported in the applied
+    count); candidates stay server-side, and a tree with no cases.yaml leaves
+    every case untouched.
 
     Two case shapes, mutually exclusive per entry: value
     cases (expected_sql — these no longer gate anywhere; certified answers are
@@ -1380,9 +1494,18 @@ def _apply_eval_cases(
     lands. No resolvable connector → parse-checked only, stored with the
     warning _probe_connector raised (probing is infrastructure; the upsert must
     not rot on a dead credential)."""
-    if not source.eval_cases:
-        return
     existing = {c.question.strip().lower(): c for c in eval_store.list_cases(session, name)}
+    retired = 0
+    if source.cases_file:
+        pushed = {str(c.get("question", "")).strip().lower() for c in source.eval_cases}
+        for question, stored_case in existing.items():
+            if question not in pushed and stored_case.status == "approved":
+                eval_store.retire_case(session, stored_case.id)
+                retired += 1
+    if not source.eval_cases:
+        if retired:
+            result.applied.append(f"eval cases: retired {retired} (absent from evals/cases.yaml)")
+        return
     stored_sql = {q: c.expected_sql for q, c in existing.items()}
     leaf_to_table = {e.source.table.split(".")[-1].lower(): e.source.table for e in model.entities}
     connector: Connector | None = None
@@ -1511,8 +1634,9 @@ def _apply_eval_cases(
             "longer gate: certified answers are the regression suite; run "
             "`dst evals migrate` to convert them"
         )
+    retired_part = f", retired {retired}" if retired else ""
     result.applied.append(
-        f"eval cases: created {created}, updated {updated}, unchanged {unchanged}"
+        f"eval cases: created {created}, updated {updated}, unchanged {unchanged}{retired_part}"
     )
 
 

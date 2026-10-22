@@ -26,6 +26,7 @@ from services.contracts.semantic_model import SemanticModel
 from services.runtime import ambiguity
 from services.runtime.compiler import (
     CompileError,
+    UnpinnedDimension,
     compile_intent,
     govern_literals,
     prefer_weighted_ratio,
@@ -269,6 +270,29 @@ def gate_grain(question: str, intent: QueryIntent, model: SemanticModel) -> Quer
     return intent.model_copy(update={"grain": grain, "dimensions": dimensions})
 
 
+def gate_dimensions(question: str, intent: QueryIntent, model: SemanticModel) -> QueryIntent:
+    """The intent with the breakdown the question asks for in words ("revenue by
+    household plan") among its dimensions. "by <dimension>" with a declared
+    dimension's name right after is a fact read off the text — the typed
+    resolver records it the same way — so an intent that left it out is
+    grouped as asked, and the answer's ledger names the dimension it used."""
+    if not intent.metrics:
+        return intent
+    entity = next((e for e in model.entities if e.name == intent.entity), None)
+    if entity is None:
+        return intent
+    # Imported here: the typed resolver imports this module.
+    from services.contracts.protocols import Option
+    from services.runtime.typed_resolver import by_dimension
+
+    named, _rest = by_dimension(question, [Option(d.name) for d in entity.dimensions])
+    have = {d.rpartition(".")[2] for d in intent.dimensions}
+    pinned = {f.field.rpartition(".")[2] for f in intent.filters if f.op == "="}
+    if named is None or named in have or named in pinned:
+        return intent
+    return intent.model_copy(update={"dimensions": [*intent.dimensions, named]})
+
+
 def intent_term(intent: QueryIntent | None) -> str | None:
     """The compiler-validated term a compiled intent implements — basis provenance.
 
@@ -345,6 +369,7 @@ class IntentSQLGenerator:
             # formula's unit and the gate leaves it alone.
             intent = prefer_weighted_ratio(intent, semantic_model)
             intent = gate_grain(question, intent, semantic_model)
+            intent = gate_dimensions(question, intent, semantic_model)
             intent = govern_literals(intent, semantic_model)
             try:
                 sql = compile_intent(intent, semantic_model)
@@ -369,7 +394,11 @@ class IntentSQLGenerator:
             definition_used=intent_term(intent) if sql else None,
             intent=intent if sql else None,
         )
-        if error is not None and "ask for them separately" in str(error):
+        if isinstance(error, UnpinnedDimension):
+            # The repair still sums kinds of record that do not add up: which
+            # kind is the caller's to say, and a raw tier would sum them anyway.
+            gq.clarification = error.clarification()
+        elif error is not None and "ask for them separately" in str(error):
             # Two readings the compiler cannot put in one query, and the repair
             # did not split them: ask, rather than let a raw tier guess.
             gq.clarification = ClarificationRequest(

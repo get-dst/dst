@@ -113,6 +113,27 @@ def entity_domains(
     return out
 
 
+def entity_column_types(
+    model: SemanticModel, profiles: list[TableProfile]
+) -> dict[str, dict[str, str]]:
+    """entity name -> column name (lowercased) -> the warehouse's own type for
+    it, as the stored profile recorded it. The compiler casts a window bound
+    to it where the declared type cannot say which of a warehouse's moment
+    types the column is."""
+    by_table = {p.table: {c.name: c for c in p.columns} for p in profiles}
+    out: dict[str, dict[str, str]] = {}
+    for entity in model.entities:
+        columns = by_table.get(entity.source.table, {})
+        own = {
+            f.name.lower(): columns[f.name].type
+            for f in entity.fields
+            if f.name in columns and columns[f.name].type
+        }
+        if own:
+            out[entity.name] = own
+    return out
+
+
 def value_domains(model: SemanticModel, profiles: list[TableProfile]) -> dict[str, list[str]]:
     """column name (lowercased) -> its COMPLETE value dictionary, for SQL whose
     table the caller cannot resolve.

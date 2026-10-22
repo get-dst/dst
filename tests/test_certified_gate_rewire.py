@@ -190,6 +190,15 @@ def _apply(headers: dict[str, str], files: dict[str, str]) -> list[dict[str, obj
     return client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
 
 
+def _edited(files: dict[str, str], note: str) -> dict[str, str]:
+    """The same project with a real edit to the lens (its description), so a
+    re-apply takes the publish path and the gate runs again — identical files
+    skip it, unchanged."""
+    cfg = yaml.safe_load(files["lenses/customer_value/lens.yaml"])
+    cfg["description"] = f"{cfg.get('description') or ''} {note}".strip()
+    return {**files, "lenses/customer_value/lens.yaml": yaml.safe_dump(cfg, sort_keys=False)}
+
+
 def _gate_llm(monkeypatch, responses: list[str]) -> None:
     # These tests pin GATE SEMANTICS (divergence, starvation, override) with
     # exact scripted-response consumption; the retry policy has its own
@@ -1227,7 +1236,7 @@ def test_prev_score_compares_only_the_same_case_set(org, monkeypatch) -> None:
     assert row["gate_detail"]["prev_score"] is None
 
     _gate_llm(monkeypatch, ["GARBAGE ;;;"])
-    out = _apply(headers, _files([{"question": _Q, "sql": _SQL}]))
+    out = _apply(headers, _edited(_files([{"question": _Q, "sql": _SQL}]), "again"))
     row = next(e for e in out if e.get("lens") == "customer_value")
     assert row["gate_detail"]["baseline"].startswith("previous run ")
     assert row["gate_detail"]["prev_score"] == 1.0
@@ -1266,7 +1275,7 @@ def test_upgrade_never_restates_a_value_stored_as_text(org, monkeypatch) -> None
         certify_store.update(s, stored.id, sql=stored.sql, verified_value=legacy)
         s.commit()
 
-    out = _apply(headers, _files([{"question": _Q, "sql": sql}]))
+    out = _apply(headers, _edited(_files([{"question": _Q, "sql": sql}]), "upgraded"))
     row = next(e for e in out if e.get("lens") == "customer_value")
     assert not row.get("errors"), row
     assert row.get("action") != "aborted"
@@ -1278,7 +1287,7 @@ def test_upgrade_never_restates_a_value_stored_as_text(org, monkeypatch) -> None
         stored = next(a for a in certify_store.list_for_lens(s, "customer_value"))
     assert stored.verified_value == {"columns": ["n", "day"], "rows": [[float(n), "2018-01-01"]]}
     # the next push compares native against native: nothing to migrate, nothing restated
-    out = _apply(headers, _files([{"question": _Q, "sql": sql}]))
+    out = _apply(headers, _edited(_files([{"question": _Q, "sql": sql}]), "again"))
     row = next(e for e in out if e.get("lens") == "customer_value")
     assert not row.get("errors") and not any("restated" in w for w in row["warnings"])
 

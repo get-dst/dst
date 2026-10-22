@@ -110,11 +110,11 @@ phrasing, violated for the next), and apply warns (`constraint_in_prose`) when a
 rule is written there. These are the structural homes for those rules:
 
 ```yaml
-# semantic/entities/account_feature_usage.yaml
-name: account_feature_usage
-source: { connection: bq, table: marts.account_feature_usage }
-population: "Active paying accounts only — trials and internal test accounts are excluded upstream."
-population_filter: "account_feature_usage.is_active_paying = TRUE"
+# semantic/entities/desk_bookings.yaml
+name: desk_bookings
+source: { connection: bq, table: marts.desk_bookings }
+population: "Paying members only — day passes and staff test bookings are excluded upstream."
+population_filter: "desk_bookings.is_paying_member = TRUE"
 pinned_dimensions: ["currency"]
 ```
 
@@ -137,7 +137,13 @@ pinned_dimensions: ["currency"]
   table the lens already exposes.
 - **`pinned_dimensions`**: dimensions that must be pinned to one value or
   GROUPed before any aggregate. The structural form of "never sum across
-  currencies": the `aggregation_scope` serve check enforces it deterministically.
+  currencies", or of "never count lead and opportunity rows together" on a table
+  that stacks several record kinds. The compiler refuses an aggregate that
+  neither filters the dimension to one value (an equality, a one-value `IN`, a
+  definition or the `population_filter`) nor groups by it, naming the dimension
+  and its known values; a metric whose own `filters` condition on the dimension
+  pins it for itself, and so does one that declares its `currency`. Generated
+  SQL is held to the same rule by the `aggregation_scope` serve check.
 - **`hide`**: column patterns the entity withholds from every door (fnmatch on
   the column name, bare or as `entity.column`). A hidden column is absent from
   the lens: generated SQL, the `sql` tool and `describe_lens` never see it, and
@@ -172,6 +178,27 @@ not_computable:
     keys: [patient_id]
 ```
 
+`not_for` in `lens.yaml` covers the other case: an ask the lens's tables *could*
+produce a figure for, which would be a different measure under the asked name
+("walk-in revenue" on a lens over membership revenue). Each entry is an `ask` and
+an optional `sibling`, the lens that does answer it:
+
+```yaml
+not_for:
+  - ask: walk-in revenue
+    sibling: day_passes
+  - ask: location-level churn
+    sibling: location_movements
+```
+
+A question that names every content word of an ask, each as a whole word
+(hyphens and underscores read as spaces, function words ignored), is refused
+before typing or generation: `this lens does not answer walk-in revenue; ask
+day_passes`. A question sharing one word with an ask ("member churn")
+is not that ask. On a lens with one entity, an `Avoid for:` line in the entity's
+`use_cases` is read the same way, with no sibling (`Avoid for: location-level
+churn; meeting-room revenue` declares two asks, a parenthetical is ignored).
+
 `route_query` carries the same refusal: when it would decline and a lens the
 caller may use declares a term the question names not computable, the response
 is that lens's refusal (`routed_to.decided_by: refusal`, `answer.status:
@@ -183,7 +210,9 @@ refused`) rather than "no lens covers this".
 |---|---|---|
 | rows outside the intended scope counted in | `population_filter` | yes; compiler ANDs it in |
 | a partial population read as the whole | `population` | yes; serve check requires the caveat |
-| summed across currencies / entities that must not mix | `pinned_dimensions` | yes; serve check |
+| summed across currencies / entities that must not mix | `pinned_dimensions` | yes; compiler refuses, serve check |
+| a value repeated across joined rows summed once per row | `agg: sum_distinct_on` + `distinct_on` | yes; compiler sums one per key |
+| an ask the tables can answer with a different measure | `not_for` in `lens.yaml` | yes; refusal naming the sibling |
 | a metric served without its defining constraint | `filters:` on the metric | yes; filter guard |
 | a term's meaning never checkable in answers | `sql:` on the definition (alias `sql_expr`) | yes; definition_applied check + generation grounding |
 | a rule on one period (a duplicated export month) that certified SQL reads past | `sql:` + `period:` on a definition `about:` the entity | yes; definition_period check on every certified serve, `certified_ignores_definition` at plan/apply |
@@ -236,6 +265,19 @@ and the composer states the amount in that currency; leave it unset and the
 answer carries a bare number and asserts no currency at all
 (`services/contracts/semantic_model.py`). The product never infers one: a bare
 number beats a wrong symbol.
+
+### What the metric catalog shows
+
+Every metric a lens selects is listed in its metric catalog
+(`GET /v1/lenses/{name}/catalog`, and the `metrics` list on `GET /v1/lenses/{name}`),
+which is what an app reads to label and arrange its figures. The catalog serves the
+metric's `label`, `aliases` and `description` as written, its unit (the `currency:`
+code, or `percent` for `format: percent`, never inferred), its `additivity`, the grains
+its time field supports, and `depends_on`: the metrics a ratio names as `numerator:` and
+`denominator:`, or a derived metric names as `{placeholders}` in its `expr`. A tree of
+metrics is therefore declared here, as derived metrics, and an app draws it from
+`depends_on` instead of keeping its own copy
+([Building data apps](building-data-apps.md)).
 
 ### A level metric is a snapshot, not a sum
 
@@ -294,6 +336,28 @@ answer. Exactly one operand must be a level. The window must be bounded on
 both ends ("in September 2026"); an open window has no length, and a trend
 (`grain`) is one window at a time — both are refused with the reason, never
 guessed.
+
+### One value per key: `sum_distinct_on`
+
+A monthly quota joined onto daily sales rows repeats on every day of the month,
+and a plain `SUM` adds it once per day. `agg: sum_distinct_on` with a
+`distinct_on:` key sums one value per distinct key instead:
+
+```yaml
+metrics:
+  - name: quota
+    agg: sum_distinct_on
+    expr: quotas.quota
+    distinct_on: [quotas.rep_id, quotas.month]
+```
+
+The compiler reads the rows the query keeps (its joins and WHERE) once in a
+subquery, numbers the rows of each key within each group, and sums the first
+row of each key, so a window that keeps only part of a month still counts that
+month's quota once. Plan rejects the metric without `distinct_on`, and a key on
+any other aggregate. A distinct-on metric compiles beside simple metrics only:
+a ratio over it, or a level metric in the same question, is refused with the
+reason.
 
 ## Freshness is a declared contract
 

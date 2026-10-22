@@ -85,6 +85,14 @@ class CoverageProfile:
     anchors: list[str]  # SPECIFIC governed metrics / definitions / sample questions
     scope: frozenset[str] = field(default_factory=frozenset)
     description: str = ""  # broad lens blurb — display only, never scored
+    # The lens's certified questions (template questions at their sample
+    # rendering): a question equal to one of them routes here without scoring.
+    certified: list[str] = field(default_factory=list)
+    # Declared names (tables, governed entities, metrics) for the word-boundary
+    # tie-break between two sibling candidates.
+    names: list[str] = field(default_factory=list)
+    # Asks the lens declares it is not for: such a question never routes here.
+    not_for: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -98,7 +106,9 @@ class RouteDecision:
     score: float
     alternatives: list[tuple[str, float]]  # (lens, score), ranked, best first
     reason: str = ""
-    # What actually made the call: "decider" (LLM coverage decision),
+    # What actually made the call: "certified" (the question is a lens's
+    # certified question), "declared-name" (it names a table, entity or metric
+    # only one of two candidates declares), "decider" (LLM coverage decision),
     # "cosine-verbatim" (the near-exact fast path), or "cosine" (no decider
     # configured — pure similarity, the weakest basis).
     decided_by: str = "cosine"

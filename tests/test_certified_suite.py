@@ -390,8 +390,9 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
         assert results[0][0].startswith("certified:")
         assert results[0][1] is True
         # The executed values ride the stored row, not only the verdict and SQL:
-        # a copy of eval_result elsewhere must hold the numbers.
-        assert results[0][2] == "19"
+        # a copy of eval_result elsewhere must hold the numbers — JSON-native,
+        # the shape a verified_value has, so the two compare as values.
+        assert json.loads(results[0][2]) == {"value": 19}
         assert results[0][3]["certified"] == "19" and results[0][3]["generated"] == "19"
     # --json carries the same two facts structurally.
     rc = _test(argparse.Namespace(lens="customer_value", all=False, org=_ORG, as_json=True))
@@ -400,6 +401,11 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
     assert report["database"].startswith("postgresql") and "***@" in report["database"]
     assert [(r["org"], r["lens"]) for r in report["recorded"]] == [(_ORG, "customer_value")]
     assert len(report["recorded"][0]["run_id"]) == 36
+    # Every row names the eval_result case it is and the certified answer it grades.
+    (row,) = report["results"]
+    assert row["case_id"] == results[0][0]
+    assert row["case_id"] == f"certified:{row['certified_answer_id']}"
+    assert "calibration_by_slot" in report
 
 
 @needs_db

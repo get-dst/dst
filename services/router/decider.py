@@ -23,7 +23,20 @@ import logging
 
 from services.contracts.protocols import Decider, Decision, LLMProvider, Option
 from services.llm.vote_decider import DEFAULT_K, DeciderStarved, VoteDecider
-from services.router import DECIDER_DOWN, CoverageProfile, RouteDecision, Router
+from services.router import (
+    DECIDER_DOWN,
+    CoverageProfile,
+    Embedder,
+    RouteDecision,
+    Router,
+    Scorer,
+)
+from services.router.sibling import (
+    certified_owner,
+    distinct_profiles,
+    drop_not_for,
+    unique_name_owner,
+)
 from services.runtime import decision_policy
 
 log = logging.getLogger("dst")
@@ -43,7 +56,7 @@ def shortlist_k(catalogue_size: int) -> int:
     return min(max(PREFILTER_K, -(-catalogue_size // 2)), _MAX_SHORTLIST)
 
 
-__all__ = ["DeciderStarved", "LlmDecider", "route_with_llm", "shortlist_k"]
+__all__ = ["DeciderStarved", "LlmDecider", "route_question", "route_with_llm", "shortlist_k"]
 
 _CONTEXT = (
     "Route a data question to the ONE governed lens that covers it, or none. A lens covers "
@@ -166,6 +179,10 @@ def route_with_llm(
     if k is None:
         k = shortlist_k(len(scored))
     shortlist = [profiles_by_lens[lens] for lens, _ in scored[:k] if lens in profiles_by_lens]
+    if len(shortlist) == 2:
+        named = unique_name_owner(question, shortlist)
+        if named is not None:
+            return _named_route(named, scored)
     try:
         decision = (
             decider.decide_measured(question, shortlist)
@@ -189,6 +206,12 @@ def route_with_llm(
         # coverage signal (name the lens), never an outage — no degraded mark.
         ranked = sorted((decision.probs or {}).items(), key=lambda kv: -kv[1])
         lenses = [k for k, _v in ranked[:2] if k != "none"]
+        if len(lenses) == 2:
+            named = unique_name_owner(
+                question, [profiles_by_lens[n] for n in lenses if n in profiles_by_lens]
+            )
+            if named is not None:
+                return _named_route(named, scored, decision)
         # Two lenses close together is an ambiguity between them; one lens
         # against `none` is doubt that any lens covers it — say which.
         reason = (
@@ -230,3 +253,51 @@ def route_with_llm(
         decision=decision,
         verdict=verdict,
     )
+
+
+def _named_route(
+    lens: str, scored: list[tuple[str, float]], decision: Decision | None = None
+) -> RouteDecision:
+    return RouteDecision(
+        True,
+        lens,
+        dict(scored).get(lens, 0.0),
+        [(n, s) for n, s in scored if n != lens],
+        "routed (the question names what only this lens declares)",
+        decided_by="declared-name",
+        decision=decision,
+    )
+
+
+def route_question(
+    profiles: list[CoverageProfile],
+    embedder: Embedder,
+    decider: LlmDecider | None,
+    question: str,
+    *,
+    scorer: Scorer | None = None,
+) -> RouteDecision:
+    """The full routing order, deterministic first (``services/router/sibling.py``):
+    drop lenses whose ``not_for`` names the ask; route a certified question to its
+    one owning lens; score only the anchors a lens does not share verbatim; then
+    the decider over the shortlist (pure cosine when none is configured)."""
+    profiles = drop_not_for(question, profiles)
+    owner = certified_owner(question, profiles)
+    if owner is not None:
+        return RouteDecision(
+            True, owner, 1.0, [], "routed (certified question)", decided_by="certified"
+        )
+    scoring = distinct_profiles(profiles)
+    if scorer is not None:
+        # A stored scorer was built over every accessible lens: keep its ranking
+        # to the lenses still in play.
+        keep = {p.lens for p in scoring}
+        inner = scorer
+
+        def scorer(q: str) -> list[tuple[str, float]]:
+            return [(n, s) for n, s in inner(q) if n in keep]
+
+    router = Router(scoring, embedder, scorer=scorer)
+    if decider is None or not scoring:
+        return router.route(question)
+    return route_with_llm(router, {p.lens: p for p in scoring}, decider, question)

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,6 +54,7 @@ from services.evals.certified_suite import (
     _render_template_case,
     format_result,
     run_certified_suite,
+    value_json,
 )
 from services.evals.runner import (
     REPORTED_PREFIX,
@@ -70,7 +71,7 @@ from services.runtime import assembly
 from services.runtime.answer import AnswerComposer
 from services.runtime.bounded import ApplyStepTimeout
 from services.runtime.canon import canon_cell
-from services.runtime.pipeline import _jsonable
+from services.runtime.pipeline import PipelineResult, _jsonable
 from services.semantic import store as semantic_store
 
 log = logging.getLogger("dst")
@@ -625,7 +626,7 @@ def _value_lane(
                 checks={} if passed else {"wrong_at": "value"},
                 reason=reason,
                 actual_sql=oracle_sql,
-                actual_value=format_result(now),
+                actual_value=value_json(now),
             )
         )
     return lane
@@ -706,6 +707,7 @@ def _certified_gate(
                 ),
                 reason=r.reason,
                 actual_sql=r.generated_sql,
+                actual_value=value_json(r.generated_result),
             )
         )
     return lane
@@ -731,17 +733,52 @@ def _behavioral_gate(
     ]
     if not cases or not bundle.config.connections:
         return []
-    assemble_q, generators_for = assembly.question_harness(bundle, org_id, resolved)
     outcome = run_behavioral(
-        connector=_connector_for(session, org_id, bundle.config.connections[0]),
         lens=lens,
         cases=cases,
-        assemble_for=assemble_q,
-        generators_for=generators_for,
-        composer=AnswerComposer(resolved.llm, model=resolved.name),
-        model_name=resolved.name,
+        serve=lens_serve(
+            lens,
+            bundle,
+            org_id=org_id,
+            connector=_connector_for(session, org_id, bundle.config.connections[0]),
+            resolved=resolved,
+        ),
     )
     return outcome.results
+
+
+def lens_serve(
+    lens: str,
+    bundle: LensBundle,
+    *,
+    org_id: uuid.UUID | str,
+    connector: Connector,
+    resolved: ResolvedModel,
+) -> Callable[[str], PipelineResult]:
+    """A behavioral case's question through the query door's own core, on
+    *bundle* (the candidate at the gate, the published lens under `dst test`):
+    the install's typed serving and decider, the lens's ``untyped_fallback``,
+    certified matching, caps and answer mode, exactly as a caller is served.
+    A grader on any other path certifies a response nobody gets: a case pinned
+    to the clarification the door gives failed here when the gate escalated to
+    raw-SQL generation the lens does not allow. It asks for no one, so every
+    lens of the org counts as holding a table the question names."""
+    from services.api.query import serve_lens_question, tables_held_elsewhere
+
+    def serve(question: str) -> PipelineResult:
+        result, _assembled = serve_lens_question(
+            lens,
+            question,
+            bundle,
+            org_id=org_id,
+            caller="eval",
+            connector=connector,
+            resolved=resolved,
+            tables_elsewhere=lambda: tables_held_elsewhere(None, exclude=lens, org_id=org_id),
+        )
+        return result
+
+    return serve
 
 
 def previous_baseline(

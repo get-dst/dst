@@ -1,11 +1,12 @@
-"""Round-8 check rails: ratio_population and the
-latest-snapshot-pin refinement of window_applied.
+"""Check rails: ratio_population and the latest-snapshot-pin refinement of
+window_applied.
 
-#52: a ratio whose denominator filters on the very column the numerator
-aggregates unfiltered mixes populations — served 200,849 where the answer is
-16,411, identical SQL across model tiers. #53: 'how much churned last month'
-answered from `status_date = MAX(status_date)` PASSED window_applied — one
-snapshot day narrated as a calendar month, 40% wrong, zero failing checks.
+A ratio whose denominator filters on the very column the numerator
+aggregates unfiltered mixes populations — the served figure is an order of
+magnitude off, with identical SQL across model tiers. A 'last month'
+question answered from `snapshot_date = MAX(snapshot_date)` PASSED
+window_applied — one snapshot day narrated as a calendar month, zero failing
+checks.
 """
 
 from __future__ import annotations
@@ -61,15 +62,15 @@ def test_the_mismatch_names_the_predicate_for_the_repair_prompt() -> None:
 
 def _model() -> SemanticModel:
     return SemanticModel(
-        lens="finance",
+        lens="laundry",
         dialect="bigquery",
         entities=[
             Entity(
-                name="finance_kpis",
-                source=EntitySource(connection="c", table="p.d.finance_kpis"),
+                name="store_kpis",
+                source=EntitySource(connection="c", table="p.d.store_kpis"),
                 fields=[
-                    Field(name="arr_churned_pms", type="number"),
-                    Field(name="status_date", type="date"),
+                    Field(name="refunds_eur", type="number"),
+                    Field(name="snapshot_date", type="date"),
                 ],
             )
         ],
@@ -77,37 +78,35 @@ def _model() -> SemanticModel:
 
 
 _PIN_SQL = (
-    "SELECT SUM(finance_kpis.arr_churned_pms) AS c FROM p.d.finance_kpis AS finance_kpis "
-    "WHERE finance_kpis.status_date = "
-    "(SELECT MAX(finance_kpis.status_date) FROM p.d.finance_kpis AS finance_kpis)"
+    "SELECT SUM(store_kpis.refunds_eur) AS c FROM p.d.store_kpis AS store_kpis "
+    "WHERE store_kpis.snapshot_date = "
+    "(SELECT MAX(store_kpis.snapshot_date) FROM p.d.store_kpis AS store_kpis)"
 )
 
 
 def test_a_period_question_answered_from_a_snapshot_pin_fails() -> None:
-    check = _window_applied("How much ARR churned last month, company-wide?", _PIN_SQL, _model())
+    check = _window_applied("How much was refunded last month, chain-wide?", _PIN_SQL, _model())
     assert check.status == "fail"
     assert check.reason is not None and "snapshot" in check.reason
 
 
 def test_a_real_window_still_passes() -> None:
     sql = (
-        "SELECT SUM(t.arr_churned_pms) FROM p.d.finance_kpis AS t "
+        "SELECT SUM(t.refunds_eur) FROM p.d.store_kpis AS t "
         "WHERE t.status_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE, INTERVAL 1 MONTH), MONTH)"
     )
-    assert _window_applied("How much ARR churned last month?", sql, _model()).status == "pass"
+    assert _window_applied("How much was refunded last month?", sql, _model()).status == "pass"
 
 
 def test_a_current_question_keeps_the_pin_legal() -> None:
-    # 'current ARR' has no period term — the latest snapshot IS the right read.
-    assert _window_applied("What is our current ARR?", _PIN_SQL, _model()).status == "skip"
+    # 'current refunds' has no period term — the latest snapshot IS the right read.
+    assert _window_applied("What are our current refunds?", _PIN_SQL, _model()).status == "skip"
 
 
 def test_intent_alignment_owns_its_own_narrowness() -> None:
     # the audit: the skip reason blamed an explicit question for the check's
     # narrow vocabulary ("intent not determinable from the question").
-    check = _intent_alignment(
-        "How much ARR churned last month, company-wide?", _PIN_SQL, "bigquery"
-    )
+    check = _intent_alignment("How much was refunded last month, chain-wide?", _PIN_SQL, "bigquery")
     assert check.status == "skip"
     assert check.reason is not None and "vocabulary" in check.reason
     assert "not determinable" not in check.reason

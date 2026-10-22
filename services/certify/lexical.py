@@ -29,6 +29,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+import sqlglot
+from sqlglot import exp
+
 from services.contracts.semantic_model import SemanticModel
 
 
@@ -443,4 +446,90 @@ def unit_mismatch(
             f"the question asks in {'/'.join(sorted(wanted))} and the certified answer "
             f"reports {'/'.join(sorted(have))}"
         )
+    return None
+
+
+# "per driver", "by store tier", "for each account", "for every rep": the
+# question asks one figure per member of something. A bare "every" is "all"
+# ("revenue from every large order") and asks for one total.
+_BREAKDOWN = re.compile(
+    r"\b(?:per|by|each|for\s+each|for\s+every)\s+(?:the\s+|a\s+|an\s+)?"
+    r"([a-z][a-z0-9_-]*)(?:\s+([a-z][a-z0-9_-]*))?",
+    re.I,
+)
+_NOT_A_BREAKDOWN = frozenset(
+    """
+    the a an end now then far default cent percent one other way
+    in on at of for to from and or with during within over since until than
+    """.split()
+)
+# Words that ask for a grouped answer without naming the unit: a ranking, a
+# listing, a series.
+_GROUPED_CUE = re.compile(
+    r"\b(?:per|by|each|every|which|who|top|rank|ranked|ranking|most|least|highest|lowest|"
+    r"hourly|daily|weekly|monthly|quarterly|yearly|annually|over\s+time|trend|breakdown|split)\b",
+    re.I,
+)
+
+
+def breakdown_words(question: str) -> list[set[str]]:
+    """One word set per breakdown the question asks ("per SDR" -> {sdr})."""
+    out: list[set[str]] = []
+    for m in _BREAKDOWN.finditer(question):
+        words = [w.lower() for w in m.groups() if w and w.lower() not in _NOT_A_BREAKDOWN]
+        if m.group(1) and m.group(1).lower() not in _NOT_A_BREAKDOWN and words:
+            out.append(set(words))
+    return out
+
+
+def _outer_group(sql: str) -> list[str] | None:
+    """The outermost SELECT's GROUP BY expressions as lowercased SQL text — the
+    grain the answer comes back at (a GROUP BY inside a subquery dedups rows
+    and still returns one total) — or None when the text does not parse."""
+    try:
+        tree = sqlglot.parse_one(sql)
+    except sqlglot.errors.ParseError:
+        return None
+    while isinstance(tree, exp.Subquery | exp.Paren):
+        tree = tree.this
+    select = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
+    if select is None:
+        return None
+    group = select.args.get("group")
+    if group is None:
+        return []
+    out: list[str] = []
+    for g in group.expressions:
+        # GROUP BY 1 names the first projection
+        if isinstance(g, exp.Literal) and g.is_int and 0 < int(g.this) <= len(select.selects):
+            g = select.selects[int(g.this) - 1]
+        out.append(g.sql().lower())
+    return out
+
+
+def breakdown_mismatch(asked: str, approved: str, approved_sql: str) -> str | None:
+    """Why a certified answer does not come back at the grain the question
+    asks, or None. "Delivery target and parcels delivered per driver" is not
+    "Delivery target and parcels delivered": cosine sees one word apart, the
+    certified SQL returns one total. A question asking a breakdown ("per X",
+    "by X", "each X", "for every X") that the certified SQL's outer GROUP BY
+    does not name, or a certified SQL grouped for a breakdown its question
+    asks and the asked question does not, is the mismatch. Deterministic: the
+    question's words and the SQL's parse."""
+    groups = _outer_group(approved_sql)
+    if groups is None:
+        return None
+    grouped_words = {w for g in groups for w in re.findall(r"[a-z0-9]+", g)}
+    # A breakdown the approved question says itself is the approved grain,
+    # whatever the SQL groups by ("top 5 stores by sales" orders by it).
+    approved_words = {w for ws in breakdown_words(approved) for w in ws}
+    for words in breakdown_words(asked):
+        forms = {f for w in words for f in (w, w + "s", w[:-1] if w.endswith("s") else w)}
+        if not forms & (grouped_words | approved_words):
+            return (
+                f"the question asks a breakdown by {' '.join(sorted(words))} and the certified "
+                "SQL does not group by it"
+            )
+    if groups and _GROUPED_CUE.search(approved) and not _GROUPED_CUE.search(asked):
+        return "the certified SQL is grouped and the question asks no breakdown"
     return None

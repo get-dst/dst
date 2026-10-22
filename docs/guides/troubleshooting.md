@@ -116,12 +116,12 @@ distinct anchors and embeddings on, is worth reporting.
 
 ## A lens answers a sibling's question when asked directly
 
-`use_when` steers routing. On the direct door (`/v1/lenses/<lens>/query`) a lens
-answers whatever its columns can compute, so "show me ARR levels" asked of a movements
-lens produces a number. Scope on the direct door is not enforced from prose, by design:
-a heuristic that guesses intent from wording would refuse real questions. The pin is an
-`expect: refuse` behavioral case per sibling question; the business suite that found
-the gap is that suite. Owner: your files.
+`use_when` steers routing. On the direct door (`/v1/lenses/<lens>/query`) a lens answers
+whatever its columns can compute, so "show me membership fee levels" asked of a
+movements lens produces a number. Scope on the direct door is not enforced from prose,
+by design: a heuristic that guesses intent from wording would refuse real questions. The
+pin is an `expect: refuse` behavioral case per sibling question; the business suite that
+found the gap is that suite. Owner: your files.
 
 ## Serving KPIs count your own test traffic
 
@@ -132,8 +132,8 @@ nobody; by design.
 
 ## Business-suite questions "fail" with a clarification
 
-An author-phrased question that names no single metric ("how is quota attainment
-tracking against weekly CARR?") gets a clarification. That is the decider refusing to
+An author-phrased question that names no single metric ("how is occupancy tracking
+against the weekly member goal?") gets a clarification. That is the decider refusing to
 guess, which is what it is for. The gap is the alias or definition the lens does not
 declare. Owner: your files.
 

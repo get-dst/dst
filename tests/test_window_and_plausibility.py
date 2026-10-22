@@ -24,7 +24,7 @@ def _model() -> SemanticModel:
                 name="movements",
                 source=EntitySource(connection="wh", table="marts.movements"),
                 default_time_field="movement_date",
-                fields=[Field(name="metric_type", type="string")],
+                fields=[Field(name="tally_basis", type="string")],
             )
         ],
     )
@@ -54,7 +54,7 @@ def test_unwindowed_sql_for_a_windowed_question_is_not_verified() -> None:
     report = _report(
         "How many customers churned last month?",
         "SELECT COUNT(DISTINCT account_id) AS churned FROM movements "
-        "WHERE movements.metric_type = 'Month Over Month'",
+        "WHERE movements.tally_basis = 'Per Branch'",
         rows=[[8740]],
         columns=["churned"],
     )
@@ -133,7 +133,7 @@ def test_zero_count_without_division_is_not_flagged() -> None:
     # A plain COUNT of zero is the value_guard/has_rows story, not this check's.
     report = _report(
         "How many churned?",
-        "SELECT COUNT(*) AS n FROM movements WHERE metric_type = 'x'",
+        "SELECT COUNT(*) AS n FROM movements WHERE tally_basis = 'x'",
         rows=[[0]],
         columns=["n"],
     )

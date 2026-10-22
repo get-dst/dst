@@ -41,6 +41,7 @@ from services.api.mgmt_distill import router as mgmt_distill_router
 from services.api.mgmt_evals import router as mgmt_evals_router
 from services.api.mgmt_gap_map import router as mgmt_gap_map_router
 from services.api.mgmt_lenses import router as mgmt_lenses_router
+from services.api.mgmt_observe import ledger_router as mgmt_ledger_router
 from services.api.mgmt_observe import router as mgmt_observe_router
 from services.api.mgmt_profile import connection_router as profile_connection_router
 from services.api.mgmt_profile import lens_drift_router as profile_lens_drift_router
@@ -274,6 +275,7 @@ app.include_router(mgmt_activation_router)
 app.include_router(mgmt_certify_router)
 app.include_router(mgmt_catalog_router)
 app.include_router(mgmt_observe_router)
+app.include_router(mgmt_ledger_router)
 app.include_router(mgmt_profile_router)
 app.include_router(profile_connection_router)
 app.include_router(profile_lens_drift_router)

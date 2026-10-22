@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from services.contracts.resolution import Resolution
 from services.contracts.verification import VerificationReport
@@ -206,6 +206,29 @@ class QueryResponse(BaseModel):
     # model summed a column it chose.
     resolution: Resolution | None = None
     request_id: str
+
+    # Where the served figure came from, derived (never set) so the direct and
+    # the routed envelope say the same thing: ``certified`` = an approved
+    # answer's SQL served (its id in ``certified_answer_id``); ``compiled`` =
+    # the compiler built the SQL from a typed intent over declared names;
+    # ``generated`` = a model wrote the SQL. None on a non-answer.
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def source(self) -> Literal["certified", "generated", "compiled"] | None:
+        if self.status != "ok":
+            return None
+        if self.certification == "certified":
+            return "certified"
+        if self.resolution is not None and self.resolution.method == "construction":
+            return "compiled"
+        return "generated"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def certified_answer_id(self) -> str | None:
+        if self.certification != "certified" or self.certified_provenance is None:
+            return None
+        return self.certified_provenance.cert_id
 
 
 class ConsumerAnswer(BaseModel):

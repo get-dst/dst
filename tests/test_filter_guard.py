@@ -390,36 +390,36 @@ def test_an_equality_filter_requirement_still_demands_equality() -> None:
 
 def _snapshot_model() -> SemanticModel:
     """The standard snapshot-table pattern that deadlocks the guard:
-    current_arr pins the latest snapshot date, total_arr pins end-of-month —
+    current_revenue pins the latest snapshot date, total_revenue pins end-of-month —
     same expression, jointly unsatisfiable filters on ~29 days in 30."""
     return SemanticModel(
-        lens="finance",
+        lens="laundry",
         dialect="bigquery",
         entities=[
             Entity(
-                name="finance_kpis",
-                source=EntitySource(connection="bq", table="proj.marts.finance_kpis"),
+                name="store_kpis",
+                source=EntitySource(connection="bq", table="proj.marts.store_kpis"),
                 fields=[
-                    Field(name="arr_usd", type="number"),
-                    Field(name="status_date", type="date"),
-                    Field(name="is_end_of_month", type="boolean"),
-                    Field(name="tier", type="string"),
+                    Field(name="revenue_eur", type="number"),
+                    Field(name="snapshot_date", type="date"),
+                    Field(name="is_month_end", type="boolean"),
+                    Field(name="store_tier", type="string"),
                 ],
                 metrics=[
                     Metric(
-                        name="current_arr",
+                        name="current_revenue",
                         agg="sum",
-                        expr="finance_kpis.arr_usd",
+                        expr="store_kpis.revenue_eur",
                         filters=[
-                            "finance_kpis.status_date = (SELECT MAX(finance_kpis.status_date) "
-                            "FROM proj.marts.finance_kpis AS finance_kpis)"
+                            "store_kpis.snapshot_date = (SELECT MAX(store_kpis.snapshot_date) "
+                            "FROM proj.marts.store_kpis AS store_kpis)"
                         ],
                     ),
                     Metric(
-                        name="total_arr",
+                        name="total_revenue",
                         agg="sum",
-                        expr="finance_kpis.arr_usd",
-                        filters=["finance_kpis.is_end_of_month = TRUE"],
+                        expr="store_kpis.revenue_eur",
+                        filters=["store_kpis.is_month_end = TRUE"],
                     ),
                 ],
             )
@@ -427,44 +427,44 @@ def _snapshot_model() -> SemanticModel:
     )
 
 
-_BARE_ARR = (
-    "SELECT finance_kpis.tier, SUM(finance_kpis.arr_usd) AS arr "
-    "FROM proj.marts.finance_kpis AS finance_kpis GROUP BY finance_kpis.tier"
+_BARE_REVENUE = (
+    "SELECT store_kpis.store_tier, SUM(store_kpis.revenue_eur) AS revenue "
+    "FROM proj.marts.store_kpis AS store_kpis GROUP BY store_kpis.store_tier"
 )
 
 
 def test_the_question_resolves_incompatible_twins_to_one_metric() -> None:
-    """'current ARR by tier' names current_arr — only ITS filter is demanded,
+    """'current revenue by store tier' names current_revenue — only ITS filter is demanded,
     so the repair loop has a satisfiable target instead of an impossible union."""
     missing = missing_metric_filters(
-        _BARE_ARR, _snapshot_model(), question="Break our current ARR down by customer tier"
+        _BARE_REVENUE, _snapshot_model(), question="Break our current revenue down by store tier"
     )
     assert missing, "an unfiltered governed aggregation must still be caught"
-    assert {name for name, _f in missing} == {"current_arr"}
+    assert {name for name, _f in missing} == {"current_revenue"}
 
 
 def test_a_question_naming_neither_twin_keeps_the_union_and_names_the_conflict() -> None:
     missing = missing_metric_filters(
-        _BARE_ARR, _snapshot_model(), question="Break our ARR down by customer tier"
+        _BARE_REVENUE, _snapshot_model(), question="Break our revenue down by store tier"
     )
-    assert {name for name, _f in missing} == {"current_arr", "total_arr"}
+    assert {name for name, _f in missing} == {"current_revenue", "total_revenue"}
     note = conflict_note(missing, _snapshot_model())
     assert note is not None
-    assert "current_arr" in note and "total_arr" in note
+    assert "current_revenue" in note and "total_revenue" in note
     assert "naming the metric" in note or "re-ask" in note
 
 
 def test_a_query_satisfying_one_twin_still_clears_without_a_question() -> None:
     sql = (
-        "SELECT finance_kpis.tier, SUM(finance_kpis.arr_usd) AS arr "
-        "FROM proj.marts.finance_kpis AS finance_kpis "
-        "WHERE finance_kpis.is_end_of_month = TRUE GROUP BY finance_kpis.tier"
+        "SELECT store_kpis.store_tier, SUM(store_kpis.revenue_eur) AS revenue "
+        "FROM proj.marts.store_kpis AS store_kpis "
+        "WHERE store_kpis.is_month_end = TRUE GROUP BY store_kpis.store_tier"
     )
     assert missing_metric_filters(sql, _snapshot_model()) == []
 
 
 def test_conflict_note_is_none_for_a_single_metric_miss() -> None:
-    missing = [("current_arr", "whatever")]
+    missing = [("current_revenue", "whatever")]
     assert conflict_note(missing, _snapshot_model()) is None
 
 
@@ -538,10 +538,10 @@ def test_zero_signal_on_every_twin_waives_the_whole_group() -> None:
     question asked for neither governed metric, so the union (permanently
     unsatisfiable) is waived rather than demanded."""
     findings = metric_filter_findings(
-        _BARE_ARR, _snapshot_model(), question="How much recurring revenue per customer tier?"
+        _BARE_REVENUE, _snapshot_model(), question="How much did the stores take in per store tier?"
     )
     assert findings.missing == []
-    assert {name for name, _f in findings.waived} == {"current_arr", "total_arr"}
+    assert {name for name, _f in findings.waived} == {"current_revenue", "total_revenue"}
 
 
 def test_a_satisfied_filter_yields_no_waiver_to_disclose() -> None:

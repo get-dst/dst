@@ -37,6 +37,7 @@ from services.evals.service import _row_to_case
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
 from services.runtime.generator import GroundedSQLGenerator
+from services.runtime.pipeline import run_query
 
 
 def _reachable(url: str) -> bool:
@@ -132,13 +133,20 @@ def _run(cases: list[EvalCase], scripts: list[str], definitions: list[Definition
         data_as_of=None,
         counts={},
     )
+    connector, composer = _CountingConnector(), AnswerComposer(llm)
     return run_behavioral(
-        connector=_CountingConnector(),
         lens=model.lens,
         cases=cases,
-        assemble_for=lambda _q: assembled,
-        generators_for=lambda _a: (GroundedSQLGenerator(llm), None),
-        composer=AnswerComposer(llm),
+        serve=lambda q: run_query(
+            question=q,
+            lens_name=model.lens,
+            org_id="eval",
+            caller="eval",
+            semantic_model=assembled.model,
+            connector=connector,
+            generator=GroundedSQLGenerator(llm),
+            composer=composer,
+        ),
     )
 
 
@@ -315,6 +323,22 @@ def test_clarify_case_fails_when_the_response_answers() -> None:
     assert result.reason is not None and "expected a clarification" in result.reason
 
 
+def test_a_clarify_case_that_got_a_refusal_says_so() -> None:
+    """A refusal is not an answer: the reason names the refusal, never
+    'got status=refused (the response answered)'."""
+    outcome = _run(
+        [_case("what is our NPS?", "clarify")],
+        ['{"no_answer": "no survey data is modeled"}'],
+        [],
+    )
+    (result,) = outcome.results
+    assert not result.passed
+    assert result.reason is not None
+    assert result.reason.startswith("expected a clarification, got status=refused: ")
+    assert "no survey data is modeled" in result.reason
+    assert "the response answered" not in result.reason
+
+
 def test_clarify_term_must_match_when_pinned() -> None:
     workload = Definition(
         term="workload",
@@ -367,6 +391,30 @@ def test_answer_case_passes_on_a_data_answer_and_fails_on_a_refusal() -> None:
     assert result.grade == "fail"
     assert result.reason is not None and "expected a data answer" in result.reason
     assert "refused" in result.reason
+
+
+def test_a_behavioural_row_carries_what_it_got_back() -> None:
+    """The row's actual value is the response's status and text: a pass and a
+    failure alike say what the lens answered, not only how it was graded."""
+    import json
+
+    answered = _run(
+        [_case("how many projects do we have?", "answer")],
+        ['{"sql": "SELECT COUNT(projects.id) AS n FROM projects AS projects"}', "3 projects."],
+        [],
+    )
+    (row,) = answered.results
+    assert row.actual_value is not None
+    got = json.loads(row.actual_value)
+    assert got["status"] == "ok" and got["text"]
+    clarified = _run(
+        [_case("what is the average value of a customer?", "clarify", term="value")],
+        ['{"sql": "SELECT 1"}'],
+        [AMBIGUOUS_VALUE],
+    )
+    (row,) = clarified.results
+    got = json.loads(row.actual_value or "{}")
+    assert got["status"] == "clarification" and "value" in got["text"]
 
 
 def test_value_cases_are_not_scored_by_the_behavioral_runner() -> None:

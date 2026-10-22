@@ -81,12 +81,17 @@ def sync(session: Session, profile: CoverageProfile, embedder: Embedder) -> None
 def scored(session: Session, lenses: list[str], query_vec: list[float]) -> list[tuple[str, float]]:
     """Every lens ranked by max anchor cosine to the pre-embedded question (best
     first) — the same recall signal ``Router.scored`` computes in memory, done
-    where the vectors live. A lens with no stored anchors gets no entry, matching
-    the in-memory behaviour for an anchor-less profile."""
+    where the vectors live. Anchors two of the ranked lenses carry verbatim are
+    left out, as ``sibling.distinct_profiles`` leaves them out in memory: they
+    score both lenses alike and separate nothing. A lens with no remaining
+    anchors gets no entry, matching the in-memory behaviour."""
     rows = session.execute(
         text(
             "SELECT lens, MAX(1 - (embedding <=> CAST(:q AS vector))) AS score "
             "FROM router_anchor WHERE lens = ANY(CAST(:ls AS text[])) "
+            "AND anchor NOT IN (SELECT anchor FROM router_anchor "
+            "WHERE lens = ANY(CAST(:ls AS text[])) GROUP BY anchor "
+            "HAVING COUNT(DISTINCT lens) > 1) "
             "GROUP BY lens ORDER BY score DESC"
         ),
         {"q": _vec(query_vec), "ls": lenses},

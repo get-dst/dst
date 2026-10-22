@@ -13,6 +13,9 @@ additionally enforced by sql_guard.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -371,18 +374,29 @@ class PostgresConnector:
     ) -> QueryResult:
         con = self._connect()  # always read-only
         try:
-            query = (
-                sql
-                if row_limit is None
-                else f"SELECT * FROM ({sql.rstrip().rstrip(';')}) AS _q LIMIT {int(row_limit)}"
-            )
-            query = tag_sql(query)  # the final statement identifies itself in query history
-            cur = con.execute(query)
-            columns = [d.name for d in cur.description] if cur.description else []
-            rows = [list(r) for r in cur.fetchall()]
-            return QueryResult(columns=columns, rows=rows)
+            return _fetch(con, sql, row_limit)
         finally:
             con.close()
+
+    @contextmanager
+    def shared_snapshot(self) -> Iterator[_PinnedPostgres]:
+        """One REPEATABLE READ snapshot, exported by a holding transaction and
+        imported by every query run through the yielded connector — Postgres's
+        own mechanism for parallel readers that must agree (pg_export_snapshot).
+        The holder stays open, and the snapshot valid, until the block exits."""
+        holder = self._connect()
+        try:
+            holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            row = holder.execute("SELECT pg_export_snapshot()").fetchone()
+            snapshot = str(row[0]) if row else ""
+            if not _SNAPSHOT_ID.match(snapshot):
+                raise RuntimeError(f"unexpected snapshot id {snapshot!r}")
+            yield _PinnedPostgres(self, snapshot)
+        finally:
+            try:
+                holder.execute("ROLLBACK")
+            finally:
+                holder.close()
 
     def probe_write(self) -> None:
         """Prove write access: create a throwaway table in the schema, insert, drop."""
@@ -396,5 +410,53 @@ class PostgresConnector:
                 con.execute(f"INSERT INTO {table} (probe) VALUES (1)")
             finally:
                 con.execute(f"DROP TABLE IF EXISTS {table}")
+        finally:
+            con.close()
+
+
+# What pg_export_snapshot() returns (e.g. 00000003-0000001B-1): checked before
+# it is written into SET TRANSACTION SNAPSHOT, which takes no bind parameter.
+_SNAPSHOT_ID = re.compile(r"^[0-9A-F]+(-[0-9A-F]+)+$")
+
+
+def _fetch(con: Any, sql: str, row_limit: int | None) -> QueryResult:
+    query = (
+        sql
+        if row_limit is None
+        else f"SELECT * FROM ({sql.rstrip().rstrip(';')}) AS _q LIMIT {int(row_limit)}"
+    )
+    query = tag_sql(query)  # the final statement identifies itself in query history
+    cur = con.execute(query)
+    columns = [d.name for d in cur.description] if cur.description else []
+    rows = [list(r) for r in cur.fetchall()]
+    return QueryResult(columns=columns, rows=rows)
+
+
+class _PinnedPostgres:
+    """A PostgresConnector whose queries read one exported snapshot."""
+
+    kind = "postgres"
+
+    def __init__(self, parent: PostgresConnector, snapshot: str) -> None:
+        self._parent = parent
+        self.snapshot = snapshot
+
+    def introspect(self) -> SchemaSnapshot:
+        return self._parent.introspect()
+
+    def dry_run(self, sql: str) -> DryRunResult:
+        return self._parent.dry_run(sql)
+
+    def execute(
+        self, sql: str, *, read_only: bool = True, row_limit: int | None = None
+    ) -> QueryResult:
+        con = self._parent._connect()  # always read-only
+        try:
+            con.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            con.execute(f"SET TRANSACTION SNAPSHOT '{self.snapshot}'")
+            try:
+                return _fetch(con, sql, row_limit)
+            finally:
+                con.execute("ROLLBACK")
         finally:
             con.close()

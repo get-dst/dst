@@ -23,6 +23,7 @@ from services.contracts.warehouse import QueryResult
 from services.evals.runner import run_behavioral
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
+from services.runtime.pipeline import run_query
 
 
 class _SlowRecordingGenerator:
@@ -73,13 +74,21 @@ def _run(n_cases: int, concurrency: int) -> tuple[list[str], _SlowRecordingGener
         EvalCase(id=f"c{i}", lens="t", question=f"q {i}?", source="authored", expect="answer")
         for i in range(n_cases)
     ]
+    connector = FakeConnector(result=QueryResult(columns=["total"], rows=[[7]]))
+    composer = AnswerComposer(ScriptedLLM(["Seven."]))
     outcome = run_behavioral(
-        connector=FakeConnector(result=QueryResult(columns=["total"], rows=[[7]])),
         lens="t",
         cases=cases,
-        assemble_for=lambda _q: assembled,
-        generators_for=lambda _a: (gen, None),
-        composer=AnswerComposer(ScriptedLLM(["Seven."])),
+        serve=lambda q: run_query(
+            question=q,
+            lens_name="t",
+            org_id="eval",
+            caller="eval",
+            semantic_model=assembled.model,
+            connector=connector,
+            generator=gen,
+            composer=composer,
+        ),
         concurrency=concurrency,
     )
     return [r.case_id for r in outcome.results], gen

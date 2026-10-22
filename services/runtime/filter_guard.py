@@ -469,8 +469,8 @@ def _question_resolved(
     Two metrics over one expression with different mandatory filters is the
     standard snapshot-table pattern (current_* = latest snapshot, total_* =
     end-of-month series). When neither filter is satisfied, demanding the
-    union is the one option that can never be satisfied — "current ARR by
-    tier" already says which metric it means, and the guard must hear it.
+    union is the one option that can never be satisfied — "current revenue
+    by tier" already says which metric it means, and the guard must hear it.
     Strictly-best name-token overlap wins; a tie or zero signal returns None
     (the union stays, and the rejection names the conflict instead of the
     phrasing)."""
@@ -673,7 +673,7 @@ def metric_filter_findings(
                 if any(_cleared(fcs, satisfied, today) for _m, fcs in twins):
                     continue
                 # The question resolves twins before the union is demanded:
-                # "current ARR" binds current_arr's filters alone; only a tie
+                # "current revenue" binds current_revenue's filters alone; only a tie
                 # WITH signal keeps the whole group. Zero signal on EVERY
                 # member waives the group instead: the question asked for none
                 # of these metrics, so the bare form is a plain aggregate — a

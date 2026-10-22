@@ -234,7 +234,38 @@ flows; `--json` prints the parseable row list, including the
 line but stay quiet about a warehouse the check could not reach
 (`status: unavailable`). Shared-asset edits mark
 their selecting lenses stale either way (they recompile on apply). Flags: `--full`,
-`--json`, `--dir` (default `.`), `--timeout` (seconds, default 120).
+`--json`, `--dir` (default `.`), `--timeout` (seconds, default 120), and the
+selection flags `--select`, `--lens` and `--scope` described below, which preview
+exactly what the same flags push on apply. With a selection, the first line of
+the plan names it (`selection: +lens/finance (scope: all) → lenses: finance;
+assets: entity/orders, …`) and everything after describes the selected push only.
+
+#### Selecting part of the project
+
+`--select` takes one or more selectors over the project graph, where a lens reads
+the entities and definitions its `select:` names:
+
+| Selector | Selects |
+| --- | --- |
+| `lens/finance`, `entity/orders`, `definition/net_revenue` | that node alone |
+| `lens/finance_*`, `definition/*` | every node of that kind whose name matches the glob |
+| `+lens/finance` | the lens and everything upstream: the entities and definitions it selects |
+| `entity/orders+` | the entity and everything downstream: every lens that selects it |
+| `@changed` | every node whose files differ from the server (the plan's own diff) |
+
+Only selected files are pushed. An unselected lens is not validated and not touched,
+so a broken file in a sibling does not block yours. A selection that changes a shared
+asset an unselected published lens compiles against is refused before anything
+lands, naming the lens; `entity/orders+` takes every reader along. A selector that
+matches nothing is an error. `--lens <name>` is an alias for `--select lens/<name>`.
+
+`--scope {all,semantic,certified,cases,config}` limits which kinds of files are
+pushed: `semantic/**`, each selected lens's `certified_answers.yaml`, its
+`evals/cases.yaml`, or `dst.yaml` and the other project-level files. `certified` and
+`cases` change only that one file of a lens that is already on the server.
+`--scope cases` lands the cases against the published lens and runs no eval gate:
+nothing recompiles or republishes, and the next apply that publishes the lens scores
+against them.
 
 Plan predicts apply: every `semantic/**` file is validated through the same seam
 apply parses with, so a file apply would reject plans as `invalid` on its own
@@ -263,7 +294,28 @@ line never changes the exit code.
 
 Deploy the project directory; files win. Blue/green and all-or-nothing: any error
 aborts the whole apply (`APPLY ABORTED`, exit 1) and prior versions keep serving;
-connection declarations are probed before landing. Concurrent applies conflict (409).
+connection declarations are probed before landing. A connection whose entities name
+their tables is probed with one connectivity check plus one row-less read per
+declared table, not an introspection of every dataset the credential can see; a
+declared table that cannot be read is a warning naming it. Each warehouse step runs
+under `DST_APPLY_STEP_TIMEOUT_S`, and a step past it is named with the connection's
+declared-table and dataset counts.
+
+The apply runs on the server as a job. `dst apply` starts it, prints each lens as it
+lands, and polls the job until it ends, so a client timeout or a proxy that cuts long
+requests never loses the result. `--no-wait` prints the job id and returns at once;
+`dst apply status <job id>` prints the job's state and per-lens progress, and once it
+is done, the same report `dst apply` prints. A second apply while one runs gets a
+409 that names the running job and the `dst apply status` command that attaches to
+it.
+
+A pushed `evals/cases.yaml` owns the lens's approved cases: a case absent from it is
+retired, and the lens row counts it (`eval cases: … retired 1`). A lens with no
+`evals/cases.yaml` in the push keeps its cases. Certified answers already work this
+way (an answer absent from a pushed `certified_answers.yaml` is deleted, except those
+a review approved). Values the server records onto a row (a probe's verified value and
+prose, timestamps) are not differences when the file does not carry them, so `dst
+plan` right after `dst apply` reports zero changes.
 Exit is non-zero on **any** error, not just rejected lenses. Every stage (connections,
 semantic assets, eval cases, certified answers, the lens publish) shares **one
 transaction**, so a failure deploys nothing and the error line says so.
@@ -287,12 +339,10 @@ anyway), `--require-gates` (fail closed: abort, exit non-zero, if any lens confi
 for an eval gate had it *skipped* (empty suite, provider error, or unreachable
 warehouse alike); by default a skipped gate publishes with a warning. CI wants this
 flag: without it a provider outage silently converts a gated apply into an ungated
-one that exits 0), `--lens <name>` (repeatable: publish only these lenses of the
-project; the other lenses in the tree are reported `unchanged` and their files are
-left alone, so a sibling's red gate no longer holds yours back. A push that changes
-shared inputs a non-selected published lens is compiled against (a `semantic/` asset
-it reads, a connection it declares) is refused before anything lands, naming the lens
-and the two ways out: add it to `--lens`, or drop `--lens` and apply every lens).
+one that exits 0), `--no-wait`, and `--select` / `--lens` / `--scope` (see
+[Selecting part of the project](#selecting-part-of-the-project): only the selected
+lenses are validated, pushed and gated; a changed connection that an unselected lens
+declares is refused the same way as a changed shared asset).
 
 Lenses whose managed files match the server exactly report `unchanged` and skip the
 publish path (no recompile, no version bump, no eval-gate generation), so a no-op
@@ -532,10 +582,17 @@ Each case prints as a ledger row (`PASS`/`FAIL`, `org/lens: question`, the diver
 when there is one, and the case's wall-clock), then a rule, the `N/M passed`
 summary, and a `recorded:` line per lens naming the run id and the database it was
 written to (`DATABASE_URL`, password hidden). `--json` emits the same rows structurally
-(org, lens, question, verdict, certified/generated result, reason, `elapsed_s`, and a
-stable id: `answer_id` on certified and slot-lane rows, `case_id` on behavioral ones)
-plus the summary, `recorded` (org, lens, `run_id`) and `database`, for CI that wants the
-table rather than the exit code alone.
+(org, lens, question, verdict, certified/generated result, reason, `elapsed_s`, and
+the join keys: `case_id`, the row's `eval_result.case_id` (`certified:<id>` on the
+data lane, `slots:<id>` on the slot lane, the case id on behavioral rows), and
+`certified_answer_id` wherever a certified answer is graded) plus the summary,
+`recorded` (org, lens, `run_id`) and `database`, for CI that wants the table rather
+than the exit code alone. `calibration_by_slot` gives the deciders' calibration per
+decision slot (metric, grain, lens, ...): n, accuracy, the unanimous bin's n and
+accuracy, and ECE (null, with the status saying why, below 20 measured decisions).
+Every recorded row stores its generated value in `eval_result.actual_value`: the
+executed result as JSON on the data lane (the shape a `verified_value` has), the
+typed intent on the slot lane.
 
 [![dst test with nothing certified: 0/0 passed, exit 4, and the warning that this run could not have failed](../assets/term/test.svg)](../assets/term/test.svg)
 
@@ -545,7 +602,10 @@ Under [typed serving](../concepts/typed-decisions.md) the run is three lanes:
 the resolution lane (every certified question decided by the provider, graded
 per slot, no warehouse), the compile lane (compiled SQL against the certified
 text), and the data lane, which executes only the cases the first two could
-not prove. `--slots` runs the first two only; `--rows` executes every case;
+not prove. A case whose compiled SQL differs from the certified text but whose
+rows match on the data lane is reported `differs (data equal)` (`sql_data_equal`
+on its JSON row): the data lane is the oracle, and a different spelling is not a
+failure. `--slots` runs the first two only; `--rows` executes every case;
 `--repeat N` resolves each question N times and fails any that does not
 produce the same intent every time.
 
@@ -571,7 +631,8 @@ message says so. The `recorded:` line `dst test` prints names the database to
 compare against.
 
 `dst runs --all [--last N]` lists every lens on the server with its last N runs
-(default 5); a lens with no history is listed as such. `--json` gives
+(default 5) in one request (`/mgmt/observe/runs`); a lens with no history is listed
+as such. `--json` gives
 `{"runs": [{"lens", "runs": [...]}]}`, one entry per lens.
 
 `dst runs <lens> --diff A B` compares two runs: score delta plus the per-case
@@ -711,11 +772,23 @@ dst observe                 headline + usage per caller
 dst observe callers         who, how many, how much, how many errors
 dst observe requests        what they actually asked
 dst observe show <req_id>   one request: question, SQL, confidence, purpose when logged
+dst observe export          the request ledger, every row in the window
 ```
 
 Flags: `--lens`, `--status ok|refused|error` (with `requests`), `--limit` (default
 50; the server caps it at 10000 — there is no cursor, so the cap is the only page),
-`--json`, `--timeout`, `--dir`, `--url`/`--token`.
+`--include-test`, `--json`, `--timeout`, `--dir`, `--url`/`--token`.
+
+`dst observe export --since 2026-10-01 [--until 2026-10-08] [--caller ana]
+[--format csv|json]` writes the request ledger (`GET /mgmt/requests`): one row per
+request, `ts, caller, agent, question, lens, covered, answer_kind, certification,
+request_id`, CSV by default. `answer_kind` is `certified`, `generated`, `clarify`,
+`refuse` or `error`; `covered` is false only for a refusal.
+
+Test traffic, requests whose agent (`X-Dst-Agent`) is `dst-test` or `benchmark`,
+stays in the ledger and the export but is left out of the headline, the basis line
+and the caller rows; the headline says how many requests it left out, and
+`--include-test` counts them.
 
 The bare form is the answer to "the CFO wants to know who has been using the
 reporting tool": one line of totals (queries, AI spend, warehouse bytes

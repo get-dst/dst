@@ -456,6 +456,7 @@ def test_basis_counts_every_employee_read_with_raw_inside_the_denominator(org: o
         "unknown": 1,
         "n": 7,
         "raw_refused": 1,  # the refused probe: outside n, named, not 0
+        "test_excluded": 0,
         "governed_share": round(4 / 7, 4),
     }
     # The older counters are untouched: governed rows only, probes in their own block.
@@ -540,6 +541,7 @@ def test_audit_statement_carries_the_basis_over_the_window(org: object) -> None:
         "unknown": 1,
         "n": 6,
         "raw_refused": 0,
+        "test_excluded": 0,
         "governed_share": 0.5,
     }
     # Unwindowed, the same block sees the older certified read too.

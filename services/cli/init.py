@@ -919,8 +919,8 @@ a rule, pick the data-side one.
      nothing. Same trap as rule 10, biting through the alias field.
    - Mapping LABELS are the escape hatch: a question naming a label serves
      that reading directly. Labels must be words a user would type -
-     "contracted-ARR-vs-goal" catches nothing a person types; bare
-     "contracted" / "go-live" does.
+     "signed-deals-vs-quota" catches nothing a person types; bare
+     "signed" / "invoiced" does.
    - Mapping TAILS ("meaning - entity.column") power the disclosure floor:
      name the actual column/table so a served answer can say which reading
      it used even when the clarify never fired.
@@ -1397,8 +1397,8 @@ and violated for the next (measured three separate times). Recommending
    high share of zeros. Consequence: zero-vs-missing confusion both ways.
    Remedy: declare which convention holds in `grain`.
 6. Scope-narrowed column name. Signal: a product/segment token its siblings
-   lack (*_pms, *_emea). Consequence: a subset narrated as the company total
-   (measured ~40% off, every check passing). Remedy: rename, or a decisive
+   lack (*_coastal, *_north). Consequence: a subset narrated as the company
+   total, with every check passing. Remedy: rename, or a decisive
    definition naming the trap in negative form + `not_computable` for the
    bare question.
 7. Sentinel-dominated dimension. Signal: one literal ('(not set)', '',

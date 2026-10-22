@@ -581,7 +581,8 @@ def test_the_window_owns_time_so_date_fields_are_not_filter_candidates() -> None
     TypedResolver(decider2, domains=DOMAINS, today=TODAY).resolve(  # type: ignore[arg-type]
         "total revenue", with_due
     )
-    assert any("due_date" in c["options"] for c in decider2.calls)
+    # nor, on a question that is not about time, a candidate at all
+    assert decider2.calls and all("due_date" not in c["options"] for c in decider2.calls)
 
 
 def test_a_profiled_month_period_column_takes_the_window_instead_of_a_binding() -> None:
@@ -1065,7 +1066,7 @@ def test_a_window_on_a_timestamp_ends_before_the_next_day_not_on_the_last_one() 
         ("order_date", "<", "2026-09-01"),
     ]
     sql = compile_intent(res.intent, model)
-    assert "orders.order_date < '2026-09-01'" in sql
+    assert "orders.order_date < CAST('2026-09-01' AS TIMESTAMP)" in sql
     assert "2026-08-31" not in sql
 
 
@@ -1529,26 +1530,26 @@ def test_a_filter_on_the_value_the_metric_counts_by_is_never_applied() -> None:
     assert res.matched == ["team_name"]
 
 
-def test_end_of_a_period_on_a_level_metric_types_to_that_periods_last_snapshot() -> None:
+def test_end_of_a_period_on_a_level_metric_resolves_to_that_periods_last_snapshot() -> None:
     """ "at the end of August 2026" is August's window, which the parser already
     reads; the snapshot reading is the metric's declaration, so the compiled
     SQL restricts to the window's latest snapshot. "as of 2026-08-31" is the
     day. No phrase is sniffed."""
     snapshots = Entity(
-        name="arr_snapshots",
-        source=EntitySource(connection="wh", table="arr_snapshots"),
+        name="stock_snapshots",
+        source=EntitySource(connection="wh", table="stock_snapshots"),
         default_time_field="snapshot_date",
         fields=[
             Field(name="snapshot_date", type="date"),
-            Field(name="customer_id", type="integer"),
-            Field(name="arr", type="number"),
+            Field(name="warehouse_id", type="integer"),
+            Field(name="stock", type="number"),
         ],
-        metrics=[Metric(name="arr", agg="sum", expr="arr_snapshots.arr", additivity="level")],
+        metrics=[Metric(name="stock", agg="sum", expr="stock_snapshots.stock", additivity="level")],
     )
-    model = SemanticModel(lens="finance", dialect="duckdb", entities=[snapshots])
-    steps = [_sure("aggregate"), _sure("arr"), _sure(None)]
+    model = SemanticModel(lens="pantry", dialect="duckdb", entities=[snapshots])
+    steps = [_sure("aggregate"), _sure("stock"), _sure(None)]
     res = TypedResolver(ScriptedDecider(list(steps)), domains={}, today=TODAY).resolve(  # type: ignore[arg-type]
-        "What was total ARR at the end of August 2026?", model
+        "What was total stock at the end of August 2026?", model
     )
     assert res.intent is not None and res.intent.grain is None
     assert [(f.op, f.value) for f in res.intent.filters] == [
@@ -1556,9 +1557,9 @@ def test_end_of_a_period_on_a_level_metric_types_to_that_periods_last_snapshot()
         ("<=", "2026-08-31"),
     ]
     sql = compile_intent(res.intent, model)
-    assert "= (SELECT MAX(arr_snapshots_latest.snapshot_date)" in sql and "'2026-08-31'" in sql
+    assert "= (SELECT MAX(stock_snapshots_latest.snapshot_date)" in sql and "'2026-08-31'" in sql
     as_of = TypedResolver(ScriptedDecider(list(steps)), domains={}, today=TODAY).resolve(  # type: ignore[arg-type]
-        "ARR as of 2026-08-31", model
+        "stock as of 2026-08-31", model
     )
     assert as_of.intent is not None
     assert [(f.op, f.value) for f in as_of.intent.filters] == [
@@ -1570,37 +1571,37 @@ def test_end_of_a_period_on_a_level_metric_types_to_that_periods_last_snapshot()
 # ── names the question says word for word ────────────────────────────────────
 
 
-def _arr_model() -> SemanticModel:
+def _box_model() -> SemanticModel:
     return SemanticModel(
-        lens="finance",
+        lens="boxes",
         dialect="duckdb",
         entities=[
             Entity(
-                name="accounts",
-                source=EntitySource(connection="wh", table="accounts"),
+                name="households",
+                source=EntitySource(connection="wh", table="households"),
                 default_time_field="as_of_date",
                 fields=[
-                    Field(name="account_id", type="integer"),
-                    Field(name="mrr", type="number"),
-                    Field(name="customer_tier", type="string"),
+                    Field(name="household_id", type="integer"),
+                    Field(name="box_price", type="number"),
+                    Field(name="household_plan", type="string"),
                     Field(name="region", type="string"),
                     Field(name="as_of_date", type="date"),
                 ],
-                dimensions=[Dimension(name="customer_tier"), Dimension(name="region")],
+                dimensions=[Dimension(name="household_plan"), Dimension(name="region")],
                 metrics=[
-                    Metric(name="arr", agg="sum", expr="accounts.mrr * 12"),
-                    Metric(name="customers", agg="count_distinct", expr="accounts.account_id"),
+                    Metric(name="revenue", agg="sum", expr="households.box_price"),
+                    Metric(name="households", agg="count_distinct", expr="households.household_id"),
                     Metric(
-                        name="subscription_arr",
+                        name="puppy_revenue",
                         agg="sum",
-                        expr="accounts.mrr * 12",
-                        filters=["accounts.customer_tier = 'subscription'"],
+                        expr="households.box_price",
+                        filters=["households.household_plan = 'puppy'"],
                     ),
                     Metric(
-                        name="payment_arr",
+                        name="senior_revenue",
                         agg="sum",
-                        expr="accounts.mrr * 12",
-                        filters=["accounts.customer_tier = 'payment'"],
+                        expr="households.box_price",
+                        filters=["households.household_plan = 'senior'"],
                     ),
                 ],
             )
@@ -1608,121 +1609,121 @@ def _arr_model() -> SemanticModel:
     )
 
 
-def _split_arr_model() -> SemanticModel:
-    """subscription_arr and payment_arr on two different entities."""
-    model = _arr_model()
-    accounts = model.entities[0]
-    subscriptions = accounts.model_copy(
+def _split_box_model() -> SemanticModel:
+    """puppy_revenue and senior_revenue on two different entities."""
+    model = _box_model()
+    households = model.entities[0]
+    puppy_plans = households.model_copy(
         update={
-            "name": "subscriptions",
-            "metrics": [m for m in accounts.metrics if m.name in ("arr", "subscription_arr")],
+            "name": "puppy_plans",
+            "metrics": [m for m in households.metrics if m.name in ("revenue", "puppy_revenue")],
         }
     )
-    payments = accounts.model_copy(
+    senior_plans = households.model_copy(
         update={
-            "name": "payments",
-            "metrics": [m for m in accounts.metrics if m.name == "payment_arr"],
+            "name": "senior_plans",
+            "metrics": [m for m in households.metrics if m.name == "senior_revenue"],
         }
     )
-    return model.model_copy(update={"entities": [subscriptions, payments]})
+    return model.model_copy(update={"entities": [puppy_plans, senior_plans]})
 
 
 _SPLIT_VOTE = Decision(
-    chosen="subscription_arr",
-    probs={"subscription_arr": 0.5, "payment_arr": 0.5},
+    chosen="puppy_revenue",
+    probs={"puppy_revenue": 0.5, "senior_revenue": 0.5},
     provider="scripted",
 )
 
 
 def test_two_metrics_named_word_for_word_are_the_metrics_not_a_clarification() -> None:
-    """The first pick splits 0.5/0.5 between subscription_arr and payment_arr
+    """The first pick splits 0.5/0.5 between puppy_revenue and senior_revenue
     because the question asks for BOTH: two governed names said word for word
     are the answer's metrics, read off the text and recorded as such — never a
-    clarification, and `arr` is not named a third time off their tails."""
+    clarification, and `revenue` is not named a third time off their tails."""
     decider = ScriptedDecider([_sure("aggregate"), _SPLIT_VOTE, _sure(None)])
     res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
-        "What is the split between subscription ARR and payment ARR today?", _arr_model()
+        "What is the split between puppy revenue and senior revenue today?", _box_model()
     )
     assert res.intent is not None and res.clarification is None, res.clarification
-    assert res.intent.metrics == ["subscription_arr", "payment_arr"]
+    assert res.intent.metrics == ["puppy_revenue", "senior_revenue"]
     assert res.intent.dimensions == []
     # the decider's split stays on the ledger as what it was; the two names
     # follow it as question-text decisions
     metric = [d for d in res.decisions if d.slot == "metric"]
     assert metric[0].verdict == "clarify" and metric[0].provider == "scripted"
     assert [(d.chosen, d.provider) for d in metric[1:]] == [
-        ("subscription_arr", "question-text"),
-        ("payment_arr", "question-text"),
+        ("puppy_revenue", "question-text"),
+        ("senior_revenue", "question-text"),
     ]
     # no "another metric?" round: no third metric is named in the question
     assert not any("no further one is asked for" in c["options"] for c in decider.calls)
-    assert "SUM(" in compile_intent(res.intent, _arr_model())
+    assert "SUM(" in compile_intent(res.intent, _box_model())
 
 
 def test_named_metrics_on_different_entities_still_clarify_and_say_why() -> None:
     decider = ScriptedDecider([_sure("aggregate"), _SPLIT_VOTE, _sure(None)])
     res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
-        "What is the split between subscription ARR and payment ARR today?", _split_arr_model()
+        "What is the split between puppy revenue and senior revenue today?", _split_box_model()
     )
     assert res.intent is None and res.clarification is not None
     assert res.clarification.term == "metric"
     assert "different entities" in res.clarification.question
-    assert "subscriptions" in res.clarification.question
-    assert "payments" in res.clarification.question
-    assert res.clarification.options == ["subscription_arr", "payment_arr"]
+    assert "puppy_plans" in res.clarification.question
+    assert "senior_plans" in res.clarification.question
+    assert res.clarification.options == ["puppy_revenue", "senior_revenue"]
 
 
 def test_a_metric_the_question_names_once_still_clarifies_when_unsure() -> None:
     """One named metric is the ordinary case: a split the text does not settle
     asks, as before."""
-    decider = ScriptedDecider([_sure("aggregate"), _unsure("arr", "customers")])
+    decider = ScriptedDecider([_sure("aggregate"), _unsure("revenue", "households")])
     res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
-        "how much ARR do we have", _arr_model()
+        "how much revenue do we have", _box_model()
     )
     assert res.intent is None and res.clarification is not None
     assert res.clarification.term == "metric"
 
 
 def test_by_dimension_is_read_off_the_text_and_another_metric_is_not_asked() -> None:
-    """ "ARR by customer tier": the breakdown is said in words and read, not
-    decided; the word "customer" cannot pull the `customers` metric through
+    """ "revenue by household plan": the breakdown is said in words and read, not
+    decided; the word "household" cannot pull the `households` metric through
     the "another metric?" round, because that round offers only metrics named
     outside the dimension phrase — here none, so it is not asked at all. The
-    decider would pick `customers` on it if it were."""
-    decider = _Prefers("aggregate", "arr", "customers")
+    decider would pick `households` on it if it were."""
+    decider = _Prefers("aggregate", "revenue", "households")
     res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
-        "What is our ARR by customer tier today?", _arr_model()
+        "What is our revenue by household plan today?", _box_model()
     )
     assert res.intent is not None, res.clarification
-    assert res.intent.metrics == ["arr"]
-    assert res.intent.dimensions == ["customer_tier"]
+    assert res.intent.metrics == ["revenue"]
+    assert res.intent.dimensions == ["household_plan"]
     assert [d.slot for d in res.decisions].count("metric") == 1
     grouping = next(d for d in res.decisions if d.slot == "dimension")
-    assert grouping.chosen == "customer_tier" and grouping.provider == "question-text"
+    assert grouping.chosen == "household_plan" and grouping.provider == "question-text"
 
 
 def test_a_dimension_word_that_overlaps_a_metric_name_keeps_both_straight() -> None:
-    """ "Customers by region": the first pick is `customers` and the breakdown is
+    """ "Households by region": the first pick is `households` and the breakdown is
     `region` — the dimension phrase is blanked only for the further-metric
     rounds, never for the first pick."""
-    decider = _Prefers("aggregate", "customers", "arr")
+    decider = _Prefers("aggregate", "households", "revenue")
     res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
-        "Customers by region", _arr_model()
+        "Households by region", _box_model()
     )
     assert res.intent is not None, res.clarification
-    assert res.intent.metrics == ["customers"]
+    assert res.intent.metrics == ["households"]
     assert res.intent.dimensions == ["region"]
 
 
 def test_by_month_is_a_time_breakdown_and_the_dimension_is_still_decided() -> None:
-    """ "ARR by month" names no dimension: the grain rail owns it, and the
+    """ "revenue by month" names no dimension: the grain rail owns it, and the
     dimension question is posed to the decider as before."""
-    decider = _Prefers("aggregate", "arr", "month")
+    decider = _Prefers("aggregate", "revenue", "month")
     res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
-        "ARR by month", _arr_model()
+        "revenue by month", _box_model()
     )
     assert res.intent is not None, res.clarification
-    assert res.intent.metrics == ["arr"] and res.intent.grain == "month"
+    assert res.intent.metrics == ["revenue"] and res.intent.grain == "month"
     assert res.intent.dimensions == []
     grouping = next(d for d in res.decisions if d.slot == "dimension")
     assert grouping.chosen is None and grouping.provider == "scripted"
@@ -1756,3 +1757,125 @@ def test_the_first_field_of_a_listing_still_clarifies() -> None:
     res = _resolver(decisions).resolve("list the things", _model())
     assert res.intent is None and res.clarification is not None
     assert res.clarification.term == "field" and res.declined == []
+
+
+# ── what a breakdown may group by ────────────────────────────────────────────
+# A label inside a composite primary key (`[day, driver_name]`) is what a per-driver
+# question groups by: the key identifies a row only together. With no
+# `dimensions:` declared, the entity's labels are the dimensions, as the metric
+# catalog reports them. A breakdown clarification always names fields to pick.
+
+
+def _daily(*, key: list[str], dims: list[str]) -> SemanticModel:
+    return SemanticModel(
+        lens="deliveries",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="driver_daily",
+                source=EntitySource(connection="wh", table="driver_daily"),
+                default_time_field="day",
+                primary_key=key,
+                fields=[
+                    Field(name="day", type="date"),
+                    Field(name="driver_name", type="string"),
+                    Field(name="account_id", type="string"),
+                    Field(name="team_code", type="integer"),
+                    Field(name="seats", type="integer"),
+                    Field(name="parcels_delivered", type="integer"),
+                ],
+                dimensions=[Dimension(name=d) for d in dims],
+                metrics=[Metric(name="parcels_delivered", agg="sum", expr="parcels_delivered")],
+            )
+        ],
+    )
+
+
+class _Breakdown:
+    """Groups by ``dim`` when it is on offer, restricts by nothing, and records
+    every dimension list it was offered."""
+
+    def __init__(self, shape: str, dim: str | None) -> None:
+        self.shape, self.dim, self.offered = shape, dim, []  # type: list[list[str]]
+
+    def decide(self, *, question, context, options, allow_none):  # type: ignore[no-untyped-def]
+        names = [o.name for o in options]
+        if "broken down by a dimension" in context:
+            self.offered.append(names)
+            return _sure(self.dim if self.dim in names and "Already" not in context else None)
+        for pick in (self.shape, "parcels_delivered"):
+            if pick in names:
+                return _sure(pick)
+        return _sure(None)
+
+
+def test_a_label_in_a_composite_key_is_a_dimension() -> None:
+    decider = _Breakdown("aggregate", "driver_name")
+    res = TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+        "parcels delivered per driver in August 2026",
+        _daily(key=["day", "driver_name"], dims=["driver_name"]),
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.dimensions == ["driver_name"]
+    assert "driver_name" in decider.offered[0]
+
+
+def test_a_surrogate_id_or_a_single_column_key_is_still_never_offered() -> None:
+    for key in (["day", "account_id"], ["driver_name"]):
+        decider = _Breakdown("ranking", None)
+        TypedResolver(decider, today=TODAY).resolve(  # type: ignore[arg-type]
+            "who delivered the most parcels in August 2026", _daily(key=key, dims=[])
+        )
+        offered = {n for names in decider.offered for n in names}
+        assert "account_id" not in offered
+        if key == ["driver_name"]:
+            assert "driver_name" not in offered
+
+
+def test_with_no_declared_dimensions_the_entity_s_labels_are_offered() -> None:
+    """The string fields, and an integer only with a complete value dictionary
+    (a code, never a count or an id); no date unless the question is about
+    time series."""
+    decider = _Breakdown("ranking", "driver_name")
+    res = TypedResolver(  # type: ignore[arg-type]
+        decider, today=TODAY, entity_domains={"driver_daily": {"team_code": ["1", "2"]}}
+    ).resolve(
+        "which driver delivered the most parcels in August 2026",
+        _daily(key=["day", "driver_name"], dims=[]),
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.dimensions == ["driver_name"]
+    assert set(decider.offered[0]) == {"driver_name", "team_code"}
+
+
+def test_a_breakdown_nothing_groups_names_the_fields_to_pick() -> None:
+    res = TypedResolver(_Breakdown("ranking", None), today=TODAY).resolve(  # type: ignore[arg-type]
+        "which one delivered the most parcels in August 2026",
+        _daily(key=["day", "driver_name"], dims=[]),
+    )
+    assert res.intent is None and res.clarification is not None
+    assert res.clarification.term == "dimension"
+    assert res.clarification.options and "driver_name" in res.clarification.options
+    assert "This entity declares no dimension" not in res.clarification.question
+
+
+def test_by_a_dimension_names_the_breakdown_not_a_filter() -> None:
+    """ "by driver name" groups by driver_name; it is not also offered as a column to
+    restrict, where a decider picking it asked for a value nobody gave."""
+
+    class _FiltersAnything(_Breakdown):
+        def decide(self, *, question, context, options, allow_none):  # type: ignore[no-untyped-def]
+            names = [o.name for o in options]
+            if "restrict the rows" in context and "driver_name" in names:
+                return _sure("driver_name")
+            return super().decide(
+                question=question, context=context, options=options, allow_none=allow_none
+            )
+
+    res = TypedResolver(_FiltersAnything("aggregate", None), today=TODAY).resolve(  # type: ignore[arg-type]
+        "parcels delivered by driver name in August 2026",
+        _daily(key=["day", "driver_name"], dims=[]),
+    )
+    assert res.intent is not None, res.clarification
+    assert res.intent.dimensions == ["driver_name"]
+    assert all(f.field != "driver_name" for f in res.intent.filters)

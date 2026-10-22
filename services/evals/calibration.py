@@ -187,3 +187,28 @@ def format_report(rep: dict[str, dict[str, Any]]) -> str:
                 f"error among acted {c['error_among_acted']:.0%}"
             )
     return "\n".join(lines)
+
+
+def by_slot(rep: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """``report`` regrouped per decision slot (metric, grain, lens, …): each
+    decider's n, accuracy, the unanimous bin's n and accuracy, and ECE. ECE
+    stays None (with the status saying why) below ``MIN_N`` measured
+    decisions, the same rule the table follows."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for key, e in rep.items():
+        decider, _, slot = key.rpartition(" [")
+        unanimous = e.get("unanimous") or {}
+        out.setdefault(slot.rstrip("]") or key, []).append(
+            {
+                "decider": decider or key,
+                "n": e["n"],
+                "decisions": e["decisions"],
+                "accuracy": e["accuracy"],
+                "unanimous_n": unanimous.get("n", 0),
+                "unanimous_accuracy": unanimous.get("accuracy"),
+                "ece": e.get("ece"),
+                "status": e["status"],
+                **({"reason": e["reason"]} if "reason" in e else {}),
+            }
+        )
+    return out

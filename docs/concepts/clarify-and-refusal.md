@@ -103,6 +103,15 @@ When repair can't use what the investigation learned, there is a floor:
   investigated-and-confirmed absence keeps its badge: that zero is the data's
   answer, and now there is a receipt saying so.
 
+## A typed answer asks when the text settles nothing
+
+On typed serving, a question the decider cannot settle from declared facts is
+asked back, never served on the nearest guess: siblings one parameter apart,
+a measure the lens does not declare, a value no column holds ("this lens has
+no field for APAC"), or a question an entity declares it answers but the
+shape vote refused. The rails are listed in
+[typed decisions](typed-decisions.md#rails-that-ask-instead-of-acting).
+
 ## A named table the SQL does not read: ask
 
 A question can name a table outright — "how many events per day" — and

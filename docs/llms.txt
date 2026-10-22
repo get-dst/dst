@@ -26,6 +26,7 @@
 - [Bootstrap from history](https://www.dataservetool.com/guides/drift-audit/)
 - [Agents over MCP](https://www.dataservetool.com/guides/agents-mcp/): point Claude, Cursor or your agent at dst's MCP server
 - [Build your own UI](https://www.dataservetool.com/guides/build-your-own-ui/)
+- [Building data apps](https://www.dataservetool.com/guides/building-data-apps/): metric trees and dashboards on the metrics door, the catalog, batches and period comparison
 - [The correction loop](https://www.dataservetool.com/guides/correction-loop/)
 - [Evaluation](https://www.dataservetool.com/guides/evaluation/): tests on your data
 - [Environments and CI](https://www.dataservetool.com/guides/environments-and-ci/): disposable environments, plan and apply

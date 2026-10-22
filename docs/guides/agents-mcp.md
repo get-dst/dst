@@ -38,15 +38,17 @@ Revoke a key with `dst revoke-key` or from the dashboard.
 
 ## The tools
 
-Twelve tools (`services/mcp/server.py`):
+Fourteen tools (`services/mcp/server.py`):
 
 | Tool | What it does |
 |---|---|
 | `route_query` | **the default door**: dst picks the lens or declines; on a decline you get `covered: false` with a reason and nearest miss, never a wrong-lens guess — or, when a lens you may use declares the named thing not computable, that lens's refusal (`decided_by: refusal`, `answer.status: refused`) |
 | `query` | ask a named lens |
-| `query_metrics` | ask with a structured intent (metrics, dimensions, filters) instead of prose |
+| `query_metrics` | ask with a structured intent (metrics, dimensions, filters) instead of prose; `compare` adds the same figures over a comparison window, with deltas |
+| `query_metrics_batch` | up to 50 structured intents in one call, read at one `data_as_of`, results keyed by each intent's `id`; one failing intent fails alone |
 | `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; honours the lens's `hide` and `not_computable` refusals (code `refused`, the same sentence `query` answers with); takes `purpose` like the other asking tools |
-| `list_lenses` / `describe_lens` | what this caller may see: schema, definitions, certified count |
+| `list_lenses` / `describe_lens` | what this caller may see: schema, definitions, certified count, and the metric catalog |
+| `metric_catalog` | the catalog alone: metrics with label, unit, grains, callable dimensions and `depends_on`; dimensions with their value lists; and the metric `tree` |
 | `lookup_definition` | a governed term's approved meaning verbatim; no SQL, no warehouse call |
 | `search_certified` | similarity-ranked [certified answers](../concepts/certified.md) |
 | `run_certified` | deterministic run of approved SQL; auto-resolves only at or above the configured embedder's exact band (0.95 by default), otherwise returns `no_exact_match` plus near-misses |
@@ -61,10 +63,12 @@ The argument names, as the tools declare them (required first; `format` is
 |---|---|
 | `route_query` | `question`; `format`, `bindings`, `allow_untyped`, `purpose` |
 | `query` | `name`, `question`; `format`, `bindings`, `allow_untyped`, `purpose` |
-| `query_metrics` | `lens`; `metrics`, `dimensions`, `filters`, `order_by`, `limit`, `entity`, `grain`, `format` |
+| `query_metrics` | `lens`; `metrics`, `dimensions`, `filters`, `order_by`, `limit`, `entity`, `grain`, `compare`, `format` |
+| `query_metrics_batch` | `lens`, `intents`; `format` |
 | `sql` | `lens`, `sql`; `limit`, `purpose` |
 | `list_lenses` | none |
 | `describe_lens` | `name` |
+| `metric_catalog` | `lens` |
 | `lookup_definition` | `term` |
 | `search_certified` | `lens`, `question` |
 | `run_certified` | `lens`; `cert_id` or `question`, `bindings`, `format`, `purpose` |

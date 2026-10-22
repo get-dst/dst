@@ -621,8 +621,8 @@ def test_plan_counts_the_grant_warns_on_untyped_fallback_and_apply_publishes_it(
 
 @needs_db
 def test_a_re_pushed_artifact_republishes_an_identical_lens_as_unchanged(org) -> None:
-    # A probe artifact in the push is a touched input, so the lens takes the
-    # publish path; its managed files match the DB, which is what the plan
+    # A re-probed artifact in the push is a touched input, so the lens takes
+    # the publish path; its managed files match the DB, which is what the plan
     # reports — the apply row must say the same, not "updated".
     _oid, headers = org
     files = _project_files(["stg_*"])
@@ -632,10 +632,27 @@ def test_a_re_pushed_artifact_republishes_an_identical_lens_as_unchanged(org) ->
     assert first["action"] in ("created", "updated"), out
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
     assert next(e for e in plan if e.get("lens") == "customer_value")["status"] == "unchanged"
+    files["profiles/jaffle.probe.json"] = _probe_restamped(NOW + timedelta(days=1))
     out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
     assert any(r.get("scope") == "profiles" for r in out), out  # the input was touched
     again = next(r for r in out if r.get("lens") == "customer_value")
     assert again["action"] == "unchanged", out
+    # The same artifact pushed again is no change at all: nothing lands, and
+    # the lens is not sent back through the publish path and its eval gate.
+    out = client.post("/mgmt/project/apply", headers=headers, json={"files": files}).json()
+    assert not any(r.get("scope") == "profiles" for r in out), out
+    third = next(r for r in out if r.get("lens") == "customer_value")
+    assert third == {"lens": "customer_value", "action": "unchanged"}, out
+
+
+def _probe_restamped(probed_at: datetime) -> str:
+    """The same artifact, re-probed later."""
+    artifact = ProbeArtifact.model_validate_json(_probe_artifact())
+    return ProbeArtifact(
+        connection="jaffle",
+        probed_at=probed_at,
+        tables=[p.model_copy(update={"profiled_at": probed_at}) for p in artifact.tables],
+    ).model_dump_json()
 
 
 def _probe_without(table: str, probed_at: datetime) -> str:

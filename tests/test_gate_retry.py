@@ -10,6 +10,7 @@ different fact from a clean pass, and from a real failure).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from services.contracts.errors import ProviderError
@@ -22,6 +23,24 @@ from services.evals.runner import FLAKY_PREFIX, GATE_ATTEMPTS, run_behavioral
 from services.evals.service import gate_decision, gate_decision_dict
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
+from services.runtime.pipeline import PipelineResult, run_query
+
+
+def _serve(
+    assembled: AssembledInputs, gen: Any, composer: AnswerComposer
+) -> Callable[[str], PipelineResult]:
+    """The behavioral lane's serve core, on fakes: one pipeline run per question."""
+    connector = FakeConnector(result=QueryResult(columns=["total"], rows=[[7]]))
+    return lambda q: run_query(
+        question=q,
+        lens_name="t",
+        org_id="eval",
+        caller="eval",
+        semantic_model=assembled.model,
+        connector=connector,
+        generator=gen,
+        composer=composer,
+    )
 
 
 class _FlakyGenerator:
@@ -72,12 +91,9 @@ def _run(fail_first: int):
     gen = _FlakyGenerator(_GOOD, _BAD, fail_first)
     case = EvalCase(id="c1", lens="t", question="total orders?", source="authored", expect="answer")
     outcome = run_behavioral(
-        connector=FakeConnector(result=QueryResult(columns=["total"], rows=[[7]])),
         lens="t",
         cases=[case],
-        assemble_for=lambda _q: assembled,
-        generators_for=lambda _a: (gen, None),
-        composer=AnswerComposer(ScriptedLLM(["Seven."])),
+        serve=_serve(assembled, gen, AnswerComposer(ScriptedLLM(["Seven."]))),
     )
     return outcome, gen
 
@@ -148,12 +164,9 @@ def _run_dropping(drop_first: int):
         for i in (1, 2)
     ]
     return run_behavioral(
-        connector=FakeConnector(result=QueryResult(columns=["total"], rows=[[7]])),
         lens="t",
         cases=cases,
-        assemble_for=lambda _q: assembled,
-        generators_for=lambda _a: (gen, None),
-        composer=AnswerComposer(ScriptedLLM(["Seven."] * 10)),
+        serve=_serve(assembled, gen, AnswerComposer(ScriptedLLM(["Seven."] * 10))),
         concurrency=1,
     )
 

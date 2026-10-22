@@ -21,7 +21,7 @@ from services.runtime.assembly import certified_lookup, temporal_mismatch, tempo
 
 
 def test_temporal_terms_normalize() -> None:
-    assert temporal_terms("How many leads this quarter?") == {"this quarter"}
+    assert temporal_terms("How many enquiries this quarter?") == {"this quarter"}
     assert temporal_terms("orders in the current quarter") == {"this quarter"}
     assert temporal_terms("churn over the previous month") == {"last month"}
     assert temporal_terms("revenue for the last 30 days") == {"last 30 day"}
@@ -38,17 +38,18 @@ def test_a_month_name_alone_is_not_a_window() -> None:
 
 
 def test_mismatch_requires_windows_on_both_sides() -> None:
-    assert temporal_mismatch("leads last quarter?", "leads this quarter?")
-    assert temporal_mismatch("leads this year?", "leads this quarter?")
-    assert not temporal_mismatch("how many leads?", "leads this quarter?")
-    assert not temporal_mismatch("leads this quarter?", "SQLs generated this quarter?")
+    assert temporal_mismatch("enquiries last quarter?", "enquiries this quarter?")
+    assert temporal_mismatch("enquiries this year?", "enquiries this quarter?")
+    assert not temporal_mismatch("how many enquiries?", "enquiries this quarter?")
+    assert not temporal_mismatch("enquiries this quarter?", "quotes sent this quarter?")
 
 
 # ── the serve veto ───────────────────────────────────────────────────────────
 
-_THIS_QUARTER_Q = "How many leads, SQLs and SQOs did we generate this quarter?"
+_THIS_QUARTER_Q = "How many enquiries, quotes and orders did we get this quarter?"
 _THIS_QUARTER_SQL = (
-    "SELECT SUM(leads) FROM funnel WHERE full_date >= DATE_TRUNC(CURRENT_DATE, QUARTER)"
+    "SELECT SUM(enquiries) FROM enquiry_funnel "
+    "WHERE enquiry_date >= DATE_TRUNC(CURRENT_DATE, QUARTER)"
 )
 
 
@@ -80,7 +81,10 @@ def _wire(monkeypatch, hits: list[_Hit]) -> None:
 def test_window_mismatch_blocks_an_exact_certified_serve(monkeypatch) -> None:
     _wire(monkeypatch, [_Hit()])
     top, exemplars, mode, match, bound = certified_lookup(
-        "funnel", [0.1], "org-1", "How many leads, SQLs and SQOs did we generate last quarter?"
+        "enquiries",
+        [0.1],
+        "org-1",
+        "How many enquiries, quotes and orders did we get last quarter?",
     )
     assert top is None and match is None
     # …and the certified pair still teaches generation as an exemplar.
@@ -91,7 +95,7 @@ def test_window_mismatch_blocks_an_exact_certified_serve(monkeypatch) -> None:
 def test_grain_mismatch_blocks_too(monkeypatch) -> None:
     _wire(monkeypatch, [_Hit()])
     top, _, mode, match, _ = certified_lookup(
-        "funnel", [0.1], "org-1", "How many leads, SQLs and SQOs did we generate this year?"
+        "enquiries", [0.1], "org-1", "How many enquiries, quotes and orders did we get this year?"
     )
     assert top is None and match is None and mode == "assisted"
 
@@ -101,7 +105,10 @@ def test_same_window_paraphrase_still_serves_exact(monkeypatch) -> None:
     # written for, including harmless paraphrase.
     _wire(monkeypatch, [_Hit()])
     top, _, mode, match, _ = certified_lookup(
-        "funnel", [0.1], "org-1", "How many leads, SQLs, and SQOs have we generated this quarter?"
+        "enquiries",
+        [0.1],
+        "org-1",
+        "How many enquiries, quotes, and orders have we had this quarter?",
     )
     assert top is not None and mode == "certified" and match == "exact"
 
@@ -111,7 +118,7 @@ def test_windowless_ask_still_serves(monkeypatch) -> None:
     # matching a windowed certified answer is the certified question's meaning.
     _wire(monkeypatch, [_Hit()])
     top, _, mode, match, _ = certified_lookup(
-        "funnel", [0.1], "org-1", "How many leads, SQLs and SQOs did we generate?"
+        "enquiries", [0.1], "org-1", "How many enquiries, quotes and orders did we get?"
     )
     assert top is not None and mode == "certified" and match == "exact"
 
@@ -210,7 +217,7 @@ def test_an_iso_date_is_that_day_not_its_year() -> None:
     terms = temporal_terms("how many customers as of 2026-08-31?")
     assert terms == {"2026-08-31"}
     assert window_ranges(terms, date(2026, 10, 15)) == [(date(2026, 8, 31), date(2026, 8, 31))]
-    assert temporal_mismatch("ARR as of 2026-08-31", "ARR as of 2026-09-30")
+    assert temporal_mismatch("members as of 2026-08-31", "members as of 2026-09-30")
     assert window_ranges(temporal_terms("as of 2026-02-30"), date(2026, 10, 15)) == []
 
 

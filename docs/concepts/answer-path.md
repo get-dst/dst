@@ -18,7 +18,11 @@ The stages, in order:
 1. **Ground.** The question is scoped to one [lens](lens.md), which selects the
    semantic files, governed definitions and [curated context](curated-context.md)
    the model may read. When the caller names no lens, a routing step picks one
-   first, or declines.
+   first, or declines. Routing settles what the lenses declare before any model
+   is asked: a lens whose `not_for` names the ask is not a candidate; a question
+   that is one lens's certified question goes to that lens; text two lenses
+   carry word for word counts for neither; and between two remaining
+   candidates, a table, entity or metric only one of them declares picks it.
 2. **Match.** If a [certified answer](certified.md) covers the question, its
    approved SQL is served verbatim and generation is skipped.
 3. **Check, then generate.** Before generation runs, deterministic code

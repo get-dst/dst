@@ -55,6 +55,20 @@ def test_query_prints_answer_sql_and_meta(monkeypatch, capsys) -> None:
     assert seen["auth"] == "Bearer dstadm_t"
 
 
+def test_query_names_the_cli_as_its_agent(monkeypatch) -> None:
+    """The request ledger's agent column tells a terminal ask from a caller's:
+    `dst query` wrote it empty."""
+    seen: dict[str, str] = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, params=None):
+        seen.update(headers or {})
+        return _fake_response({"lens": "sales", "answer": "a", "sql": "SELECT 1"})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    _run_cli(monkeypatch, ["query", "sales", "total bookings?", "--token", "dstadm_t"])
+    assert seen["X-Dst-Agent"] == "dst-cli"
+
+
 def test_query_renders_clarification(monkeypatch, capsys) -> None:
     """A clarification still renders — and exits DECLINED, because no SQL ran."""
     monkeypatch.setattr(

@@ -271,6 +271,7 @@ def compile_lens_model(
         # reaches one tier doesn't exist) — the runtime's refusal rail and
         # result-column backstop both read them from here.
         not_computable=[nc.model_dump(mode="json") for nc in config.not_computable],
+        not_for=[nf.model_dump(mode="json") for nf in config.not_for],
         excluded_metric_shapes=excluded_shapes,
         shared_provenance=SharedProvenance(
             compiled_at=datetime.now(UTC).isoformat(), assets=consumed

@@ -53,7 +53,7 @@ from services.runtime import resolution as resolution_mod
 from services.runtime.answer import AnswerComposer
 from services.runtime.assembly import AssembledInputs
 from services.runtime.bounded import ApplyStepTimeout
-from services.runtime.canon import canon_rows
+from services.runtime.canon import canon_cell, canon_rows
 from services.runtime.pipeline import _jsonable, run_query
 
 # The comparison window: certified answers are small verified results; anything
@@ -134,6 +134,20 @@ def format_result(summary: dict[str, Any]) -> str:
     if set(summary) == {"value"}:
         return str(summary["value"])
     return json.dumps(summary, separators=(",", ":"), default=str)
+
+
+def value_json(summary: dict[str, Any]) -> str:
+    """An executed value summary as ``eval_result.actual_value`` stores it: the
+    JSON-native shape a certified answer's ``verified_value`` has (``{"value":
+    x}`` or ``{"columns", "rows"}``, ``{"error": …}`` for a failed run), every
+    cell canonical (``canon_cell``) so the stored text reads back as the
+    value the restated check compares, never as a driver's spelling of it."""
+    out = dict(summary)
+    if "value" in out:
+        out["value"] = canon_cell(out["value"])
+    if isinstance(out.get("rows"), list):
+        out["rows"] = canon_rows([list(r) for r in out["rows"]])
+    return json.dumps(out, default=str, ensure_ascii=False, separators=(",", ":"))
 
 
 def _key(row: list[Any]) -> tuple[Any, ...]:
@@ -310,40 +324,70 @@ def _month_label(cell: Any) -> str | None:
     return None
 
 
-def _month_lenient(oracle_rows: list[list[Any]], gen_rows: list[list[Any]]) -> str | None:
-    """Same months, different day labels. A month-grain trend certified on
+_BUCKET_GRAINS = ("week", "month", "quarter", "year")
+
+
+def _bucket_of(cell: Any, grain: str) -> tuple[int, ...] | None:
+    """The calendar bucket a date-like cell falls in at *grain*; None otherwise."""
+    day = _day_of(cell)
+    if day is None:
+        return None
+    if grain == "week":
+        iso = day.isocalendar()
+        return (iso[0], iso[1])
+    if grain == "quarter":
+        return (day.year, (day.month - 1) // 3)
+    if grain == "year":
+        return (day.year,)
+    return (day.year, day.month)
+
+
+def _month_lenient(
+    oracle_rows: list[list[Any]], gen_rows: list[list[Any]], grain: str | None = None
+) -> str | None:
+    """Same buckets, different day labels. A month-grain trend certified on
     month-end dates against a generation that labels each bucket by its first
     day (DATE_TRUNC) carries identical values under labels that differ only in
     the day, and an exact set diff reads it as every row missing and every row
-    extra. Every column that is a date on both sides is read as (year, month);
+    extra. Every column that is a date on both sides is read as its bucket;
     the rows must then match (exactly, or within the float tolerance), the same
     number on both sides, and no row may fold into another by the rewrite —
-    two certified rows in one month are two facts, not one. A lenient pass
-    carries its reason, never a silent green. None when the rule does not apply."""
+    two certified rows in one bucket are two facts, not one.
+
+    Which buckets: when the answer's *grain* is declared (week, month, quarter
+    or year — the typed reading's or the certified SQL's DATE_TRUNC), the date
+    columns are compared on that grain whatever day labels them: the latest,
+    partial month labelled by its last snapshot day is still that month.
+    Without a grain only the two canonical month labels qualify, one per side:
+    every certified date a month end and every generated one a month start, or
+    the reverse; two arbitrary days in one month are two days, and stay a
+    failure. A lenient pass carries its reason, never a silent green. None
+    when the rule does not apply."""
     if not oracle_rows or not gen_rows or len(oracle_rows) != len(gen_rows):
         return None
     width = len(oracle_rows[0])
     if any(len(r) != width for r in oracle_rows + gen_rows):
         return None
+    unit = grain if grain in _BUCKET_GRAINS else None
     date_cols = [
-        i for i in range(width) if all(_month_of(r[i]) is not None for r in oracle_rows + gen_rows)
+        i for i in range(width) if all(_day_of(r[i]) is not None for r in oracle_rows + gen_rows)
     ]
     if not date_cols:
         return None
-    # Only the two canonical month labels qualify, one per side: every certified
-    # date a month end and every generated one a month start, or the reverse.
-    # Two arbitrary days in one month are two days, and stay a failure.
-    for i in date_cols:
-        o_labels = {_month_label(r[i]) for r in oracle_rows}
-        g_labels = {_month_label(r[i]) for r in gen_rows}
-        if len(o_labels) != 1 or len(g_labels) != 1 or None in o_labels | g_labels:
-            return None
-        if o_labels == g_labels:
-            return None
+    if unit is None:
+        for i in date_cols:
+            o_labels = {_month_label(r[i]) for r in oracle_rows}
+            g_labels = {_month_label(r[i]) for r in gen_rows}
+            if len(o_labels) != 1 or len(g_labels) != 1 or None in o_labels | g_labels:
+                return None
+            if o_labels == g_labels:
+                return None
+    bucket = unit or "month"
 
     def bucketed(rows: list[list[Any]]) -> set[tuple[Any, ...]]:
         return {
-            _key([_month_of(v) if i in date_cols else v for i, v in enumerate(r)]) for r in rows
+            _key([_bucket_of(v, bucket) if i in date_cols else v for i, v in enumerate(r)])
+            for r in rows
         }
 
     want, got = bucketed(oracle_rows), bucketed(gen_rows)
@@ -354,12 +398,32 @@ def _month_lenient(oracle_rows: list[list[Any]], gen_rows: list[list[Any]]) -> s
     ):
         return None
     o_day, g_day = oracle_rows[0][date_cols[0]], gen_rows[0][date_cols[0]]
+    if unit is not None:
+        if {_key([r[i] for i in date_cols]) for r in oracle_rows} == {
+            _key([r[i] for i in date_cols]) for r in gen_rows
+        }:
+            return None  # same labels: the diff came from elsewhere, say nothing here
+        return (
+            f"bucket-match: rows matched on the {unit} bucket of their date column(s) — "
+            f"generated labels {g_day!s} where certified uses {o_day!s}; the values match "
+            f"{unit} for {unit}"
+        )
     if _key([o_day]) == _key([g_day]):
         return None  # same labels: the diff came from elsewhere, say nothing here
     return (
         f"month-lenient: generated rows label each month by {g_day!s} where certified "
         f"uses {o_day!s}; the values match month for month"
     )
+
+
+def _grain(*readings: Resolution | None) -> str | None:
+    """The answer's time grain: the first reading (the certified gold, then the
+    generated one) whose grain slot names a unit."""
+    for res in readings:
+        for slot in res.slots if res is not None else []:
+            if slot.kind == "grain" and slot.value:
+                return slot.value.lower()
+    return None
 
 
 def gold_worthy(exact: bool, got: Resolution) -> bool:
@@ -518,25 +582,28 @@ def _compare(
     oracle_rows: list[list[Any]],
     gen_cols: list[str],
     gen_rows: list[list[Any]],
+    grain: str | None = None,
 ) -> tuple[bool, str | None]:
     """Executed-result equality on the certified projection: columns matched
     by name (extra generated columns ignored), set diff, column-order-
     insensitive, and numbers value-equivalent — the scalar tolerance, a
     percentage against its fraction, and a value rounded to the precision the
-    certified value prints with (``_cells_close``). Both sides are read
+    certified value prints with (``_cells_close``). *grain* (the answer's
+    declared time grain) lets dated rows match by bucket (``_month_lenient``).
+    Both sides are read
     through ``canon_cell`` first, so a value's type and text form never decide
     equality — only the value does."""
     oracle_rows, gen_rows = canon_rows(oracle_rows), canon_rows(gen_rows)
     gen_cols, gen_rows, projected = _projection(oracle_cols, gen_cols, gen_rows)
     if projected is not None:
-        ok, reason = _compare(oracle_cols, oracle_rows, gen_cols, gen_rows)
+        ok, reason = _compare(oracle_cols, oracle_rows, gen_cols, gen_rows, grain)
         return ok, (f"{projected}; {reason}" if reason else projected) if ok else reason
     if (wider := _certified_projection(oracle_cols, oracle_rows, gen_cols, gen_rows)) is not None:
         # The certified side carried a helper column beside the value (a
         # count next to a percentage): the comparison runs on the certified
         # columns generation returned, and the pass says what was dropped.
         cols, rows, gen_rows, note = wider
-        ok, reason = _compare(cols, rows, cols, gen_rows)
+        ok, reason = _compare(cols, rows, cols, gen_rows, grain)
         return ok, (f"{note}; {reason}" if reason else note) if ok else reason
     if len(oracle_cols) == 1 and len(oracle_rows) == 1 and len(gen_rows) == 1 and len(gen_cols) > 1:
         # The certified answer is one value; the generated one is a single row
@@ -600,7 +667,7 @@ def _compare(
                 f"shape-lenient: certified count {scalar} matched by generated "
                 "row cardinality (row-shaped result)"
             )
-        if monthly := _month_lenient(oracle_rows, gen_rows):
+        if monthly := _month_lenient(oracle_rows, gen_rows, grain):
             return True, monthly
         story = _shape_story(oracle_cols, oracle_rows, gen_cols, gen_rows)
         return False, story or f"{missing} missing / {extra} extra row(s) vs certified"
@@ -777,7 +844,11 @@ def _score_one(
     # attributor learns (an inline ratio once read back as its numerator).
     expected = expected_resolution(
         a.resolution,
-        lambda: resolution_mod.attribute(oracle_sql, assembled.model, assembled.value_domains),
+        lambda: resolution_mod.answer_measures(
+            resolution_mod.attribute(oracle_sql, assembled.model, assembled.value_domains),
+            oracle_sql,
+            assembled.model,
+        ),
     )
     generator, escalate_generator = generators_for(assembled)
     passed, reason = False, None
@@ -835,7 +906,9 @@ def _score_one(
             gen_summary, passed = {"error": reason}, False
         else:
             data = pr.response.data
-            passed, reason = _compare(oracle.columns, oracle_rows, data.columns, data.rows)
+            passed, reason = _compare(
+                oracle.columns, oracle_rows, data.columns, data.rows, _grain(expected, got)
+            )
             # an exact match: no lenient bridge was needed (a later flaky-retry
             # note must not hide that it was)
             exact = passed and reason is None

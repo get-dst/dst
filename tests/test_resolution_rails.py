@@ -28,10 +28,10 @@ from services.runtime.generator import FixedSQLGenerator, GroundedSQLGenerator
 from services.runtime.pipeline import run_query
 
 
-def _run(generator, llm=None, **kw):  # type: ignore[no-untyped-def]
+def _run(generator, llm=None, question="how many customers?", **kw):  # type: ignore[no-untyped-def]
     llm = llm or ScriptedLLM(["A number of customers."])
     return run_query(
-        question="how many customers?",
+        question=question,
         lens_name="customer_value",
         org_id="org-1",
         caller="analyst",
@@ -222,7 +222,9 @@ def test_a_typed_answer_is_marked_typed() -> None:
         sure(None),
     ]
     gen = TypedIntentGenerator(TypedResolver(ScriptedDecider(steps)))
-    res = _run(gen)
+    # revenue, asked as revenue: "how many customers?" is a count that revenue
+    # does not answer, and the resolver asks instead of typing it
+    res = _run(gen, question="what was our revenue?")
     assert res.trace.status == "ok", res.trace.error
     assert res.response.resolution is not None and res.response.resolution.typed is True
     assert res.response.resolution.tag == "declared"
@@ -239,3 +241,33 @@ def test_a_clarification_is_traced_with_its_slot() -> None:
     assert res.trace.clarification is not None
     assert res.trace.clarification.kind == "unresolved_slot"
     assert res.trace.clarification.term == "shape"
+
+
+def test_a_deciders_calls_are_charged_to_the_request() -> None:
+    """Typed serving makes no generator call; its spend is the decider's votes.
+    Every measured decision carries its usage, and the request's AI tokens and
+    cost include it — observe showed a few cents where the decider had spent
+    the bulk of the tokens."""
+    from services.contracts.fakes import ScriptedDecider
+    from services.contracts.protocols import Decision, DecisionUsage
+    from services.runtime.typed_resolver import TypedIntentGenerator, TypedResolver
+
+    def sure(name: str | None) -> Decision:
+        return Decision(
+            chosen=name,
+            probs={name or "none": 1.0},
+            provider="vote:claude-haiku-4-5:k=5",
+            usage=DecisionUsage(calls=5, input_tokens=1000, output_tokens=20),
+        )
+
+    gen = TypedIntentGenerator(
+        TypedResolver(ScriptedDecider([sure("aggregate"), sure("revenue"), sure(None)]))
+    )
+    res = _run(gen, question="what was our revenue?")
+    assert res.trace.status == "ok", res.trace.error
+    decided = res.response.resolution.decisions if res.response.resolution else []
+    spent_in = sum((d.usage or {}).get("input_tokens", 0) for d in decided)
+    assert spent_in >= 3000
+    assert res.trace.ai_input_tokens >= spent_in
+    # haiku at $1/M in, $5/M out: the votes alone are at least this much
+    assert res.trace.ai_cost_usd is not None and res.trace.ai_cost_usd >= 0.003

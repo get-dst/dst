@@ -55,9 +55,11 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 | Route | Description |
 |---|---|
 | `GET /v1/lenses` | The lenses this key may query |
-| `GET /v1/lenses/{name}` | One lens's schema, definitions, and certified count |
+| `GET /v1/lenses/{name}` | One lens's schema, definitions, certified count, and metric catalog (`metrics`, `dimensions`) |
+| `GET /v1/lenses/{name}/catalog` | The metric catalog alone: `metrics`, `dimensions`, and `tree`, the metrics arranged by what each is computed from |
 | `POST /v1/lenses/{name}/query` | Ask: body `{"q": "..."}` → a governed answer |
-| `POST /v1/lenses/{name}/metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; same governance and receipts |
+| `POST /v1/lenses/{name}/metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; same governance and receipts; `compare` adds a comparison window |
+| `POST /v1/lenses/{name}/metrics/batch` | Up to 50 structured intents in one request, read at one `data_as_of` (and one warehouse snapshot where the connector can hold one); results keyed by each intent's `id`, failures isolated |
 | `GET /v1/definitions` | Look a governed term up across every lens this key may use: the approved meaning verbatim, no SQL, no warehouse (`dst define`) |
 | `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key) where the lens's `hide` and `not_computable` refusals apply; row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
 | `GET /v1/lenses/{name}/certified` | The lens's certified library; with `?q=` results are similarity-ranked (top 5, scored) |
@@ -85,7 +87,10 @@ The query response (`services/contracts/response.py`) carries the answer plus it
 (`verified` / `partial` / `unverified`; derived from named checks, never asserted),
 `certification` (`certified` / `assisted` / `none`, plus `certified_failed` on an
 error status: the approved answer's SQL no longer runs, so the badge never stands
-beside the fault as plain `certified`), `data_as_of`, a `request_id`
+beside the fault as plain `certified`), `source` (`certified`: an approved answer's
+SQL served, its id in `certified_answer_id`; `compiled`: the compiler built the SQL
+from a typed intent; `generated`: a model wrote the SQL; null on a non-answer; the
+same on the direct and the routed envelope), `data_as_of`, a `request_id`
 that ties it to the audit trail, and a signed `receipt`, a portable block anyone in
 the org can POST back to `/v1/verify-receipt` later to confirm these exact claims were
 really served. A `clarification` field set means it is *not* a data
@@ -95,6 +100,83 @@ from the column it filters (checked against the committed value dictionary, or b
 governed probe of the warehouse): `term` names the column, `options` are the values it
 actually holds; re-ask with the stored value you mean, or read the absence as the
 answer ([Clarify & refusal](../concepts/clarify-and-refusal.md)).
+
+### The metric catalog
+
+`GET /v1/lenses/{name}` carries two catalog lists beside `entities`, and
+`GET /v1/lenses/{name}/catalog` returns them alone with a `tree`. Both go through the
+same authorization as every other caller door, read the lens's own scope, and make no
+model call and no warehouse call (`services/lenses/describe.py`).
+
+Each entry in `metrics` has `name`, `entity`, `label`, `aliases`, `description`, `type`
+(`simple`, `ratio` or `derived`), `agg`, `additivity` (`flow` unless the metric declares
+`level`), `unit` (the declared `currency`, or `percent`, or null), `currency`, `format`,
+`time_field`, `grains` (the grains that time field supports: hour to year on a
+timestamp, day to year on a date, none otherwise), `dimensions` (every member the
+metrics door accepts beside it: its own entity's by bare name, a joined entity's as
+`entity.member` when the declared relationship does not fan the rows out),
+`depends_on` (the sibling metrics a ratio or derived metric references, numerator
+first), `filters_summary`, and `certified_answer_ids` (the active certified answers
+whose stored terms name the metric).
+
+Each entry in `dimensions` has `name`, `entity`, `label`, `type`, `description` and
+`values`: the complete value list from the stored profile when the column is
+enum-sized and the profile is within `probe.max_age`, otherwise null. A sampled list is
+never served as a complete one. Declared `dimensions:` come first, then every field of
+type string, integer, boolean, date or timestamp; `label` is null today, since neither
+carries an authored label.
+
+`tree` holds the metrics no other metric depends on as roots; each node's `children`
+are its `depends_on`, so a metric two parents share appears under both. Exposed tables
+stay out of all three lists.
+
+### Batches
+
+`POST /v1/lenses/{name}/metrics/batch` takes
+`{"intents": [{"id": "...", ...intent}], "format": "structured"}`. Each intent is the
+body `POST /v1/lenses/{name}/metrics` takes, plus an `id` unique in the batch. More than
+50 intents, an empty list, or a repeated id is a 422.
+
+The batch reads the profile once, so every answer carries the same `data_as_of`. On a
+connector that can hold one snapshot across connections (Postgres, through an exported
+snapshot), every query reads that snapshot and the response says `"snapshot":
+"shared"`; elsewhere each query reads the warehouse at its own moment and the response
+says `"per_query"`, with a `snapshot_note` in words. Queries run concurrently, four at a
+time.
+
+`results` maps each id to `{ok, request_id, status, error, answer}`. A served intent has
+its own `request_id`, trace and receipt, exactly as if it had come alone. A failing
+intent has `ok: false`, the HTTP `status` the single door would have answered (400 for a
+compile error, 504 for a warehouse timeout) and the `error` detail, and the other
+intents are unaffected. An intent the door answered without serving it (`answer.status`
+`error` or `rejected`) is `ok: false` as well, with `status` 200, `error` set to the
+answer's sentence, and the `answer` itself. `ok: true` means a served answer, a
+clarification or a refusal; `answer.status` says which. Each intent counts against the
+caller's per-minute limit and daily quota like a single ask; intents past either are
+answered 429 one by one.
+
+### Period comparison
+
+An intent with `compare: {"to": ...}` runs every metric over its own date window and
+over a comparison window. `to` is `previous_period` (the window of equal length just
+before; calendar months when the window starts and ends on month boundaries and the
+grain is not hour, day or week), `previous_year` (the same window a year earlier; 52
+weeks earlier under a week grain), or an explicit range: `YYYY`, `YYYY-MM` or
+`YYYY-MM-DD/YYYY-MM-DD` with both days inclusive.
+
+The window is read from the intent's own filters on the metrics' time field, and it must
+be bounded on both ends in whole days. An intent without one is refused with a 400
+naming the fields to bound. Each window compiles on its own, so a `level` metric reads
+each window's latest snapshot and a flow metric sums each window's rows. Every metric
+gains `<metric>_compare`, `<metric>_delta` (value minus compare value) and
+`<metric>_delta_pct` (the delta over the absolute compare value, null when that is zero).
+Rows are joined on the intent's dimensions and, under a `grain`, on each bucket's
+counterpart in the other window; a group only the comparison window has appears with a
+null current value. A grain the shift cannot line up with (a month grain over a window
+that is not month-aligned, a week grain shifted by days that are not whole weeks) is
+refused rather than matched approximately. `order_by` may name any selected column,
+including the compare columns. The resolution ledger records the second window as a
+`window` slot (`compared with 2026-08-01 to 2026-08-31 (previous_period)`).
 
 ### Row caps and truncation
 
@@ -163,17 +245,19 @@ receipt: they make no data claim to attest.
 ## MCP (`/mcp`)
 
 A remote, stateless streamable-HTTP MCP server (`services/mcp/server.py`); connect with
-a URL and a `dst_` key, or via the built-in OAuth flow. Twelve tools:
+a URL and a `dst_` key, or via the built-in OAuth flow. Fourteen tools:
 
 | Tool | Description |
 |---|---|
 | `list_lenses` | What this key can query |
-| `describe_lens` | Fields, definitions, certified count for one lens |
+| `describe_lens` | Fields, definitions, certified count and metric catalog for one lens |
+| `metric_catalog` | The metric catalog alone, with the metric tree |
 | `lookup_definition` | A governed term's approved meaning verbatim; no SQL, no warehouse |
 | `search_certified` | Similarity-search the certified library |
 | `run_certified` | Deterministic run; a bare question auto-resolves only at or above the configured embedder's exact band (`exact_band` on the certified-library response — 0.95 by default, and embedder-relative), otherwise returns `no_exact_match` + near misses |
 | `query` | Ask a named lens |
-| `query_metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose |
+| `query_metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; `compare` adds a comparison window |
+| `query_metrics_batch` | Up to 50 structured intents in one call, read at one moment, results keyed by id |
 | `sql` | Run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; the lens's `hide` and `not_computable` refusals apply |
 | `route_query` | **The default door**: dst picks the lens or declines; a decline a lens would refuse by declaration returns that lens's refusal |
 | `send_for_review` | Flag an answer into the human review queue |
@@ -230,7 +314,8 @@ the rest is on `/docs`, and the [CLI](cli.md) wraps the ones you'd call by hand.
 | `/mgmt/connections` | warehouse connections, catalog, per-connection profile, and the [drift-audit](../guides/drift-audit.md) endpoints |
 | `/mgmt/reviews` | queue, rulings, patch approve/reject |
 | `/mgmt/callers` · `/mgmt/users` | identities and keys |
-| `/mgmt/observe` | KPIs, requests, callers, evals |
+| `/mgmt/observe` | KPIs, requests, callers, evals, every lens's recent runs (`/mgmt/observe/runs?last=N`) |
+| `/mgmt/requests` | the request ledger export |
 | `/mgmt/standards` · `/mgmt/activation` · `/mgmt/surface` · `/mgmt/gap-map` | the rest of the cockpit |
 
 Notable:
@@ -241,6 +326,16 @@ Notable:
 - `POST /mgmt/project/plan`: the dry run behind `dst plan`.
 - `GET /mgmt/observe/requests/{request_id}`: the full trace drill-down for one
   request: question, SQL, cost, outcome.
+- `GET /mgmt/requests?since=&until=&lens=&caller=&format=csv|json`: the request
+  ledger, one row per request in the window (`since` inclusive, `until`
+  exclusive), uncapped: `ts, caller, agent, question, lens, covered,
+  answer_kind, certification, request_id`. `answer_kind` is `certified`,
+  `generated`, `clarify`, `refuse` or `error`; `covered` is false only for a
+  refusal. `dst observe export` wraps it.
+- Test traffic: requests whose agent (`X-Dst-Agent`) is `dst-test` or
+  `benchmark` stay in the ledger but are left out of `/mgmt/observe/kpis`,
+  `/audit` and `/callers`, the basis block included; `?include_test=true`
+  counts them, and `test_requests` says how many were left out.
 - `GET /mgmt/lenses/{name}/repo` and `GET /mgmt/lenses/{name}/diff?from=&to=`: the
   lens-as-repo file tree and version diffs (`services/api/mgmt_lenses.py`).
 

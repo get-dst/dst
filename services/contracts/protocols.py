@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -100,6 +101,20 @@ class Connector(Protocol):
     def execute(
         self, sql: str, *, read_only: bool = True, row_limit: int | None = None
     ) -> QueryResult: ...
+
+
+@runtime_checkable
+class SharedSnapshot(Protocol):
+    """A connector that can hold one read snapshot open across several queries.
+
+    Entering the context yields a connector whose every ``execute`` — each on
+    its own connection, so they may run concurrently — reads the same committed
+    state of the warehouse, whatever commits in between. A batch of metric
+    reads rendered together uses it, so a parent and its children never come
+    from two different moments. A connector without it reads each query at its
+    own moment, and the batch says so."""
+
+    def shared_snapshot(self) -> AbstractContextManager[Connector]: ...
 
 
 @runtime_checkable

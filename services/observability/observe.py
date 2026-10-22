@@ -7,8 +7,32 @@ from sqlalchemy.orm import Session
 
 from services.runtime.scope import parse_scope
 
+# The agent labels that mark test traffic — the suite's own (``dst-test``) and
+# the label measurement runs are told to send (``benchmark``). A request
+# carrying one is the operator testing the layer, not a caller using it: it
+# stays in request_log, and the serving KPIs and the basis line leave it out
+# unless asked (``include_test``), counting what they left out.
+TEST_AGENTS = ("dst-test", "benchmark")
+_TEST = "COALESCE(agent, '') IN ('dst-test', 'benchmark')"
 
-def kpis(session: Session) -> dict[str, object]:
+
+def _serving(include_test: bool) -> str:
+    """The predicate that keeps (or, with *include_test*, stops excluding) test traffic."""
+    return "TRUE" if include_test else f"NOT {_TEST}"
+
+
+def _test_requests(
+    session: Session, where: str = "TRUE", params: dict[str, object] | None = None
+) -> int:
+    return int(
+        session.execute(
+            text(f"SELECT count(*) FROM request_log WHERE {_TEST} AND {where}"), params or {}
+        ).scalar()
+        or 0
+    )
+
+
+def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
     """Headline numbers, with the outcome vocabulary kept honest.
 
     ``errors`` counts status='error' ONLY. Counting every non-ok status brands
@@ -34,8 +58,12 @@ def kpis(session: Session) -> dict[str, object]:
     out: an authoring probe against an org credential is not an employee read.
     ``governed_share`` is (certified + declared + mixed) / n and None when
     nothing was read, never a vacuous 100%.
+
+    Test traffic (``TEST_AGENTS``) is out of every figure here unless
+    *include_test*; ``test_requests`` says how many rows that left out.
     """
-    governed = "COALESCE(generator_tier, '') <> 'probe'"
+    serving = _serving(include_test)
+    governed = f"COALESCE(generator_tier, '') <> 'probe' AND {serving}"
     row = session.execute(
         text(
             "SELECT count(*) AS queries, "
@@ -75,7 +103,7 @@ def kpis(session: Session) -> dict[str, object]:
             "SELECT count(*), "
             "count(*) FILTER (WHERE lens LIKE 'sql:%'), "
             "COALESCE(SUM(wh_cost_usd), 0) "
-            "FROM request_log WHERE COALESCE(generator_tier, '') = 'probe'"
+            f"FROM request_log WHERE COALESCE(generator_tier, '') = 'probe' AND {serving}"
         )
     ).first()
     assert probe_row is not None
@@ -95,7 +123,7 @@ def kpis(session: Session) -> dict[str, object]:
     # certified or declared definition. NULL rows predate the ledger and are
     # reported as `unknown`, never folded into "not governed".
     resolution_histogram = _resolution_histogram(session, f"status = 'ok' AND {governed}", {})
-    basis = _basis(session)
+    basis = _basis(session, include_test=include_test)
     from services.lenses.profile_age import connection_ages
 
     return {
@@ -135,6 +163,9 @@ def kpis(session: Session) -> dict[str, object]:
             "warehouse_cost_usd": round(float(probe_row[2]), 4),
         },
         "basis": basis,
+        # Test traffic left out of every figure above (0 with include_test).
+        "test_requests": 0 if include_test else _test_requests(session),
+        "include_test": include_test,
         # How old the facts behind the answers are, per connection, against
         # the project's probe.max_age: a probe job that stopped shows here
         # before it shows as a wrong answer.
@@ -143,7 +174,10 @@ def kpis(session: Session) -> dict[str, object]:
 
 
 def _basis(
-    session: Session, where: str = "TRUE", params: dict[str, object] | None = None
+    session: Session,
+    where: str = "TRUE",
+    params: dict[str, object] | None = None,
+    include_test: bool = False,
 ) -> dict[str, object]:
     """Every served caller read, split by what its figure rested on: the ledger
     tags, `raw` for the lens-scoped SQL probe, `unknown` for served answers with
@@ -151,7 +185,9 @@ def _basis(
     narrows the rows (a time window); the read/probe/passthrough rules are fixed
     here so every caller of the block means the same thing by it. ``raw_refused``
     sits OUTSIDE ``n``: the caller's own SQL the guard turned away read nothing,
-    but it is the one refusal the governed ``outcomes`` never count."""
+    but it is the one refusal the governed ``outcomes`` never count. Test
+    traffic sits outside ``n`` unless *include_test* (``test_excluded``
+    counts the reads it left out)."""
     probe = "COALESCE(generator_tier, '') = 'probe'"
     read = "status = 'ok'"
     row = session.execute(
@@ -167,7 +203,7 @@ def _basis(
             f"count(*) FILTER (WHERE {read}), "
             f"count(*) FILTER (WHERE status = 'rejected' AND {probe}) "
             "FROM request_log WHERE COALESCE(lens, '') NOT LIKE 'sql:%' "
-            f"AND {where}"
+            f"AND {where} AND {_serving(include_test)}"
         ),
         params or {},
     ).first()
@@ -182,6 +218,11 @@ def _basis(
         "unknown": unknown,
         "n": n,
         "raw_refused": raw_refused,
+        "test_excluded": 0
+        if include_test
+        else _test_requests(
+            session, f"status = 'ok' AND COALESCE(lens, '') NOT LIKE 'sql:%' AND {where}", params
+        ),
         "governed_share": round((certified + declared + mixed) / n, 4) if n else None,
     }
 
@@ -363,7 +404,9 @@ def eval_trend(session: Session) -> list[dict[str, object]]:
     return out
 
 
-def caller_report(session: Session, lens: str | None = None) -> list[dict[str, object]]:
+def caller_report(
+    session: Session, lens: str | None = None, include_test: bool = False
+) -> list[dict[str, object]]:
     """Per-caller rollup. Same vocabulary rule as kpis(): ``errors`` is
     status='error' only; declines are their own column — a support asker
     whose questions the layer can't answer yet is a coverage signal, not a
@@ -376,7 +419,7 @@ def caller_report(session: Session, lens: str | None = None) -> list[dict[str, o
     rollup laundered the gap into "free". The count keeps it visible."""
     # Probe rows are excluded like kpis(): an admin's passthrough
     # statements are not that caller "querying".
-    governed = "COALESCE(generator_tier, '') <> 'probe'"
+    governed = f"COALESCE(generator_tier, '') <> 'probe' AND {_serving(include_test)}"
     where = f"WHERE {governed} AND lens = :lens" if lens else f"WHERE {governed}"
     rows = session.execute(
         text(
@@ -408,7 +451,9 @@ def caller_report(session: Session, lens: str | None = None) -> list[dict[str, o
     ]
 
 
-def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
+def audit_statement(
+    session: Session, days: int = 30, include_test: bool = False
+) -> dict[str, object]:
     """The Statement — one payload behind the audit page: what was asked, what
     came back, how much of it carried receipts, what it cost, per lens. Built
     windowed with a prior-window comparison so movement is measured, never
@@ -418,8 +463,8 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
 
     One round trip on purpose: the page is skimmed by someone with thirty
     seconds, and a fan of sequential endpoints would make the fast path the
-    stale path."""
-    governed = "COALESCE(generator_tier, '') <> 'probe'"
+    stale path. Test traffic is out unless *include_test*, like kpis()."""
+    governed = f"COALESCE(generator_tier, '') <> 'probe' AND {_serving(include_test)}"
     win = "created_at >= NOW() - make_interval(days => :d)"
     prior = (
         "created_at >= NOW() - make_interval(days => :d2) "
@@ -534,7 +579,7 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
     )
     # The same basis block as kpis(), over this window: every served caller
     # read, the raw probe inside the denominator, the admin passthrough out.
-    basis = _basis(session, win, {"d": days})
+    basis = _basis(session, win, {"d": days}, include_test=include_test)
 
     # Per-lens rollup over the window: owner and the degraded mark from the
     # lens row, the latest regression-gate score from eval_run. Verified share
@@ -556,6 +601,7 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
             " ORDER BY er.started_at DESC LIMIT 1) AS gate_score "
             "FROM request_log r JOIN lens l ON l.name = r.lens "
             "WHERE COALESCE(r.generator_tier, '') <> 'probe' "
+            f"AND {_serving(include_test).replace('agent', 'r.agent')} "
             "AND r.created_at >= NOW() - make_interval(days => :d) "
             "GROUP BY r.lens, owner, l.degraded ORDER BY asked DESC"
         ),
@@ -622,6 +668,7 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
         "resolution_unknown": int(current["resolution_unknown"]),
         "resolution_histogram": resolution_histogram,
         "basis": basis,
+        "test_requests": 0 if include_test else _test_requests(session, win, {"d": days}),
         # Typed serving: % of answers where every slot typed (no escalation),
         # the answers served before typed serving existed, and the slots that
         # keep clarifying — the dictionary gaps to profile.
@@ -641,3 +688,80 @@ def audit_statement(session: Session, days: int = 30) -> dict[str, object]:
         "certified_active": int(certified_active or 0),
         "open_incident_tickets": int(open_tickets or 0),
     }
+
+
+EXPORT_COLUMNS = (
+    "ts",
+    "caller",
+    "agent",
+    "question",
+    "lens",
+    "covered",
+    "answer_kind",
+    "certification",
+    "request_id",
+)
+
+
+def _answer_kind(status: object, certification: object) -> str:
+    """certified | generated | clarify | refuse | error — what the caller got."""
+    if status == "ok":
+        return "certified" if certification == "certified" else "generated"
+    if status == "clarification":
+        return "clarify"
+    if status in ("refused", "rejected"):
+        return "refuse"
+    return "error"
+
+
+def request_export(
+    session: Session,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+    lens: str | None = None,
+    caller: str | None = None,
+) -> list[dict[str, object]]:
+    """The request ledger, one row per served request in time order — every
+    row in the window, nothing capped (an export that silently stops is a
+    report that lies). ``covered``: a lens took the question in scope (an
+    answer, a clarification or a fault), False when it was refused.
+    ``answer_kind`` is what the caller got. Test traffic is in the ledger and
+    says so by its ``agent``; the raw-SQL probes are out (``dst observe``
+    counts them apart). *since* / *until* are ISO dates or instants, until
+    exclusive."""
+    clauses = ["COALESCE(generator_tier, '') <> 'probe'"]
+    params: dict[str, object] = {}
+    if since:
+        clauses.append("created_at >= CAST(:since AS timestamptz)")
+        params["since"] = since
+    if until:
+        clauses.append("created_at < CAST(:until AS timestamptz)")
+        params["until"] = until
+    if lens:
+        clauses.append("lens = :lens")
+        params["lens"] = lens
+    if caller:
+        clauses.append("caller = :caller")
+        params["caller"] = caller
+    rows = session.execute(
+        text(
+            "SELECT created_at, caller, agent, question, lens, status, certification, request_id "
+            f"FROM request_log WHERE {' AND '.join(clauses)} ORDER BY created_at, request_id"
+        ),
+        params,
+    ).all()
+    return [
+        {
+            "ts": r[0].isoformat() if r[0] else None,
+            "caller": r[1],
+            "agent": r[2],
+            "question": r[3],
+            "lens": r[4],
+            "covered": r[5] not in ("refused", "rejected"),
+            "answer_kind": _answer_kind(r[5], r[6]),
+            "certification": r[6],
+            "request_id": r[7],
+        }
+        for r in rows
+    ]

@@ -163,7 +163,23 @@ def _lint_compiles(sm: SemanticModel, issues: list[Issue]) -> None:
     intent that does not compile is a product defect the author must not meet
     at serve time as a clarification. Dialect parse included (transpile)."""
     from services.contracts.query_intent import QueryIntent
-    from services.runtime.compiler import CompileError, compile_intent
+    from services.runtime.compiler import CompileError, UnpinnedDimension, compile_intent
+
+    def _compile(intent: QueryIntent) -> None:
+        # A pinned dimension refuses an aggregate that neither pins nor groups
+        # it; that refusal is the rail working, not the entity failing. The
+        # shape is checked grouped by each pinned dimension instead.
+        for _ in range(len(e.pinned_dimensions) + 1):
+            try:
+                compile_intent(intent, sm)
+                return
+            except UnpinnedDimension as exc:
+                if exc.dimension in intent.dimensions:
+                    raise
+                intent = intent.model_copy(
+                    update={"dimensions": [*intent.dimensions, exc.dimension]}
+                )
+        compile_intent(intent, sm)
 
     for e in sm.entities:
         if not e.metrics:
@@ -175,7 +191,7 @@ def _lint_compiles(sm: SemanticModel, issues: list[Issue]) -> None:
             )
         for label, intent in shapes:
             try:
-                compile_intent(intent, sm)
+                _compile(intent)
             except CompileError as exc:
                 issues.append(
                     Issue(

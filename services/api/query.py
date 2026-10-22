@@ -10,10 +10,13 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -26,26 +29,33 @@ from services.certify.store import CertifiedAnswer
 from services.config import settings
 from services.contracts.correction import CorrectionDelta
 from services.contracts.lens_config import LensConfig
-from services.contracts.protocols import Connector
+from services.contracts.protocols import Connector, SharedSnapshot
 from services.contracts.query_intent import QueryIntent
 from services.contracts.response import CertifiedProvenance, ConsumerAnswer, QueryResponse
 from services.db.session import org_session
 from services.governance import audit, drift_watch, quota, ratelimit
 from services.governance.credentials import CallerIdentity
 from services.governance.policy import authorize
-from services.lenses import profile_enrich
+from services.lenses import profile_enrich, profile_store
 from services.lenses import store as lens_store
 from services.lenses.connections import resolve_connector
-from services.lenses.describe import LensDescription, describe_model
+from services.lenses.describe import (
+    LensDescription,
+    MetricCatalog,
+    catalog_of,
+    describe_model,
+    metric_tree,
+)
 from services.lenses.store import LensBundle, list_published_for_org, load_published_lens
+from services.llm.registry import ResolvedModel
 from services.observability.logger import log_trace
 from services.project import demo_page
 from services.reviews import service as reviews_service
 from services.reviews import store as reviews_store
-from services.runtime import assembly
+from services.runtime import assembly, value_guard
 from services.runtime.answer import AnswerComposer, Audience
 from services.runtime.attribution import Attribution, attributed
-from services.runtime.compiler import CompileError, compile_intent
+from services.runtime.compiler import CompileError, UnpinnedDimension, compile_intent
 from services.runtime.generator import FixedSQLGenerator
 from services.runtime.intent_generator import intent_term
 from services.runtime.pipeline import (
@@ -357,6 +367,7 @@ def describe_lens_for_caller(
             certified_examples = [e.question for e in active_certified(session, name)[:3]]
         except Exception:
             log.exception("certified example lookup failed for lens %s", name)
+    domains, certified = _catalog_facts(bundle, caller, name)
     return describe_model(
         name,
         display_name=bundle.config.display_name,
@@ -364,6 +375,46 @@ def describe_lens_for_caller(
         model=sm,
         certified_count=certified_count,
         certified_examples=certified_examples,
+        domains=domains,
+        certified=certified,
+    )
+
+
+def _catalog_facts(
+    bundle: LensBundle, caller: CallerIdentity, name: str
+) -> tuple[dict[str, dict[str, list[str]]], list[tuple[str, list[str]]]]:
+    """What the metric catalog reads besides the model: each entity's complete
+    value dictionaries from the stored profile (none when the profile is past
+    probe.max_age: a stale dictionary proves nothing about today's values),
+    and each active certified answer's id with its stored terms. Best-effort,
+    like the certified examples: a failed lookup leaves the catalog without
+    values or certified links, never without metrics."""
+    domains: dict[str, dict[str, list[str]]] = {}
+    profiles, _as_of, age, _stamps = assembly.profile_facts(bundle, caller.org_id)
+    if profiles and (age is None or not age.stale):
+        domains = value_guard.entity_domains(bundle.semantic_model, profiles)
+    certified: list[tuple[str, list[str]]] = []
+    try:
+        with org_session(caller.org_id) as session:
+            certified = [(a.id, list(a.terms or [])) for a in active_certified(session, name)]
+    except Exception:
+        log.exception("certified terms lookup failed for lens %s", name)
+    return domains, certified
+
+
+@router.get("/lenses/{name}/catalog", response_model=MetricCatalog)
+def metric_catalog_for_caller(
+    name: str,
+    caller: CallerIdentity = Depends(get_caller),
+) -> MetricCatalog:
+    """The lens's metric catalog alone: metrics, dimensions, and the tree the
+    metrics' dependencies form — what an app needs to render a metric tree in
+    one call. Same authorization as describe; no model call, no warehouse."""
+    bundle = _authorized_bundle(name, caller)
+    domains, certified = _catalog_facts(bundle, caller, name)
+    metrics, dimensions = catalog_of(bundle.semantic_model, domains=domains, certified=certified)
+    return MetricCatalog(
+        lens=name, metrics=metrics, dimensions=dimensions, tree=metric_tree(metrics)
     )
 
 
@@ -484,7 +535,7 @@ def active_certified(session: Session, lens: str) -> list[CertifiedAnswer]:
     ]
 
 
-def _lenses_carrying(org_id: uuid.UUID, asking_lens: str, metric: str) -> list[str]:
+def _lenses_carrying(org_id: uuid.UUID | str, asking_lens: str, metric: str) -> list[str]:
     """OTHER published lenses whose compiled model carries *metric* — the
     shape refusal's sibling hint ("lens 'growth' carries conversion_rate").
     Looked up lazily, refusals only; a failed lookup just drops the hint."""
@@ -550,20 +601,27 @@ def lens_refusal_named(question: str, caller: CallerIdentity) -> tuple[str, str]
     return None
 
 
-def tables_held_elsewhere(caller: CallerIdentity, *, exclude: str) -> dict[str, str]:
+def tables_held_elsewhere(
+    caller: CallerIdentity | None, *, exclude: str, org_id: uuid.UUID | str | None = None
+) -> dict[str, str]:
     """name -> lens, for every entity name and source table the OTHER lenses this
     caller may use declare or expose (*exclude* left out). What a generated
     answer is checked against when the question names a table this lens does
-    not read: the clarification can then say which lens holds it. A failed
-    lookup just drops the hint."""
+    not read: the clarification can then say which lens holds it. With no
+    caller (the publish gate and `dst test`, which ask for nobody in
+    particular) every lens of *org_id* counts. A failed lookup just drops the
+    hint."""
+    org = caller.org_id if caller is not None else org_id
+    if org is None:
+        return {}
     try:
-        bundles = list_published_for_org(caller.org_id)
+        bundles = list_published_for_org(org)
     except Exception:
         log.exception("held-table lookup failed")
         return {}
     out: dict[str, str] = {}
     for lens_name, _display, _desc, bundle in bundles:
-        if lens_name == exclude or not authorize(caller, bundle.config)[0]:
+        if lens_name == exclude or (caller is not None and not authorize(caller, bundle.config)[0]):
             continue
         for entity in bundle.semantic_model.entities:
             for name in (entity.name, entity.source.table):
@@ -577,6 +635,22 @@ def exposed_hint(hits: list[tuple[str, str]]) -> str:
         f"lens '{lens}' exposes {table} (no governed definitions): ask it by name"
         for lens, table in hits
     )
+
+
+# Causes that are the warehouse's whatever SQL it was sent (a cost cap, a
+# refused grant, a timeout, no route): compiled SQL meeting one of these is
+# the warehouse's incident like any other.
+_WAREHOUSE_SIDE = frozenset(
+    drift_watch.cause_class(sample)
+    for sample in ("bytes billed", "access denied", "timed out", "connection")
+)
+_COMPILED_SQL_FAULT = (
+    "This question hit a dst defect: the warehouse rejected the SQL dst compiled for "
+    "it from the declared layer{matches}. The SQL is dst's own and no data-team ticket "
+    "was opened. Asking again compiles the same SQL; report it to whoever runs dst "
+    "with request id {request_id}."
+)
+_SCHEMA_CHANGED = "the warehouse schema changed since the layer was applied"
 
 
 def _serve_error_backstop(
@@ -594,11 +668,20 @@ def _serve_error_backstop(
     Either way the caller-facing answer becomes a deterministic template naming
     the cause CLASS and the ticket: the raw engine text stays in the trace,
     never the response (engine shrapnel is not an answer for a business user),
-    and no LLM runs on the error path."""
+    and no LLM runs on the error path.
+
+    SQL dst compiled from an intent (``result.compiled``) that the applied
+    baseline shows no drift under is dst's own fault, whatever the engine
+    called it: no ticket, and the answer says the SQL is dst's. With no
+    baseline only an error about the SQL's own vocabulary is."""
     if result.error_kind != "warehouse":
         return
     cause = drift_watch.cause_class(result.trace.error or "")
-    if cause == drift_watch.GENERATION_FAULT_CAUSE:
+    # SQL dst compiled from the declared layer: only the schema diff can say
+    # whether the warehouse moved under it (the data team's) or the SQL itself
+    # is wrong (dst's), so the diff runs even for a dialect-shaped error.
+    compiled = result.compiled and cause not in _WAREHOUSE_SIDE
+    if cause == drift_watch.GENERATION_FAULT_CAUSE and not compiled:
         # A dialect-invalid function / bad cast is dst's own defect:
         # no schema diff, no data-team ticket, no degraded mark — the
         # data team cannot action "the mart is fine, the query is wrong". The
@@ -641,6 +724,19 @@ def _serve_error_backstop(
                 lens_store.set_degraded(session, lens, note)
                 for sink in (result.response.degraded, result.trace.degraded):
                     sink.append(note)
+                if compiled:
+                    cause = _SCHEMA_CHANGED
+            elif compiled and (
+                (baseline := bool(connection and profile_store.list_profiles(session, connection)))
+                or cause == drift_watch.GENERATION_FAULT_CAUSE
+            ):
+                # With no applied baseline nothing says the schema held, and
+                # only an error about the SQL's own vocabulary is still dst's.
+                result.response.answer = _COMPILED_SQL_FAULT.format(
+                    matches=", and the schema still matches what was applied" if baseline else "",
+                    request_id=result.response.request_id,
+                )
+                return
             else:
                 ticket, _created = reviews_store.create_incident_ticket(
                     session,
@@ -769,128 +865,32 @@ def run_lens_query(
     rid = "req_" + uuid.uuid4().hex[:16]
     bundle = _authorized_bundle(name, caller, rid)
 
-    model_ref = bundle.config.model.model_ref()
-    resolved = require_llm(model_ref)
-    llm, model_name = resolved.llm, resolved.name
+    resolved = require_llm(bundle.config.model.model_ref())
     try:
         connector = _authorized_connector(bundle, caller)
     except (IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
 
-    assembled = assembly.assemble(
-        bundle,
-        q,
-        caller.org_id,
-        bindings=bindings or {},
-        allow_untyped=effective_allow_untyped(bundle.config, allow_untyped),
-    )
-    generator, escalate, certification, certified_match = assembly.select_generators(
-        assembled, resolved, config=bundle.config
-    )
-    generator_tier: str = assembly.generator_tier(assembled)
-    if generator_tier == "intent" and not isinstance(generator, TypedIntentGenerator):
-        # A question that names one governed metric and nothing else is the
-        # structured door's case: the compiler computes it, deterministically,
-        # before any model writes a reading of it. Typed serving already does
-        # this through its decisions; without a decider the text decides, and
-        # only when the text leaves nothing open.
-        intent = sole_metric_intent(
-            q,
-            assembled.model,
-            period_fields=assembled.period_fields,
-            domains=assembled.value_domains,
-            today=assembly.business_today_date(assembled.model.timezone),
-        )
-        if intent is not None:
-            try:
-                sql = compile_intent(intent, assembled.model)
-            except CompileError:
-                log.exception("sole-metric intent did not compile; generating instead")
-            else:
-                generator = FixedSQLGenerator(
-                    sql, definition_used=intent_term(intent), intent=intent
-                )
-                generator_tier = "metrics"
-
-    provenance = (
-        CertifiedProvenance(
-            cert_id=assembled.certified.id,
-            certified_by=assembled.certified.created_by,
-            certified_at=assembled.certified.created_at,
-            bound_values=assembled.certified_bound,
-        )
-        if assembled.certified is not None
-        else None
-    )
     audience = _audience(caller)
     with attributed(
         Attribution(
             principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
         )
     ):
-        result = run_query(
-            question=q,
-            lens_name=name,
+        result, assembled = serve_lens_question(
+            name,
+            q,
+            bundle,
             org_id=caller.org_id,
             caller=caller.name,
-            request_id=rid,
-            audience=audience,
-            semantic_model=assembled.model,
-            value_domains=assembled.value_domains,
-            table_domains=assembled.table_domains,
-            entity_coverage=assembled.entity_coverage,
-            profile_age=assembled.profile_age,
-            decisions=assembled.decisions,
             connector=connector,
-            generator=generator,
-            escalate_generator=escalate,
-            composer=None if fmt in _ROWS_ONLY else AnswerComposer(llm, model=model_name),
-            prose_context=assembled.prose,
-            max_rows=bundle.config.model.max_rows_to_return,
-            compose_rows=bundle.config.model.max_rows_to_compose,
-            max_repairs=bundle.config.model.max_repairs,
-            model_name=model_name,
-            certification=certification,
-            certified_match=certified_match,
-            certified_provenance=provenance,
-            # The judge/adversary carve-out is verbatim-scoped: the pipeline
-            # compares this against the asked question.
-            certified_question=(
-                assembled.certified.question if assembled.certified is not None else None
-            ),
-            # A matched fixed answer's certify-time prose serves
-            # verbatim — the pipeline skips the composer and numeric_grounding
-            # on it. None (legacy answers, templates) composes as before.
-            verified_prose=(
-                assembled.certified.verified_prose if assembled.certified is not None else None
-            ),
-            # The value a human verified, and for a template the sample binding
-            # it was recorded under: the `restated` check compares against it.
-            verified_value=(
-                assembled.certified.verified_value if assembled.certified is not None else None
-            ),
-            verified_bindings=(
-                next(iter(assembled.certified.sample_bindings or []), None)
-                if assembled.certified is not None
-                else None
-            ),
-            # Strict mode tightens scrutiny — judge + adversary on, so off-scope or
-            # low-confidence answers get downgraded/declined more readily — regardless of
-            # the explicit per-lens flags.
-            inline_judge_llm=llm if bundle.config.model.answer_mode == "strict" else None,
-            judge_model=model_name,
-            adversary_llm=llm if bundle.config.model.answer_mode == "strict" else None,
-            adversary_model=model_name,
-            data_as_of=assembled.data_as_of,
-            table_as_of=assembled.table_as_of,
-            serve_ungoverned_shapes=bundle.config.serve_ungoverned_shapes,
-            metric_carriers=lambda metric: _lenses_carrying(caller.org_id, name, metric),
+            resolved=resolved,
+            request_id=rid,
+            fmt=fmt,
+            audience=audience,
+            bindings=bindings,
+            allow_untyped=allow_untyped,
             tables_elsewhere=lambda: tables_held_elsewhere(caller, exclude=name),
-            # Which prompt this answer was written against (`dst lens prompt`
-            # prints the same tier's prompt for a question).
-            generator_tier=generator_tier,
-            # The per-lens switch the pipeline cannot see from the semantic model.
-            log_samples=bundle.config.logging.log_samples,
         )
     _fail_on_warehouse_timeout(result, caller)
     if result.response.status == "refused":
@@ -927,6 +927,152 @@ def run_lens_query(
     if _auto_review_flags(bundle.config.auto_review, result.response):
         background.add_task(_auto_review, caller.org_id, result.response.request_id)
     return _shaped(result.response, fmt, audience)
+
+
+def serve_lens_question(
+    name: str,
+    q: str,
+    bundle: LensBundle,
+    *,
+    org_id: uuid.UUID | str,
+    caller: str,
+    connector: Connector,
+    resolved: ResolvedModel,
+    request_id: str | None = None,
+    fmt: AnswerFormat = "both",
+    audience: Audience = "engineer",
+    bindings: dict[str, str] | None = None,
+    allow_untyped: bool | None = None,
+    serve_certified: bool = True,
+    tables_elsewhere: Callable[[], Mapping[str, str]] | None = None,
+) -> tuple[PipelineResult, assembly.AssembledInputs]:
+    """One lens question through the serving configuration: assembly, the
+    generator the install and the lens choose (typed serving and its decider,
+    the lens's ``untyped_fallback`` unless the caller overrides it, the
+    sole-metric compile), and the pipeline with the lens's own caps, answer mode
+    and rails. No authorization, logging or incident handling: the door wraps
+    those around it, and the publish gate and `dst test` call it as they are,
+    so a behavioural case is graded on the path the door serves."""
+    llm, model_name = resolved.llm, resolved.name
+    assembled = assembly.assemble(
+        bundle,
+        q,
+        org_id,
+        bindings=bindings or {},
+        allow_untyped=effective_allow_untyped(bundle.config, allow_untyped),
+        serve_certified=serve_certified,
+    )
+    generator, escalate, certification, certified_match = assembly.select_generators(
+        assembled, resolved, config=bundle.config
+    )
+    generator_tier: str = assembly.generator_tier(assembled)
+    if generator_tier == "intent" and not isinstance(generator, TypedIntentGenerator):
+        # A question that names one governed metric and nothing else is the
+        # structured door's case: the compiler computes it, deterministically,
+        # before any model writes a reading of it. Typed serving already does
+        # this through its decisions; without a decider the text decides, and
+        # only when the text leaves nothing open.
+        intent = sole_metric_intent(
+            q,
+            assembled.model,
+            period_fields=assembled.period_fields,
+            domains=assembled.value_domains,
+            today=assembly.business_today_date(assembled.model.timezone),
+        )
+        if intent is not None:
+            try:
+                sql = compile_intent(
+                    intent,
+                    assembled.model,
+                    domains=assembled.value_domains,
+                    column_types=assembled.column_types,
+                )
+            except UnpinnedDimension as exc:
+                # The metric sums kinds of record that do not add: ask which.
+                generator = FixedSQLGenerator("", clarification=exc.clarification())
+            except CompileError:
+                log.exception("sole-metric intent did not compile; generating instead")
+            else:
+                generator = FixedSQLGenerator(
+                    sql, definition_used=intent_term(intent), intent=intent
+                )
+                generator_tier = "metrics"
+
+    provenance = (
+        CertifiedProvenance(
+            cert_id=assembled.certified.id,
+            certified_by=assembled.certified.created_by,
+            certified_at=assembled.certified.created_at,
+            bound_values=assembled.certified_bound,
+        )
+        if assembled.certified is not None
+        else None
+    )
+    result = run_query(
+        question=q,
+        lens_name=name,
+        org_id=org_id,
+        caller=caller,
+        request_id=request_id,
+        audience=audience,
+        semantic_model=assembled.model,
+        value_domains=assembled.value_domains,
+        table_domains=assembled.table_domains,
+        entity_coverage=assembled.entity_coverage,
+        profile_age=assembled.profile_age,
+        decisions=assembled.decisions,
+        connector=connector,
+        generator=generator,
+        escalate_generator=escalate,
+        composer=None if fmt in _ROWS_ONLY else AnswerComposer(llm, model=model_name),
+        prose_context=assembled.prose,
+        max_rows=bundle.config.model.max_rows_to_return,
+        compose_rows=bundle.config.model.max_rows_to_compose,
+        max_repairs=bundle.config.model.max_repairs,
+        model_name=model_name,
+        certification=certification,
+        certified_match=certified_match,
+        certified_provenance=provenance,
+        # The judge/adversary carve-out is verbatim-scoped: the pipeline
+        # compares this against the asked question.
+        certified_question=(
+            assembled.certified.question if assembled.certified is not None else None
+        ),
+        # A matched fixed answer's certify-time prose serves
+        # verbatim — the pipeline skips the composer and numeric_grounding
+        # on it. None (legacy answers, templates) composes as before.
+        verified_prose=(
+            assembled.certified.verified_prose if assembled.certified is not None else None
+        ),
+        # The value a human verified, and for a template the sample binding
+        # it was recorded under: the `restated` check compares against it.
+        verified_value=(
+            assembled.certified.verified_value if assembled.certified is not None else None
+        ),
+        verified_bindings=(
+            next(iter(assembled.certified.sample_bindings or []), None)
+            if assembled.certified is not None
+            else None
+        ),
+        # Strict mode tightens scrutiny — judge + adversary on, so off-scope or
+        # low-confidence answers get downgraded/declined more readily — regardless of
+        # the explicit per-lens flags.
+        inline_judge_llm=llm if bundle.config.model.answer_mode == "strict" else None,
+        judge_model=model_name,
+        adversary_llm=llm if bundle.config.model.answer_mode == "strict" else None,
+        adversary_model=model_name,
+        data_as_of=assembled.data_as_of,
+        table_as_of=assembled.table_as_of,
+        serve_ungoverned_shapes=bundle.config.serve_ungoverned_shapes,
+        metric_carriers=lambda metric: _lenses_carrying(org_id, name, metric),
+        tables_elsewhere=tables_elsewhere,
+        # Which prompt this answer was written against (`dst lens prompt`
+        # prints the same tier's prompt for a question).
+        generator_tier=generator_tier,
+        # The per-lens switch the pipeline cannot see from the semantic model.
+        log_samples=bundle.config.logging.log_samples,
+    )
+    return result, assembled
 
 
 @router.post("/lenses/{name}/query", response_model=QueryResponse | ConsumerAnswer)
@@ -1034,72 +1180,116 @@ def run_lens_metrics(
     """
     rid = "req_" + uuid.uuid4().hex[:16]
     bundle = _authorized_bundle(name, caller, rid)
-    try:
-        sql = compile_intent(intent, bundle.semantic_model)
-    except CompileError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    try:
-        connector = _authorized_connector(bundle, caller)
-    except (IndexError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
-
-    # An LLM is required only to WRITE the prose. Demanding one for the rows-only
-    # case would make the door that exists to avoid model calls 503 on an install
-    # with no provider configured — which is exactly what it should serve happily.
-    composer = None
-    model_name = "none"
-    if fmt not in _ROWS_ONLY:
-        resolved = require_llm(bundle.config.model.model_ref())
-        model_name = resolved.name
-        composer = AnswerComposer(resolved.llm, model=model_name)
-
-    profiles, as_of, age, stamps = assembly.profile_facts(bundle, caller.org_id)
-    coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
-    audience = _audience(caller)
-    with attributed(
-        Attribution(
-            principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
-        )
-    ):
-        result = run_query(
-            question=describe_intent(intent),
-            # The rails read names, never values — the log keeps the values.
-            scan_text=intent_scan_text(intent),
-            lens_name=name,
-            org_id=caller.org_id,
-            caller=caller.name,
-            request_id=rid,
-            audience=audience,
-            semantic_model=bundle.semantic_model,
-            connector=connector,
-            # The caller's own intent names the metric — basis provenance is a
-            # fact here, not an attribution guess.
-            generator=FixedSQLGenerator(sql, definition_used=intent_term(intent), intent=intent),
-            composer=composer,
-            max_rows=bundle.config.model.max_rows_to_return,
-            compose_rows=bundle.config.model.max_rows_to_compose,
-            model_name=model_name,
-            # Not `certified`: no human approved THIS query. But nothing was guessed
-            # either — every name came from the model and the SQL was built by code.
-            certification="none",
-            data_as_of=as_of,
-            table_as_of=stamps,
-            entity_coverage=coverage,
-            profile_age=age,
-            generator_tier="metrics",
-            log_samples=bundle.config.logging.log_samples,
-        )
-    _fail_on_warehouse_timeout(result, caller)
-    _trust_backstops(
-        result,
-        org_id=caller.org_id,
-        lens=name,
-        connection=bundle.config.connections[0] if bundle.config.connections else "",
-    )
-    result.trace.agent = caller.agent
+    serve = _MetricsServe.prepare(name, bundle, caller, fmt)
+    sql = serve.compiled(intent)
+    result = serve.run(intent, sql, rid, serve.connector)
     background.add_task(log_trace, result.trace)
-    return _shaped(result.response, fmt, audience)
+    return _shaped(result.response, fmt, serve.audience)
+
+
+class _MetricsServe:
+    """Everything the metrics door resolves once per request — connector,
+    composer, profile facts, audience — so one intent and a batch of fifty
+    serve from the same facts. ``run`` is one intent through the governed
+    pipeline; it raises HTTPException on the paths the single door maps to a
+    status (a warehouse timeout is a 504)."""
+
+    def __init__(
+        self,
+        name: str,
+        bundle: LensBundle,
+        caller: CallerIdentity,
+        connector: Connector,
+        composer: AnswerComposer | None,
+        model_name: str,
+    ) -> None:
+        self.name, self.bundle, self.caller = name, bundle, caller
+        self.connector, self.composer, self.model_name = connector, composer, model_name
+        profiles, self.as_of, self.age, self.stamps = assembly.profile_facts(bundle, caller.org_id)
+        self.coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
+        # The warehouse's own column types, as the prose door compiles with:
+        # a bound or a bucket shift on a column declared `date` that the
+        # warehouse stores as a TIMESTAMP must be written for the TIMESTAMP.
+        self.column_types = value_guard.entity_column_types(bundle.semantic_model, profiles)
+        self.audience = _audience(caller)
+
+    @classmethod
+    def prepare(
+        cls, name: str, bundle: LensBundle, caller: CallerIdentity, fmt: AnswerFormat
+    ) -> _MetricsServe:
+        try:
+            connector = _authorized_connector(bundle, caller)
+        except (IndexError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
+        # An LLM is required only to WRITE the prose. Demanding one for the rows-only
+        # case would make the door that exists to avoid model calls 503 on an install
+        # with no provider configured — which is exactly what it should serve happily.
+        composer = None
+        model_name = "none"
+        if fmt not in _ROWS_ONLY:
+            resolved = require_llm(bundle.config.model.model_ref())
+            model_name = resolved.name
+            composer = AnswerComposer(resolved.llm, model=model_name)
+        return cls(name, bundle, caller, connector, composer, model_name)
+
+    def compiled(self, intent: QueryIntent) -> str:
+        """The intent's SQL, or a 400 carrying the compiler's own sentence."""
+        try:
+            return compile_intent(
+                intent, self.bundle.semantic_model, column_types=self.column_types
+            )
+        except CompileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def run(self, intent: QueryIntent, sql: str, rid: str, connector: Connector) -> PipelineResult:
+        caller, bundle = self.caller, self.bundle
+        with attributed(
+            Attribution(
+                principal=caller.name,
+                agent=caller.agent,
+                request_id=rid,
+                org_id=str(caller.org_id),
+            )
+        ):
+            result = run_query(
+                question=describe_intent(intent),
+                # The rails read names, never values — the log keeps the values.
+                scan_text=intent_scan_text(intent),
+                lens_name=self.name,
+                org_id=caller.org_id,
+                caller=caller.name,
+                request_id=rid,
+                audience=self.audience,
+                semantic_model=bundle.semantic_model,
+                connector=connector,
+                # The caller's own intent names the metric — basis provenance is a
+                # fact here, not an attribution guess.
+                generator=FixedSQLGenerator(
+                    sql, definition_used=intent_term(intent), intent=intent
+                ),
+                composer=self.composer,
+                max_rows=bundle.config.model.max_rows_to_return,
+                compose_rows=bundle.config.model.max_rows_to_compose,
+                model_name=self.model_name,
+                # Not `certified`: no human approved THIS query. But nothing was guessed
+                # either — every name came from the model and the SQL was built by code.
+                certification="none",
+                data_as_of=self.as_of,
+                table_as_of=self.stamps,
+                entity_coverage=self.coverage,
+                profile_age=self.age,
+                generator_tier="metrics",
+                log_samples=bundle.config.logging.log_samples,
+            )
+        _fail_on_warehouse_timeout(result, caller)
+        _trust_backstops(
+            result,
+            org_id=caller.org_id,
+            lens=self.name,
+            connection=bundle.config.connections[0] if bundle.config.connections else "",
+        )
+        result.trace.agent = caller.agent
+        return result
 
 
 @router.post("/lenses/{name}/metrics", response_model=QueryResponse | ConsumerAnswer)
@@ -1114,6 +1304,204 @@ def query_lens_metrics(
     back into words for the request log."""
     intent = QueryIntent(**body.model_dump(exclude={"format"}))
     return run_lens_metrics(name, intent, caller, background, body.format)
+
+
+# A batch renders one screen — a metric tree, a dashboard — at one moment.
+# The cap keeps one request's warehouse load bounded; the pool bounds how many
+# of its queries hold a warehouse connection at once.
+BATCH_MAX = 50
+BATCH_WORKERS = 4
+
+
+class BatchIntent(QueryIntent):
+    id: str = Field(
+        min_length=1,
+        max_length=200,
+        description="the caller's key for this intent; its result comes back under it",
+    )
+
+
+class MetricsBatchBody(BaseModel):
+    intents: list[BatchIntent] = Field(
+        min_length=1,
+        max_length=BATCH_MAX,
+        description=f"up to {BATCH_MAX} structured intents, each with a unique `id`",
+    )
+    format: AnswerFormat = Field(default="structured", description=FORMAT_HELP)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> MetricsBatchBody:
+        ids = [i.id for i in self.intents]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"intent ids must be unique; repeated: {', '.join(dupes)}")
+        return self
+
+
+# The answer statuses that serve nothing: the SQL failed or was rejected.
+# A clarification or a refusal is an outcome, not a failure, and stays `ok`.
+_FAILED = frozenset({"error", "rejected"})
+
+
+class BatchItem(BaseModel):
+    """One intent's outcome. A failure is this intent's alone: `status` is the
+    HTTP status the single door would have answered it with, `error` its detail.
+    An intent the door answered without serving (its answer's status is
+    ``error`` or ``rejected``) is a failure too: `status` 200, as the single
+    door answered it, `error` the answer's sentence, and the answer itself."""
+
+    ok: bool
+    request_id: str | None = None
+    status: int | None = None
+    error: str | None = None
+    answer: QueryResponse | ConsumerAnswer | None = None
+
+
+SnapshotKind = Literal["shared", "per_query"]
+SNAPSHOT_NOTES: dict[str, str] = {
+    "shared": "every query read one warehouse snapshot",
+    "per_query": "each query read the warehouse at its own moment; this connector "
+    "cannot hold one snapshot across queries",
+}
+
+
+class MetricsBatchResponse(BaseModel):
+    lens: str
+    # One profile read for the whole batch, so every answer carries this date.
+    data_as_of: str | None = None
+    snapshot: SnapshotKind
+    snapshot_note: str
+    results: dict[str, BatchItem]
+
+
+def _batch_allowance(bundle: LensBundle, caller: CallerIdentity, name: str, n: int) -> int:
+    """How many of a batch's *n* intents this caller may run now. The door's
+    own authorization already charged the first; each further intent takes one
+    more hit of the per-minute limit and one more answer of the daily quotas,
+    exactly as if it had come alone. The rest are refused one by one."""
+    if caller.is_admin:
+        return n
+    allowed = n
+    rpd = bundle.config.rate_limit.per_caller_rpd
+    if rpd > 0:
+        used = quota.usage(caller.org_id, caller=caller.name, lens=name).served
+        allowed = min(allowed, max(1, rpd - used))
+    cap = settings.daily_request_cap
+    if cap > 0:
+        allowed = min(allowed, max(1, cap - quota.usage(caller.org_id).served))
+    rl_key = f"{caller.org_id}:{name}:{caller.name}"
+    for i in range(1, allowed):
+        if not ratelimit.check(rl_key, bundle.config.rate_limit.per_caller_rpm):
+            return i
+    return allowed
+
+
+@contextmanager
+def _batch_reader(connector: Connector) -> Iterator[tuple[Connector, SnapshotKind]]:
+    """The connector a batch runs on: one held snapshot where the connector
+    can hold one, else the connector as it is — and which of the two, so the
+    response states the consistency it actually got."""
+    stack = ExitStack()
+    pinned: Connector | None = None
+    if isinstance(connector, SharedSnapshot):
+        try:
+            pinned = stack.enter_context(connector.shared_snapshot())
+        except Exception:
+            log.exception("could not hold a shared snapshot; reading per query")
+    with stack:
+        if pinned is None:
+            yield connector, "per_query"
+        else:
+            yield pinned, "shared"
+
+
+def run_lens_metrics_batch(
+    name: str,
+    body: MetricsBatchBody,
+    caller: CallerIdentity,
+    background: BackgroundTasks,
+) -> MetricsBatchResponse:
+    """Run up to BATCH_MAX intents in one request, at one data_as_of and — where
+    the connector can hold one — one warehouse snapshot. Each intent compiles,
+    runs and is logged on its own (its own request_id, receipt and trace), and
+    fails on its own: a bad metric name in one costs that one, not the batch."""
+    rids = ["req_" + uuid.uuid4().hex[:16] for _ in body.intents]
+    bundle = _authorized_bundle(name, caller, rids[0])
+    allowed = _batch_allowance(bundle, caller, name, len(body.intents))
+    _ok, reason = authorize(caller, bundle.config)
+    for i, rid in enumerate(rids[1:], start=1):
+        decision = "allow" if i < allowed else "deny"
+        why = reason if i < allowed else "batch: rate limit or daily quota exceeded"
+        audit.record(
+            caller.org_id, caller.name, name, decision, why, request_id=rid, agent=caller.agent
+        )
+    serve = _MetricsServe.prepare(name, bundle, caller, body.format)
+    results: dict[str, BatchItem] = {}
+
+    def one(index: int, connector: Connector) -> BatchItem:
+        item = body.intents[index]
+        intent = QueryIntent(**item.model_dump(exclude={"id"}))
+        try:
+            sql = serve.compiled(intent)
+            result = serve.run(intent, sql, rids[index], connector)
+        except HTTPException as exc:
+            # A timed-out query was traced under its id; a refused compile never ran.
+            rid = rids[index] if exc.status_code == 504 else None
+            return BatchItem(
+                ok=False, request_id=rid, status=exc.status_code, error=str(exc.detail)
+            )
+        except Exception:
+            log.exception("batch intent %s failed on lens %s", item.id, name)
+            return BatchItem(ok=False, status=500, error="internal error serving this intent")
+        background.add_task(log_trace, result.trace)
+        answer = _shaped(result.response, body.format, serve.audience)
+        if result.response.status in _FAILED:
+            # Answered, but nothing was served: the single door says so with
+            # HTTP 200 and the answer's status, the batch with `ok: false`.
+            return BatchItem(
+                ok=False,
+                request_id=result.response.request_id,
+                status=200,
+                error=result.response.answer,
+                answer=answer,
+            )
+        return BatchItem(ok=True, request_id=result.response.request_id, answer=answer)
+
+    with _batch_reader(serve.connector) as (connector, snapshot):
+        with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, allowed)) as pool:
+            done = list(pool.map(lambda i: one(i, connector), range(allowed)))
+    for i, item in enumerate(body.intents):
+        results[item.id] = (
+            done[i]
+            if i < allowed
+            else BatchItem(
+                ok=False,
+                status=429,
+                error=f"rate limit or daily quota reached for caller '{caller.name}' on "
+                f"lens '{name}' before this intent ran",
+            )
+        )
+    return MetricsBatchResponse(
+        lens=name,
+        data_as_of=serve.as_of,
+        snapshot=snapshot,
+        snapshot_note=SNAPSHOT_NOTES[snapshot],
+        results=results,
+    )
+
+
+@router.post("/lenses/{name}/metrics/batch", response_model=MetricsBatchResponse)
+def query_lens_metrics_batch(
+    name: str,
+    body: MetricsBatchBody,
+    background: BackgroundTasks,
+    caller: CallerIdentity = Depends(get_caller),
+) -> MetricsBatchResponse:
+    """Several structured intents in one request, read at one moment — a metric
+    tree or a dashboard rendered from one snapshot. Results come back keyed by
+    each intent's `id`, every one with its own request_id and receipt; a failing
+    intent fails alone. At most 50 intents; more is a 422."""
+    return run_lens_metrics_batch(name, body, caller, background)
 
 
 @router.get("/lenses/{name}/certified", response_model=CertifiedLibrary)

@@ -60,6 +60,7 @@ nav:
       - Bootstrap from history: guides/drift-audit.md
       - Agents over MCP: guides/agents-mcp.md
       - Build your own UI: guides/build-your-own-ui.md
+      - Building data apps: guides/building-data-apps.md
       - The correction loop: guides/correction-loop.md
       - Evaluation: guides/evaluation.md
       - Environments and CI: guides/environments-and-ci.md
