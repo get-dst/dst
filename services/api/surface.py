@@ -9,7 +9,7 @@ decisions (``routing_decision``, migration 0019) per org over a window:
 
 with a trend (this window vs the previous one of equal length). The **declines**
 are the actionable signal: they cluster into uncovered-metric groups (a normalized
-token-overlap clustering, the no-SQL analogue of the distiller's shape clustering)
+token-overlap clustering, the no-SQL analogue of the drift probe's shape clustering)
 so "we missed 40 questions" becomes "all about churn / support tickets" — the gap
 candidates a customer resolves by extending or building a lens.
 
@@ -97,7 +97,7 @@ def cluster_declines(
 ) -> list[UncoveredCluster]:
     """Group declined questions into uncovered-metric candidates by their most-shared
     content term (stopwords stripped, lightly stemmed) — the no-SQL analogue of the
-    distiller's shape clustering. Each question joins the cluster of its highest
+    drift probe's shape clustering. Each question joins the cluster of its highest
     document-frequency salient token, so questions about the same subject (churn,
     tickets) land together; clusters are returned largest-first (ties: by label)."""
     # Document frequency over (stemmed) content tokens → the token shared by the MOST

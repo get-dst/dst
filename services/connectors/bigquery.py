@@ -103,6 +103,9 @@ class BigQueryConnector:
         # bytes estimate against this cap before any job is started.
         self.max_bytes = max_bytes_billed
         self._sample_bytes_budget = sample_bytes_budget
+        # Public: the bound any read dst runs on its own behalf (a sampling
+        # pass, the grain check's live count) is held to.
+        self.sample_bytes_budget = sample_bytes_budget
         self._client = bigquery.Client(credentials=self._creds, project=self._project)
 
     _MAX_INTROSPECT_TABLES = 250

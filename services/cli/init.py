@@ -4,7 +4,10 @@ Interactive by default; every prompt has a flag so CI/scripts run it headless.
 Writes: dst.yaml (providers + connection declarations with
 DST_API_KEY_<NAME> env refs), .env (generated secret key, DB URLs, one
 placeholder line per declared secret), .gitignore, lenses/ with a reference
-lens tree, README.md, and `git init`s the directory.
+lens tree, README.md, and `git init`s the directory. ``--cube`` adds a
+Cube-backed layout: cube/model/, cube/cube.js, cube/overlay.yaml, a lens over
+Cube views, the pinned Cube sidecar as the compose profile ``cube``, and the
+``dst-cube-overlay`` skill.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 WAREHOUSES = ("demo", "duckdb", "postgres", "bigquery", "snowflake", "none")
 
@@ -28,8 +32,14 @@ def compose_project_name(name: str, root: Path) -> str:
     return f"dst-{name}-{digest}"
 
 
+# The Cube Core image the sidecar pins; deploy/cube.version holds the same tag
+# (a test keeps them equal).
+CUBE_TAG = "v1.6.75"
+CUBE_LENS = "main"
+
+
 def agent_files(root: Path, name: str, api_port: int) -> list[tuple[Path, str]]:
-    """The agent-facing scaffold — AGENTS.md and the seven skills — as
+    """The agent-facing scaffold — AGENTS.md and the eight skills — as
     ``(path, content)``.
 
     Every one is a pure function of the INSTALLED dst (nothing project-specific
@@ -47,7 +57,13 @@ def agent_files(root: Path, name: str, api_port: int) -> list[tuple[Path, str]]:
         (skills / "dst-flywheel" / "SKILL.md", _flywheel_skill()),
         (skills / "dst-warehouse-review" / "SKILL.md", _warehouse_review_skill()),
         (skills / "dst-debug" / "SKILL.md", _debug_skill()),
-    ]
+        (skills / "dst-blueprints" / "SKILL.md", _blueprints_skill()),
+    ] + (
+        # A Cube-backed project (cube/overlay.yaml) carries the overlay's slot map.
+        [(skills / "dst-cube-overlay" / "SKILL.md", _cube_overlay_skill())]
+        if (root / "cube" / "overlay.yaml").exists()
+        else []
+    )
 
 
 def stale_agent_files(root: Path) -> list[str]:
@@ -393,12 +409,31 @@ def run_init(args: argparse.Namespace) -> int:
         # would scaffold a project that `dst plan` refuses. An empty mapping is
         # the same slot to fill, and it is valid from birth.
         lines[connections_key] = "connections: {}   # add yours below - it stays a mapping"
+    cube = bool(getattr(args, "cube", False))
+    cube_lines: list[str] = []
+    if cube:
+        cube_lines = [
+            "",
+            "# Governed asks compile through Cube: the model is cube/model/, dst's",
+            "# overlay is cube/overlay.yaml. `docker compose --profile cube up -d`",
+            "# starts the pinned sidecar; dst signs each request with the secret.",
+            "cube:",
+            "  url: http://localhost:4000",
+            "  api_secret_env: CUBEJS_API_SECRET",
+        ]
+        secret_envs.append("CUBEJS_API_SECRET")
+        import secrets
+
+        secret_values["CUBEJS_API_SECRET"] = secrets.token_urlsafe(32)
     refs = reference_section(
         "Reference: every connection field (under connections.<name>)",
         ConnectionDecl,
         indent="  ",
     )
-    (root / "dst.yaml").write_text("\n".join(lines) + "\n" + refs, encoding="utf-8")
+    (root / "dst.yaml").write_text(
+        "\n".join(lines) + "\n" + refs + "".join(f"{line}\n" for line in cube_lines),
+        encoding="utf-8",
+    )
 
     # ── .env + .gitignore ─────────────────────────────────────────────────────
     from cryptography.fernet import Fernet
@@ -447,12 +482,23 @@ def run_init(args: argparse.Namespace) -> int:
         '      test: ["CMD-SHELL", "pg_isready -U dst"]\n'
         "      interval: 5s\n"
         "      timeout: 3s\n"
-        "      retries: 10\n"
-        "\n"
+        "      retries: 10\n" + (_cube_service() if cube else "") + "\n"
         "volumes:\n"
         "  pgdata:\n",
         encoding="utf-8",
     )
+    if cube:
+        # The lens over views reads through the warehouse init declared: the
+        # one named on the command line, else the demo's, else none yet.
+        if warehouse == "duckdb":
+            lens_connection: str | None = "warehouse"
+        elif warehouse not in ("demo", "none", None):
+            lens_connection = str(warehouse)
+        elif warehouse == "demo" or example:
+            lens_connection = "jaffle"
+        else:
+            lens_connection = None
+        _cube_layout(root, lens_connection)
 
     # ── reference lens tree + README ──────────────────────────────────────────
     from services.certdefs import CertifiedDefinition
@@ -467,7 +513,7 @@ def run_init(args: argparse.Namespace) -> int:
         + reference_section("Reference: definition page frontmatter", CertifiedDefinition)
         + "```\n"
     )
-    from services.contracts.semantic_model import FIELD_TYPES, Metric
+    from services.contracts.semantic_model import FIELD_TYPES, Metric, TableBlueprint
     from services.contracts.shared_semantic import SelectSpec, SharedEntity, SharedRelationship
 
     semantic_doc = (
@@ -511,6 +557,12 @@ def run_init(args: argparse.Namespace) -> int:
         + reference_section(
             "Reference: relationship file (semantic/relationships/*.yaml)", SharedRelationship
         )
+        + "```\n\nTable blueprints (semantic/tables/<table>.yaml - one file per table,\n"
+        "facts about the table itself: grain, key, rows that repeat per sync,\n"
+        "clocks, joins, caveats). An entity on the table inherits `grain` and\n"
+        "`key` when it declares none; `dst plan` checks every declared fact\n"
+        "against the probe (or one live count) and prints a coverage line:\n\n```yaml"
+        + reference_section("Reference: table blueprint (semantic/tables/*.yaml)", TableBlueprint)
         + "```\n\nWhat a lens can select (lens.yaml select:):\n\n```yaml"
         + reference_section("Reference: select block", SelectSpec)
         + "```\n"
@@ -668,8 +720,7 @@ def run_init(args: argparse.Namespace) -> int:
         "names which lenses go stale), apply.\n"
         "Author the layer from `dst introspect --connection <name> --profile`\n"
         "(schema + profile facts: row counts, enum values, null rates, ranges;\n"
-        "`--json` for the parseable form, no flag for schema only) or import\n"
-        "one-shot from dbt artifacts (`dst import dbt`, never re-synced).\n"
+        "`--json` for the parseable form, no flag for schema only).\n"
         "Run `dst probe` after authoring, then on a schedule: it records the\n"
         "warehouse's full profile in `profiles/<conn>.probe.json` - value\n"
         "dictionaries, partitions, freshness - and `dst apply` lands it in the\n"
@@ -695,6 +746,11 @@ def run_init(args: argparse.Namespace) -> int:
     print(f"  embeddings: {_embeddings_summary(warehouse)}")
     cd = f"cd {root.name} && " if args.dir is None else ""
     print(f"  next: {cd}fill the DST_API_KEY_* lines in .env, then `dst dev`")
+    if cube:
+        print(
+            "  cube: write cube/model/, then `docker compose --profile cube up -d` "
+            "and `dst plan` (slot map: .claude/skills/dst-cube-overlay/)"
+        )
     return 0
 
 
@@ -1259,7 +1315,7 @@ def _flywheel_skill() -> str:
 name: dst-flywheel
 description: Use when a lens answers questions wrongly and you want to
   improve it systematically - the loop: diagnose from traces, file
-  corrections with an explicit target, gate the drafted patch, apply,
+  corrections with an explicit target, rule, author the fix, apply,
   re-measure everything, certify verified wins.
 ---
 
@@ -1298,24 +1354,18 @@ away from answering nearly all of them; the laps are cheap, guessing is not.
    ALWAYS pass target (the verb requires it). Without it, placement is
    vocabulary matching and a cross-cutting note lands on the wrong shared
    definition - where it becomes a blanket rule that regresses every other
-   question using that term. A target naming a NEW term drafts a new
+   question using that term. A target naming a NEW term asks for a new
    definition. The note is a paragraph, not a flag - write it to a file and
    pass --note-file (or `-` to pipe it in); --note takes a one-liner. Add
    --corrected-sql when you know the SQL that would have been right.
 
-4. Gate the draft - `dst patches draft <ticket_id>` drafts it and PRINTS
-   the target and body; READ them before approving: the right target, and
-   the right AMENDMENT. The drafter amends - rulings the correction never
-   mentioned come back whether or not the model restated them - so what you
-   are checking is whether the CHANGED ruling is right, not whether the rest
-   survived. Approve with `dst patches approve <id> --dir .`; a bad
-   draft gets `dst patches reject <id> --note "why"` - the note is fed
-   to the next draft as a hard constraint, so say what to keep and what to
-   drop.
-
-   Approve writes into the file that already authors the term, whatever it
-   is named. It defaults to this lens's tree; add `--shared` when the term
-   is cross-cutting and belongs in semantic/definitions/ - that reaches
+4. Rule on the ticket, then author the fix in the files - `dst rule
+   <ticket_id> --verdict approve|changes|reject` records the ruling; the fix
+   itself (an amended definition page, a lens.yaml instruction) is a file
+   change you write, review with `git diff`, and land with `dst apply`.
+   Amend only the ruling the correction is about and keep every other ruling
+   on the page. Edit the file that already authors the term, whatever it is
+   named; a cross-cutting term belongs in semantic/definitions/ and reaches
    every lens selecting it, so re-measure them all (step 5).
 
 5. `dst apply`, then re-measure the WHOLE set including questions that
@@ -1470,6 +1520,307 @@ of the wrong answer each shape ships.
 """
 
 
+def _cube_service() -> str:
+    """The pinned Cube Core sidecar, behind the compose profile ``cube``."""
+    return (
+        "\n"
+        "  # The pinned Cube Core sidecar: `docker compose --profile cube up -d`.\n"
+        "  cube:\n"
+        '    profiles: ["cube"]\n'
+        f"    image: cubejs/cube:{CUBE_TAG}\n"
+        "    environment:\n"
+        '      CUBEJS_DEV_MODE: "false"\n'
+        "      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:?set in .env}\n"
+        "      CUBEJS_DB_TYPE: ${CUBEJS_DB_TYPE:-duckdb}\n"
+        "      CUBEJS_DB_HOST: ${CUBEJS_DB_HOST:-}\n"
+        "      CUBEJS_DB_PORT: ${CUBEJS_DB_PORT:-}\n"
+        "      CUBEJS_DB_NAME: ${CUBEJS_DB_NAME:-}\n"
+        "      CUBEJS_DB_USER: ${CUBEJS_DB_USER:-}\n"
+        "      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS:-}\n"
+        "      # BigQuery: the service-account key as the container sees it (under /data)\n"
+        "      CUBEJS_DB_BQ_PROJECT_ID: ${CUBEJS_DB_BQ_PROJECT_ID:-}\n"
+        "      CUBEJS_DB_BQ_LOCATION: ${CUBEJS_DB_BQ_LOCATION:-}\n"
+        "      CUBEJS_DB_BQ_KEY_FILE: ${CUBEJS_DB_BQ_KEY_FILE:-}\n"
+        "      # a DuckDB file as the container sees it (under /data): opened read-only\n"
+        "      DST_DUCKDB_PATH: ${DST_DUCKDB_PATH:-}\n"
+        "      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory\n"
+        '      CUBEJS_SCHEDULED_REFRESH_DEFAULT: "false"\n'
+        "    ports:\n"
+        '      - "4000:4000"\n'
+        "    volumes:\n"
+        "      - ./cube/model:/cube/conf/model:ro\n"
+        "      - ./cube/cube.js:/cube/conf/cube.js:ro\n"
+        "      - ${DST_CUBE_DATA:-./cube/data}:/data:ro\n"
+        "    healthcheck:\n"
+        '      test: ["CMD", "node", "-e", "require(\'http\').get(\'http://localhost:4000/readyz\','
+        "r=>process.exit(r.statusCode==200?0:1)).on('error',()=>process.exit(1))\"]\n"
+        "      interval: 5s\n"
+        "      timeout: 3s\n"
+        "      retries: 20\n"
+    )
+
+
+def _cube_js() -> str:
+    """deploy/cube/cube.js, verbatim (a test keeps the two equal): groups from
+    the token dst signs, and a DuckDB file attached read-only."""
+    return """// dst's Cube Core config, mounted at /cube/conf/cube.js.
+//
+// Groups: dst mints each request's token with `{dst: {groups: [...]}}`, and a
+// view's `access_policy` grants by `group:`. contextToGroups is the bridge, so
+// a hidden member with exception groups reaches those groups and no one else.
+// A Cube without it matches no named group: the exception fails closed.
+//
+// A DuckDB warehouse is opened READ-ONLY. Cube's DuckDB driver opens its
+// databasePath read-write (no access mode option), which takes DuckDB's
+// exclusive lock - so dst's own connector could not open the file beside it -
+// and lets Cube's bundled DuckDB checkpoint the file. Instead the driver opens
+// an in-memory database and ATTACHes the file READ_ONLY in its initSql.
+// Set DST_DUCKDB_PATH to the file as the container sees it; leave it unset for
+// any other warehouse and Cube's own CUBEJS_DB_* settings apply unchanged.
+const path = process.env.DST_DUCKDB_PATH;
+
+const contextToGroups = ({ securityContext }) => {
+  const groups = securityContext && securityContext.dst && securityContext.dst.groups;
+  return Array.isArray(groups) ? groups.map(String) : [];
+};
+
+module.exports = path
+  ? {
+      contextToGroups,
+      driverFactory: () => {
+        const { DuckDBDriver } = require('@cubejs-backend/duckdb-driver');
+        return new DuckDBDriver({
+          databasePath: ':memory:',
+          initSql: `ATTACH '${path.replace(/'/g, "''")}' AS wh (READ_ONLY); USE wh;`,
+        });
+      },
+    }
+  : { contextToGroups };
+"""
+
+
+def _cube_layout(root: Path, connection: str | None = None) -> None:
+    """The Cube-backed slots: an empty model, the sidecar's config, the
+    overlay, and one lens over views. Nothing in them is a guess at the
+    warehouse: the model and the views are the author's to write."""
+    from services.contracts.lens_model import Overlay
+    from services.project.template import reference_section
+
+    cube = root / "cube"
+    (cube / "model" / "views").mkdir(parents=True, exist_ok=True)
+    (cube / "model" / "views" / ".gitkeep").write_text("", encoding="utf-8")
+    (cube / "data").mkdir(exist_ok=True)
+    (cube / "data" / ".gitkeep").write_text("", encoding="utf-8")
+    (cube / "cube.js").write_text(_cube_js(), encoding="utf-8")
+    (cube / "overlay.yaml").write_text(
+        "# dst's overlay over the Cube model: what dst reads that no member's\n"
+        "# meta.dst carries. The slot map is .claude/skills/dst-cube-overlay/.\n"
+        "version: 1\n"
+        "lenses:\n"
+        f"  {CUBE_LENS}:\n"
+        "    views: []   # the Cube views this lens serves (or name them in lens.yaml)\n"
+        + reference_section("Reference: every overlay field", Overlay),
+        encoding="utf-8",
+    )
+    lens = root / "lenses" / CUBE_LENS
+    lens.mkdir(parents=True, exist_ok=True)
+    (lens / "lens.yaml").write_text(
+        f"name: {CUBE_LENS}\n"
+        "description: ''   # what this lens answers, one line\n"
+        "# The Cube views this lens serves (cube/model/views/*.yml); plan reads them\n"
+        "# from Cube's /v1/meta and apply stamps the model_version they compile to.\n"
+        "views: []\n"
+        + (
+            f"connections: [{connection}]   # where dst runs the SQL Cube compiles\n"
+            if connection
+            else "connections: []   # name your warehouse connection from dst.yaml\n"
+        )
+        + "access:\n"
+        "  allow: []   # e.g. [{group: everyone}]\n",
+        encoding="utf-8",
+    )
+
+
+def _cube_overlay_skill() -> str:
+    """The scaffolded slot map for a Cube-backed project: which file holds
+    what, every ``meta.dst`` key with what in dst reads it, and the checks
+    plan runs. The author's agent writes the model and the overlay; dst makes
+    no model call for any of it (the skill razor)."""
+    from services.contracts.lens_model import KEY_READERS
+
+    keys = "\n".join(
+        f"- on a {on}: "
+        + "; ".join(f"`{key}` ({reader})" for key, reader in sorted(readers.items()))
+        for on, readers in KEY_READERS.items()
+    )
+    return (
+        """---
+name: dst-cube-overlay
+description: Use when asked to write or fix a Cube-backed dst project - the
+  Cube model (cube/model/), the meta.dst keys on its members, the overlay
+  (cube/overlay.yaml) or a lens over Cube views. dst checks all of it on
+  plan and apply against Cube's own /v1/meta.
+---
+
+# Cube-backed project: the slot map
+
+The Cube model IS the model; dst reads it only through Cube's `/v1/meta`
+and never parses the files. dst keeps what Cube has no word for.
+
+## Files
+
+- `cube/model/*.yml` - cubes (sql_table or sql, dimensions, measures,
+  segments, joins). Cube's own format.
+- `cube/model/views/*.yml` - views: what a lens serves. A view lists its
+  members (`includes: [..]`); `includes: "*"` also serves every
+  `public: false` member of the cube through the view.
+- `cube/overlay.yaml` - dst-only facts no member carries: `cubes.<cube>`
+  (default_time_dimension, clock_kind, pinned_dimensions, feed_axes,
+  feed_measures, use_cases, caveats, member_caveats), `lenses.<lens>`
+  (views, access, not_for, not_computable, timezone, sources),
+  `definitions`, `ambiguous`, `hide`. Its reference block lists every field.
+- `lenses/<lens>/lens.yaml` - `views:` (overrides the overlay's) plus the
+  lens's policy; a `certified_answers.yaml` pair may carry a Cube `query`
+  beside its `sql`: the model lane reads those pairs as worked examples.
+- `cube/cube.js` - the sidecar's config; keep `contextToGroups`.
+- `dst.yaml` `cube:` - url, api_secret_env, plan_context.groups.
+
+## meta.dst: a closed schema
+
+`meta: {dst: {...}}` on a member, cube or view. Any key not listed here
+fails plan (`meta_dst_unknown_key`). What reads each key:
+
+"""
+        + keys
+        + """
+
+## Hidden members
+
+`public: false` on the cube member, plus `meta.dst.hide` (with
+`except_groups` when some groups may read it) or `meta.dst.internal`. A view
+leaves an internal member or one hidden from everyone out of `includes`. A
+member some groups may read is listed and withheld by the view's
+`access_policy`:
+
+```yaml
+access_policy:
+  - group: "*"
+    member_level: {excludes: [<cube>_<member>]}
+  - group: <exception group>
+    member_level: {includes: "*"}
+```
+
+Cube reads the groups from the token dst signs (`security_context.dst.groups`)
+through `contextToGroups` in cube.js.
+
+## The checks plan runs (and apply, which refuses on an error)
+
+Errors: unknown_view, unknown_member (an overlay or meta.dst name the meta
+lacks), meta_dst_unknown_key, level_without_clock, default_segment_missing,
+certified_member, certified_hidden, provider_down (Cube unreachable; the
+files still check). Warnings: hide_unenforced_in_cube (Cube serves a hidden
+member to a caller in no group), text_month_dimension. Hints:
+hide_unlisted, dictionary_unprobed, definition_about_hidden (a definition
+about a member Cube lists to no caller; kept for the callers who may see it).
+Plan ends with the "keys read" table per lens.
+
+## The loop
+
+`docker compose --profile cube up -d`, `dst plan`, `dst probe --cube`
+(dictionaries and data ends into `profiles/cube.probe.json`), `dst apply`,
+`dst monitor`. `dst migrate-model` writes a first model from an entity
+catalogue; edit it from there.
+"""
+    )
+
+
+def _blueprints_skill() -> str:
+    """The scaffolded table-blueprint slot map: where the files live, the
+    fields, and the checks dst runs on them. The author's agent reads the
+    tables, the dbt docs and the team's notes and writes the files; dst makes
+    no model call for any of it (the skill razor)."""
+    return """---
+name: dst-blueprints
+description: Use when asked to write or fix table blueprints - the facts
+  about a warehouse table (grain, key, rows that repeat per sync, clocks,
+  joins, caveats) in semantic/tables/. dst checks them on plan and apply and
+  uses them on every answer that reads an exposed table.
+---
+
+# Table blueprints: the slot map
+
+One file per table, anywhere under `semantic/tables/` (folders are yours):
+`semantic/tables/<table>.yaml`. Project-wide, not per lens. An entity whose
+`source.table` is the table inherits `grain` and `key` (as its primary_key)
+when it declares none, so the facts live in one place.
+
+## Fields
+
+- `connection` - the dst.yaml connection the table lives on
+- `table` - the table exactly as `dst introspect` names it
+- `system` - the source system it is loaded from, as the team names it (plan
+  never hints a join between two different systems, such as a frozen legacy
+  extract and its replacement)
+- `grain` - one line: what one row is
+- `key` - the columns one row is unique on
+- `versions` - set when rows repeat once per sync of a record:
+  `sync_column` (the column that stamps the sync) and `latest_only` (columns
+  that hold only on a record's latest version, such as a delete flag)
+- `clocks.<column>` - `meaning` (what the timestamp records) and `timezone`
+  (IANA, the zone the values are stored in)
+- `joins` - `to` (another table on the same connection), `"on"` (columns
+  qualified by bare table name) and `cardinality` (one, or many)
+- `caveats` - what a reader of the table must know, one sentence each
+
+The full reference block is in `semantic/README.md`.
+
+## Where the facts come from
+
+The table itself (`dst introspect --connection <name> --profile`, the probe
+artifact in `profiles/`, `dst sql ... --limit 5` for rows), the dbt docs and
+tests (`unique`, `not_null`, relationships), and the team's own notes. Write
+only what the evidence says; leave a field out rather than guess it.
+
+## The checks dst runs (plan, and again on apply)
+
+Errors, which abort apply for a blueprint the push adds or changes (a stored
+one the warehouse moved under is a DRIFT warning instead, naming the lenses
+that read the table):
+- the `key` is not unique: rows against distinct key (plus the sync column
+  when `versions` is set), from the probe when it counted exactly, else one
+  live count within the connection's byte budget
+- a declared column the table does not have
+- a blueprint for a table its connection does not hold
+- a join whose `on` names a column that does not exist
+
+Warnings: an in-scope table (read by an entity or an `expose:` grant) with no
+grain and key; a key that could not be counted, with the reason; text that
+names a column a lens hides (every door serves `[withheld column]` in its place,
+so write the caveat without the name).
+
+Hints: a likely join no blueprint declares, only when the probe shows both
+tables non-empty and the column's values among the key's (three per table, the
+rest counted); a join certified SQL uses and no blueprint declares; a likely
+sync or delete column with no `versions`.
+
+`dst plan` ends with the coverage line: in-scope tables whose grain and key
+are declared, of all in scope. A missing blueprint never fails a plan.
+
+## What serving does with them
+
+An answer that reads an exposed table carries a GRAIN line per table: rows
+against distinct key (with `versions`, the key without the sync column) and
+when they were counted, or "could not verify" and why. Such an answer is
+never graded verified, and one whose counts contradict the declared key
+grades unverified. `describe_lens`
+summarises each exposed table (grain, key, versions, rows, flags) and, with
+`table`, shows one table's blueprint, each check's verdict and the probe's
+facts. A hidden column is never named or counted aloud.
+
+Land them like any file: `dst plan`, then `dst apply`.
+"""
+
+
 def _history_bootstrap_skill() -> str:
     """The scaffolded history-bootstrap skill: mine warehouse query history into
     a draft semantic layer with the driver's agent. Judgment stays agent-side;
@@ -1526,8 +1877,8 @@ judgment; dst's apply gates catch what you get wrong.
 
 2. Separate AUTHORED from GENERATED. Only authored SQL expresses judgment;
    generated SQL is a tool consuming metrics, not defining them. The tells:
-   - dbt: leading comment {"app": "dbt", ...} - ingest via `dst import dbt`
-     instead of mining.
+   - dbt: leading comment {"app": "dbt", ...} - author those models as
+     semantic/ entities instead of mining.
    - BI pivot engines: __mask / rowDepth / colDepth projections, agg0_ aliases.
    - Semantic-layer compilers: __with_t_0-style generated CTEs.
    - dst itself: /* dst: ... */ (already filtered above).
@@ -1596,7 +1947,9 @@ never author in a UI.
   `relationships/<left>__<right>.yaml` (one join pair per file, left = the
   FK side, with declared relationship) and `definitions/<term>.md` (governed
   terms; `status: ambiguous` + possible_mappings makes dst ASK instead
-  of guessing). Full field references in `semantic/README.md`.
+  of guessing) and `tables/<table>.yaml` (one table blueprint per file:
+  grain, key, repeated rows per sync, clocks, joins, caveats). Full field
+  references in `semantic/README.md`.
 - `lenses/<name>/` - one governed lens per dir: selection + policy + extras:
   - `lens.yaml` (`select:` over shared assets; model, access allow-list,
     rate limits - full commented reference at the bottom), `queries.yaml`
@@ -1619,7 +1972,7 @@ never author in a UI.
 - `.claude/skills/dst-context/` - the authoring rules for
   definitions/instructions/context prose (decide, don't describe).
 - `.claude/skills/dst-flywheel/` - wrong answer -> diagnose -> correct ->
-  gate the patch -> re-measure -> certify; the incident loop.
+  rule -> author the fix -> re-measure -> certify; the incident loop.
 - `.claude/skills/dst-debug/` - a symptom that is not a wrong answer (runs
   that cannot be found, certified answers that never match, slot-lane
   failures, timeouts, routing between siblings): name the owner - dst, your
@@ -1627,6 +1980,9 @@ never author in a UI.
 - `.claude/skills/dst-warehouse-review/` - review a warehouse for
   answerability BEFORE building lenses: 12 shape checks over introspect/
   probe output, each with a rail / definition / remodel remedy.
+- `.claude/skills/dst-blueprints/` - the slot map for table blueprints
+  (`semantic/tables/`): grain, key, repeated rows per sync, clocks, joins,
+  caveats, and the checks dst runs on them.
 
 ## Workflow
 ```bash
@@ -1658,7 +2014,7 @@ attributable to a person.
 ## Rules for agents
 - The UI never authors - files do. Governance (rulings, certify, revoke)
   runs from the CLI - `dst reviews`, `dst rule`, `dst correct`,
-  `dst patches`, `dst revoke-key` - and the dashboard renders the same state
+  `dst revoke-key` - and the dashboard renders the same state
   when this install bundles one (a locally-built wheel is API-only; see
   `dst dev`'s startup line). Anything authored lives in this repo.
 - Deletion of server OBJECTS is explicit: `dst lens rm` /
@@ -1678,8 +2034,6 @@ attributable to a person.
   PLUS profile facts (row counts, null rates, enum values, ranges) - read it,
   then author semantic/ files yourself. Without --profile it is schema only and
   says NOT PROFILED at the top; `--json` prints the same facts parseable.
-  `dst import dbt --target-dir target/ --connection X` scaffolds from dbt
-  artifacts one-shot.
 - Need actual ROWS to settle what a column means? `dst sql "SELECT ..."
   --connection X --limit 5` - SELECT-only, row-capped, logged. Never open the
   warehouse client directly: dst holds that credential so you do not have
@@ -1706,3 +2060,53 @@ file, not this one). Its content is yours; what it must cover is fixed:
 
 Reference documentation (every verb, every field): https://www.dataservetool.com
 """
+
+
+def register(sub: Any) -> None:
+    """The `dst init` parser."""
+    p = sub.add_parser("init", help="scaffold a new dst project (dbt-style)")
+    p.add_argument(
+        "dir", nargs="?", default=None, help="target directory (default: create ./<project name>)"
+    )
+    p.add_argument("--name")
+    p.add_argument(
+        "--instance-name",
+        help="what the org's AI calls this deployment, e.g. watson (default: dst; "
+        "written to .env as DST_INSTANCE_NAME and used as the MCP registration name)",
+    )
+    p.add_argument(
+        "--warehouse", choices=["demo", "duckdb", "postgres", "bigquery", "snowflake", "none"]
+    )
+    p.add_argument(
+        "--duckdb-path",
+        help="with --warehouse duckdb: path to your .duckdb file "
+        "(relative = resolved from the serve cwd)",
+    )
+    p.add_argument(
+        "--example",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="include the example lens over the bundled duckdb demo (default: yes)",
+    )
+    p.add_argument("--db-port", type=int, default=5432, help="host port for the project's Postgres")
+    p.add_argument(
+        "--api-port",
+        type=int,
+        default=8000,
+        help="port dst serve/dev will use (written to .env as DST_URL)",
+    )
+    p.add_argument("--yes", action="store_true", help="accept defaults, no prompts")
+    p.add_argument(
+        "--cube",
+        action="store_true",
+        help="a Cube-backed project: cube/model, cube/overlay.yaml, a lens over views, "
+        "the pinned Cube sidecar (compose profile `cube`) and the dst-cube-overlay skill",
+    )
+    p.add_argument(
+        "--skills-only",
+        action="store_true",
+        help="refresh an EXISTING project's AGENTS.md and .claude/skills/ from the "
+        "installed dst, reporting what changed — the scaffold is a snapshot taken at "
+        "init, so a skill improved in a later release never reaches a project otherwise",
+    )
+    p.set_defaults(fn=run_init)

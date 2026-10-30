@@ -81,3 +81,44 @@ ingress:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Cube Core, the semantic layer governed asks compile through. Off by default:
+# turn it on with a model, or point at a Cube you run yourself.
+cube:
+  enabled: false
+  # A Cube you run: dst calls it here and the chart adds no container.
+  external:
+    url: ""
+  # The sidecar's image; the tag is the one this release is tested against
+  # (deploy/cube.version). Bump both together.
+  image:
+    repository: cubejs/cube
+    tag: v1.6.75
+    pullPolicy: IfNotPresent
+  # CUBEJS_API_SECRET: the key dst signs each request's security-context token
+  # with and Cube verifies. One Secret both containers read.
+  secret:
+    name: dst-cube
+    key: api-secret
+  # The project's cube/model, mounted read-only at /cube/conf/model: a
+  # ConfigMap (flat: one key per file, views included, e.g. `kubectl create
+  # configmap dst-cube-model --from-file=cube/model --from-file=cube/model/views`)
+  # or an existing PersistentVolumeClaim.
+  model:
+    configMap: ""
+    existingClaim: ""
+  # Cube's warehouse settings (CUBEJS_DB_TYPE, CUBEJS_DB_HOST, …). For a DuckDB
+  # file set DST_DUCKDB_PATH and mount it with extraVolumes: cube.js attaches
+  # it READ_ONLY. For BigQuery set CUBEJS_DB_TYPE=bigquery,
+  # CUBEJS_DB_BQ_PROJECT_ID, CUBEJS_DB_BQ_LOCATION and CUBEJS_DB_BQ_KEY_FILE,
+  # the service-account key mounted read-only from a Secret with extraVolumes.
+  env: {}
+  envFrom: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi

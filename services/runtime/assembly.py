@@ -24,7 +24,6 @@ from datetime import date
 from pathlib import Path
 from typing import Literal
 
-from services.benchmark.contamination import normalize
 from services.certdefs import load_certified_defs, select_context
 from services.certify import bands as fitted_bands
 from services.certify import binding as certify_binding
@@ -58,15 +57,16 @@ from services.contracts.protocols import (
 from services.contracts.resolution import DecisionRecord
 from services.contracts.semantic_model import SampleQuery, SemanticModel
 from services.db.session import org_session
+from services.evals.contamination import normalize
 from services.lenses import profile_enrich, profile_store
 from services.lenses.profile_age import ProfileAge, profile_age
 from services.lenses.store import LensBundle
-from services.llm import registry
+from services.llm import decision_memo, registry
 from services.llm.assist import assist_llm
 from services.llm.vote_decider import EQUIV_K, VoteDecider
 from services.observability import usage as ai_usage
 from services.project import probe_settings
-from services.runtime import decision_policy, value_guard
+from services.runtime import decision_policy, sql_guard, value_guard
 from services.runtime.bounded import call_bounded
 from services.runtime.generator import FixedSQLGenerator, GroundedSQLGenerator
 from services.runtime.intent_generator import IntentSQLGenerator
@@ -222,6 +222,8 @@ class AssembledInputs:
     # (profile_age.ProfileAge); None when nothing is profiled. Stale, the
     # answer says so and the profile-backed checks abstain.
     profile_age: ProfileAge | None = None
+    # table -> its stored profile: the probe's counts the grain check reads.
+    table_profiles: dict[str, TableProfile] = field(default_factory=dict)
     # table -> its own as-of date: the pipeline dates an answer from the tables
     # the served SQL read (profile_enrich.scope_as_of), `data_as_of` above is
     # the lens-wide floor it falls back to when the SQL resolves no table.
@@ -462,6 +464,7 @@ def certified_lookup(
     aliases: Mapping[str, str] | None = None,
     units: Mapping[str, str] | None = None,
     restrictions: Callable[[str], frozenset[tuple[str, str]]] | None = None,
+    hidden_from: SemanticModel | None = None,
 ) -> tuple[
     certify_store.CertifiedAnswer | None,
     list[SampleQuery],
@@ -507,7 +510,14 @@ def certified_lookup(
     except Exception:
         log.exception("certified lookup failed for lens %s", lens)
         return None, [], "none", None, None
-    hits = [h for h in hits if h.answer.id != exclude_id]
+    # ``hidden_from`` is the caller's view: an answer reading a column it
+    # withholds neither serves nor folds as an exemplar into generation.
+    hits = [
+        h
+        for h in hits
+        if h.answer.id != exclude_id
+        and not (hidden_from is not None and sql_guard.withheld_reads(h.answer.sql, hidden_from))
+    ]
     if not hits:
         return None, [], "none", None, None
     bands = certified_bands()
@@ -779,6 +789,7 @@ def assemble(
         aliases=name_aliases(bundle.semantic_model),
         units=declared_units(bundle.semantic_model),
         restrictions=named_restrictions(bundle.semantic_model, per_entity),
+        hidden_from=bundle.semantic_model,
     )
     if exemplars:
         model = model.model_copy(update={"sample_queries": list(model.sample_queries) + exemplars})
@@ -797,6 +808,7 @@ def assemble(
         data_as_of=as_of,
         table_as_of=stamps,
         profile_age=age,
+        table_profiles={p.table: p for p in profiles},
         degraded=() if (line := matching_line(name, org_id, embed_failure)) is None else (line,),
         value_domains=domains,
         table_domains=per_table,
@@ -847,7 +859,13 @@ def eval_harness(
     """The parity harness for the certified suite: per-question
     assembly exactly as serving, with the serve bypasses off (testing the bypass
     would trivially pass) and the answer under test excluded from its own
-    exemplars (with parity it would match itself at ~1.0 and grade copying)."""
+    exemplars (with parity it would match itself at ~1.0 and grade copying).
+    It reads the lens as a caller in every group a `hide` entry excepts: a
+    certified answer that reads such a column serves only those callers, so
+    that is the caller its generation is measured for."""
+    widest = bundle.semantic_model.every_exception()
+    if widest is not bundle.semantic_model:
+        bundle = bundle.model_copy(update={"semantic_model": widest})
 
     def assemble_for(answer: certify_store.CertifiedAnswer) -> AssembledInputs:
         question = answer.question
@@ -902,8 +920,8 @@ def typed_decider() -> Decider | None:
     if decider is None:
         return None
     if settings.typed_serving == "on":
-        return decider
-    return decider if getattr(decider, "typed_decisions", False) else None
+        return decision_memo.memoised(decider)
+    return decision_memo.memoised(decider) if getattr(decider, "typed_decisions", False) else None
 
 
 def business_today_date(timezone: str | None) -> date:

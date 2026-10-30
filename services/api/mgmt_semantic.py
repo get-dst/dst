@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from services.auth.deps import get_admin_org, get_app_session
 from services.contracts.protocols import TargetedIntrospect
-from services.contracts.semantic_model import Definition
+from services.contracts.semantic_model import Definition, TableBlueprint
 from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.lenses import profile_store
 from services.lenses.connections import resolve_connector
@@ -36,8 +36,8 @@ class DraftBody(BaseModel):
 def list_assets(
     kind: store.AssetKind | None = None, session: Session = Depends(get_app_session)
 ) -> list[store.StoredAsset]:
-    """The shared semantic layer's stored assets — entities, definitions and
-    relationships, optionally filtered to one kind."""
+    """The shared semantic layer's stored assets — entities, definitions,
+    relationships and table blueprints, optionally filtered to one kind."""
     return store.list_assets(session, kind)
 
 
@@ -66,7 +66,7 @@ def upsert_asset(
     name in the body — except a relationship's, whose name is derived from its
     (left, right) pair and cannot be chosen."""
     try:
-        model: SharedEntity | Definition | SharedRelationship
+        model: SharedEntity | Definition | SharedRelationship | TableBlueprint
         if kind == "entity":
             model = SharedEntity.model_validate({**body, "name": name})
         elif kind == "relationship":
@@ -77,6 +77,8 @@ def upsert_asset(
                     detail=f"a relationship's name is derived from its pair — this body "
                     f"names '{model.name}', so PUT it there, not at '{name}'",
                 )
+        elif kind == "blueprint":
+            model = TableBlueprint.model_validate({**body, "table": name})
         else:
             model = Definition.model_validate({**body, "term": name})
     except ValidationError as exc:

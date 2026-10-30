@@ -10,6 +10,7 @@ import pytest
 from services.config import settings
 from services.connectors.duckdb import DuckDBConnector
 from services.contracts.protocols import Connector
+from services.runtime.external_access import ExternalAccessRefused
 
 
 @pytest.fixture
@@ -54,8 +55,10 @@ def test_dry_run(conn: DuckDBConnector) -> None:
 
 
 def test_read_only_rejects_writes(conn: DuckDBConnector) -> None:
-    with pytest.raises(duckdb.Error):
+    with pytest.raises(ExternalAccessRefused):  # the statement check
         conn.execute("CREATE TABLE evil (x int)")
+    with conn._session() as con, pytest.raises(duckdb.Error):  # and the engine under it
+        con.execute("CREATE TABLE evil (x int)")
 
 
 # ── schemas other than `main` must not be invisible ──────────────────────────
@@ -126,3 +129,17 @@ def test_empty_warehouse_names_the_schemas_it_searched(tmp_path: Path) -> None:
     snap = DuckDBConnector(path).introspect()
     assert snap.tables == []
     assert snap.schemas_searched == ["main"]
+
+
+def test_a_window_edge_reads_the_same_on_every_host(tmp_path: Path) -> None:
+    """Cube compiles a window as ``col >= ?::timestamptz`` with UTC bounds; a
+    TIMESTAMP is cast to the zone of the database reading it. dst's DuckDB
+    clock is UTC whatever the host's, so a row at midnight on the first of the
+    month is inside its month on a laptop in any zone, and on a server."""
+    path = tmp_path / "clock.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute("CREATE TABLE t AS SELECT TIMESTAMP '2026-07-01 00:00:00' AS ts")
+    con.close()
+    connector = DuckDBConnector(str(path), profile=False)
+    edge = "SELECT count(*) FROM t WHERE ts >= '2026-07-01T00:00:00.000Z'::timestamptz"
+    assert connector.execute(edge).rows == [[1]]

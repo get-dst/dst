@@ -235,11 +235,6 @@ def render_context(
     return "\n\n".join(blocks)
 
 
-def ground_truth(metrics: list[CertifiedDefinition]) -> dict[str, float | str]:
-    """The documented known-good values, keyed by metric — mode-2 grading anchors."""
-    return {m.metric: m.verified_value.value for m in metrics if m.verified_value is not None}
-
-
 _TOKEN = re.compile(r"[a-z]+")
 
 

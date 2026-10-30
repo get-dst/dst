@@ -297,7 +297,7 @@ def test_dst_test_names_the_unembedded_answers(org, monkeypatch, capsys) -> None
             [CertifiedCaseResult(a.id, a.question, {}, {}, passed=True) for a in answers],
         ),
     )
-    from services.cli.main import _test
+    from services.cli.test import _test
 
     assert _test(argparse.Namespace(lens="customer_value", all=False, org="P27T")) == 0
     out = capsys.readouterr().out

@@ -23,7 +23,7 @@ import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
-from services.cli.main import _read_project
+from services.cli._common import _read_project
 from services.project.lineage import (
     LineageError,
     LineageGraph,
@@ -292,7 +292,7 @@ def test_a_configured_lineage_that_cannot_be_read_fails(monkeypatch, tmp_path, c
 def test_dst_test_select_runs_only_the_lenses_reached(monkeypatch, capsys) -> None:
     import argparse
 
-    from services.cli.main import _test_selection
+    from services.cli.test import _test_selection
 
     args = argparse.Namespace(
         select=["table/stg_tools+"], tables_from=None, lineage=None, dir=str(PROJECT)
@@ -321,7 +321,7 @@ def test_star_selects_everything_on_every_command(monkeypatch, capsys) -> None:
 
     import httpx
 
-    from services.cli.main import _test_selection
+    from services.cli.test import _test_selection
 
     every = _select([])
     assert _select(["*"]).lenses == every.lenses

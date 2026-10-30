@@ -210,7 +210,7 @@ def test_openai_compatible_requires_base_url() -> None:
 _CONSTRUCT = re.compile(r"\b(AnthropicProvider|OpenAICompatProvider|DeepSeekProvider)\(")
 # The benchmark harness deliberately builds providers from raw env (decoupled from
 # app settings); everything else goes through the registry.
-_EXEMPT = ("services/llm/", "services/benchmark/")
+_EXEMPT = ("services/llm/",)
 
 
 def test_providers_are_constructed_only_in_services_llm() -> None:

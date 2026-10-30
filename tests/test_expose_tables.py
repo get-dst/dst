@@ -1,8 +1,9 @@
 """A lens exposes tables that have no definitions — declared as a grant,
 resolved at apply from the connection's profiles, ungoverned on every rail.
 
-Pinned: the grant resolves from profiles (a pattern matching nothing and a
-bare-name collision both fail apply, by name); `hide` withholds a column and
+Pinned: the grant resolves from profiles (a pattern matching nothing fails
+apply, by name; a bare name another table or a selected entity holds is
+exposed under its qualified name); `hide` withholds a column and
 the guard refuses it as out of scope; `SELECT *` passes only on an
 exposed-only statement with nothing hidden; both generation prompts list the
 table with the no-definitions line; the typed resolver never offers it; the
@@ -137,7 +138,7 @@ def _compile(config: LensConfig) -> SemanticModel:
 
 def _model() -> SemanticModel:
     # `staging.customers` only: `staging.*` would also match `staging.orders`,
-    # whose bare name collides with the selected `orders` (pinned below).
+    # exposed as `staging_orders` beside the selected `orders` (pinned below).
     return _compile(_config(["staging.customers"], hide=["*.ssn"]))
 
 
@@ -180,22 +181,32 @@ def test_a_connection_without_profiles_says_so() -> None:
     assert errors and "no stored profiles" in errors[0] and "dst probe" in errors[0]
 
 
-def test_a_bare_name_collision_with_a_selected_entity_fails_compile() -> None:
-    # staging.orders' bare name is `orders`, which the lens also selects.
-    with pytest.raises(CompileError) as exc:
-        _compile(_config(["staging.orders"]))
-    assert "collides with a selected entity" in str(exc.value)
+def test_a_bare_name_a_selected_entity_holds_is_exposed_qualified() -> None:
+    # staging.orders' bare name is `orders`, which the lens also selects: the
+    # table is exposed as `staging_orders`, and a bare `orders` is the entity.
+    model = _compile(_config(["staging.orders"]))
+    names = {e.name: e.source.table for e in model.entities}
+    assert names == {"orders": "marts.orders", "staging_orders": "staging.orders"}
+    guarded = sql_guard.check("SELECT order_id FROM orders", model)
+    assert guarded.ok and "marts.orders" in (guarded.sql or "")
+    assert sql_guard.check("SELECT order_id FROM staging.orders", model).ok
+    assert sql_guard.check("SELECT order_id FROM staging_orders", model).ok
 
 
-def test_two_exposed_tables_sharing_a_bare_name_fail_compile() -> None:
+def test_two_exposed_tables_sharing_a_bare_name_are_both_exposed_qualified() -> None:
     profiles = {
         WH: [
             _profile("staging.customers", [("id", "INTEGER")]),
             _profile("legacy.customers", [("id", "INTEGER")]),
         ]
     }
-    _entities, errors = resolve_expose(_config(["*.customers"]), profiles)
-    assert errors and "share the bare name 'customers'" in errors[0]
+    entities, errors = resolve_expose(_config(["*.customers"]), profiles)
+    assert errors == []
+    assert sorted(e.name for e in entities) == ["legacy_customers", "staging_customers"]
+    # a qualified name that is itself taken still fails, naming it
+    profiles[WH].append(_profile("legacy_customers", [("id", "INTEGER")]))
+    _entities, errors = resolve_expose(_config(["*customers"]), profiles)
+    assert errors and "'legacy_customers'" in errors[0]
 
 
 def test_a_grant_on_a_connection_the_lens_does_not_list_is_an_error() -> None:

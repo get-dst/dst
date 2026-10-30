@@ -34,8 +34,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
+from services.contracts.failure_modes import DRIFT_MODES, FailureMode
 from services.contracts.profile import LOW_CARDINALITY_MAX, ColumnProfile, TableProfile
 from services.contracts.semantic_model import Definition
 from services.contracts.shared_semantic import SharedEntity, SharedRelationship
@@ -92,6 +93,14 @@ class Finding(BaseModel):
     kind: DriftKind
     detail: str
     refs: list[LayerRef] = Field(default_factory=list)
+
+    # The failure mode a declared reader of this table serves under
+    # (contracts/failure_modes.py::DRIFT_MODES): ``stale`` on the reader-bearing
+    # kinds, None on the quiet ones, which never exit 2.
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mode(self) -> FailureMode | None:
+        return DRIFT_MODES.get(self.kind)
 
     @property
     def referenced(self) -> bool:

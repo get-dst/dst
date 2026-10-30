@@ -109,7 +109,7 @@ class EvalRun(BaseModel):
     #   test       — a human ran `dst test` (the full-corpus sweep)
     #   health     — the judge-scored live check (`POST .../evals/run`)
     #   behavioral — a shape-only suite (expect: clarify|refuse|answer)
-    # `test` was missing here while services/cli/main.py wrote it on every
+    # `test` was missing here while services/cli/test.py wrote it on every
     # sweep, so a strict parse of eval_run rows failed on exactly the runs a
     # user triggers by hand — and the dashboard renders that value as a badge.
     mode: Literal["regression", "test", "health", "behavioral"]
@@ -138,6 +138,11 @@ class EvalResult(BaseModel):
     actual_sql: str | None = None
     actual_value: str | None = None
     reason: str | None = None
+    # The failure mode the response carried (contracts/failure_modes.py): the
+    # clarification's or refusal's mode on a behavioural case, whatever the
+    # expectation; None when the response was a clean answer. The scorecard
+    # by mode in `dst test` sums this column.
+    mode: str | None = None
     # What the case's provider calls cost: every model call it made, retries
     # and the judge included (0 when it made none). None cost: unpriced.
     ai_input_tokens: int = 0

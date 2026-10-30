@@ -1,0 +1,247 @@
+views:
+- name: sales_lens
+  title: Sales
+  description: Orders, revenue and stock across the bakeries.
+  meta:
+    dst:
+      sources:
+      - till
+      - web shop
+  cubes:
+  - join_path: orders
+    includes:
+    - order_id
+    - store_id
+    - channel
+    - status
+    - ordered_at
+    - shipped_on
+    - amount_eur
+    - discount_eur
+    - tips_eur_value
+    - revenue
+    - order_count
+    - discount_total
+    - tips_eur
+    - shipped_revenue
+    - average_order_value
+    - net_revenue
+    - web_order
+    prefix: true
+  - join_path: order_lines
+    includes:
+    - order_id
+    - line_number
+    - product
+    - qty
+    - line_total_eur
+    - order_discount_eur
+    - units_sold
+    - product_revenue
+    prefix: true
+  - join_path: order_lines_by_order_id
+    includes:
+    - order_id
+    - line_number
+    - product
+    - qty
+    - line_total_eur
+    - order_discount_eur
+    - order_discount
+    prefix: true
+  - join_path: stores
+    includes:
+    - store_id
+    - store_name
+    - region
+    - opened_on
+    - manager_email
+    - store_count
+    prefix: true
+  - join_path: stock_monthly
+    includes:
+    - month
+    - store_id
+    - units_on_hand
+    - stock_on_hand
+    prefix: true
+  access_policy:
+  - group: '*'
+    member_level:
+      excludes:
+      - stores_manager_email
+  - group: ops
+    member_level:
+      includes: '*'
+- name: sales_order_lines
+  title: 'Sales: order_lines with its dimensions'
+  description: order_lines with the dimensions of orders, stores joined (the sales lens).
+  meta:
+    dst:
+      sources:
+      - till
+      - web shop
+  cubes:
+  - join_path: order_lines
+    includes:
+    - order_id
+    - line_number
+    - product
+    - qty
+    - line_total_eur
+    - order_discount_eur
+    - units_sold
+    - product_revenue
+    prefix: true
+  - join_path: order_lines.orders
+    includes:
+    - order_id
+    - store_id
+    - channel
+    - status
+    - ordered_at
+    - shipped_on
+    - amount_eur
+    - discount_eur
+    - tips_eur_value
+    prefix: true
+  - join_path: order_lines.orders.stores
+    includes:
+    - store_id
+    - store_name
+    - region
+    - opened_on
+    - manager_email
+    prefix: true
+  access_policy:
+  - group: '*'
+    member_level:
+      excludes:
+      - stores_manager_email
+  - group: ops
+    member_level:
+      includes: '*'
+- name: sales_orders
+  title: 'Sales: orders with its dimensions'
+  description: orders with the dimensions of stores joined (the sales lens).
+  meta:
+    dst:
+      sources:
+      - till
+      - web shop
+  cubes:
+  - join_path: orders
+    includes:
+    - order_id
+    - store_id
+    - channel
+    - status
+    - ordered_at
+    - shipped_on
+    - amount_eur
+    - discount_eur
+    - tips_eur_value
+    - revenue
+    - order_count
+    - discount_total
+    - tips_eur
+    - shipped_revenue
+    - average_order_value
+    - net_revenue
+    - web_order
+    prefix: true
+  - join_path: orders.stores
+    includes:
+    - store_id
+    - store_name
+    - region
+    - opened_on
+    - manager_email
+    prefix: true
+  access_policy:
+  - group: '*'
+    member_level:
+      excludes:
+      - stores_manager_email
+  - group: ops
+    member_level:
+      includes: '*'
+- name: sales_stock_monthly
+  title: 'Sales: stock_monthly with its dimensions'
+  description: stock_monthly with the dimensions of stores joined (the sales lens).
+  meta:
+    dst:
+      sources:
+      - till
+      - web shop
+  cubes:
+  - join_path: stock_monthly
+    includes:
+    - month
+    - store_id
+    - units_on_hand
+    - stock_on_hand
+    prefix: true
+  - join_path: stock_monthly.stores
+    includes:
+    - store_id
+    - store_name
+    - region
+    - opened_on
+    - manager_email
+    prefix: true
+  access_policy:
+  - group: '*'
+    member_level:
+      excludes:
+      - stores_manager_email
+  - group: ops
+    member_level:
+      includes: '*'
+- name: sales_order_lines_by_order_id
+  title: 'Sales: order_lines_by_order_id with its dimensions'
+  description: order_lines_by_order_id with the dimensions of orders, stores joined (the sales lens).
+  meta:
+    dst:
+      sources:
+      - till
+      - web shop
+  cubes:
+  - join_path: order_lines_by_order_id
+    includes:
+    - order_id
+    - line_number
+    - product
+    - qty
+    - line_total_eur
+    - order_discount_eur
+    - order_discount
+    prefix: true
+  - join_path: order_lines_by_order_id.orders
+    includes:
+    - order_id
+    - store_id
+    - channel
+    - status
+    - ordered_at
+    - shipped_on
+    - amount_eur
+    - discount_eur
+    - tips_eur_value
+    prefix: true
+  - join_path: order_lines_by_order_id.orders.stores
+    includes:
+    - store_id
+    - store_name
+    - region
+    - opened_on
+    - manager_email
+    prefix: true
+  access_policy:
+  - group: '*'
+    member_level:
+      excludes:
+      - stores_manager_email
+  - group: ops
+    member_level:
+      includes: '*'

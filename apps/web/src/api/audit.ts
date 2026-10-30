@@ -1,6 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { apiGet, apiPost } from './client'
-import type { PatchCandidate } from './reviews'
 
 /** Medallion tier of a variant's source tables — drives canon + coloring. */
 export type Tier = 'gold' | 'silver' | 'bronze' | 'unknown'
@@ -114,17 +113,6 @@ export function useRunAudit() {
       apiPost<AuditRun>(
         `/mgmt/connections/${encodeURIComponent(args.connection)}/audit?days=${args.days}`,
         {},
-      ),
-  })
-}
-
-/** Bridge a conflict finding into a definition PatchCandidate on the chosen lens. */
-export function useDraftDefinition() {
-  return useMutation({
-    mutationFn: (args: { connection: string; finding: DriftFinding; lens: string }) =>
-      apiPost<PatchCandidate>(
-        `/mgmt/connections/${encodeURIComponent(args.connection)}/audit/draft-definition`,
-        { finding: args.finding, lens: args.lens },
       ),
   })
 }

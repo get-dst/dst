@@ -1,0 +1,5 @@
+left: stock_monthly
+right: stores
+"on": stock_monthly.store_id = stores.store_id
+type: left
+relationship: many_to_one

@@ -100,7 +100,7 @@ def test_tables_named_as_the_entity_names_them_are_sampled(
     listed table says so."""
     import argparse
 
-    from services.cli.main import _sample_scope
+    from services.cli.probe import _sample_scope
 
     listed = [
         TableProfile(connection="bq", table=t, columns=[])

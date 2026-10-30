@@ -1,0 +1,144 @@
+cubes:
+- name: orders
+  title: orders
+  description: Orders at the tills and on the web shop, one row per order (the latest sync).
+  sql: |-
+    SELECT * FROM (SELECT * FROM bakery.orders_raw QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY _synced DESC) = 1) AS orders
+    WHERE NOT is_test
+  meta:
+    dst:
+      grain: one row per order per sync version
+      key:
+      - order_id
+      population: real orders; test orders excluded
+      system: the till and the web shop
+  joins:
+  - name: stores
+    relationship: many_to_one
+    sql: '{CUBE}.store_id = {stores}.store_id'
+  dimensions:
+  - name: order_id
+    sql: '{CUBE}.order_id'
+    type: number
+    primary_key: true
+    public: true
+  - name: store_id
+    sql: '{CUBE}.store_id'
+    type: number
+  - name: channel
+    sql: '{CUBE}.channel'
+    type: string
+    description: counter or web
+    meta:
+      dst:
+        aliases:
+        - sales channel
+        dictionary:
+        - counter
+        - web
+  - name: status
+    sql: '{CUBE}.status'
+    type: string
+    meta:
+      dst:
+        dictionary:
+        - open
+        - paid
+        - refunded
+  - name: ordered_at
+    sql: '{CUBE}.ordered_at'
+    type: time
+    meta:
+      dst:
+        clock:
+          meaning: when the customer paid
+          timezone: Europe/Helsinki
+  - name: shipped_on
+    sql: '{CUBE}.shipped_on'
+    type: time
+  - name: amount_eur
+    sql: '{CUBE}.amount_eur'
+    type: number
+    description: order total incl. VAT
+  - name: discount_eur
+    sql: '{CUBE}.discount_eur'
+    type: number
+  - name: tips_eur_value
+    sql: '{CUBE}.tips_eur'
+    type: number
+    title: tips_eur (the column)
+  - name: _synced
+    sql: '{CUBE}._synced'
+    type: time
+    public: false
+    meta:
+      dst:
+        internal: true
+  - name: is_test
+    sql: '{CUBE}.is_test'
+    type: boolean
+    public: false
+    meta:
+      dst:
+        internal: true
+  measures:
+  - name: revenue
+    title: revenue
+    type: sum
+    sql: '{CUBE}.amount_eur'
+    filters:
+    - sql: '{CUBE}.status = ''paid'''
+    format: currency
+    meta:
+      dst:
+        additivity: flow
+        better: higher
+        currency: EUR
+        aliases:
+        - sales
+        - turnover
+  - name: order_count
+    title: orders
+    type: count
+  - name: discount_total
+    title: discount_total
+    type: sum
+    sql: '{CUBE}.discount_eur'
+    meta:
+      dst:
+        currency: EUR
+  - name: tips_eur
+    title: tips
+    type: sum
+    sql: '{CUBE}.tips_eur'
+  - name: shipped_revenue
+    title: shipped web revenue
+    type: sum
+    sql: '{CUBE}.amount_eur'
+    filters:
+    - sql: '{CUBE}.channel = ''web'''
+    meta:
+      dst:
+        clock: shipped_on
+  - name: average_order_value
+    title: average order value
+    type: number
+    sql: '{revenue} / NULLIF({order_count}, 0)'
+    meta:
+      dst:
+        aliases:
+        - AOV
+  - name: net_revenue
+    title: net revenue
+    type: number
+    sql: '{revenue} - {discount_total}'
+  segments:
+  - name: web_order
+    sql: '{CUBE}.channel = ''web'''
+    meta:
+      dst:
+        meaning: An order placed on the web shop.
+        aliases:
+        - online order
+        - web orders
+        term: web_order

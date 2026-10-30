@@ -22,7 +22,7 @@ from services.contracts.protocols import (
 from services.contracts.query_intent import QueryIntent
 from services.contracts.resolution import DecisionRecord
 from services.contracts.response import ClarificationRequest
-from services.contracts.semantic_model import SemanticModel
+from services.contracts.semantic_model import SemanticModel, blueprint_lines
 from services.observability import usage as ai_usage
 from services.runtime.compiler import CompileError, metric_sql
 from services.runtime.identifiers import quote_ident, quote_table
@@ -204,6 +204,10 @@ def serialize_model(m: SemanticModel) -> str:
             )
         if e.grain:
             lines.append(f"    grain: {e.grain}")
+        readable = {f.name.lower() for f in e.fields}
+        lines += [
+            f"    {line}" for line in blueprint_lines(m.blueprints.get(e.source.table), readable)
+        ]
         if e.population:
             # The scoped-subset rail — same line as the metric layer's, so the
             # fact reaches both tiers.

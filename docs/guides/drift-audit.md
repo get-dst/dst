@@ -34,7 +34,7 @@ including personal data.
 
 **Separate authored from generated.** Only authored SQL expresses judgment; generated
 SQL is a tool *consuming* metrics, not defining them. The tells the skill teaches: dbt's
-leading `{"app": "dbt"}` comment (ingest those models via `dst import dbt` instead
+leading `{"app": "dbt"}` comment (author those models as `semantic/` entities instead
 of mining them), BI pivot engines (`__mask` / `rowDepth` / `colDepth` projections,
 `agg0_` aliases), semantic-layer compilers (`__with_t_0`-style generated CTEs),
 and service accounts running one shape on a schedule. A generated

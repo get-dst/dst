@@ -4,7 +4,7 @@ The audit is not a synchronous button-press: every run (a manual refresh or a
 scheduled job — see ``run_and_store`` in ``services.api.mgmt_audit``)
 records an ``AuditRun`` here, and the dashboard default-loads ``latest`` per
 connection so the findings simply *stand there* to be examined. Org-scoped via
-RLS (``audit_run``, migration 0018), mirroring the JoinCandidate / PatchCandidate
+RLS (``audit_run``, migration 0018), mirroring the JoinCandidate
 stores: record / latest / list, findings stored as the verbatim DriftFinding list.
 """
 

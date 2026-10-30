@@ -130,7 +130,7 @@ def test_revoke_key_is_org_scoped_and_names_the_org(
     which is the whole point, and the org named in the output."""
     import argparse
 
-    from services.cli.main import _revoke_key
+    from services.cli.keys import _revoke_key
 
     admin = create_engine(settings.database_admin_url)
     a_id, a_token = _org_with_caller(admin, "RevokeA", "alex")
@@ -181,7 +181,7 @@ def test_revoke_token_kills_one_credential_of_either_kind(
     import argparse
 
     from services.auth.tokens import new_caller_key
-    from services.cli.main import _revoke_token
+    from services.cli.keys import _revoke_token
     from services.db.session import org_session
     from services.governance import credentials
 

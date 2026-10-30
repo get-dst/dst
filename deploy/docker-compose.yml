@@ -1,5 +1,10 @@
-# dst self-host: one Postgres, one app container. VM quickstart:
+# dst self-host: one Postgres, one app container, and optionally the Cube Core
+# sidecar that compiles governed asks. VM quickstart:
 #   POSTGRES_PASSWORD=… DST_APP_DB_PASSWORD=… DST_SECRET_KEY=$(dst secret) docker compose up -d
+# With the sidecar (the project's cube/model mounted read-only, Cube's tag pinned
+# in deploy/cube.version):
+#   COMPOSE_PROFILES=cube DST_CUBE_URL=http://cube:4000 CUBEJS_API_SECRET=$(dst secret) \
+#   DST_CUBE_MODEL=../cube/model … docker compose up -d
 # DST_PROVIDERS carries your LLM/embedding entries (see dst.yaml docs).
 # DST_APP_DB_PASSWORD is required (the app role ships without a password) —
 # the entrypoint's migrate syncs the role to whatever DATABASE_URL declares,
@@ -39,9 +44,52 @@ services:
       DATABASE_ADMIN_URL: postgresql+psycopg://dst:${POSTGRES_PASSWORD}@db:5432/dst?sslmode=disable
       DST_SECRET_KEY: ${DST_SECRET_KEY:?generate one with `dst secret`}
       DST_PROVIDERS: ${DST_PROVIDERS:-}
+      # Unset = no Cube: nothing compiles through one, and /ready says so.
+      DST_CUBE_URL: ${DST_CUBE_URL:-}
+      # The key dst signs each request's security-context token with; the same
+      # value Cube verifies it against.
+      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}
     depends_on:
       db:
         condition: service_healthy
+      cube:
+        condition: service_healthy
+        required: false  # only under COMPOSE_PROFILES=cube
+
+  # Cube Core, pinned (deploy/cube.version holds the tag this release is tested
+  # against; bump both together). The model is the project's cube/model,
+  # mounted read-only; no Cube Store in this shape, so one Cube per app.
+  cube:
+    profiles: ["cube"]
+    image: cubejs/cube:${CUBE_TAG:-v1.6.75}
+    restart: unless-stopped
+    environment:
+      CUBEJS_DEV_MODE: "false"
+      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}  # Cube refuses to start without one
+      CUBEJS_DB_TYPE: ${CUBEJS_DB_TYPE:-duckdb}
+      CUBEJS_DB_HOST: ${CUBEJS_DB_HOST:-}
+      CUBEJS_DB_PORT: ${CUBEJS_DB_PORT:-}
+      CUBEJS_DB_NAME: ${CUBEJS_DB_NAME:-}
+      CUBEJS_DB_USER: ${CUBEJS_DB_USER:-}
+      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS:-}
+      # BigQuery: the service-account key as the container sees it (under /data).
+      CUBEJS_DB_BQ_PROJECT_ID: ${CUBEJS_DB_BQ_PROJECT_ID:-}
+      CUBEJS_DB_BQ_LOCATION: ${CUBEJS_DB_BQ_LOCATION:-}
+      CUBEJS_DB_BQ_KEY_FILE: ${CUBEJS_DB_BQ_KEY_FILE:-}
+      # A DuckDB file, as the container sees it: cube.js attaches it READ_ONLY.
+      DST_DUCKDB_PATH: ${DST_DUCKDB_PATH:-}
+      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory
+      CUBEJS_SCHEDULED_REFRESH_DEFAULT: "false"
+      CUBEJS_LOG_LEVEL: ${CUBEJS_LOG_LEVEL:-warn}
+    volumes:
+      - ${DST_CUBE_MODEL:-./cube/model}:/cube/conf/model:ro  # the project's cube/model
+      - ./cube/cube.js:/cube/conf/cube.js:ro
+      - ${DST_CUBE_DATA:-./cube/data}:/data:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/readyz',r=>process.exit(r.statusCode==200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
 volumes:
   pgdata:

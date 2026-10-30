@@ -17,6 +17,7 @@ from typing import Literal
 from services.config import ProviderConfig, ProviderType, resolve_env_ref, settings
 from services.contracts.errors import ProviderError
 from services.contracts.protocols import Decider, Embedder, LLMProvider
+from services.observability.usage import models_off
 
 log = logging.getLogger("dst")
 
@@ -231,6 +232,8 @@ def resolve(ref: str) -> ResolvedModel | None:
     errors (auth, bad request) still raise immediately. The provider also carries
     the spec's `reasoning` flag, so call sites keep asking for the ANSWER size
     they want and thinking headroom is added on the wire (services/llm/reasoning.py)."""
+    if models_off():
+        return None  # driver mode: the agent driving the request does the reading
     provider_name, model = split_ref(ref)
     spec = specs().get(provider_name) if provider_name else None
     if spec is None or not spec.api_key or not model:
@@ -255,12 +258,22 @@ def resolve(ref: str) -> ResolvedModel | None:
     return ResolvedModel(client, spec.name, model)
 
 
+def typed_provider_configured() -> bool:
+    """Whether a typed-decision provider (``typesafe`` or ``openai-decisions``)
+    is declared with a key: the provider the typed lane runs on, read without
+    constructing a client. The publish gate asks this of a lens that serves
+    typed answers only, which needs no chat model."""
+    return any(s.type in _TYPED and s.api_key for s in specs().values())
+
+
 def resolve_decider(*, k: int | None = None) -> Decider | None:
     """The install's closed-set decider: the FIRST DECLARED typed-decision
     provider (``typesafe`` or ``openai-decisions``) with a key wins —
     declaration order, the same rule the tiers follow; a keyless one is
     skipped. Else the voting chat decider on the fast tier; None when nothing
-    qualifies (callers fall back to pure cosine / no gate)."""
+    qualifies (callers fall back to pure cosine / no gate). None in driver mode."""
+    if models_off():
+        return None
     for s in specs().values():
         if s.type not in _TYPED or not s.api_key:
             continue
@@ -521,7 +534,10 @@ def resolve_embedder() -> Embedder | None:
 
     CACHED per configuration (see ``_EMBEDDER_CACHE``): built once, and a
     construction FAILURE is cached too — re-raised as a ProviderError carrying
-    ``EMBEDDER_DOWN`` on every later call instead of re-attempted per request."""
+    ``EMBEDDER_DOWN`` on every later call instead of re-attempted per request.
+    None in driver mode: the caller's agent reads the question."""
+    if models_off():
+        return None
     s = _embedding_spec()
     if s is None and find_spec("fastembed") is None:
         return None

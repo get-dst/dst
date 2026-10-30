@@ -1,6 +1,6 @@
 """`dst export --out` writes the lens tree THERE, not over the project.
 
-When --out is osi-only — accepted with --lens and silently ignored — the flag
+When --out is accepted with --lens and silently ignored, the flag
 that means "write output here" rewrites the project's hand-authored lens files
 in place. These pin the redirect, the refusal to stub
 empty list files into being, and the absolute-path summary."""

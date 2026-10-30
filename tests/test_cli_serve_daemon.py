@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from services import app as app_module
-from services.cli import main as cli
+from services.cli import serve as cli
 
 
 class _Child:

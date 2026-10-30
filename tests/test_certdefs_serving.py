@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from services.api.query import _certified_sql
-from services.benchmark.contamination import normalize
 from services.contracts.semantic_model import Entity, EntitySource, Field, SemanticModel
+from services.evals.contamination import normalize
 from services.runtime import sql_guard
 
 PAGE = """---

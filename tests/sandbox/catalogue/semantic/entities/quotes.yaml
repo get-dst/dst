@@ -1,0 +1,86 @@
+name: quotes
+description: >-
+  Quotes sent to customers (Pipedrive calls these "deals"; the real closed-won deals are bookings).
+  Latest Fivetran version per quote, deleted dropped. Every quote has a decision: Won, Lost or
+  Expired, dated decided_date. Win rate = won / decided, by decision date unless the question says
+  "sent".
+grain: one row per quote
+use_cases:
+  - "Use when a question asks about quotes, quote value, win rate, won or lost quotes, open quotes, quotes by segment, service, region or rep."
+  - "Avoid for: bookings or contract value (bookings); leads (crm_leads); Bergström quotes (none exist in the warehouse)"
+common_questions:
+  - quote win rate by segment for Q3 2026
+  - how many quotes were sent in August 2026 and how many were won
+  - average quote value by service line this year
+source: {connection: warehouse, table: staging.stg_pipedrive__quotes}
+default_time_field: sent_date
+primary_key: [quote_id]
+population: Nordlund LVI Oy quotes from the CRM (Finland); every row carries a final status, there is no open quote status in this table
+fields:
+  - {name: quote_id, type: string}
+  - {name: lead_id, type: string}
+  - {name: survey_id, type: string}
+  - {name: customer_id, type: string}
+  - {name: rep_id, type: string, description: "Compass rep id"}
+  - {name: segment, type: string, description: "Households, Housing companies, Commercial & public"}
+  - {name: service, type: string, description: "service line"}
+  - {name: sent_date, type: date}
+  - {name: status, type: string, description: "Won, Lost, Expired"}
+  - {name: quote_value_eur, type: number, description: "quoted amount ex-VAT"}
+  - {name: term_months, type: integer}
+  - {name: deal_id, type: string, description: "the Compass deal once won"}
+  - {name: decided_date, type: date, description: "when the quote was won, lost or expired"}
+dimensions:
+  - {name: segment, aliases: [customer segment]}
+  - {name: service, aliases: [service line, job type, service type]}
+  - {name: status, aliases: [quote status, outcome]}
+  - {name: rep_id, aliases: [rep, sales rep, salesperson]}
+internal: [lead_id, survey_id, deal_id]
+metrics:
+  - name: quote_count
+    agg: count
+    label: quotes
+    aliases: [quotes sent, number of quotes]
+  - name: quotes_won
+    agg: count
+    filters: ["quotes.status = 'Won'"]
+    label: won quotes
+    aliases: [quotes won, wins]
+    agg_time_field: decided_date
+  - name: quotes_decided
+    agg: count
+    filters: ["quotes.status IN ('Won', 'Lost', 'Expired')"]
+    label: decided quotes
+    agg_time_field: decided_date
+  - name: quote_win_rate
+    type: ratio
+    numerator: quotes_won
+    denominator: quotes_decided
+    label: quote win rate
+    aliases: [win rate, hit rate, conversion of quotes]
+    description: won quotes over decided quotes (won + lost + expired), by decision date
+    format: percent
+    better: higher
+  - name: quoted_value_eur
+    agg: sum
+    expr: quotes.quote_value_eur
+    label: quoted value
+    aliases: [quote value, pipeline value]
+    format: currency
+    currency: EUR
+  - name: won_quote_value_eur
+    agg: sum
+    expr: quotes.quote_value_eur
+    filters: ["quotes.status = 'Won'"]
+    label: won quote value
+    aliases: [won pipeline value, value of won quotes]
+    agg_time_field: decided_date
+    format: currency
+    currency: EUR
+  - name: average_quote_value_eur
+    agg: avg
+    expr: quotes.quote_value_eur
+    label: average quote value
+    aliases: [average quote size]
+    format: currency
+    currency: EUR

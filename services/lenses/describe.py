@@ -17,13 +17,17 @@ its ask to match; keeping them secret bought nothing.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Literal
 
 from pydantic import BaseModel
 
+from services.contracts.profile import TableProfile, prompt_values
 from services.contracts.semantic_model import (
+    WITHHELD_COLUMN,
     Entity,
     Metric,
     SemanticModel,
+    TableBlueprint,
     column_hidden,
     column_internal,
 )
@@ -45,20 +49,80 @@ class LensEntityInfo(BaseModel):
     values_note: str | None = None
 
 
+class BlueprintCheckInfo(BaseModel):
+    """One check on an exposed table's blueprint: pass, fail, or unverified
+    with the reason. Read from the stored probe only — describe never hits the
+    warehouse, so a key the probe cannot count says so."""
+
+    check: str
+    verdict: str
+    detail: str
+
+
+class ColumnFactsInfo(BaseModel):
+    """What the probe measured on one column. ``distinct_exact`` False makes
+    ``distinct`` a count seen in a sample (a lower bound)."""
+
+    name: str
+    distinct: int | None = None
+    distinct_exact: bool = False
+    null_rate: float | None = None
+    values: list[str] | None = None
+    min: str | None = None
+    max: str | None = None
+
+
+class TableFactsInfo(BaseModel):
+    """The probe's cheap facts on one table. ``sampled_rows`` set means the
+    column facts were read from that many rows, not all of them."""
+
+    rows: int | None = None
+    sampled_rows: int | None = None
+    profiled_at: str | None = None
+    stale: bool = False
+    columns: list[ColumnFactsInfo] = []
+
+
 class ExposedTableInfo(BaseModel):
-    """A table the lens reads WITHOUT definitions (an `expose:` grant): its
-    columns as profiled, and nothing else — no metric, no meaning."""
+    """A table the lens reads WITHOUT definitions (an `expose:` grant) — no
+    metric, no meaning. A hidden column appears nowhere, not even by name.
+
+    ``detail`` "summary" (describe's default) carries the line a caller needs
+    to pick a table: grain, key, the sync column when rows repeat per sync,
+    row and column counts, and ``flags``. "full" (one table asked by name)
+    adds its columns as profiled, its blueprint (semantic/tables/) when one
+    is declared, each blueprint check's verdict, and the probe's facts."""
 
     table: str
-    columns: list[LensFieldInfo]
+    detail: Literal["summary", "full"] = "full"
+    grain: str | None = None
+    key: list[str] | str | None = None  # "withheld" when it names a hidden column
+    versions: dict[str, object] | None = None
+    rows: int | None = None
+    column_count: int = 0
+    # no blueprint | key fails | key unverified | N caveat(s) | stale probe
+    flags: list[str] = []
+    columns: list[LensFieldInfo] = []
     description: str | None = None
+    blueprint: dict[str, object] | None = None
+    checks: list[BlueprintCheckInfo] = []
+    facts: TableFactsInfo | None = None
 
 
 EXPOSED_NOTE = (
     "exposed_tables are read without governed definitions: answers from these tables "
     "are ungoverned: they carry an EXPOSED line and never a declared or certified tag "
-    "— the sql tool reads them directly"
+    "— the sql tool reads them directly. Each answer also carries a GRAIN line per "
+    "table: rows against distinct key when the table's blueprint declares a key, else "
+    "'could not verify' — check `blueprint` and `facts` before counting rows. Each "
+    "table is a summary here; describe_lens with `table` returns one in full: its "
+    "columns, blueprint, caveats, check verdicts and probe facts"
 )
+
+# The most a description may weigh, as JSON characters: under an MCP client's
+# tool-result limit (Claude Code's is 25,000 tokens by default), so the
+# caller reads the whole of it rather than a preview.
+DESCRIBE_MAX_CHARS = 60_000
 
 
 class LensDefinitionInfo(BaseModel):
@@ -165,6 +229,11 @@ class LensDescription(BaseModel):
     # answer from them is, so the caller learns it before it pays for an ask.
     exposed_tables: list[ExposedTableInfo] = []
     note: str | None = None
+    # Set when the size bound cut the description: what was left out, and how
+    # to read it. ``elided_tables`` names exposed tables whose summary did not
+    # fit (each can be described alone with `table`).
+    elided: str | None = None
+    elided_tables: list[str] = []
     # The metric catalog: every governed metric with its label, unit, time
     # grains, callable dimensions and dependencies, and every dimension with
     # its value dictionary — what an app needs to render a metric tree.
@@ -294,6 +363,156 @@ def metric_tree(metrics: Sequence[CatalogMetric]) -> list[CatalogNode]:
     return [node(m, frozenset()) for m in metrics if (m.entity, m.name) not in used]
 
 
+def _exposed_info(
+    entity: Entity,
+    model: SemanticModel,
+    profiles: Mapping[str, TableProfile],
+    fresh: bool,
+    full: bool = True,
+) -> ExposedTableInfo:
+    from services.project.blueprints import blueprint_verdicts
+    from services.runtime.grain import profile_for
+
+    visible = {f.name.lower() for f in entity.fields}
+    profile = profile_for(profiles, entity.source.table)
+    blueprint = model.blueprints.get(entity.source.table)
+    shown: dict[str, object] | None = None
+    checks: list[BlueprintCheckInfo] = []
+    if blueprint is not None:
+        # Withheld: every profiled column the lens does not read, and any
+        # declared one it does not read either.
+        hidden = (
+            frozenset(
+                {c.name.lower() for c in (profile.columns if profile else [])}
+                | {c.lower() for _where, c in blueprint.own_columns()}
+            )
+            - visible
+        )
+        shown = _visible_blueprint(blueprint, hidden)
+        if profile is not None:
+            verdicts, _errors, _unverified = blueprint_verdicts(
+                blueprint,
+                list(profiles.values()),
+                known_connection=True,
+                fresh=lambda _p: fresh,
+                live=None,
+                hidden=hidden,
+            )
+            checks = [
+                BlueprintCheckInfo(check=v.check, verdict=v.status, detail=v.detail)
+                for v in verdicts
+            ]
+        else:
+            checks = [
+                BlueprintCheckInfo(
+                    check="table",
+                    verdict="unverified",
+                    detail=f"could not verify {entity.source.table}: no stored profile",
+                )
+            ]
+    facts = None
+    if profile is not None:
+        facts = TableFactsInfo(
+            rows=profile.row_count,
+            sampled_rows=profile.sampled_rows,
+            profiled_at=profile.profiled_at.isoformat(),
+            stale=not fresh,
+            columns=[
+                ColumnFactsInfo(
+                    name=c.name,
+                    distinct=c.distinct_count,
+                    distinct_exact=c.distinct_is_exact,
+                    null_rate=c.null_rate,
+                    values=prompt_values(c),
+                    min=c.min,
+                    max=c.max,
+                )
+                for c in profile.columns
+                if c.name.lower() in visible
+            ],
+        )
+    flags: list[str] = []
+    if blueprint is None:
+        flags.append("no blueprint")
+    else:
+        flags += [f"key {c.verdict}s" for c in checks if c.check == "key" and c.verdict == "fail"]
+        flags += [
+            "key unverified" for c in checks if c.check == "key" and c.verdict == "unverified"
+        ]
+        if blueprint.caveats:
+            flags.append(f"{len(blueprint.caveats)} caveat(s)")
+    if profile is not None and not fresh:
+        flags.append("stale probe")
+    view = shown or {}
+    key = view.get("key")
+    versions = view.get("versions")
+    info = ExposedTableInfo(
+        table=entity.source.table,
+        grain=entity.grain,
+        key=key if isinstance(key, (list, str)) else None,
+        versions=versions if isinstance(versions, dict) else None,
+        rows=profile.row_count if profile is not None else None,
+        column_count=len(entity.fields),
+        flags=flags,
+    )
+    if not full:
+        return info.model_copy(update={"detail": "summary"})
+    return info.model_copy(
+        update={
+            "description": entity.description,
+            "columns": [
+                LensFieldInfo(name=f.name, type=f.type, description=f.description)
+                for f in entity.fields
+            ],
+            "blueprint": shown,
+            "checks": checks,
+            "facts": facts,
+        }
+    )
+
+
+def _visible_blueprint(blueprint: TableBlueprint, hidden: frozenset[str]) -> dict[str, object]:
+    """The blueprint as a caller may read it: every mention of a hidden column
+    dropped — a key on one reads as `withheld`, never by name."""
+    data: dict[str, object] = blueprint.model_dump(mode="json", exclude_defaults=True)
+    data = {"connection": blueprint.connection, "table": blueprint.table, **data}
+    prose = [blueprint.grain or "", *blueprint.caveats]
+    prose += [c.meaning or "" for c in blueprint.clocks.values()]
+    if any(WITHHELD_COLUMN in text for text in prose):
+        data["withheld"] = (
+            f"this blueprint's text names a column the lens hides; it reads {WITHHELD_COLUMN} "
+            "in its place"
+        )
+    if not hidden:
+        return data
+    if any(c.lower() in hidden for c in blueprint.key):
+        data["key"] = "withheld"
+    if blueprint.versions is not None:
+        versions = blueprint.versions
+        if versions.sync_column.lower() in hidden:
+            data.pop("versions", None)
+        else:
+            data["versions"] = {
+                "sync_column": versions.sync_column,
+                "latest_only": [c for c in versions.latest_only if c.lower() not in hidden],
+            }
+    if blueprint.clocks:
+        data["clocks"] = {
+            name: clock.model_dump(mode="json", exclude_none=True)
+            for name, clock in blueprint.clocks.items()
+            if name.lower() not in hidden
+        }
+    if blueprint.joins:
+        from services.project.blueprints import on_columns
+
+        data["joins"] = [
+            j.model_dump(mode="json")
+            for j in blueprint.joins
+            if not any(column.lower() in hidden for _q, column in on_columns(j.on))
+        ]
+    return data
+
+
 def describe_model(
     name: str,
     *,
@@ -305,13 +524,33 @@ def describe_model(
     domains: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
     certified: Sequence[tuple[str, Sequence[str]]] = (),
     unsampled: Mapping[str, str] | None = None,
+    profiles: Mapping[str, TableProfile] | None = None,
+    profiles_fresh: bool = True,
+    exposed: Literal["summary", "full"] = "full",
+    table: str | None = None,
+    max_chars: int | None = None,
 ) -> LensDescription:
     """Project a compiled semantic model into the caller-facing description.
     ``unsampled``: entity name -> why its table was never sampled
-    (``value_guard.entity_unsampled``)."""
+    (``value_guard.entity_unsampled``). ``profiles``: table -> its stored
+    profile, for an exposed table's facts and blueprint verdicts;
+    ``profiles_fresh`` False past probe.max_age (counts then decide nothing).
+
+    ``exposed`` picks each exposed table's detail; ``table`` narrows the
+    exposed tables to that one, in full (KeyError when the lens exposes no
+    such table). ``max_chars`` bounds the JSON: exposed summaries that do not
+    fit are named in ``elided_tables`` instead, and ``elided`` says so."""
+    from services.project.lineage import same_table
+
     why = unsampled or {}
     metrics, dimensions = catalog_of(model, domains=domains, certified=certified)
-    return LensDescription(
+    shown = [e for e in model.entities if e.exposed]
+    if table is not None:
+        shown = [e for e in shown if same_table(e.source.table, table)]
+        if not shown:
+            raise KeyError(table)
+    full = exposed == "full" or table is not None
+    described = LensDescription(
         name=name,
         display_name=display_name,
         description=description,
@@ -335,16 +574,7 @@ def describe_model(
             if not e.exposed
         ],
         exposed_tables=[
-            ExposedTableInfo(
-                table=e.source.table,
-                description=e.description,
-                columns=[
-                    LensFieldInfo(name=f.name, type=f.type, description=f.description)
-                    for f in e.fields
-                ],
-            )
-            for e in model.entities
-            if e.exposed
+            _exposed_info(e, model, profiles or {}, profiles_fresh, full) for e in shown
         ],
         note=EXPOSED_NOTE if any(e.exposed for e in model.entities) else None,
         definitions=[
@@ -362,4 +592,77 @@ def describe_model(
         certified_examples=list(certified_examples or []),
         metrics=metrics,
         dimensions=dimensions,
+    )
+    return described if max_chars is None else bounded(described, max_chars)
+
+
+def bounded(description: LensDescription, max_chars: int) -> LensDescription:
+    """The description cut to *max_chars* of JSON, from the end of its exposed
+    tables: each one cut is named in ``elided_tables``, and past what even the
+    names fit, counted. ``elided`` says what was cut and how to read it. A
+    description that fits comes back unchanged."""
+    if len(description.model_dump_json()) <= max_chars:
+        return description
+    if any(t.detail == "full" for t in description.exposed_tables):
+        return _bounded_full(description, max_chars)
+    tables = list(description.exposed_tables)
+    names: list[str] = []
+    unnamed = 0
+    out = description
+
+    def said() -> str:
+        cut = len(names) + unnamed
+        return (
+            f"bounded at {max_chars:,} characters: {cut} of "
+            f"{len(tables) + cut} exposed table(s) are not summarised here"
+            + (f", {unnamed} of them not even by name" if unnamed else "")
+            + " — call describe_lens with `table` set to one of elided_tables for it in full"
+        )
+
+    while len(out.model_dump_json()) > max_chars:
+        if tables:
+            names.insert(0, tables.pop().table)
+        elif names:
+            names.pop()
+            unnamed += 1
+        else:
+            break
+        out = description.model_copy(
+            update={"exposed_tables": tables, "elided_tables": names, "elided": said()}
+        )
+    return out
+
+
+def _bounded_full(description: LensDescription, max_chars: int) -> LensDescription:
+    """A table described in full that is over the bound: its probe facts lose
+    their value lists first, then go whole; ``elided`` says which."""
+    lean = [
+        t.model_copy(
+            update={
+                "facts": t.facts.model_copy(
+                    update={
+                        "columns": [c.model_copy(update={"values": None}) for c in t.facts.columns]
+                    }
+                )
+            }
+        )
+        if t.facts is not None
+        else t
+        for t in description.exposed_tables
+    ]
+    out = description.model_copy(
+        update={
+            "exposed_tables": lean,
+            "elided": f"bounded at {max_chars:,} characters: the value lists in `facts` are "
+            "left out — the sql tool reads a column's values",
+        }
+    )
+    if len(out.model_dump_json()) <= max_chars:
+        return out
+    return description.model_copy(
+        update={
+            "exposed_tables": [t.model_copy(update={"facts": None}) for t in lean],
+            "elided": f"bounded at {max_chars:,} characters: the probe's `facts` are left "
+            "out — the sql tool reads the table itself",
+        }
     )

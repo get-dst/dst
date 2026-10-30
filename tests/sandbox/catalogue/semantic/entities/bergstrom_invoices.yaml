@@ -1,0 +1,59 @@
+name: bergstrom_invoices
+description: >-
+  Bergström Rör AB customer invoices from the monthly Fortnox export, in SEK. Swedish column names:
+  fakturadatum = invoice date, belopp_exkl_moms = amount ex-VAT (the revenue basis),
+  belopp_inkl_moms = incl. 25 % moms, kundnummer = Fortnox customer number (NOT the Finnish CRM id),
+  rakenskapsar = fiscal year as Fortnox labels it (July-June years until the acquisition, calendar
+  years after). Not staged in dbt; this is the only place Bergström's SEK figures exist.
+grain: one row per invoice (fakturanummer)
+use_cases:
+  - "Use when a question asks for Bergström Rör figures in SEK, Swedish invoices, or Swedish customers by type."
+  - "Avoid for: Bergström revenue in EUR (group_revenue_monthly, at the monthly average rate); quotes or deal sizes (Bergström has no quote data in the warehouse)"
+common_questions:
+  - Bergström Rör revenue in SEK for August 2026 vs July
+  - Swedish invoices by customer type this year
+source: {connection: warehouse, table: raw_fortnox_bergstrom.fakturor}
+default_time_field: fakturadatum
+primary_key: [fakturanummer]
+population: Bergström Rör AB only, invoices since January 2022; amounts in SEK, never EUR
+pinned_dimensions: [valuta]
+fields:
+  - {name: fakturanummer, type: integer, description: "invoice number"}
+  - {name: kundnummer, type: integer, description: "Fortnox customer number; collides numerically with nothing in Finland but is a different register"}
+  - {name: fakturadatum, type: date, description: "invoice date"}
+  - {name: forfallodatum, type: date, description: "due date"}
+  - {name: belopp_inkl_moms, type: number, description: "amount incl. 25 % VAT (moms), SEK"}
+  - {name: belopp_exkl_moms, type: number, description: "amount ex-VAT, SEK - the revenue basis"}
+  - {name: moms, type: number, description: "VAT amount, SEK"}
+  - {name: valuta, type: string, description: "currency, always SEK"}
+  - {name: status, type: string, description: "Betald (paid), Obetald (unpaid), Delbetald (part paid)"}
+  - {name: projekt, type: string, description: "project number"}
+  - {name: rakenskapsar, type: string, description: "fiscal year label as Fortnox wrote it"}
+dimensions:
+  - {name: status, aliases: [payment status]}
+  - {name: rakenskapsar, aliases: [fiscal year, financial year]}
+  - {name: valuta, aliases: [currency]}
+  - {name: kundnummer, aliases: [swedish customer, fortnox customer]}
+metrics:
+  - name: se_revenue_sek
+    agg: sum
+    expr: bergstrom_invoices.belopp_exkl_moms
+    label: Bergström revenue in SEK
+    aliases: [Swedish revenue in SEK, revenue in SEK, SEK revenue, Bergström invoiced SEK]
+    description: invoiced amount ex-VAT in SEK by invoice date
+    format: currency
+    currency: SEK
+  - name: se_invoiced_incl_vat_sek
+    agg: sum
+    expr: bergstrom_invoices.belopp_inkl_moms
+    label: Bergström invoiced incl. VAT (SEK)
+    format: currency
+    currency: SEK
+  - name: se_invoice_count
+    agg: count
+    label: Bergström invoices
+    aliases: [Swedish invoices]
+  - name: se_unpaid_invoices
+    agg: count
+    filters: ["bergstrom_invoices.status IN ('Obetald', 'Delbetald')"]
+    label: unpaid Bergström invoices

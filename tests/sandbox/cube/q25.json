@@ -1,0 +1,646 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"tickets.created_at\"], \"limit\": 1, \"order\": [[\"tickets.created_at\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "tickets__created_at": "tickets.created_at"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"tickets\".created_at::timestamptz) \"tickets__created_at\"\n    FROM\n      staging.stg_zendesk__tickets AS \"tickets\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"tickets.customer_id\"], \"filters\": [{\"member\": \"tickets.customer_id\", \"operator\": \"set\"}], \"limit\": 5, \"measures\": [\"tickets.ticket_count\"], \"order\": [[\"tickets.ticket_count\", \"desc\"], [\"tickets.customer_id\", \"asc\"]], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"tickets.created_at\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "tickets__customer_id": "tickets.customer_id",
+      "tickets__ticket_count": "tickets.ticket_count"
+     },
+     "sql": [
+      "SELECT\n      \"tickets\".customer_id \"tickets__customer_id\", count(\"tickets\".ticket_id) \"tickets__ticket_count\"\n    FROM\n      staging.stg_zendesk__tickets AS \"tickets\"  WHERE (\"tickets\".created_at >= ?::timestamptz AND \"tickets\".created_at <= ?::timestamptz) AND (\"tickets\".customer_id IS NOT NULL) GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"tickets.customer_id\"], \"filters\": [{\"member\": \"tickets.customer_id\", \"operator\": \"set\"}], \"limit\": 55, \"measures\": [\"tickets.ticket_count\"], \"order\": [[\"tickets.ticket_count\", \"desc\"], [\"tickets.customer_id\", \"asc\"]], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"tickets.created_at\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "tickets__customer_id": "tickets.customer_id",
+      "tickets__ticket_count": "tickets.ticket_count"
+     },
+     "sql": [
+      "SELECT\n      \"tickets\".customer_id \"tickets__customer_id\", count(\"tickets\".ticket_id) \"tickets__ticket_count\"\n    FROM\n      staging.stg_zendesk__tickets AS \"tickets\"  WHERE (\"tickets\".created_at >= ?::timestamptz AND \"tickets\".created_at <= ?::timestamptz) AND (\"tickets\".customer_id IS NOT NULL) GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 55",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"tickets.customer_id\"], \"limit\": 5, \"measures\": [\"tickets.ticket_count\"], \"order\": [[\"tickets.ticket_count\", \"desc\"], [\"tickets.customer_id\", \"asc\"]], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"tickets.created_at\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "tickets__customer_id": "tickets.customer_id",
+      "tickets__ticket_count": "tickets.ticket_count"
+     },
+     "sql": [
+      "SELECT\n      \"tickets\".customer_id \"tickets__customer_id\", count(\"tickets\".ticket_id) \"tickets__ticket_count\"\n    FROM\n      staging.stg_zendesk__tickets AS \"tickets\"  WHERE (\"tickets\".created_at >= ?::timestamptz AND \"tickets\".created_at <= ?::timestamptz) GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"tickets.resolved_at\"], \"limit\": 1, \"order\": [[\"tickets.resolved_at\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "tickets__resolved_at": "tickets.resolved_at"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"tickets\".resolved_at::timestamptz) \"tickets__resolved_at\"\n    FROM\n      staging.stg_zendesk__tickets AS \"tickets\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "Zendesk tickets, latest version, deleted dropped. Categories: Scheduling, Invoice question, Warranty claim, Emergency, Webshop order, Complaint, Other. first_response_minutes and resolved_at measure service; satisfaction is the good/bad rating when one was given. Tickets link to a CRM customer, a webshop order or a work order, but carry no company (Nordlund LVI vs Bergström) - Bergström's support does not run through this Zendesk.",
+    "dimensions": [
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "tickets.ticket_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Ticket ID",
+      "suggestFilterValues": true,
+      "title": "tickets Ticket ID",
+      "type": "number"
+     },
+     {
+      "isVisible": true,
+      "name": "tickets.created_at",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Created at",
+      "suggestFilterValues": true,
+      "title": "tickets Created at",
+      "type": "time"
+     },
+     {
+      "description": "requester type - b2b contact, webshop customer, ...",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "requester type"
+        ],
+        "dictionary": [
+         "b2b contact",
+         "webshop customer",
+         "ops planner (internal)"
+        ]
+       }
+      },
+      "name": "tickets.requester",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Requester",
+      "suggestFilterValues": true,
+      "title": "tickets Requester",
+      "type": "string"
+     },
+     {
+      "description": "CRM customer when known",
+      "isVisible": true,
+      "name": "tickets.customer_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer ID",
+      "suggestFilterValues": true,
+      "title": "tickets Customer ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "ticket category",
+         "ticket type",
+         "topic"
+        ],
+        "dictionary": [
+         "Webshop order",
+         "Other",
+         "Invoice question",
+         "Emergency",
+         "Warranty claim",
+         "Complaint",
+         "Scheduling"
+        ]
+       }
+      },
+      "name": "tickets.category",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Category",
+      "suggestFilterValues": true,
+      "title": "tickets Category",
+      "type": "string"
+     },
+     {
+      "description": "low, normal, high, urgent",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "dictionary": [
+         "normal",
+         "high",
+         "low",
+         "urgent"
+        ]
+       }
+      },
+      "name": "tickets.priority",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Priority",
+      "suggestFilterValues": true,
+      "title": "tickets Priority",
+      "type": "string"
+     },
+     {
+      "description": "open, pending, closed",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "ticket status"
+        ],
+        "dictionary": [
+         "closed",
+         "open",
+         "pending"
+        ]
+       }
+      },
+      "name": "tickets.status",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Status",
+      "suggestFilterValues": true,
+      "title": "tickets Status",
+      "type": "string"
+     },
+     {
+      "description": "support agent",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "agent",
+         "support agent"
+        ],
+        "dictionary": [
+         "su_okko",
+         "su_ville",
+         "su_janne",
+         "su_petra",
+         "su_maija",
+         "su_leena"
+        ]
+       }
+      },
+      "name": "tickets.assignee",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Assignee",
+      "suggestFilterValues": true,
+      "title": "tickets Assignee",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "dictionary": [
+         "resolved",
+         "Confirmed with BI: known issue in the work-order mart's margin calculation for wo_type = 'Emergency callout' (materials join skipped). Fix scheduled with the platform backlog. Closing."
+        ]
+       }
+      },
+      "name": "tickets.resolution",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Resolution",
+      "suggestFilterValues": true,
+      "title": "tickets Resolution",
+      "type": "string"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "tickets.first_response_minutes",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "First Response Minutes",
+      "suggestFilterValues": true,
+      "title": "tickets First Response Minutes",
+      "type": "number"
+     },
+     {
+      "isVisible": true,
+      "name": "tickets.resolved_at",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Resolved at",
+      "suggestFilterValues": true,
+      "title": "tickets Resolved at",
+      "type": "time"
+     },
+     {
+      "description": "good or bad when rated, else null",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "rating"
+        ],
+        "dictionary": [
+         "good",
+         "bad"
+        ]
+       }
+      },
+      "name": "tickets.satisfaction",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Satisfaction",
+      "suggestFilterValues": true,
+      "title": "tickets Satisfaction",
+      "type": "string"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "number of tickets",
+         "ticket volume",
+         "cases"
+        ]
+       }
+      },
+      "name": "tickets.ticket_count",
+      "public": true,
+      "shortTitle": "tickets",
+      "title": "tickets tickets",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "unresolved tickets",
+         "tickets still open",
+         "backlog"
+        ],
+        "better": "lower"
+       }
+      },
+      "name": "tickets.open_tickets",
+      "public": true,
+      "shortTitle": "open tickets",
+      "title": "tickets open tickets",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "complaint tickets"
+        ],
+        "better": "lower"
+       }
+      },
+      "name": "tickets.complaints",
+      "public": true,
+      "shortTitle": "complaints",
+      "title": "tickets complaints",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "warranty tickets"
+        ]
+       }
+      },
+      "name": "tickets.warranty_claims",
+      "public": true,
+      "shortTitle": "warranty claims",
+      "title": "tickets warranty claims",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "tickets.webshop_tickets",
+      "public": true,
+      "shortTitle": "webshop order tickets",
+      "title": "tickets webshop order tickets",
+      "type": "number"
+     },
+     {
+      "aggType": "avg",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "first response time",
+         "time to first response",
+         "response time"
+        ],
+        "better": "lower"
+       }
+      },
+      "name": "tickets.avg_first_response_minutes",
+      "public": true,
+      "shortTitle": "average first response time (minutes)",
+      "title": "tickets average first response time (minutes)",
+      "type": "number"
+     },
+     {
+      "aggType": "avg",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "resolution time",
+         "time to resolve",
+         "time to resolution"
+        ],
+        "better": "lower"
+       }
+      },
+      "name": "tickets.avg_resolution_hours",
+      "public": true,
+      "shortTitle": "average resolution time (hours)",
+      "title": "tickets average resolution time (hours)",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "tickets.rated_tickets",
+      "public": true,
+      "shortTitle": "rated tickets",
+      "title": "tickets rated tickets",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "tickets.good_rated_tickets",
+      "public": true,
+      "shortTitle": "tickets rated good",
+      "title": "tickets tickets rated good",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "good ratings over all ratings on the asked tickets",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "satisfaction rate",
+         "share rated good",
+         "good rating share"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "tickets.good_rating_share",
+      "public": true,
+      "shortTitle": "share of tickets rated good",
+      "title": "tickets share of tickets rated good",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per ticket",
+      "key": [
+       "ticket_id"
+      ],
+      "population": "all Zendesk tickets since January 2025 - Finnish operations and the webshop; no Bergström tickets",
+      "system": "Zendesk"
+     }
+    },
+    "name": "tickets",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "tickets",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "tickets": {
+   "time_dimensions": {
+    "created_at": {
+     "data_end": "2026-08-09",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-09"
+    },
+    "resolved_at": {
+     "data_end": "2026-08-10",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-10"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "dimensions": [
+    "tickets.customer_id"
+   ],
+   "limit": 5,
+   "measures": [
+    "tickets.ticket_count"
+   ],
+   "order": {
+    "tickets.customer_id": "asc",
+    "tickets.ticket_count": "desc"
+   },
+   "timeDimensions": [
+    {
+     "dateRange": [
+      "2026-01-01",
+      "2026-08-31"
+     ],
+     "dimension": "tickets.created_at"
+    }
+   ]
+  }
+ ],
+ "question": "top 5 customers by number of support tickets opened this year"
+}

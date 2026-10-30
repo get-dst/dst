@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from services.contracts.errors import ProviderError
 from services.contracts.eval import EvalCase, EvalResult, EvalRun
+from services.contracts.failure_modes import FailureMode
 from services.contracts.protocols import Connector, LLMProvider
 from services.observability import usage as ai_usage
 from services.reviews.judge import judge_trace
@@ -155,6 +156,9 @@ def run_behavioral(
         # refusal) — a behavioural row is graded on its shape, and the shape
         # it had is what a later reader needs to see.
         actual: str | None = None
+        # The mode the response carried, whatever the expectation: a
+        # clarification's or a refusal's name, None on a clean answer.
+        mode: str | None = None
         for attempt in range(GATE_ATTEMPTS):
             try:
                 pr = serve(c.question)
@@ -163,9 +167,11 @@ def run_behavioral(
                 # like any failure; it must not take the rest of the suite with it.
                 ok, reason, grade, sql = False, f"model provider failed: {exc}", "errored", None
                 actual = json.dumps({"status": "errored", "text": reason})
+                mode = str(FailureMode.provider_down)
                 continue
             t = pr.trace
             sql = t.sql
+            mode = str(pr.response.mode) if pr.response.mode is not None else None
             actual = json.dumps({"status": t.status, "text": pr.response.answer or t.error})
             if t.status == "error":
                 ok, reason, grade = False, t.error, "errored"
@@ -215,6 +221,7 @@ def run_behavioral(
             actual_sql=sql,
             actual_value=actual,
             reason=reason,
+            mode=mode,
         )
 
     results = list(_pooled(_score, shape_cases, concurrency))

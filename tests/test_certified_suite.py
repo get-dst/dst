@@ -268,7 +268,7 @@ def test_cli_test_verb_full_corpus_exit_codes_and_restamp(org, monkeypatch, caps
     the re-verify flag clears through evidence, from the CLI too)."""
     from services.certify import store as certify_store
     from services.certify.bindings import certified_bindings
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.db.session import org_session
     from services.evals import store as eval_store
 
@@ -344,7 +344,7 @@ def test_dst_test_records_its_run(org, monkeypatch, capsys) -> None:
     from sqlalchemy import text
 
     from services.certify import store as certify_store
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.db.session import org_session
 
     oid = org
@@ -414,7 +414,7 @@ def test_cli_test_runs_behavioral_expectations(org, monkeypatch, capsys) -> None
     — `dst test` must not skip them. The demo clarify pin passes
     deterministically; an expect: refuse on a question the pipeline answers
     fails and exits 1."""
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.db.session import org_session
     from services.evals import store as eval_store
 
@@ -485,7 +485,7 @@ def test_cli_test_is_org_scoped_and_names_the_org(org, monkeypatch, capsys) -> N
     from sqlalchemy import create_engine, text
 
     from services.certify import store as certify_store
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.db.session import org_session
     from services.lenses import connection_store
     from services.lenses import store as lens_store
@@ -558,7 +558,7 @@ def test_cli_test_skips_a_lens_it_cannot_serve_instead_of_dialling_another_vendo
     same lie the org scoping exists to prevent. It says SKIP, names what it
     tried, and counts it, so the exit code cannot claim verification."""
     from services.certify import store as certify_store
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.config import ProviderConfig
     from services.contracts.lens_config import ModelConfig
     from services.db.session import org_session
@@ -758,7 +758,7 @@ def test_a_suite_that_verified_nothing_exits_4_not_0(org, monkeypatch, capsys) -
     no certified answers and no eval cases is an UNGATED lens, and a script has to
     be able to see that without parsing prose.
     """
-    from services.cli.main import _test
+    from services.cli.test import _test
 
     monkeypatch.setattr("services.llm.registry.resolve_embedder", lambda: None)
     monkeypatch.setattr(
@@ -1029,7 +1029,7 @@ def test_dst_test_exits_one_on_a_divergence_under_json_too(org, monkeypatch, cap
     """The exit code is the gate: a run with any failing case exits 1 whether
     it prints prose or the --json object, and the object's tally agrees."""
     from services.certify import store as certify_store
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.db.session import org_session
 
     with org_session(org) as s:
@@ -1124,7 +1124,7 @@ def test_dst_test_prints_and_reports_the_lenient_reason(org, monkeypatch, capsys
     """A value-equivalent pass names its reason on the PASS line and in the
     --json row; neither may read as an exact match."""
     from services.certify import store as certify_store
-    from services.cli.main import _test
+    from services.cli.test import _test
     from services.db.session import org_session
 
     certified = "SELECT 'all' AS label, 19.0 AS pct"

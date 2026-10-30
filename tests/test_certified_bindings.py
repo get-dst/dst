@@ -651,3 +651,23 @@ def test_differing_qualifications_never_match() -> None:
     assert foreign_tables("SELECT customer_id FROM hr.customers", _model()) == ["hr.customers"]
     assert foreign_tables("SELECT customer_id FROM jaffle.customers", _model()) == []
     assert foreign_tables("SELECT customer_id FROM customers", _model()) == []
+
+
+def test_a_template_cube_query_renders_validated_values_never_spliced_text() -> None:
+    from services.certify.binding import parse_slots, render_query
+
+    specs, _ = parse_slots({"period": {"type": "date_range"}, "n": {"type": "number"}})
+    query = {
+        "measures": ["orders.count"],
+        "timeDimensions": [{"dimension": "orders.ordered_at", "dateRange": "{period}"}],
+        "filters": [
+            {"member": "orders.ordered_at", "operator": "afterDate", "values": ["{period.start}"]}
+        ],
+        "limit": "{n}",
+    }
+    out = render_query(query, specs, {"period": "2026-Q2", "n": "5"})
+    assert out["timeDimensions"][0]["dateRange"] == ["2026-04-01", "2026-06-30"]  # type: ignore[index]
+    assert out["filters"][0]["values"] == ["2026-04-01"]  # type: ignore[index]
+    assert out["limit"] == 5  # type: ignore[index]
+    with pytest.raises(ValueError):
+        render_query(query, specs, {"period": "next spring", "n": "5"})

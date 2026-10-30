@@ -2,9 +2,7 @@
 
 POST /mgmt/connections/{name}/audit — query history → mine_drift →
 execute_variants, end-to-end through a fake connector; connectors without a
-history catalog are a clear 400. POST …/audit/draft-definition records a
-ticket-less definition PatchCandidate that lands on the SAME approval rail as
-corrections and distillation (GET /mgmt/lenses/{lens}/patches).
+history catalog are a clear 400.
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ from services.config import settings
 from services.contracts.query_history import QueryRecord
 from services.contracts.warehouse import DryRunResult, QueryResult, SchemaSnapshot
 from services.db.session import org_session
-from services.lenses.demo import jaffle_customer_value_bundle
 
 client = TestClient(app)
 
@@ -60,7 +57,6 @@ def _cleanup(org: object) -> None:
     admin = create_engine(settings.database_admin_url)
     with admin.begin() as c:
         c.execute(text("DELETE FROM review WHERE org_id = :o"), {"o": org})
-        c.execute(text("DELETE FROM patch_candidate WHERE org_id = :o"), {"o": org})
         c.execute(text("DELETE FROM audit_run WHERE org_id = :o"), {"o": org})
         c.execute(text("DELETE FROM lens WHERE org_id = :o"), {"o": org})
         c.execute(text("DELETE FROM admin_token WHERE org_id = :o"), {"o": org})
@@ -436,67 +432,5 @@ def test_drift_ticket_dedup_is_one_per_fingerprint(
         assert "definitions: channel" in note
         assert "certified answers: Channel mix?" in note
         assert "entities: orders" in note
-    finally:
-        _cleanup(org)
-
-
-# ─── the bridge: finding → definition patch on the shared approval rail ───────
-
-
-@needs_db
-def test_draft_definition_lands_on_the_lens_patch_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    org, raw = _org_token()
-    h = {"Authorization": f"Bearer {raw}"}
-    _patch_resolver(monkeypatch, FakeHistoryConnector())
-    try:
-        bundle = jaffle_customer_value_bundle().model_dump(mode="json")
-        assert client.post("/mgmt/lenses", json=bundle, headers=h).status_code == 201
-
-        audit = client.post("/mgmt/connections/wh/audit", headers=h).json()
-        (finding,) = audit["findings"]
-
-        r = client.post(
-            "/mgmt/connections/wh/audit/draft-definition",
-            json={"finding": finding, "lens": "customer_value"},
-            headers=h,
-        )
-        assert r.status_code == 201, r.text
-        cand = r.json()
-        assert cand["kind"] == "definition"
-        assert cand["status"] == "candidate"
-        assert cand["ticket_id"] is None  # ticket-less, like distilled candidates
-        assert cand["lens"] == "customer_value"
-        assert cand["target"] == finding["metric_intent"]
-        assert cand["diff_before"] is None  # term not yet defined on the lens
-        # the proposal names the canon (most-agreed reading) and keeps the rejected ones
-        assert "Canonical reading" in cand["diff_after"]
-        assert "Rejected readings" in cand["diff_after"]
-        assert "review before certifying" in cand["diff_after"]
-
-        # THE point: it appears on the existing approval rail for this lens.
-        listed = client.get("/mgmt/lenses/customer_value/patches", headers=h).json()
-        assert [p["id"] for p in listed] == [cand["id"]]
-        assert listed[0]["status"] == "candidate"
-    finally:
-        _cleanup(org)
-
-
-@needs_db
-def test_draft_definition_unknown_lens_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    org, raw = _org_token()
-    h = {"Authorization": f"Bearer {raw}"}
-    fake = FakeHistoryConnector()
-    _patch_resolver(monkeypatch, fake)
-    try:
-        audit = client.post("/mgmt/connections/wh/audit", headers=h).json()
-        (finding,) = audit["findings"]
-        r = client.post(
-            "/mgmt/connections/wh/audit/draft-definition",
-            json={"finding": finding, "lens": "nope"},
-            headers=h,
-        )
-        assert r.status_code == 404
-        # nothing recorded
-        assert client.get("/mgmt/lenses/nope/patches", headers=h).json() == []
     finally:
         _cleanup(org)

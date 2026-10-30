@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 
+from services.contracts.failure_modes import FailureMode
 from services.contracts.protocols import (
     CacheableBlock,
     ContextChunk,
@@ -22,7 +23,7 @@ from services.contracts.protocols import (
 )
 from services.contracts.query_intent import QueryIntent
 from services.contracts.response import ClarificationRequest
-from services.contracts.semantic_model import SemanticModel
+from services.contracts.semantic_model import SemanticModel, blueprint_lines
 from services.lenses.profile_enrich import lens_today
 from services.observability import usage as ai_usage
 from services.runtime import ambiguity, growth
@@ -104,6 +105,11 @@ def serialize_layer(model: SemanticModel) -> str:
             )
         if e.grain:
             lines.append(f"  Grain: {e.grain}")
+        readable = {f.name.lower() for f in e.fields}
+        lines += [
+            f"  {line[0].upper()}{line[1:]}"
+            for line in blueprint_lines(model.blueprints.get(e.source.table), readable)
+        ]
         if e.population:
             # Without this, a scoped table answers "all X" questions as if it
             # held the whole population — the bound rides both prompts, the
@@ -454,6 +460,7 @@ class IntentSQLGenerator:
             # did not split them: ask, rather than let a raw tier guess.
             gq.clarification = ClarificationRequest(
                 kind="unresolved_slot",
+                mode=FailureMode.not_expressible,
                 term="metric",
                 question=f"These cannot be computed in one query: {error}",
                 options=list(intent.metrics) if intent is not None else [],

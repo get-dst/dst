@@ -108,6 +108,29 @@ class CoverageProfile:
     sources: list[str] = field(default_factory=list)
     # Whose figures it holds (lens.yaml ``scope``): "own", "market" or "".
     data_scope: str = ""
+    # What its answers can be split and filtered by: each governed entity's
+    # dimensions (with their aliases), shown to the decider.
+    dimensions: list[str] = field(default_factory=list)
+    # Key stored values per dimension or field, bounded (the decider reads
+    # them: "which lens holds 'warranty'").
+    values: dict[str, list[str]] = field(default_factory=dict)
+    # Every word the lens holds, stemmed (``router.coverage``): its metrics,
+    # fields, dimensions, stored values, definitions, row nouns and declared
+    # scope. None for a profile not built from published files: not checked.
+    vocabulary: frozenset[str] | None = None
+    # The part of it the lens declares as names: metric names, labels and
+    # aliases, fields, dimensions, stored values, definitions, sources. Only
+    # a word some lens declares so can count against another lens; a word
+    # met only in prose (a verb in a description) separates nothing.
+    declared: frozenset[str] | None = None
+    # A text column whose stored values are incomplete: a word the question
+    # writes as a name may be one of them.
+    open_values: bool = False
+    # Served by the cube lane, whose own word check (``uncovered_word``)
+    # refuses a question naming what the lens does not hold: the router may
+    # send it a question it covers in part, and asks the decider only when
+    # several lenses cover a question equally (``router.decider``).
+    cube_lane: bool = False
 
 
 @dataclass
@@ -140,6 +163,12 @@ class RouteDecision:
     # votes answered, a reply came back unreadable), as ``(provider, usage)``
     # pairs: no decision was made, but the spend is recorded on the row.
     spent: list[tuple[str, DecisionUsage]] = field(default_factory=list)
+    # The lenses tried in order and why each was passed over, refused or
+    # chosen: ``{"lens", "result", "why"}``. Rides the routing record.
+    chain: list[dict[str, str]] = field(default_factory=list)
+    # Further lenses that cover the whole question, in order: the door tries
+    # the next when the routed lens refuses for data it does not hold.
+    fallbacks: list[str] = field(default_factory=list)
 
 
 # (embedder model, dim, ask) -> vector: the not_for asks, embedded once per process.

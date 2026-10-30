@@ -9,9 +9,9 @@ for naming, a DuckDB mini-world for the execute-variants path.
 from datetime import UTC, datetime
 from pathlib import Path
 
+import duckdb
 import pytest
 
-from services.benchmark.world import load_world
 from services.connectors.duckdb import DuckDBConnector
 from services.contracts.fakes import ScriptedLLM
 from services.contracts.query_history import QueryRecord
@@ -19,6 +19,22 @@ from services.contracts.warehouse import QueryResult
 from services.definitions.standards import OrgStandard
 from services.probe.drift import DriftFinding, DriftVariant, execute_variants, mine_drift
 from services.probe.report import annotate_against_canon
+
+
+def load_world(csv_root: Path, db_path: Path) -> None:
+    """Load every ``<schema>/<table>.csv`` under ``csv_root`` into a DuckDB file."""
+    con = duckdb.connect(str(db_path))
+    try:
+        for schema_dir in sorted(p for p in csv_root.iterdir() if p.is_dir()):
+            con.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema_dir.name}"')
+            for csv_file in sorted(schema_dir.glob("*.csv")):
+                con.execute(
+                    f'CREATE TABLE "{schema_dir.name}"."{csv_file.stem}" AS '
+                    "SELECT * FROM read_csv_auto(?, header=true)",
+                    [str(csv_file)],
+                )
+    finally:
+        con.close()
 
 
 def _rec(statement: str, runs: int, who: str | None = None, tool: str | None = None) -> QueryRecord:

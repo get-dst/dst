@@ -10,6 +10,7 @@ dst.yaml                      providers + connection declarations
 .env                              secrets, referenced by env-var NAME only (gitignored)
 semantic/entities/<name>.yaml     shared entities (name is identity, unique project-wide)
 semantic/relationships/<left>__<right>.yaml  one join pair per file (left = the FK side)
+semantic/tables/<table>.yaml      table blueprints: grain, key, repeated rows, clocks, joins
 semantic/definitions/<term>.md    shared governed terms (frontmatter + prose)
 lenses/<name>/lens.yaml           selection + policy (+ `timezone:` — the lens's business clock)
 lenses/<name>/queries.yaml        use_when (router anchors) + sample_queries
@@ -146,15 +147,37 @@ pinned_dimensions: ["currency"]
   SQL is held to the same rule by the `aggregation_scope` serve check.
 - **`hide`**: column patterns the entity withholds from every door (fnmatch on
   the column name, bare or as `entity.column`). A hidden column is absent from
-  the lens: generated SQL, the `sql` tool and `describe_lens` never see it, and
-  naming it is out of scope on every one of them. Plan fails on a pattern that
-  matches no field, and on a hidden column a dimension, metric, key or filter
-  still reads: hiding less than you believe is the silent miss this exists to
-  stop. Plan also warns `sensitive_columns` when an entity in scope carries a
-  column named like personal data (`personal_id`, `ssn`, `email`, `phone`,
-  `birth_date`, `date_of_birth`, `address`) with no `hide` on it and no
-  definition `about` it; the column reaching a door is a declared schema fact,
-  and the author decides whether the hide or the definition is the fix.
+  the lens: generated SQL, the `sql` tool, `describe_lens`, the metric catalog,
+  value dictionaries and certified answers never see it, and naming it is out
+  of scope on every one of them. A pattern matches a field or a bare dimension
+  (one with no `expr`), since either puts the column in the lens; the bare
+  dimension is withheld with its column. Plan fails on a pattern that matches
+  neither, on a hidden column a computed dimension, metric, key or filter still
+  reads, and on a certified answer whose SQL reads a hidden column: hiding less
+  than you believe is the silent miss this exists to stop. Plan also warns
+  `sensitive_columns` when an entity in scope carries a column named like
+  personal data (`personal_id`, `ssn`, `email`, `phone`, `birth_date`,
+  `date_of_birth`, `address`) with no `hide` on it and no definition `about`
+  it; the column reaching a door is a declared schema fact, and the author
+  decides whether the hide or the definition is the fix.
+
+  An entry can keep the column for named caller groups:
+
+  ```yaml
+  hide:
+    - ssn
+    - column: contact_email
+      except_groups: [support, sales]
+  ```
+
+  Every caller outside `support` and `sales` reads the lens as if
+  `contact_email` were a plain `hide` entry. A caller in one of them reads the
+  column on every door, and each answer that read it names the exception on its
+  receipt. A plain pattern over the same column wins, and so does any other
+  entry still hiding it from the caller. The group names must be declared under
+  `groups:` in `dst.yaml`; plan and apply fail on any other name. Group
+  membership is set on the caller, never by a request (see
+  [Security](../security.md#hidden-columns-and-group-exceptions)).
 - **`internal`**: column patterns, matched like `hide`, that the lens keeps
   but never offers a question: no filter, breakdown or ranking is decided on
   them, a clarification never lists them, and the metric catalog leaves them
@@ -295,20 +318,20 @@ Both describe what one row is, and they have completely separate consumers:
   by machinery: the time guard treats a GROUP BY on a key column as deliberate
   row-grain grouping and skips its repair (`services/runtime/time_guard.py`),
   the reference resolver checks the named columns exist
-  (`services/semantic/resolve.py`), and the OSI export carries it.
+  (`services/semantic/resolve.py`).
 
 `grain` is where the sentence that prevents a double-count lives: `description`
 says what the table holds, `grain` says what counting the rows would actually
 count: "one row per order line, so summing `amount` double-counts the order".
 
-The honest caveat: because `grain` is prose the model trusts and nothing checks,
-a wrong declared grain ("one row per order" written over an order-lines table)
-makes the model confidently double-count with that sentence in its prompt. That
-is precisely the failure `grain` exists to prevent, and today it is the one
-claim on an entity no gate can catch. `primary_key` is the structural version of
-the same fact and is resolvable, but it is not cross-checked against `grain` and
-not probed against the warehouse for uniqueness. (The dbt importer's coverage
-report counts "entities with grain" from `primary_key`, not from `grain`.)
+The honest caveat: because `grain` is prose the model trusts, a wrong declared
+grain ("one row per order" written over an order-lines table) makes the model
+confidently double-count with that sentence in its prompt. An entity's own
+`primary_key` is resolvable but not probed against the warehouse for
+uniqueness. The checked version of both facts is the table's
+[blueprint](#table-blueprints-facts-about-a-table): its `key` is counted
+against the table's rows on every plan and apply, and an entity that declares
+no `grain` or `primary_key` inherits the blueprint's.
 
 Three different things are called "grain": on an entity, what one row of the
 table is; on a definition, what one row of that term's result is, rendered with
@@ -531,6 +554,100 @@ naming exactly what this lens loses on the first pass;
 `dst lens prompt <lens> "<question>"` renders both prompts so you can check
 what actually reached the model.
 
+## Table blueprints: facts about a table
+
+A table carries facts no entity file is the right home for, because they are
+true of the table whatever a lens does with it: what one row is, which columns
+a row is unique on, whether rows repeat once per sync of the same record, which
+clock a timestamp is in. A table blueprint holds them, one file per table under
+`semantic/tables/` (folders are organization, the table name inside is the
+identity):
+
+```yaml
+# semantic/tables/crm.contacts.yaml
+connection: crm
+table: crm.contacts                 # as `dst introspect` names it
+system: CRM                         # the source system it is loaded from
+grain: one row per contact per sync
+key: [contact_id, _synced_at]
+versions:
+  sync_column: _synced_at           # rows repeat once per value of it
+  latest_only: [_deleted]           # holds on a record's latest version only
+clocks:
+  created_at: {meaning: when the contact was created, timezone: UTC}
+joins:
+  - to: crm.accounts
+    "on": contacts.account_id = accounts.account_id
+    cardinality: one                # rows of `to` per row here: one or many
+caveats:
+  - a contact deleted in the CRM keeps its earlier rows
+```
+
+Blueprints are project-wide, not per lens. An entity whose `source.table` is the
+table inherits `grain` when it declares none, and the blueprint's `key` as its
+`primary_key` when it names none and reads every key column (a hidden column
+never comes back as a key). Both generation prompts carry the versions line,
+the clocks and the caveats for every entity and exposed table on the table.
+Editing a blueprint marks every lens reading the table stale, and apply
+recompiles them, the same as a shared entity edit.
+
+A lens never serves the name of a column it hides, and that includes blueprint
+text. Where the grain line, a caveat or a clock's meaning names a hidden column
+(bare, as `table.column`, or schema-qualified), every door reads
+`[withheld column]` in its place, and `describe_lens` marks the blueprint
+`withheld`. A declared join whose condition names one is left out, and a caveat
+counts how many. Plan warns the author by name, so the text can be reworded.
+
+The facts come from the table, the dbt docs and tests, and the team's notes,
+written by the author's agent: `dst init` scaffolds a `dst-blueprints` skill
+that maps the slots and the checks. dst makes no model call for any of it.
+
+### What plan checks
+
+`dst plan` checks every blueprint against the probe artifact, and `dst apply`
+runs the same checks again on what it landed:
+
+| Kind | Check |
+|---|---|
+| error | the `key` is not unique: the row count against the distinct count of the key (with `versions`, the key plus the sync column), from the probe when it counted a one-column key over every row within `probe.max_age`, else one live `COUNT` |
+| error | a declared column (key, sync column, `latest_only`, a clock) that the table does not have, with the nearest column name |
+| error | a blueprint for a table its connection does not hold, or for a connection `dst.yaml` does not declare |
+| error | a join whose `on` names a column neither table has, or a `to` table the connection does not hold |
+| warning | an in-scope table (read by an entity or an `expose:` grant) with no declared grain and key, unless its entity declares both |
+| warning | a key that could not be counted, with the reason (no probe, a connection not applied yet, over the byte budget) |
+| warning | blueprint text (grain, a caveat, a clock's meaning, a join condition) that names a column a lens hides |
+| hint | a column named like another in-scope table's one-column key, with no join declared, when the probe shows both tables non-empty and some of the column's values among the key's |
+| hint | a join in certified SQL that no blueprint declares |
+| hint | a candidate key that repeats beside a sync or delete column, with no `versions` |
+
+An error on a blueprint the push adds or changes marks its file invalid and
+aborts apply: that is a false declaration being introduced. A stored blueprint
+the push leaves alone that stops holding (the warehouse moved under it) is never
+an error, because aborting would block every unrelated lens on a warehouse
+change. It is a `DRIFT:` warning on plan and apply naming the table and the
+lenses that read it, and the answers that read the table carry it on their grain
+check: a key that no longer holds grades them `unverified`. A missing blueprint
+never fails a plan. The plan summary ends with the coverage line:
+
+```
+Table blueprints: 3 of 7 in-scope table(s) declare grain and key.
+```
+
+A join hint needs evidence from the probe, not a name alone. Both tables must
+have rows, and the column's probed values must overlap the key's; when the
+probe holds the key's complete value list, at least 95% of the column's values
+must be in it. Tables whose blueprints declare two different `system` values are
+never paired, so a frozen legacy extract and the system that replaced it do not
+hint joins to each other. Each table lists its three best-supported hints and
+counts the rest, and one line counts the candidates that were not hinted: a
+column whose values the probe does not hold on both sides, and one where a table
+is empty.
+
+A live count is one read-only statement returning one row. On a warehouse that
+bills scanned bytes it is dry-run first and is not run when the estimate exceeds
+the connection's `sample_bytes_budget`, the same bound the probe's sampling pass
+works under; the warning says so with both numbers.
+
 ## Exposing tables that have no definitions
 
 Not every read is a governed one. Investigative work on staging tables or a stray
@@ -558,14 +675,14 @@ or time field. Because it is resolved from the profile, the columns are the ware
 as of the last probe; re-apply after a probe and the entity follows the table.
 
 Apply fails loud when a pattern matches no profiled table (the error names the
-pattern: run `dst probe` or fix it). It also fails on a name collision, because an
-exposed table is addressed by its bare name and two things cannot answer to one:
-a matched table whose bare name is an entity the same lens selects
-(`staging.orders` beside a selected `orders`) fails, naming both and asking you to
-exclude it from the pattern or drop the entity from `select`; and two exposed
-tables that share a bare name (`staging.customers` and `analytics.customers` under
-one lens) fail, asking you to narrow the patterns so one lens exposes one table
-under that name. Two patterns matching the same table is not a collision: it
+pattern: run `dst probe` or fix it). A bare name that two things would answer to is
+qualified instead: a matched table whose bare name is an entity the same lens selects
+(`staging.orders` beside a selected `orders`), and two exposed tables that share a bare
+name (`staging.customers` and `analytics.customers` under one lens), are exposed under
+their qualified names (`staging_orders`, `staging_customers`, `analytics_customers`).
+A bare `orders` keeps meaning the selected entity, and SQL that names
+`staging.orders` reads the table. Apply fails only when the qualified name is taken
+too. Two patterns matching the same table is not a collision: it
 becomes one entity. `dst plan` prints `exposes N tables (M columns)` per
 lens, `(M columns, H hidden)` when `hide` withheld any, and warns when `expose` is set
 with `untyped_fallback: false`: a question about an exposed table never types, so
@@ -602,8 +719,37 @@ What an exposed table is, on every rail:
   and grades at most `partial` — the `governed_read` check names the ungoverned
   read. Its columns never count as declared sources in the resolution ledger, so a
   measure read from it is `inferred`, never `declared` or `certified`.
+- the answer also carries one `GRAIN:` line per exposed table it read. With a key in
+  the table's blueprint, the line states rows against distinct key (the key without
+  the sync column when `versions` is set), from the probe while it is fresh and
+  exact, else from one live count within the byte budget:
+  `GRAIN: crm.contacts: 12 rows for 4 distinct contact_id (counted live
+  2026-10-20 06:00 UTC): rows repeat per _synced_at, ...`. The line says when the
+  count was taken. A table with `versions` is always counted live, because the
+  same statement also counts the key plus the sync column, which the probe
+  cannot. A live count is reused across answers for the probe's `max_age` (one
+  hour when `max_age` is `0` or nothing is profiled), per org, connection, table
+  and key. Rows that repeat per a declared sync fail the `grain` check and keep
+  the grade at `partial`; counts that contradict the declared key (the key alone,
+  or with `versions` the key plus the sync column) grade the answer
+  `unverified`. With no declared key,
+  or no count possible, the line says `could not verify the grain of <table>` and
+  why, and the answer is never `verified`. The `sql` tool returns the same lines in
+  its `grain` field.
 - `describe_lens` lists it under `exposed_tables`, apart from `entities`, with a note
-  that answers from it are ungoverned.
+  that answers from it are ungoverned. Each table is a summary: its grain, key,
+  `versions`, row count, column count and `flags` (`no blueprint`, `key fails`,
+  `key unverified`, the number of caveats, `stale probe`). Called with `table`, it
+  returns that one table in full: its columns, its `blueprint`, each blueprint
+  check's verdict read from the stored probe (a key the probe cannot count reads
+  `unverified`, with the reason), and the probe's `facts`: row count, distinct
+  counts, value lists and ranges. A hidden column appears in none of them, and a
+  key on one reads `withheld`.
+- The description is bounded at 60,000 characters of JSON, below the tool-result
+  limit of common MCP clients. When a lens exposes more tables than fit, the
+  summaries past the bound are named in `elided_tables` (and past what the names
+  fit, counted), and `elided` says what was left out. A single table over the
+  bound drops its value lists first, then its `facts`, and says which.
 
 Promote a table into a real entity the moment a number from it is going to be
 repeated: the first metric, the first definition someone asks about, the first
@@ -624,9 +770,10 @@ untouched; `plan` diffs exactly what `apply` will do.
 ## The scaffold teaches
 
 `dst init` writes a dbt-style project: a demo DuckDB warehouse option, per-warehouse
-credential prompts, `git init`, an `AGENTS.md` guide for coding agents, and seven Claude
+credential prompts, `git init`, an `AGENTS.md` guide for coding agents, and eight Claude
 Code skills: [reviewing the warehouse for answerability](answerable-tables.md) before
-building on it, authoring the semantic layer, writing curated context,
+building on it, authoring the semantic layer, writing
+[table blueprints](#table-blueprints-facts-about-a-table), writing curated context,
 importing verified BI queries as certified answers,
 [bootstrapping from query history](drift-audit.md), and running the
 [correction loop](correction-loop.md) from a wrong answer back to a certified one

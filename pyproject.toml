@@ -1,6 +1,6 @@
 [project]
 name = "dst-core"
-version = "0.14.0"
+version = "0.15.0"
 description = "dst, the data serve tool — governed data access layer (backend)"
 dynamic = ["readme"]
 license = "Apache-2.0"
@@ -71,6 +71,7 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.7",
     "mypy>=1.13",
+    "time-machine>=3.6.0",
 ]
 
 [project.scripts]

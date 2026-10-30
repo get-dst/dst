@@ -34,6 +34,7 @@ import sqlglot
 from sqlglot import exp
 
 from services.certify.lexical import breakdown_words
+from services.contracts.failure_modes import FailureMode
 from services.contracts.profile import LOW_CARDINALITY_MAX
 from services.contracts.protocols import (
     ContextChunk,
@@ -84,6 +85,7 @@ from services.runtime.compiler import (
     metric_sql,
     prefer_weighted_ratio,
     reads_as_level,
+    unsafe_join_reason,
 )
 from services.runtime.compiler import _resolve_entity as resolve_entity
 from services.runtime.intent_generator import intent_term
@@ -592,6 +594,8 @@ _FRAME_WORDS = frozenset(
 # "during last month", "on 28 August", "at the start of Q3". Admitted only
 # beside a window the text states.
 _WINDOW_FRAME_WORDS = frozenset("in for during over within on at".split())
+# The present said in words: a level's latest snapshot, a flow's today.
+_PRESENT_WORDS = frozenset("currently presently".split())
 
 
 # Words a time field's name carries that say it is a time, not which one:
@@ -742,6 +746,10 @@ def window_filters(
     ``_Clarify`` when the window cannot be placed (an unplaced month, no time
     field, two periods)."""
     terms = timewindow.temporal_terms(question)
+    if terms and present_as_latest(question, entity, metrics):
+        # "today" on a level metric is its latest snapshot (the answer says
+        # which day that is), never a window today's load may not have reached.
+        return []
     # A vague part of a month ("early August", "mid-August") is never served
     # as the month and never guessed: ask, offering the days each reading uses.
     if vague := timewindow.vague_days(question, today):
@@ -779,7 +787,7 @@ def window_filters(
     # A month the question names that no window term carries would be
     # served as the OTHER months alone (or as all time) — a silently wrong
     # period. Ask for the period instead; never drop a stated month.
-    if unplaced := timewindow.unplaced_months(question, terms):
+    if unplaced := timewindow.unplaced_months(question, terms, today):
         raise _Clarify(
             ClarificationRequest(
                 kind="unresolved_slot",
@@ -800,6 +808,7 @@ def window_filters(
         raise _Clarify(
             ClarificationRequest(
                 kind="unresolved_slot",
+                mode=FailureMode.not_expressible,
                 term="window",
                 question="The question states a time window, but this entity declares no "
                 "time field to apply it to.",
@@ -824,6 +833,7 @@ def window_filters(
         raise _Clarify(
             ClarificationRequest(
                 kind="unresolved_slot",
+                mode=FailureMode.not_expressible,
                 term=field_name,
                 question=f"The question asks about days, and '{field_name}' holds months, so "
                 "the answer would cover the whole month. Ask for the month, or for a lens "
@@ -857,6 +867,14 @@ def window_filters(
         IntentFilter(field=field_name, op=">=", value=start.isoformat()),
         IntentFilter(field=field_name, op="<=", value=end.isoformat()),
     ]
+
+
+def present_as_latest(question: str, entity: Entity, metrics: list[str]) -> bool:
+    """A level metric asked for today, now or currently: its latest snapshot."""
+    bare = {m.rsplit(".", 1)[-1] for m in metrics}
+    return timewindow.asks_present(question) and any(
+        reads_as_level(m, entity) for m in entity.metrics if m.name in bare
+    )
 
 
 def pin_period(
@@ -1843,6 +1861,7 @@ def _coverage_exempt(word: str) -> bool:
         word in _ORDINARY
         or word in _FRAME_WORDS
         or word in _WINDOW_FRAME_WORDS
+        or word in _PRESENT_WORDS
         or word in _SHAPE_WORDS
         or (word in _MEASURE_SHAPE_WORDS and word != "net")  # net against gross qualifies
         or word in _FIGURE_LEAD
@@ -2183,6 +2202,7 @@ def _refuse_self_defining_filters(
                 raise _Clarify(
                     ClarificationRequest(
                         kind="unresolved_slot",
+                        mode=FailureMode.wrong_grain,
                         term=f.field,
                         question=f"Filtering on '{f.field}' would decide '{name}' itself "
                         f"(its numerator counts '{f.field}'), so every row would read the "
@@ -2732,6 +2752,9 @@ class TypedResolver:
         self._prefetched: dict[str, tuple[Decision, str, int]] = {}
         self._matched: list[str] = []
         self._declined: list[str] = []
+        # (stored value, joined entity.column) the question restricts by
+        # through a declared join (``_holds_the_named``).
+        self._joined: list[tuple[str, str]] = []
         # Numbers the chosen metrics' names carry ("15" of answered_within_15m):
         # the metric's setting, never a literal a filter may take.
         self._spent = frozenset()
@@ -2862,6 +2885,7 @@ class TypedResolver:
                 raise _Clarify(
                     ClarificationRequest(
                         kind="unresolved_slot",
+                        mode=FailureMode.not_declared,
                         term="metric",
                         question=f"{reason}, and every metric of this lens counts only other "
                         "values of it. Is the question meant for another lens?",
@@ -2934,6 +2958,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.uncovered_word,
                     term="metric",
                     question=f"The question names a measure ('{noun}'), so a list of rows would "
                     "not answer it. Which figure does it ask for? " + ", ".join(names) + ".",
@@ -2979,6 +3004,7 @@ class TypedResolver:
                     raise _Clarify(
                         ClarificationRequest(
                             kind="unresolved_slot",
+                            mode=FailureMode.not_expressible,
                             term="metric",
                             question="The question names "
                             + ", ".join(named_metrics)
@@ -3022,6 +3048,7 @@ class TypedResolver:
                     raise _Clarify(
                         ClarificationRequest(
                             kind="unresolved_slot",
+                            mode=FailureMode.ambiguous_metric,
                             term="metric",
                             question="These metrics measure the same thing at different "
                             "settings, and the question names none: "
@@ -3159,6 +3186,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.uncovered_word,
                     term="metric",
                     question="Which figure does the question ask for? "
                     + ", ".join(o.name for o in own_metrics[:6]),
@@ -3468,6 +3496,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_declared,
                     term=noun,
                     question=f"This lens measures {unit} here; '{noun}' is not declared as a "
                     f"metric of {entity.name}. Which of its metrics does the question mean, "
@@ -3484,6 +3513,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_declared,
                     term=counted,
                     question=f"The question counts {_said_plural(counted)}, and "
                     f"{', '.join(metrics)} does not count them. Which metric of "
@@ -3500,6 +3530,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_declared,
                     term=word,
                     question=f"This lens has no metric for '{word}'; it measures {labels}. "
                     "Which of them does the question mean, or is it for another lens?",
@@ -3514,6 +3545,7 @@ class TypedResolver:
                 chosen_words,
                 _naming_words(entity, self._domains_for(entity), model),
                 self._today,
+                levels=level_edge(question, entity, metrics) is not None,
             )
             if shape in _FIGURES
             else None
@@ -3534,6 +3566,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_expressible,
                     term=word,
                     question=f"The question asks for a {word}, and {', '.join(metrics)} is not "
                     "one: served as it is, the answer would be the plain figure, not its "
@@ -3552,6 +3585,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_declared,
                     term="net new",
                     question=f"The question asks for a net figure, and {', '.join(metrics)} "
                     "counts one side only. "
@@ -3574,11 +3608,13 @@ class TypedResolver:
             grouped=tuple(dimensions),
             dialect=model.dialect,
         )
+        filters += self._through_joins(question, model, entity, metrics, records)
         if code := unheld_code(question, entity, model, self._domains_for(entity)):
             if not any(str(f.value).lower() == code.lower() for f in filters):
                 raise _Clarify(
                     ClarificationRequest(
                         kind="unresolved_slot",
+                        mode=FailureMode.not_declared,
                         term=code,
                         question=f"This lens has no field for {code}: no column of "
                         f"{entity.name} holds it. Is the question meant without it, or for "
@@ -3661,6 +3697,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_declared,
                     term="dimension",
                     question=f"The question asks a breakdown by {missing}, and the answer "
                     f"would group by nothing that is one. Which field of {entity.name} should "
@@ -3691,6 +3728,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.uncovered_word,
                     term=word,
                     question=(
                         f"'{word}' is said only by {', '.join(carriers)}, and the answer "
@@ -3800,8 +3838,23 @@ class TypedResolver:
                 for column, value in named.items():
                     if value not in here and not carried.carries(value):
                         missing.setdefault(value, {}).setdefault(column, set()).add(e.name)
+        # A value held by an entity the declared joins reach without fanning
+        # this one out ("in service vessels" asked of crossings joined to
+        # vessels) restricts through the join, as the compiler reads it.
+        for value, by_column in list(missing.items()):
+            reach = {
+                (holder, column)
+                for column, holders in by_column.items()
+                for holder in holders
+                if unsafe_join_reason(model, entity.name, holder) is None
+            }
+            if len(reach) == 1:
+                holder, column = reach.pop()
+                self._joined.append((value, f"{holder}.{column}"))
+                del missing[value]
         if not missing:
             return entity, first_metric
+        self._joined = []
         holding = set.intersection(
             *(
                 {e for holders in by_column.values() for e in holders}
@@ -3849,12 +3902,75 @@ class TypedResolver:
         raise _Clarify(
             ClarificationRequest(
                 kind="unresolved_slot",
+                mode=FailureMode.not_expressible,
                 term=next(iter(missing)),
                 question=f"{stated}: {where} has it; {entity.name} does not — which should "
                 "answer, or is the question meant without it?",
                 options=[*holders, entity.name],
             )
         )
+
+    def _through_joins(
+        self,
+        question: str,
+        model: SemanticModel,
+        entity: Entity,
+        metrics: list[str],
+        records: list[DecisionRecord],
+    ) -> list[IntentFilter]:
+        """A filter for each named value a joined entity holds, and for each
+        true/false field of one the question names by its subject ("chartered
+        vessels" of `vessels.is_chartered`) when the entity has none of its
+        own and the chosen metrics do not carry it: the focused decision the
+        entity's own get, and its "none" a question back, never a silent drop.
+        Only entities the declared joins reach without fanning this one out."""
+        out: list[IntentFilter] = []
+        carried = _carried(entity, metrics, model.dialect)
+        own = {
+            said for _c, said, _n in named_flags(question, entity, [f.name for f in entity.fields])
+        }
+        joined: dict[str, list[tuple[Entity, str, bool]]] = {}
+        for other in model.entities:
+            if other.name == entity.name or unsafe_join_reason(model, entity.name, other.name):
+                continue
+            flags = [f.name for f in other.fields if not column_hidden(f.name, other)]
+            for column, said, negated in named_flags(question, other, flags):
+                if said not in own and not carried.carries(said.replace(" ", "")):
+                    joined.setdefault(said, []).append((other, column, negated))
+        for said, hits in joined.items():
+            if len(hits) != 1:
+                continue  # two joined flags say it: the qualifier rail asks
+            other, column, negated = hits[0]
+            value = self._flag_value(question, other, column, said, negated, records)
+            out.append(IntentFilter(field=f"{other.name}.{column}", op="=", value=value))
+        for value, via in self._joined:
+            picked = self._pick(
+                "filter",
+                question,
+                f"The question names '{value}', a stored value of {via}, which "
+                f"{entity.name} reaches through its declared join. Which field does it "
+                "restrict the answer by?",
+                [Option(via), Option(_NONE, "it restricts nothing; the name is incidental")],
+                allow_none=True,
+                records=records,
+                clarify_term="filter",
+                clarify_question=f"Which field should '{value}' restrict? {via}",
+                key=f"named:{value}",
+            )
+            if picked is None:
+                raise _Clarify(
+                    ClarificationRequest(
+                        kind="unresolved_slot",
+                        mode=FailureMode.uncovered_word,
+                        term=value,
+                        question=f"The question names '{value}', a stored value of {via}, "
+                        "but no filter of the answer uses it. Should it restrict the answer? "
+                        "Supply it as a binding.",
+                        options=[via],
+                    )
+                )
+            out.append(IntentFilter(field=picked, op="=", value=value))
+        return out
 
     def _ranked(
         self, question: str, entity: Entity, dims: list[Option], named_columns: set[str]
@@ -3896,6 +4012,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_expressible,
                     term="dimension",
                     question=f"The question ranks by {said}: {other.name} holds {member}, and "
                     f"{entity.name}, which the figure is counted on, does not. One answer "
@@ -3929,6 +4046,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.not_expressible,
                     term="window",
                     question=f"The question asks for a change over time, and {entity.name} "
                     "declares no time field to measure it on.",
@@ -4152,6 +4270,7 @@ class TypedResolver:
             raise _Clarify(
                 ClarificationRequest(
                     kind="unresolved_slot",
+                    mode=FailureMode.uncovered_word,
                     term=value,
                     question=f"The question names '{value}', a stored value of "
                     f"{', '.join(sorted(named))}, but no filter of the answer uses it. "
@@ -4630,6 +4749,8 @@ class TypedResolver:
     def _level_windowed(self, question: str, entity: Entity, metrics: list[str]) -> bool:
         """Is a level metric (a snapshot figure) read over a stated window?"""
         bare = {m.rsplit(".", 1)[-1] for m in metrics}
+        if present_as_latest(question, entity, metrics):
+            return False  # read as the latest snapshot, like no window at all
         return bool(timewindow.temporal_terms(question)) and any(
             reads_as_level(m, entity) for m in entity.metrics if m.name in bare
         )

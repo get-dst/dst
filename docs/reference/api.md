@@ -38,7 +38,7 @@ row-level security whose failure mode is *no rows*, never cross-tenant
 | Route | Description |
 |---|---|
 | `GET /health` | Liveness: the process is up |
-| `GET /ready` | Readiness. Five checks gate `status`: DB, MCP session manager, schema state, whether trace writes are landing, and `typed_decisions` (`ok`, `off`, or `degraded (…)` while the typed-decision provider is failing, until a typed decision succeeds again). Reported but never gating: `embeddings`, `certified_matching`, `certified_bands` (`calibrated`, `uncalibrated (…)` or `n/a`), `ai_pricing` (`ok`, or `UNPRICED (…)` naming each model your providers can call that has no price, and each `anthropic` provider model with no prompt-cache price), `plugins`, and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
+| `GET /ready` | Readiness. Five checks gate `status`: DB, MCP session manager, schema state, whether trace writes are landing, and `typed_decisions` (`ok`, `off`, or `degraded (…)` while the typed-decision provider is failing, until a typed decision succeeds again). Reported but never gating: `embeddings`, `certified_matching`, `certified_bands` (`calibrated`, `uncalibrated (…)` or `n/a`), `ai_pricing` (`ok`, or `UNPRICED (…)` naming each model your providers can call that has no price, and each `anthropic` provider model with no prompt-cache price), `plugins`, `cube` (the configured Cube: reachable, version, `model_version`, member counts, or `not configured`), `serving` (per published lens its lane, `typed` or `cube`, and why; for a Cube lane whether Cube is configured, when the monitor ran and whether a chat tier serves the HTTP question door), `data_quality` (the latest `dst monitor` run per org), and `models`: what this install actually resolves (`fast=`/`smart=` provider/model + embedder). A lens that names no model runs on the `smart=` entry, so this is where "which model does my lens run on?" is answered |
 | `GET /SKILL.md` | The file an agent reads to connect itself: the instance name, the MCP URL, the setup for Claude, Claude Code, Codex, ChatGPT and Cursor with the key as a placeholder, which of them sign in through OAuth instead, and in demo mode the topics and the limits. Public, `text/markdown`, cached for five minutes. Outside demo mode it needs `DST_PUBLIC_BASE_URL` and answers 404 with the reason without it |
 
 `/SKILL.md` is how a person connects their AI with one line: they paste
@@ -56,6 +56,11 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 |---|---|
 | `GET /v1/lenses` | The lenses this key may query |
 | `GET /v1/lenses/{name}` | One lens's schema, definitions, certified count, and metric catalog (`metrics`, `dimensions`) |
+| `GET /v1/lenses/{name}?view=` | A lens served through Cube: its views (the named one in full), members with their `meta.dst` facts and observed values, refusals, ambiguous terms, freshness and certified pairs (`CubeLensDescription`) |
+| `POST /v1/lenses/{name}/cube` | Run the caller's own Cube query: body `{"query": {…}, "ledger": [{"word", "to", "ref"}], "question": "…"}`; every check, no model call; a stopped query carries `retry` |
+| `GET /v1/lenses/{name}/values?member=&prefix=` | Observed values of `view.member` (the probe's dictionary) or of an exposed `table.column` (the stored profile) |
+| `GET /v1/lenses/{name}/data_end?member=` | Where a time dimension, measure, cube, exposed table or column ends, with the lens clock and a partly loaded period |
+| `GET /v1/grain?table=&lens=` | An exposed table's blueprint, check verdicts, probe facts and rows against distinct key |
 | `GET /v1/lenses/{name}/catalog` | The metric catalog alone: `metrics`, `dimensions`, and `tree`, the metrics arranged by what each is computed from |
 | `POST /v1/lenses/{name}/query` | Ask: body `{"q": "..."}` → a governed answer |
 | `POST /v1/lenses/{name}/metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; same governance and receipts; `compare` adds a comparison window |
@@ -64,7 +69,7 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 | `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key) where the lens's `hide` and `not_computable` refusals apply; row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
 | `GET /v1/lenses/{name}/certified` | The lens's certified library; with `?q=` results are similarity-ranked (top 5, scored) |
 | `POST /v1/lenses/{name}/certified/{cert_id}/run` | Run an approved question→SQL pair exactly as certified; zero AI SQL generation |
-| `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope; when the question names a table a lens exposes, `exposed_in` lists that lens and the reason says to ask it by name |
+| `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope; when the question names a table a lens exposes, `exposed_in` lists that lens and the reason says to ask it by name. For a driver with Cube-backed lenses in its catalogue: those lenses by coverage and why (`DriverRouteAnswer`) |
 | `POST /v1/verify-receipt` | Check an answer's signed receipt: signature + field-by-field cross-check against the logged trace |
 | `POST /v1/reviews` | Open a review ticket on a traced request (optionally with a correction delta); 201, and only against a request served to this caller (admins excepted) |
 | `GET /v1/reviews` | The tickets raised on this caller's own requests: the reporter's half of the queue |
@@ -100,6 +105,36 @@ from the column it filters (checked against the committed value dictionary, or b
 governed probe of the warehouse): `term` names the column, `options` are the values it
 actually holds; re-ask with the stored value you mean, or read the absence as the
 answer ([Clarify & refusal](../concepts/clarify-and-refusal.md)).
+
+### Driver mode
+
+A request whose caller is an agent runs in driver mode: the request carries
+`X-DST-Driver: 1` (the MCP server sends it on every call), or an admin marked the
+caller a driver (`PUT /mgmt/callers/{name}/driver`, `dst keys create --driver`).
+Driver mode applies to lenses served through Cube only. On those dst resolves no model
+provider, and a provider call that completed anyway raises instead of being recorded
+(`services/observability/usage.py`). Lenses on the typed core answer every route
+exactly as without driver mode. What changes:
+
+- `POST /v1/query`, when the caller may use a lens served through Cube, returns a
+  `DriverRouteAnswer` (`services/api/route.py`, `services/serve/driver.py`):
+  `candidates` (lens, `serving`, `no_model`, `why`, `matched` words with their
+  targets, `uncovered`), `choose` when several cover the question, `refusal` when a
+  Cube-backed lens declares it, and `no_model`, per lens, true where dst calls no
+  model. Cube-backed lenses are routed on deterministic coverage, with no embedder
+  and no decider. When none of them covers the question, the typed lenses route it
+  as without driver mode and their `RoutedAnswer` or uncovered envelope is under
+  `routed`; with no typed lens, `nearest` and `explore_kit` say what is left. With no
+  Cube-backed lens the response is unchanged.
+- `POST /v1/lenses/{name}/query` on a lens served through Cube answers 400: send the
+  query with `POST /v1/lenses/{name}/cube`.
+- `POST /v1/lenses/{name}/cube`, `values`, `data_end` and `grain` call no model for
+  any caller, and `POST /v1/sql` never did.
+
+The `/v1/lenses/{name}/cube` response is the query response plus `retry` (`check`,
+`mode`, `detail`, `change`) on a non-answer. The `/v1/sql` response adds `data_end`
+(one line per exposed table read), `checks` and a signed `receipt` graded
+`unverified`; a check that could not run reads `exposed, could not verify …`.
 
 ### The metric catalog
 
@@ -245,12 +280,18 @@ receipt: they make no data claim to attest.
 ## MCP (`/mcp`)
 
 A remote, stateless streamable-HTTP MCP server (`services/mcp/server.py`); connect with
-a URL and a `dst_` key, or via the built-in OAuth flow. Fourteen tools:
+a URL and a `dst_` key, or via the built-in OAuth flow. Every request runs in
+[driver mode](#driver-mode), which changes only lenses served through Cube. Eighteen
+tools:
 
 | Tool | Description |
 |---|---|
 | `list_lenses` | What this key can query |
-| `describe_lens` | Fields, definitions, certified count and metric catalog for one lens |
+| `describe_lens` | Fields, definitions, certified count and metric catalog for one lens; a lens served through Cube describes its views, members, refusals, freshness and certified pairs (`view` picks the one in full) |
+| `query_cube` | Run your own Cube query and word ledger through every check; rows, mode, receipt, and `retry` on a stopped query |
+| `values` | Observed values of a member or exposed column |
+| `data_end` | Where a member's or exposed table's data ends |
+| `grain` | An exposed table's blueprint and rows against distinct key |
 | `metric_catalog` | The metric catalog alone, with the metric tree |
 | `lookup_definition` | A governed term's approved meaning verbatim; no SQL, no warehouse |
 | `search_certified` | Similarity-search the certified library |
@@ -259,7 +300,7 @@ a URL and a `dst_` key, or via the built-in OAuth flow. Fourteen tools:
 | `query_metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; `compare` adds a comparison window |
 | `query_metrics_batch` | Up to 50 structured intents in one call, read at one moment, results keyed by id |
 | `sql` | Run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; the lens's `hide` and `not_computable` refusals apply |
-| `route_query` | **The default door**: dst picks the lens or declines; a decline a lens would refuse by declaration returns that lens's refusal |
+| `route_query` | **The default door**: dst picks the lens or declines; a decline a lens would refuse by declaration returns that lens's refusal; Cube-backed lenses are routed by coverage in driver mode |
 | `send_for_review` | Flag an answer into the human review queue |
 | `review_status` | Poll a ticket |
 | `verify_receipt` | Check a receipted number before repeating it: signature + trace cross-check |
@@ -308,12 +349,12 @@ the rest is on `/docs`, and the [CLI](cli.md) wraps the ones you'd call by hand.
 |---|---|
 | `/mgmt/project` | export / plan / apply: the file-first deployment door |
 | `/mgmt/lenses` | drafts, publish, versions, repo + diffs, context, drift, sample queries |
-| `/mgmt/lenses/{lens}/certified` · `/evals` · `/distill` · `/patches` | the certified corpus, eval cases, and drafted fixes per lens |
+| `/mgmt/lenses/{lens}/certified` · `/evals` | the certified corpus and eval cases per lens |
 | `/mgmt/lenses/{lens}/join-candidates` · `/profile` · `/profile-drift` | profiling |
 | `/mgmt/semantic` | shared entities/definitions + `GET /mgmt/semantic/introspect` |
 | `/mgmt/connections` | warehouse connections, catalog, per-connection profile, and the [drift-audit](../guides/drift-audit.md) endpoints |
-| `/mgmt/reviews` | queue, rulings, patch approve/reject |
-| `/mgmt/callers` · `/mgmt/users` | identities and keys |
+| `/mgmt/reviews` | queue and rulings |
+| `/mgmt/callers` · `/mgmt/users` | identities and keys; `PUT /mgmt/callers/{name}/driver` marks a caller a driver |
 | `/mgmt/observe` | KPIs, requests, callers, evals, every lens's recent runs (`/mgmt/observe/runs?last=N`) |
 | `/mgmt/requests` | the request ledger export |
 | `/mgmt/standards` · `/mgmt/activation` · `/mgmt/surface` · `/mgmt/gap-map` | the rest of the cockpit |

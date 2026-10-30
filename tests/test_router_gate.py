@@ -1,6 +1,6 @@
 """The router experiment becomes a CI gate.
 
-The held-out question set (scripts/router_experiment.py) runs offline in CI
+The held-out question set (tests/fixtures/router_gate_set.py) runs offline in CI
 against RECORDED embeddings (tests/fixtures/router_experiment_bge.json.gz, the
 local bge-small tier — the zero-config default embedder). Deterministic, no
 keys. Guards:
@@ -22,10 +22,8 @@ bge-small is a production arm, not a stand-in fake.
 from __future__ import annotations
 
 import gzip
-import importlib.util
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -44,14 +42,9 @@ _FIXTURE = _ROOT / "tests" / "fixtures" / "router_experiment_bge.json.gz"
 
 
 def _experiment():  # noqa: ANN202 — module type
-    spec = importlib.util.spec_from_file_location(
-        "router_experiment", _ROOT / "scripts" / "router_experiment.py"
-    )
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("router_experiment", mod)
-    spec.loader.exec_module(mod)
-    return mod
+    from tests.fixtures import router_gate_set
+
+    return router_gate_set
 
 
 class FixtureEmbedder:

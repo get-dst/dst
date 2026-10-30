@@ -292,10 +292,14 @@ def resolve_model(model: SemanticModel) -> tuple[SemanticModel, list[str], list[
     ctx = _Ctx(dialect=model.dialect, entities=out.entities)
 
     # Spec risk 2: an entity name equal to a DIFFERENT entity's source table
-    # would make `<name>.<col>` ambiguous — error, never silently shadow.
+    # would make `<name>.<col>` ambiguous — error, never silently shadow. An
+    # exposed table is the exception as `b`: it carries no authored
+    # expression, it is exposed under its qualified name when a selected
+    # entity holds its bare one, and a bare reference resolves to the entity
+    # name first here and in the guard.
     for a in out.entities:
         for b in out.entities:
-            if a is not b and _ref_matches(a.name.lower(), b.source.table):
+            if a is not b and not b.exposed and _ref_matches(a.name.lower(), b.source.table):
                 ctx.error(
                     f"entity '{a.name}' collides with the source table of entity "
                     f"'{b.name}' ('{b.source.table}') — entity names are the logical "

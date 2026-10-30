@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from services.cli.main import _evals_migrate
+from services.cli.evals import _evals_migrate
 
 
 def _scaffold(tmp_path: Path) -> Path:

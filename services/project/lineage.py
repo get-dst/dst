@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import json
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from services.certify.bindings import source_tables
-from services.dbt.artifacts import DbtArtifactError, load_manifest
 
 _DBT_RELATIONS = ("model", "seed", "snapshot", "source")
 
@@ -144,10 +144,19 @@ def dbt_lineage(manifest: dict[str, object]) -> LineageGraph:
 
 
 def load_dbt(target_dir: Path) -> LineageGraph:
+    """The lineage in a dbt ``target/`` directory's ``manifest.json``."""
+    manifest_path = Path(target_dir) / "manifest.json"
+    if not manifest_path.is_file():
+        raise LineageError(
+            f"manifest.json not found in {target_dir} — run `dbt parse` (or any dbt build) first"
+        )
     try:
-        return dbt_lineage(load_manifest(target_dir))
-    except DbtArtifactError as exc:
-        raise LineageError(f"{exc} — run `dbt parse` (or any dbt build) first") from exc
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LineageError(f"could not read dbt artifact {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise LineageError(f"dbt artifact {manifest_path} is not a JSON object")
+    return dbt_lineage(manifest)
 
 
 # ── SQLMesh ──────────────────────────────────────────────────────────────────

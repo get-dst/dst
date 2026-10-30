@@ -1,0 +1,5 @@
+left: crm_leads
+right: customers
+"on": crm_leads.customer_id = customers.customer_id
+type: left
+relationship: many_to_one

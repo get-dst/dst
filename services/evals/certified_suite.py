@@ -39,7 +39,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from services.benchmark.grading import first_failed_stage, stage_statuses
 from services.certify import binding as certify_binding
 from services.certify.generate import _value_summary
 from services.certify.store import CertifiedAnswer, is_active
@@ -48,6 +47,7 @@ from services.contracts.errors import ProviderError
 from services.contracts.protocols import Connector, QueryGenerator
 from services.contracts.resolution import Resolution
 from services.evals import runner
+from services.evals.grading import first_failed_stage, stage_statuses
 from services.evals.runner import _SCALAR_RTOL
 from services.observability import usage as ai_usage
 from services.observability.usage import AICall
@@ -92,7 +92,7 @@ class CertifiedCaseResult:
     assembly: dict[str, int] = field(default_factory=dict)
     # Wall-clock for this case (generation + both executions), for the ledger.
     elapsed_s: float | None = None
-    # Stage attribution (benchmark.grading): each stage's verdict, the first
+    # Stage attribution (evals.grading): each stage's verdict, the first
     # failed stage when the case is wrong, and what the resolution lane saw.
     # Rows stay the gate — a resolution miss on a rows-pass is REPORTED (the
     # answer took an ungoverned path to the right number) and never flips

@@ -1,0 +1,824 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"customers.customer_since\"], \"limit\": 1, \"order\": [[\"customers.customer_since\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "customers__customer_since": "customers.customer_since"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"customers\".customer_since::timestamptz) \"customers__customer_since\"\n    FROM\n      marts_customer.dim_customer_360 AS \"customers\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"customers.first_activity_date\"], \"limit\": 1, \"order\": [[\"customers.first_activity_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "customers__first_activity_date": "customers.first_activity_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"customers\".first_activity_date::timestamptz) \"customers__first_activity_date\"\n    FROM\n      marts_customer.dim_customer_360 AS \"customers\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"customers.last_activity_date\"], \"limit\": 1, \"order\": [[\"customers.last_activity_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "customers__last_activity_date": "customers.last_activity_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"customers\".last_activity_date::timestamptz) \"customers__last_activity_date\"\n    FROM\n      marts_customer.dim_customer_360 AS \"customers\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"maintenance_contracts.end_date\"], \"limit\": 1, \"order\": [[\"maintenance_contracts.end_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "maintenance_contracts__end_date": "maintenance_contracts.end_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"maintenance_contracts\".end_date::timestamptz) \"maintenance_contracts__end_date\"\n    FROM\n      (SELECT * FROM raw_fieldflow.maintenance_contracts\nWHERE _synced_batch = 'B2026-08-31') AS \"maintenance_contracts\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"maintenance_contracts.start_date\"], \"limit\": 1, \"order\": [[\"maintenance_contracts.start_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "maintenance_contracts__start_date": "maintenance_contracts.start_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"maintenance_contracts\".start_date::timestamptz) \"maintenance_contracts__start_date\"\n    FROM\n      (SELECT * FROM raw_fieldflow.maintenance_contracts\nWHERE _synced_batch = 'B2026-08-31') AS \"maintenance_contracts\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"filters\": [{\"member\": \"customers.customer_type\", \"operator\": \"equals\", \"values\": [\"Housing company\"]}], \"measures\": [\"maintenance_contracts.active_contracts\"], \"timeDimensions\": [{\"dateRange\": [\"2026-09-01\", \"2026-10-30\"], \"dimension\": \"maintenance_contracts.end_date\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "maintenance_contracts__active_contracts": "maintenance_contracts.active_contracts"
+     },
+     "sql": [
+      "SELECT\n      count(CASE WHEN (\"maintenance_contracts\".status = 'Active') THEN \"maintenance_contracts\".contract_id END) \"maintenance_contracts__active_contracts\"\n    FROM\n      (SELECT * FROM raw_fieldflow.maintenance_contracts\nWHERE _synced_batch = 'B2026-08-31') AS \"maintenance_contracts\"\nLEFT JOIN marts_customer.dim_customer_360 AS \"customers\" ON \"maintenance_contracts\".customer_id = \"customers\".customer_id  WHERE (\"maintenance_contracts\".end_date >= ?::timestamptz AND \"maintenance_contracts\".end_date <= ?::timestamptz) AND (\"customers\".customer_type = ?) LIMIT 10000",
+      [
+       "2026-09-01T00:00:00.000Z",
+       "2026-10-30T23:59:59.999Z",
+       "Housing company"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "One row per CRM customer (Nordlund LVI's 100 companies and private customers), current state: type, region, city, lifetime invoiced, active maintenance contracts and partner link. This is the \"customer\" group reports count. Webshop shoppers and Bergström's Fortnox customers are different populations and are not here. primary_segment carries legacy labels and is never a breakdown; the transaction tables (quotes, bookings, invoices, leads) carry the clean segment.",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "customers.customer_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Customer ID",
+      "suggestFilterValues": true,
+      "title": "customers Customer ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "label_of": "customer_id"
+       }
+      },
+      "name": "customers.customer_name",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer Name",
+      "suggestFilterValues": true,
+      "title": "customers Customer Name",
+      "type": "string"
+     },
+     {
+      "description": "Housing company, Company, Construction firm, Public sector, Private individual, Retail, Building services, Property investor, Property management",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "type",
+         "customer category"
+        ],
+        "dictionary": [
+         "Company",
+         "Housing company",
+         "Construction firm",
+         "Public sector",
+         "Private individual",
+         "Retail",
+         "Building services",
+         "Property investor",
+         "Property management"
+        ]
+       }
+      },
+      "name": "customers.customer_type",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer Type",
+      "suggestFilterValues": true,
+      "title": "customers Customer Type",
+      "type": "string"
+     },
+     {
+      "description": "Uusimaa, Pirkanmaa, Pohjois-Pohjanmaa, Varsinais-Suomi, Keski-Suomi, Päijät-Häme",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "area",
+         "maakunta"
+        ],
+        "dictionary": [
+         "Uusimaa",
+         "Pohjois-Pohjanmaa",
+         "Pirkanmaa",
+         "Varsinais-Suomi",
+         "Keski-Suomi",
+         "Päijät-Häme"
+        ]
+       }
+      },
+      "name": "customers.region",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Region",
+      "suggestFilterValues": true,
+      "title": "customers Region",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "town"
+        ],
+        "dictionary": [
+         "Helsinki",
+         "Oulu",
+         "Tampere",
+         "Turku",
+         "Espoo",
+         "Vantaa",
+         "Jyväskylä",
+         "Lahti",
+         "Mäntsälä"
+        ]
+       }
+      },
+      "name": "customers.city",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "City",
+      "suggestFilterValues": true,
+      "title": "customers City",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "customers.customer_since",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer Since",
+      "suggestFilterValues": true,
+      "title": "customers Customer Since",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "name": "customers.first_activity_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "First Activity Date",
+      "suggestFilterValues": true,
+      "title": "customers First Activity Date",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "name": "customers.last_activity_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Last Activity Date",
+      "suggestFilterValues": true,
+      "title": "customers Last Activity Date",
+      "type": "time"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "customers.lifetime_invoiced_eur_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "lifetime_invoiced_eur (the column)",
+      "suggestFilterValues": true,
+      "title": "customers lifetime_invoiced_eur (the column)",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "customers.active_contracts",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Active Contracts",
+      "suggestFilterValues": true,
+      "title": "customers Active Contracts",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "customers.active_contract_value_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Active Contract Value Eur",
+      "suggestFilterValues": true,
+      "title": "customers Active Contract Value Eur",
+      "type": "number"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "partner customer"
+        ]
+       }
+      },
+      "name": "customers.is_partner",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Is Partner",
+      "suggestFilterValues": true,
+      "title": "customers Is Partner",
+      "type": "boolean"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "customers.days_since_activity",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Days Since Activity",
+      "suggestFilterValues": true,
+      "title": "customers Days Since Activity",
+      "type": "number"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "number of customers",
+         "CRM customers",
+         "customer base"
+        ]
+       }
+      },
+      "name": "customers.customer_count",
+      "public": true,
+      "shortTitle": "customers",
+      "title": "customers customers",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "lifetime value",
+         "lifetime revenue"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "customers.lifetime_invoiced_eur",
+      "public": true,
+      "shortTitle": "lifetime invoiced",
+      "title": "customers lifetime invoiced",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "customers.customers_with_contracts",
+      "public": true,
+      "shortTitle": "customers with an active maintenance contract",
+      "title": "customers customers with an active maintenance contract",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per CRM customer",
+      "key": [
+       "customer_id"
+      ],
+      "population": "Finnish CRM customers only (100), current state",
+      "system": "dbt (Pipedrive + activity)"
+     }
+    },
+    "name": "customers",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "customers",
+    "type": "cube"
+   },
+   {
+    "description": "Maintenance contracts (yearly service agreements with housing companies and property managers) from FieldFlow, latest FULL sync batch only - the July batch was a partial sync that timed out at 8 % and was never cleaned up, so it is excluded here. status is Active, Renewed (replaced by a successor contract) or Churned (not renewed). The \"renewal wall\" is the contracts whose end_date falls in the same quarter - Q1 2027 is the one everybody watches.",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "maintenance_contracts.contract_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Contract ID",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Contract ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "customer"
+        ],
+        "label_of": "customer_id"
+       }
+      },
+      "name": "maintenance_contracts.customer_name",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer Name",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Customer Name",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "maintenance_contracts.start_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Start Date",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Start Date",
+      "type": "time"
+     },
+     {
+      "description": "the day the current term ends - when the contract is up for renewal",
+      "isVisible": true,
+      "name": "maintenance_contracts.end_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "End Date",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts End Date",
+      "type": "time"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "maintenance_contracts.annual_value_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Annual Value Eur",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Annual Value Eur",
+      "type": "number"
+     },
+     {
+      "description": "Quarterly or Annual",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "billing"
+        ],
+        "dictionary": [
+         "Quarterly",
+         "Annual"
+        ]
+       }
+      },
+      "name": "maintenance_contracts.billing_frequency",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Billing Frequency",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Billing Frequency",
+      "type": "string"
+     },
+     {
+      "description": "Active, Renewed, Churned",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "contract status"
+        ],
+        "dictionary": [
+         "Active",
+         "Renewed",
+         "Churned"
+        ]
+       }
+      },
+      "name": "maintenance_contracts.status",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Status",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Status",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "maintenance_contracts.auto_renew",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Auto Renew",
+      "suggestFilterValues": true,
+      "title": "maintenance contracts Auto Renew",
+      "type": "boolean"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "contracts",
+         "number of contracts",
+         "service agreements"
+        ]
+       }
+      },
+      "name": "maintenance_contracts.contract_count",
+      "public": true,
+      "shortTitle": "maintenance contracts",
+      "title": "maintenance contracts maintenance contracts",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "live contracts",
+         "contracts in force",
+         "contract book"
+        ]
+       }
+      },
+      "name": "maintenance_contracts.active_contracts",
+      "public": true,
+      "shortTitle": "active maintenance contracts",
+      "title": "maintenance contracts active maintenance contracts",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "contract value",
+         "annual value",
+         "ACV",
+         "value of contracts"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "maintenance_contracts.contract_annual_value_eur",
+      "public": true,
+      "shortTitle": "annual contract value",
+      "title": "maintenance contracts annual contract value",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "book value",
+         "value of active contracts"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "maintenance_contracts.active_contract_value_eur",
+      "public": true,
+      "shortTitle": "active contract value",
+      "title": "maintenance contracts active contract value",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "contracts not renewed",
+         "lost contracts",
+         "contract churn"
+        ],
+        "better": "lower"
+       }
+      },
+      "name": "maintenance_contracts.churned_contracts",
+      "public": true,
+      "shortTitle": "churned contracts",
+      "title": "maintenance contracts churned contracts",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "renewals"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "maintenance_contracts.renewed_contracts",
+      "public": true,
+      "shortTitle": "renewed contracts",
+      "title": "maintenance contracts renewed contracts",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per contract",
+      "key": [
+       "contract_id"
+      ],
+      "population": "contracts in the last full FieldFlow batch (B2026-08-31); the partial July batch is excluded",
+      "system": "FieldFlow (nightly batch sync)"
+     }
+    },
+    "name": "maintenance_contracts",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "contract churn",
+         "churned contracts",
+         "contracts churned",
+         "non-renewal",
+         "not renewed",
+         "lost contracts"
+        ],
+        "meaning": "A maintenance contract not renewed at its end date; the one churn so far (62,600 EUR) ended 2026-06-01 and the monthly mart books it in May by decision date.",
+        "term": "contract_churn"
+       }
+      },
+      "name": "maintenance_contracts.contract_churn",
+      "public": true,
+      "shortTitle": "Contract Churn",
+      "title": "maintenance contracts Contract Churn"
+     }
+    ],
+    "title": "maintenance contracts",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "customers": {
+   "time_dimensions": {
+    "customer_since": {
+     "data_end": "2024-01-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2024-01-01"
+    },
+    "first_activity_date": {
+     "data_end": "2024-01-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2024-01-01"
+    },
+    "last_activity_date": {
+     "data_end": "2026-08-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-01"
+    }
+   }
+  },
+  "maintenance_contracts": {
+   "time_dimensions": {
+    "end_date": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2027-02-01"
+    },
+    "start_date": {
+     "data_end": "2026-02-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-02-01"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "filters": [
+    {
+     "member": "customers.customer_type",
+     "operator": "equals",
+     "values": [
+      "Housing company"
+     ]
+    }
+   ],
+   "measures": [
+    "maintenance_contracts.active_contracts"
+   ],
+   "timeDimensions": [
+    {
+     "dateRange": [
+      "2026-09-01",
+      "2026-10-30"
+     ],
+     "dimension": "maintenance_contracts.end_date"
+    }
+   ]
+  }
+ ],
+ "question": "how many housing company maintenance contracts are coming up for renewal in the next 60 days"
+}

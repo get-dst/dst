@@ -15,18 +15,12 @@
  * numbered exhibits (the Definition Drift Report's visual language, in app
  * components): exhibit kickers, the diverging numbers large and tabular-mono,
  * the SQL small, severity chips, principal/blast-radius attribution.
- *
- * Each conflict exhibit closes with the bridge: "Draft definition → <lens>",
- * which records a ticket-less definition PatchCandidate on the chosen lens —
- * the SAME approval rail as corrections and distillation (Reviews).
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useConnections } from '../api/connections'
-import { useLenses } from '../api/lenses'
 import {
   useAuditSummary,
-  useDraftDefinition,
   useLatestAudit,
   useRunAudit,
   type AuditRun,
@@ -358,86 +352,6 @@ function VariantRow({
   )
 }
 
-// ─── the bridge: conflict finding → definition patch on a lens ────────────────
-
-function DraftBridge({ connection, finding }: { connection: string; finding: DriftFinding }) {
-  const lenses = useLenses()
-  const draft = useDraftDefinition()
-  const [lens, setLens] = useState('')
-  const names = (lenses.data ?? []).map((l) => l.name)
-  const selected = lens || names[0] || ''
-
-  if (draft.isSuccess) {
-    return (
-      <aside className="mt-4 border border-accent/30 bg-accent-fg px-4 py-3">
-        <p className="text-[12.5px] text-text">
-          Drafted <span className="font-mono font-semibold">“{draft.data.target}”</span> on{' '}
-          <span className="font-mono font-semibold">{draft.data.lens}</span> — a candidate on the
-          lens&apos;s patch queue, awaiting human approval.
-        </p>
-        <Link
-          to="/reviews"
-          className="mt-1.5 inline-flex items-center gap-1 rounded text-[12px] font-medium text-accent-dark outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          Review in the patch queue
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-            <path
-              d="M2.5 6h7M6.5 3l3 3-3 3"
-              stroke="currentColor"
-              strokeWidth="1.25"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </Link>
-      </aside>
-    )
-  }
-
-  return (
-    <aside className="mt-4 border border-accent/30 bg-accent-fg px-4 py-3.5">
-      <div className="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-accent-dark">
-        Drafted lens definition
-      </div>
-      <p className="mt-1.5 max-w-[78ch] text-[12.5px] leading-relaxed text-muted">
-        Make one reading canon: dst pre-drafts the definition — the proposed canon plus the
-        rejected readings — as a patch candidate on a lens. Approval stays human.
-      </p>
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <span className="font-mono text-[12px] text-muted">Draft definition →</span>
-        <select
-          aria-label="Target lens"
-          value={selected}
-          onChange={(e) => setLens(e.target.value)}
-          className={selectClass}
-          disabled={names.length === 0}
-        >
-          {names.length === 0 ? (
-            <option value="">no lenses yet</option>
-          ) : (
-            names.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))
-          )}
-        </select>
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={!selected || draft.isPending}
-          onClick={() => draft.mutate({ connection, finding, lens: selected })}
-        >
-          {draft.isPending ? <Busy label="Drafting" /> : 'Draft definition'}
-        </Button>
-      </div>
-      {draft.isError && (
-        <p className="mt-2 text-[11px] text-red">{(draft.error as Error).message}</p>
-      )}
-    </aside>
-  )
-}
-
 // ─── audit → lens binding ─────────────────────────────────────────────────────
 
 /** How the finding squares against a declared standard (dbt metric, etc.).
@@ -492,14 +406,12 @@ function GovernanceChip({ governedBy }: { governedBy: string | null | undefined 
 function FindingCard({
   finding,
   number,
-  connection,
   governedBy,
   expanded,
   onToggle,
 }: {
   finding: DriftFinding
   number: number
-  connection: string
   governedBy: string | null | undefined
   expanded: boolean
   onToggle: () => void
@@ -611,14 +523,11 @@ function FindingCard({
             ))}
           </ol>
 
-          {isConflict ? (
-            <DraftBridge connection={connection} finding={finding} />
-          ) : (
-            <aside className="mt-4 border border-border bg-surface-2 px-4 py-3 text-[12.5px] leading-relaxed text-muted">
-              Equivalent definitions in different SQL — consolidate into one certified statement so
-              the duplication stops accruing cost and risk.
-            </aside>
-          )}
+          <aside className="mt-4 border border-border bg-surface-2 px-4 py-3 text-[12.5px] leading-relaxed text-muted">
+            {isConflict
+              ? 'Make one reading canon: author the definition in semantic/definitions/ — the proposed canon, with the rejected readings named — and land it with dst apply.'
+              : 'Equivalent definitions in different SQL — consolidate into one certified statement so the duplication stops accruing cost and risk.'}
+          </aside>
         </div>
       )}
     </article>
@@ -814,7 +723,6 @@ export function DriftAuditPanel() {
                   key={i}
                   finding={f}
                   number={i + 1}
-                  connection={result.connection}
                   governedBy={summary.data?.metric_governance?.[f.metric_intent]}
                   expanded={openFindings.has(i)}
                   onToggle={() => toggleFinding(i)}

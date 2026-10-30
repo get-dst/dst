@@ -316,7 +316,7 @@ def test_mgmt_users_admin_only(org: uuid.UUID) -> None:
 def test_bootstrap_creates_first_admin() -> None:
     import argparse
 
-    from services.cli.main import _bootstrap
+    from services.cli.bootstrap import _bootstrap
 
     ns = argparse.Namespace(org="BootstrapLocal", email="own@example.com", password="pw")
     admin = create_engine(settings.database_admin_url)
@@ -343,7 +343,7 @@ def test_bootstrap_is_idempotent(
     .env is refused rather than silently switching the project."""
     import argparse
 
-    from services.cli.main import _bootstrap
+    from services.cli.bootstrap import _bootstrap
 
     def ns(**kw: object) -> argparse.Namespace:
         base: dict[str, object] = {

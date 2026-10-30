@@ -167,7 +167,7 @@ def test_ordering_is_a_no_op_when_nothing_degraded() -> None:
 def test_apply_footer_summarizes_gate_outcomes(capsys) -> None:
     """Whether the safety net ran must be legible without grepping 40 identical
     skip warnings — one footer line, skips broken out by reason."""
-    from services.cli.main import _summarize_apply
+    from services.cli.project import _summarize_apply
 
     _summarize_apply(
         [
@@ -182,7 +182,7 @@ def test_apply_footer_summarizes_gate_outcomes(capsys) -> None:
 
 
 def test_apply_footer_stays_silent_when_no_lens_was_gated(capsys) -> None:
-    from services.cli.main import _summarize_apply
+    from services.cli.project import _summarize_apply
 
     _summarize_apply([{"lens": "a", "action": "unchanged"}])
     assert "eval gates" not in capsys.readouterr().out
@@ -192,7 +192,7 @@ def test_identical_warnings_across_rows_print_once_counted(capsys) -> None:
     """The same sentence repeated across rows buries the lines that matter —
     3+ identical warnings collapse to one counted line; distinct warnings and
     2x repeats stay verbatim, and the counts line stays honest."""
-    from services.cli.main import _summarize_apply
+    from services.cli.project import _summarize_apply
 
     dup = "no callers on the allow-list (admin-only until callers are added)"
     _summarize_apply(
@@ -213,7 +213,7 @@ def test_quiet_apply_keeps_only_what_needs_a_human(capsys) -> None:
     """A multi-lens apply emits one warning line per lens, which buries the
     signal. --quiet: no per-lens ok lines, each DISTINCT warning once naming
     who it fired on, rejects/errors/deletions/footer stay."""
-    from services.cli.main import _summarize_apply
+    from services.cli.project import _summarize_apply
 
     dup = "cross-claim: two lenses answer this"
     _summarize_apply(
@@ -236,7 +236,7 @@ def test_quiet_apply_keeps_only_what_needs_a_human(capsys) -> None:
 
 
 def test_quiet_apply_caps_the_lens_list_per_warning(capsys) -> None:
-    from services.cli.main import _summarize_apply
+    from services.cli.project import _summarize_apply
 
     note = "same everywhere"
     _summarize_apply(
@@ -255,7 +255,7 @@ def test_the_probe_count_prints_on_the_lens_row(capsys) -> None:
     """`--probe-certified` says what it executed: the "probed N of N" line the
     server stages under `applied` must reach the plain report on the lens
     row, not only --json."""
-    from services.cli.main import _summarize_apply
+    from services.cli.project import _summarize_apply
 
     _summarize_apply(
         [

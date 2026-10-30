@@ -363,11 +363,11 @@ SITES: dict[str, str] = {
     "services/router/decider.py::route_question -> route_with_llm": (
         f"{_API}::test_a_routing_outage_records_the_votes_it_was_billed_for"
     ),
-    "services/evals/calibrate.py::lens_decisions.one -> route_with_llm": (
-        "no row: calibration grades the decisions and reports no cost"
+    "services/llm/decision_memo.py::Memoised.decide -> decide": (
+        "tests/test_route_coverage.py::test_a_repeated_decision_is_asked_once_and_billed_once"
     ),
-    "services/evals/calibrate.py::equivalence_decisions.one -> equivalence_decision": (
-        "no row: calibration grades the decisions and reports no cost"
+    "services/llm/decision_memo.py::Memoised._decide_many -> decide_many": (
+        "tests/test_route_coverage.py::test_a_batched_decision_already_made_is_not_asked_again"
     ),
 }
 

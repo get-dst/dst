@@ -19,6 +19,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from services.config import ProviderConfig, check_ai_pricing
 from services.contracts.authoring import Authored, parse_authored
+from services.contracts.semantic_model import StrList
 from services.project.loader import parse_yaml
 
 
@@ -166,6 +167,25 @@ class DriftTolerance(Authored):
         return parse_duration(self.time_shift).total_seconds()
 
 
+class CubeProbeConfig(Authored):
+    """What `dst probe --cube` and `dst monitor` may spend on Cube per run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_queries: int = Field(
+        default=500,
+        ge=1,
+        description="the most /v1/load queries one run makes; what the budget leaves "
+        "unread is listed in the artifact and said, never dropped silently",
+    )
+    max_values: int = Field(
+        default=500,
+        ge=1,
+        description="the most values read for one dimension's dictionary; a dimension "
+        "holding more is recorded incomplete",
+    )
+
+
 class ProbeConfig(Authored):
     """How `dst probe` samples and how old its artifact may get before serving
     says so. The user owns the probe clock (a scheduled job, a deploy step);
@@ -183,6 +203,10 @@ class ProbeConfig(Authored):
         ge=0,
         description="how many latest partitions (or days of the entity's default_time_field) "
         "the sampling pass reads on a refresh; 0 reads whole tables",
+    )
+    cube: CubeProbeConfig = Field(
+        default_factory=lambda: CubeProbeConfig(),
+        description="the query budget of the probe and monitor that read through Cube",
     )
     drift_tolerance: DriftTolerance = Field(
         default_factory=lambda: DriftTolerance(),
@@ -232,6 +256,47 @@ class LineageDecl(Authored):
         return ("dbt", self.dbt) if self.dbt is not None else ("sqlmesh", str(self.sqlmesh))
 
 
+class CubeDecl(Authored):
+    """The Cube this project's governed asks compile through. Config only; the
+    secret is named by env ref, like a connection's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(description="Cube's REST base, e.g. http://localhost:4000")
+    api_secret_env: str = Field(
+        default="CUBEJS_API_SECRET",
+        description="process-env var holding CUBEJS_API_SECRET, the key dst signs "
+        "each request's security-context token with",
+    )
+    meta_ttl: int = Field(
+        default=300,
+        ge=0,
+        description="seconds a fetched /v1/meta is reused per caller before Cube is asked again",
+    )
+    jwt_clock: Literal["wall", "process"] = Field(
+        default="wall",
+        description="the clock each request's token is dated by: 'wall' (real time, even "
+        "when dst's own clock is pinned to an asked-on day, so Cube never finds the token "
+        "expired) or 'process' (the clock Python reports)",
+    )
+    plan_context: CubePlanContext = Field(
+        default_factory=lambda: CubePlanContext(),
+        description="who plan and apply read /v1/meta as: the groups whose view of the "
+        "model is the one checked and stamped (a member an access_policy withholds from "
+        "them is not in it)",
+    )
+
+
+class CubePlanContext(Authored):
+    model_config = ConfigDict(extra="forbid")
+
+    groups: StrList = Field(
+        default_factory=list,
+        description="caller groups plan reads the meta as; empty reads it as a caller in "
+        "every group the overlay's hide entries except",
+    )
+
+
 class ProjectConfig(Authored):
     model_config = ConfigDict(extra="forbid")
 
@@ -243,6 +308,22 @@ class ProjectConfig(Authored):
     demo: DemoConfig | None = None
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     lineage: LineageDecl | None = None
+    cube: CubeDecl | None = None
+    groups: StrList = Field(
+        default_factory=list,
+        description="the caller groups a `hide` entry may except, e.g. [support, "
+        "sales]; a name not listed here fails plan and apply. Declaring a group "
+        "grants nothing: membership is set on the caller (or asserted by the "
+        "identity provider), never by a request",
+    )
+
+    @field_validator("groups")
+    @classmethod
+    def _group_names(cls, v: list[str]) -> list[str]:
+        cleaned = [g.strip() for g in v]
+        if any(not g for g in cleaned):
+            raise ValueError("groups: every entry needs a name")
+        return cleaned
 
     @field_validator("ai_pricing")
     @classmethod

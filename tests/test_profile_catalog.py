@@ -324,7 +324,7 @@ def test_the_partitions_read_is_billed_into_the_probe_meter() -> None:
 def test_the_probe_bill_reports_billed_bytes_and_says_the_minimum(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from services.cli.main import _print_probe_bill
+    from services.cli.probe import _print_probe_bill
     from services.connectors.sampling import SampleMeter
     from services.observability import cost
 

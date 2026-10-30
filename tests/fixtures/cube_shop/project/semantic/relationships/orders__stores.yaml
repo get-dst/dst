@@ -1,0 +1,5 @@
+left: orders
+right: stores
+"on": orders.store_id = stores.store_id
+type: left
+relationship: many_to_one

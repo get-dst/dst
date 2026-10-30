@@ -31,25 +31,39 @@ Enforces, via sqlglot:
     whose every table is an EXPOSED entity. There a star is not banned but
     REWRITTEN — in every scope — into the explicit allowed columns of the
     table it reads (its fields as profiled, minus `hide`), so neither the
-    returned SQL nor the rows ever carry a column the lens withholds.
+    returned SQL nor the rows ever carry a column the lens withholds. DuckDB
+    `* LIKE '...'`, `COLUMNS('regex')` and a positional `#3` are stars too;
+  - no column `hide` withholds is read, on every door, trusted or not
+    (`hidden_reads`): every reference is resolved through CTEs, derived
+    tables, set operations, laterals and correlation to the base column it
+    reads, so `WITH x AS (SELECT * FROM t) SELECT x.hidden FROM x` is the
+    hidden column; a star, `COLUMNS(...)`, positional or whole-row read whose
+    columns reach the caller or are consumed by position is refused over any
+    entity that hides one.
 
 Returns a GuardResult; the pipeline executes only `result.sql` when `ok`.
-NOTE: a column a CTE star carries out of a DECLARED entity's table is the one
-remaining gap of the column rule (inner stars over declared entities are admitted
-and not expanded); table-scope + read-only execution are the backstop there.
+NOTE: a column a CTE star carries out of a DECLARED entity's table that the
+entity neither models nor hides is the one remaining gap of the column rule
+(inner stars over declared entities are admitted and not expanded); `hide` is
+how a column is withheld, and table scope + read-only execution are the
+backstop for the rest.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.optimizer.scope import Scope, build_scope
+from sqlglot.optimizer.scope import Scope, ScopeType, build_scope, walk_in_scope
 
-from services.contracts.semantic_model import Entity, SemanticModel
+from services.contracts.failure_modes import FailureMode
+from services.contracts.semantic_model import Entity, SemanticModel, column_hidden
 from services.contracts.warehouse import VALIDATION_SCHEMA
+from services.runtime import external_access
 from services.runtime.identifiers import is_reserved, quote_bare_keywords
 
 _FORBIDDEN_NAMES = [
@@ -80,16 +94,7 @@ _FORBIDDEN = tuple(getattr(exp, n) for n in _FORBIDDEN_NAMES if hasattr(exp, n))
 # Everything else that arrives as a function IS a data source — duckdb's
 # read_csv / read_parquet, postgres dblink, snowflake IDENTIFIER() — and stays
 # rejected. Widening this set widens what a lens can read.
-_ROW_GENERATOR_NAMES = [
-    "GenerateSeries",
-    "ExplodingGenerateSeries",
-    "GenerateDateArray",
-    "GenerateTimestampArray",
-    "Unnest",
-    "Explode",
-    "Posexplode",
-]
-_ROW_GENERATORS = tuple(getattr(exp, n) for n in _ROW_GENERATOR_NAMES if hasattr(exp, n))
+_ROW_GENERATORS = external_access.ROW_GENERATORS
 # ...as is a subquery / LATERAL / VALUES target: derived, and every physical
 # table inside it is walked separately, so nothing escapes the allow-list.
 _DERIVED_TARGETS = (exp.Subquery, exp.Lateral, exp.Values) + _ROW_GENERATORS
@@ -108,6 +113,14 @@ class GuardResult:
     # the repair loop tells the model it violated a policy when it broke syntax,
     # and callers are told their in-scope question was out of scope.
     kind: str = "policy"
+    # The failure mode a policy verdict carries (contracts/failure_modes.py):
+    # the scope the SQL left, the column the lens hides, or the reach past the
+    # warehouse. A syntax verdict is a fault and carries none.
+    mode: FailureMode | None = None
+
+    def __post_init__(self) -> None:
+        if not self.ok and self.kind == "policy" and self.mode is None:
+            self.mode = FailureMode.scope_violation
 
 
 def _non_table_target(target: exp.Expression) -> str | None:
@@ -229,12 +242,31 @@ def _all_exposed(stmt: exp.Expression, model: SemanticModel, cte_names: set[str]
     return True
 
 
+def _written(tbl: exp.Table) -> str:
+    """A table reference as written, every qualifier it carries, lower-cased."""
+    return ".".join(p.lower() for p in (tbl.catalog, tbl.db, tbl.name) if p)
+
+
+def _table_keys(tbl: exp.Table, tables: Iterable[str]) -> list[str]:
+    """The allowed source tables (``tables``, lower-cased and qualified as the
+    sources name them) a physical reference denotes. Columns are scoped per
+    source table, never per bare name: two tables sharing one (`sales.targets`,
+    `raw.targets`) each keep their own columns, and a reference that could mean
+    either (a bare `targets`) is held to both."""
+    if not isinstance(tbl.this, exp.Identifier):
+        return []
+    written = _written(tbl)
+    return [t for t in tables if _names_table(written, t)]
+
+
 def _star_columns(src: object, columns_of: dict[str, list[str]]) -> list[str] | None:
     """What a star over ``src`` stands for: an exposed table's allowed columns,
     or a derived source's projection names once every one of them is explicit
-    and named. None when they are not knowable, which keeps the star."""
+    and named. None when they are not knowable — a reference two exposed
+    tables answer to among them — which keeps the star."""
     if isinstance(src, exp.Table):
-        return columns_of.get(src.name.lower())
+        keys = _table_keys(src, columns_of)
+        return columns_of[keys[0]] if len(keys) == 1 else None
     if isinstance(src, Scope) and isinstance(src.expression, exp.Query):
         names = [e.alias_or_name for e in src.expression.selects]
         if names and all(names) and not any(_is_star(e) for e in src.expression.selects):
@@ -250,9 +282,7 @@ def _expand_exposed_stars(stmt: exp.Expression, model: SemanticModel) -> bool:
     and the caller refuses the statement if one is left in the outer projection.
     Returns False when scopes cannot be built, so the caller fails closed."""
     columns_of = {
-        e.source.table.split(".")[-1].lower(): [f.name for f in e.fields]
-        for e in model.entities
-        if e.exposed
+        e.source.table.lower(): [f.name for f in e.fields] for e in model.entities if e.exposed
     }
     try:
         root = build_scope(stmt)
@@ -346,6 +376,447 @@ def entities_read(sql: str | None, model: SemanticModel) -> list[Entity]:
             if all(e.name != o.name for o in out):
                 out.append(e)
     return out
+
+
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+_QUOTED = re.compile(r"'(?:[^']|'')*'")
+
+
+def _columns_read(
+    stmt: exp.Expr | None,
+    sql: str,
+    model: SemanticModel,
+    pred: Callable[[str, Entity], bool],
+) -> list[str]:
+    """``entity.column`` for every column reference the statement makes that
+    *pred* holds for, on an entity the statement reads.
+
+    Resolution leans toward a hit: a column qualified by an entity's table or
+    alias is judged on that entity, any other column (unqualified, or
+    qualified by a CTE or derived table) on every entity the statement reads.
+    A statement that does not parse is read word by word — a certified
+    template's ``{slot}`` placeholders are the usual reason — so a column the
+    lens withholds is never missed because the SQL could not be walked."""
+    if stmt is None:
+        cleaned = _QUOTED.sub(" ", sql)
+        words = {w.lower() for w in _WORD.findall(cleaned)}
+        read = [
+            e
+            for e in model.entities
+            if {e.name.lower(), e.source.table.rsplit(".", 1)[-1].lower()} & words
+        ]
+        return sorted({f"{e.name}.{w}" for e in read for w in words if pred(w, e)})
+    cte_names = {c.alias_or_name.lower() for c in stmt.find_all(exp.CTE)}
+    by_ref: dict[str, list[Entity]] = {}
+    read_entities: list[Entity] = []
+    for tbl in stmt.find_all(exp.Table):
+        if not isinstance(tbl.this, exp.Identifier):
+            continue
+        if tbl.name.lower() in cte_names and not tbl.db and not tbl.catalog:
+            continue
+        written = ".".join(p.lower() for p in (tbl.catalog, tbl.db, tbl.name) if p)
+        for e in _owners(written, model):
+            if all(e.name != o.name for o in read_entities):
+                read_entities.append(e)
+            for ref in {tbl.name.lower(), tbl.alias.lower()} - {""}:
+                by_ref.setdefault(ref, []).append(e)
+    hits: set[str] = set()
+    for col in stmt.find_all(exp.Column):
+        name = col.name
+        if not name:
+            continue
+        qualifier = col.table.lower() if col.table else ""
+        candidates = by_ref.get(qualifier) or read_entities
+        hits |= {f"{e.name}.{name}" for e in candidates if pred(name, e)}
+    return sorted(hits)
+
+
+def _parsed(sql: str, model: SemanticModel) -> exp.Expr | None:
+    try:
+        return sqlglot.parse_one(sql, read=model.dialect)
+    except Exception:  # noqa: BLE001 — the word reading takes over
+        return None
+
+
+def withheld_reads(sql: str | None, model: SemanticModel) -> list[str]:
+    """``entity.column`` for each column the SQL reads that the model's `hide`
+    withholds — on a caller's view (``SemanticModel.for_groups``), the ones
+    withheld from that caller. What keeps pre-approved SQL (a certified
+    answer, whose tables the guard trusts) from serving a hidden column."""
+    if not sql or not sql.strip() or not any(_withholds(e) for e in model.entities):
+        return []
+    stmt = _parsed(sql, model)
+    if stmt is None:
+        return _columns_read(None, sql, model, _withheld)
+    return hidden_reads(stmt, model)
+
+
+def granted_reads(sql: str | None, model: SemanticModel) -> list[str]:
+    """The view's ``column_grants`` entries whose column the SQL reads — what
+    an answer's receipt names as shown by a group exception."""
+    if not sql or not model.column_grants:
+        return []
+    by_column = {g.split(" ", 1)[0].lower(): g for g in model.column_grants}
+    read = _columns_read(
+        _parsed(sql, model),
+        sql,
+        model,
+        lambda column, e: f"{e.name}.{column}".lower() in by_column,
+    )
+    return sorted({by_column[r.lower()] for r in read})
+
+
+def _withholds(entity: Entity) -> bool:
+    """Does the entity withhold any column? Its `hide`, or — on an exposed
+    table compiled before a grant's `hide` was recorded on the entity — the
+    `exposed_whole` flag saying the grant withheld something."""
+    return bool(entity.hide) or (entity.exposed and not entity.exposed_whole)
+
+
+def _withheld(column: str, entity: Entity) -> bool:
+    """Is ``column`` withheld? On an exposed table with a withholding grant
+    and no recorded `hide` (a lens applied by an earlier release), every
+    column it does not list is: the grant's patterns did not survive the
+    compile, and failing closed beats serving what one of them named."""
+    if column_hidden(column, entity):
+        return True
+    return (
+        entity.exposed
+        and not entity.exposed_whole
+        and not entity.hide
+        and column.lower() not in {f.name.lower() for f in entity.fields}
+    )
+
+
+def _hide_owners(tbl: exp.Table, model: SemanticModel) -> list[Entity]:
+    """The hiding entities a physical table reference may denote. Looser than
+    the allow-list's `_owners` on purpose: trusted SQL is not held to the
+    lens's spelling of a table, so a reference that ADDS a qualifier the
+    source lacks (`warehouse.bakery.patrons` over `bakery.patrons`) still
+    carries the entity's `hide`."""
+    if not isinstance(tbl.this, exp.Identifier):
+        return []
+    written = ".".join(p.lower() for p in (tbl.catalog, tbl.db, tbl.name) if p)
+    return [
+        e
+        for e in model.entities
+        if _withholds(e)
+        and (
+            _names_table(written, e.source.table)
+            or _names_table(e.source.table, written)
+            or ("." not in written and written == e.name.lower())
+        )
+    ]
+
+
+# A projection that stands for columns it does not name: a star (bare, `t.*`,
+# DuckDB `* LIKE '...'`), DuckDB `COLUMNS('regex')`, a positional `#3` / `$3`.
+_IMPLICIT = (exp.Star, exp.Columns, exp.PositionalColumn)
+
+
+def _implicit(node: exp.Expr) -> bool:
+    return isinstance(node, _IMPLICIT) or (
+        isinstance(node, exp.Parameter) and isinstance(node.this, exp.Literal)
+    )
+
+
+class _HiddenReads:
+    """Every column reference resolved to the base-table columns it reads,
+    through CTEs, derived tables, set operations and laterals, and checked
+    against `hide` — the one place both doors ask (`hidden_reads`).
+
+    An explicit reference is checked where it is written: a CTE that projects
+    `town` has its `town` checked inside the CTE. What needs resolution is a
+    name a derived source carries without writing it — through a star — and a
+    reference that takes columns without naming them: a star or a whole-row
+    reference (`TO_JSON(p)`) whose output reaches the caller or is consumed
+    by position. The first is followed down to the tables the star reads; the
+    second reads every column of its sources, so any hiding entity among them
+    is a hit, recorded as ``entity.*``."""
+
+    def __init__(self, model: SemanticModel) -> None:
+        self.model = model
+        self.hits: set[str] = set()
+        self.seen: set[tuple[int, str]] = set()
+        self.branch: dict[int, tuple[Scope, int]] = {}
+
+    # -- sources -------------------------------------------------------------
+    def table(self, tbl: exp.Table, column: str | None) -> None:
+        for e in _hide_owners(tbl, self.model):
+            if column is None:
+                self.hits.add(f"{e.name}.*")
+            elif _withheld(column, e):
+                self.hits.add(f"{e.name}.{column}")
+
+    def carry(self, src: object, column: str) -> None:
+        """``column`` read off ``src`` by name."""
+        if isinstance(src, exp.Table):
+            self.table(src, column)
+            return
+        if not isinstance(src, Scope) or (id(src), column.lower()) in self.seen:
+            return
+        self.seen.add((id(src), column.lower()))
+        if isinstance(src.expression, exp.SetOperation):
+            # A set operation's names are its first branch's; the other
+            # branches feed by position, which `implicit_star` rules on.
+            self.carry(_branches(src)[0], column)
+            return
+        select = src.expression
+        if not isinstance(select, exp.Select):
+            for inner in src.sources.values():  # a lateral / UDTF
+                if isinstance(inner, Scope):
+                    self.carry(inner, column)
+            return
+        if _renamed(src):
+            return  # positional: `implicit_star` reads its stars whole
+        if any(p.alias_or_name.lower() == column.lower() for p in select.expressions):
+            return  # explicit: checked inside its own scope
+        implicit = [
+            node
+            for proj in select.expressions
+            for node in proj.find_all(*_IMPLICIT, exp.Parameter)
+            if _implicit(node)
+        ]
+        if not implicit:
+            # Named by nothing the source projects (a star the guard already
+            # made explicit, a typo): the statement cannot run, and reading the
+            # name off the source's tables names the column if it is hidden.
+            for target in self.everything(src):
+                self.carry(target, column)
+        for node in implicit:
+            if isinstance(node, exp.Star) and _star_drops(node, column):
+                continue
+            for target in self.targets(src, node):
+                self.carry(target, column)
+
+    def whole(self, src: object) -> None:
+        """Every column of ``src`` read."""
+        if isinstance(src, exp.Table):
+            self.table(src, None)
+            return
+        if not isinstance(src, Scope) or (id(src), "*") in self.seen:
+            return
+        self.seen.add((id(src), "*"))
+        if isinstance(src.expression, exp.SetOperation):
+            for branch in _branches(src):
+                self.whole(branch)
+            return
+        select = src.expression
+        if not isinstance(select, exp.Select):
+            for inner in src.sources.values():
+                if isinstance(inner, Scope):
+                    self.whole(inner)
+            return
+        for proj in select.expressions:
+            for node in proj.find_all(*_IMPLICIT, exp.Parameter):
+                if _implicit(node):
+                    for target in self.targets(src, node):
+                        self.whole(target)
+
+    def targets(self, scope: Scope, node: exp.Expr) -> list[object]:
+        """The sources an implicit projection reads: `t.*` its qualifier's,
+        anything else every source its SELECT reads from."""
+        qualifier = node.parent.table if isinstance(node.parent, exp.Column) else ""
+        if isinstance(node, exp.Star) and qualifier:
+            src = _lookup(scope, qualifier)
+            return [src] if src is not None else self.everything(scope)
+        return self.everything(scope)
+
+    def everything(self, scope: Scope) -> list[object]:
+        try:
+            return [src for _, src in scope.selected_sources.values()]
+        except Exception:  # noqa: BLE001 — an alias used twice: every source
+            return list(scope.sources.values())
+
+    # -- references ----------------------------------------------------------
+    def column(self, scope: Scope, col: exp.Column) -> None:
+        parts = [p.name for p in col.parts]
+        # `a.b.c` is `table.column.field` when `a` names a source, `schema.table.
+        # column` when `b` does, and a struct path off column `a` when none does.
+        for i in range(len(parts) - 2, -1, -1):
+            src = _lookup(scope, parts[i])
+            if src is not None:
+                self.carry(src, parts[i + 1])
+                return
+        # No part names a source: a struct path off column `a`, or a qualifier
+        # nothing binds — every part is read as a column, so none is missed.
+        for part in parts:
+            self.bare(scope, part)
+
+    def bare(self, scope: Scope, name: str) -> None:
+        """An unqualified name: carried by whatever source in sight could hold
+        it — this scope's, then (correlated) each scope above it until one
+        names it explicitly; and a whole-row reference when it names a source
+        (`TO_JSON(p)`, BigQuery `SELECT p FROM patrons p`)."""
+        current: Scope | None = scope
+        while current is not None:
+            sources = self.everything(current)
+            for src in sources:
+                self.carry(src, name)
+            row = _lookup(current, name, here_only=True)
+            if row is not None and not _provides(row, name, self.model):
+                self.whole(row)
+            if any(_provides(src, name, self.model) for src in sources):
+                return
+            current = current.parent
+
+    def implicit_star(self, scope: Scope, node: exp.Expr) -> None:
+        """A star (or `COLUMNS`) read whole unless its SELECT feeds a source
+        consumed by name — a CTE, derived table or lateral under no column
+        rename, not a later set-operation branch — or an EXISTS, or it is
+        `COUNT(*)`. A positional read is always read whole."""
+        if isinstance(node.parent, exp.Count):
+            return
+        projection = node
+        while projection.parent is not None and projection.parent is not scope.expression:
+            projection = projection.parent
+        in_projection = projection.arg_key == "expressions" and (
+            node is projection.unalias()
+            or (isinstance(node.parent, exp.Column) and node.parent is projection.unalias())
+            or (isinstance(node.parent, exp.Like) and node.parent is projection.unalias())
+        )
+        # A positional read (`#3`, `$3`) takes a column by number, never by
+        # name, so no consumer by name can tell what it carries.
+        named = isinstance(node, exp.Star | exp.Columns)
+        if named and in_projection and self.by_name(scope):
+            return
+        for target in self.targets(scope, node):
+            self.whole(target)
+
+    def by_name(self, scope: Scope) -> bool:
+        current = scope
+        while id(current) in self.branch:
+            union, index = self.branch[id(current)]
+            if index:
+                return False
+            current = union
+        if current.is_root or _renamed(current):
+            return False
+        if current.is_subquery:
+            parent = current.expression.parent
+            if isinstance(parent, exp.Subquery):
+                parent = parent.parent
+            # EXISTS ignores what its subquery projects; a LATERAL subquery
+            # is a source read by name like a derived table. Any other
+            # subquery (IN, scalar) is consumed by position.
+            return isinstance(parent, exp.Exists | exp.Lateral)
+        return True
+
+    def run(self, root: Scope) -> None:
+        scopes = list(root.traverse())
+        for scope in scopes:
+            if isinstance(scope.expression, exp.SetOperation):
+                branches = _branches(scope)
+                if len(branches) != 2:
+                    # A sqlglot whose scopes this walk cannot read: the caller
+                    # falls back to reading names, which fails closed.
+                    raise ValueError("set operation without two branch scopes")
+                for i, branch in enumerate(branches):
+                    self.branch[id(branch)] = (scope, i)
+        for scope in scopes:
+            for node in walk_in_scope(scope.expression):
+                if isinstance(node, exp.Column):
+                    if isinstance(node.this, exp.Star):
+                        continue
+                    if node.find_ancestor(exp.Star) is not None and node.arg_key == "except_":
+                        continue  # `* EXCLUDE (c)` drops c, it does not read it
+                    self.column(scope, node)
+                elif _implicit(node):
+                    self.implicit_star(scope, node)
+                elif isinstance(node, exp.Join):
+                    for ident in node.args.get("using") or []:
+                        self.bare(scope, ident.name)
+                    if (node.args.get("method") or "").upper() == "NATURAL":
+                        # Joined on every shared column, named or not.
+                        for src in self.everything(scope):
+                            self.whole(src)
+
+
+def _lookup(scope: Scope, name: str, *, here_only: bool = False) -> object | None:
+    """The source ``name`` denotes from ``scope`` — its own, then (correlated)
+    the scopes above it."""
+    current: Scope | None = scope
+    while current is not None:
+        for key, src in current.sources.items():
+            if key.lower() == name.lower():
+                return src
+        if here_only:
+            return None
+        current = current.parent
+    return None
+
+
+def _branches(scope: Scope) -> list[Scope]:
+    """A set operation scope's two branch scopes (`union_scopes` until
+    sqlglot renamed it `set_operation_scopes`)."""
+    branches: list[Scope] = getattr(scope, "set_operation_scopes", None) or getattr(
+        scope, "union_scopes", []
+    )
+    return branches
+
+
+def _renamed(scope: Scope) -> bool:
+    """A CTE or derived table whose alias renames its columns by position
+    (`WITH x(a, b) AS ...`, `(...) AS d(a, b)`)."""
+    parent = scope.expression.parent
+    alias = parent.args.get("alias") if isinstance(parent, exp.CTE | exp.Subquery) else None
+    return bool(alias and alias.columns)
+
+
+def _star_drops(star: exp.Star, column: str) -> bool:
+    """Does `* EXCLUDE (c)` / `* REPLACE (expr AS c)` take ``column`` off the star?"""
+    excluded = [c.name for c in star.args.get("except_") or []]
+    replaced = [a.alias for a in star.args.get("replace") or []]
+    return column.lower() in {n.lower() for n in excluded + replaced}
+
+
+def _provides(src: object, name: str, model: SemanticModel) -> bool:
+    """Does ``src`` name ``name`` as a column it carries — a modelled field or
+    dimension of the table, or an explicit projection of a derived source?"""
+    lowered = name.lower()
+    if isinstance(src, exp.Table):
+        return any(
+            lowered in {f.name.lower() for f in e.fields} | {d.name.lower() for d in e.dimensions}
+            for e in _owners(
+                ".".join(p.lower() for p in (src.catalog, src.db, src.name) if p), model
+            )
+        )
+    if isinstance(src, Scope) and isinstance(src.expression, exp.Select):
+        return lowered in {p.alias_or_name.lower() for p in src.expression.expressions}
+    return False
+
+
+def hidden_reads(stmt: exp.Expr, model: SemanticModel) -> list[str]:
+    """``entity.column`` for every column ``stmt`` reads that the model's
+    `hide` withholds, resolved through CTEs, derived tables, set operations,
+    laterals and correlation to the base table it comes from; ``entity.*`` for
+    a star, `COLUMNS(...)`, positional or whole-row read that takes every
+    column of a hiding entity. A shape whose scopes cannot be built or walked is
+    read by name on every entity the statement reads, and any star in it reads
+    every hiding entity whole, so nothing is missed."""
+    if not any(_withholds(e) for e in model.entities):
+        return []
+    reads = _HiddenReads(model)
+    try:
+        root = build_scope(stmt)
+        if root is not None:
+            reads.run(root)
+    except Exception:  # noqa: BLE001 — the name reading takes over
+        root = None
+    if root is None:
+        hiding = {
+            ref: e
+            for tbl in stmt.find_all(exp.Table)
+            for e in _hide_owners(tbl, model)
+            for ref in {tbl.name.lower(), tbl.alias.lower()} - {""}
+        }
+        whole = any(
+            _implicit(n) and not isinstance(n.parent, exp.Count) for n in stmt.walk()
+        ) or any(not c.table and c.name.lower() in hiding for c in stmt.find_all(exp.Column))
+        return _columns_read(stmt, "", model, _withheld) or (
+            sorted({f"{e.name}.*" for e in hiding.values()}) if whole else []
+        )
+    return sorted(reads.hits)
 
 
 def _as_words(name: str) -> str:
@@ -449,15 +920,19 @@ _DENY_TYPED: dict[str, tuple[type[exp.Expression], ...]] = {
 
 
 def _has_outer_star(stmt: exp.Expression) -> bool:
-    """A bare `*` / `t.*` in what the CALLER receives. Scanning the whole
-    statement instead refused the CTE-staging idiom — a star inside a
+    """A bare `*` / `t.*` in what the CALLER receives — or what stands for one:
+    DuckDB `* LIKE '...'`, `COLUMNS('regex')`, a positional `#3`. Scanning the
+    whole statement instead refused the CTE-staging idiom — a star inside a
     CTE/subquery under an explicit outer projection leaks nothing, because the
     outer projection is what comes back. An unclassifiable root falls back to
     scanning everything, so an unknown shape fails closed."""
     projections = _output_projections(stmt)
     for subtree in [stmt] if projections is None else projections:
-        for star in subtree.find_all(exp.Star):
-            if isinstance(star.parent, exp.Select | exp.Column):
+        for node in subtree.find_all(*_IMPLICIT, exp.Parameter):
+            if isinstance(node, exp.Star):
+                if isinstance(node.parent, exp.Select | exp.Column | exp.Like):
+                    return True
+            elif _implicit(node):
                 return True
     return False
 
@@ -558,6 +1033,12 @@ def check(
             False, reason=f"non-SELECT operation not allowed ({type(node).__name__})"
         )
 
+    # Nothing that reaches past the warehouse's tables (a file, a URL, another
+    # database, SQL passed as a string), on every door: trust_tables relaxes
+    # which TABLES may be read, never whether a file may be.
+    if reason := external_access.refusal_in(stmt, dialect or ""):
+        return GuardResult(False, reason=reason, mode=FailureMode.external_access)
+
     if not isinstance(stmt, exp.Select | exp.Union | exp.Subquery | exp.With):
         return GuardResult(False, reason="only SELECT queries are allowed")
 
@@ -585,13 +1066,24 @@ def check(
     # So every bare name an entity answers to — its name, its
     # source's bare table — maps to the source-qualified table; None marks a
     # name that two different sources claim: ambiguous, never rewritten.
+    # An entity's own name outranks another source's bare table name: an
+    # exposed table sharing a selected entity's bare name is exposed under
+    # its qualified name, and `FROM orders` keeps meaning the entity.
     entity_tables: dict[str, str | None] = {}
+    named: dict[str, str | None] = {}
     for e in model.entities:
-        for ref in {e.name.lower(), e.source.table.split(".")[-1].lower()}:
-            claimed = entity_tables.get(ref, e.source.table)
-            entity_tables[ref] = e.source.table if claimed == e.source.table else None
+        for ref, claims in (
+            (e.source.table.split(".")[-1].lower(), entity_tables),
+            (e.name.lower(), named),
+        ):
+            claimed = claims.get(ref, e.source.table)
+            claims[ref] = e.source.table if claimed == e.source.table else None
+    entity_tables.update(named)
 
-    alias_to_table: dict[str, str] = {}
+    allowed_cols = {
+        t.lower(): {c.lower() for c in cols} for t, cols in model.allowed_columns().items()
+    }
+    alias_to_table: dict[str, list[str]] = {}
     for tbl in stmt.find_all(exp.Table):
         # Hard backstop: dst's in-warehouse validation plane is never readable by a
         # lens, regardless of allow-list (defense in depth — see architecture.md posture).
@@ -648,9 +1140,10 @@ def check(
             written = ".".join(p.lower() for p in (tbl.catalog, tbl.db, tbl.name) if p)
             if not any(_names_table(written, t) for t in model.allowed_tables()):
                 return GuardResult(False, reason=f"table '{written}' is out of lens scope")
-        alias_to_table[name] = name
+        keys = _table_keys(tbl, allowed_cols)
+        alias_to_table[name] = [*alias_to_table.get(name, []), *keys]
         if tbl.alias:
-            alias_to_table[tbl.alias.lower()] = name
+            alias_to_table[tbl.alias.lower()] = keys
 
     # Every table is an exposed entity: a star is made explicit here, in every
     # scope, so what comes back is the table's allowed columns and nothing the
@@ -661,13 +1154,28 @@ def check(
         return GuardResult(False, reason="SELECT * is not allowed; select explicit columns")
 
     if not trust_tables:
-        allowed_cols = {
-            t.split(".")[-1].lower(): {c.lower() for c in cols}
-            for t, cols in model.allowed_columns().items()
-        }
         bad = _out_of_scope_column(stmt, allowed_cols, alias_to_table)
         if bad:
             return GuardResult(False, reason=f"column '{bad}' is out of lens scope")
+
+    # `hide` holds on every door, trusted or not: a trusted statement skips the
+    # allow-list above, never `hide` — a certified answer reading a hidden
+    # column would serve it to every caller the hide withholds it from (on a
+    # caller's view, that caller's hide). And the allow-list cannot see a
+    # hidden column a star carries out of a CTE or derived table, so here every
+    # reference is resolved to the base column it reads.
+    if withheld := hidden_reads(stmt, model):
+        entity, _, column = withheld[0].partition(".")
+        if column == "*":
+            reason = (
+                f"a star or whole-row read over '{entity}' would carry a column the "
+                "lens hides; select explicit columns"
+            )
+        elif trust_tables:
+            reason = f"column '{withheld[0]}' is hidden by the lens and cannot be read"
+        else:
+            reason = f"column '{withheld[0]}' is out of lens scope"
+        return GuardResult(False, reason=reason, mode=FailureMode.hidden_column)
 
     # Last stop before the warehouse. sqlglot's generator quotes the keywords IT
     # knows about, and its set is neither complete nor the same across dialects
@@ -683,7 +1191,7 @@ def check(
 
 
 def _out_of_scope_column(
-    stmt: exp.Expression, allowed_cols: dict[str, set[str]], alias_to_table: dict[str, str]
+    stmt: exp.Expression, allowed_cols: dict[str, set[str]], alias_to_table: dict[str, list[str]]
 ) -> str | None:
     """First column that is provably a non-modeled column of an allowed PHYSICAL
     table — as "<qualifier>.<column>" when qualified, "<column>" when not — or
@@ -717,7 +1225,7 @@ def _out_of_scope_column(
     except Exception:  # an unresolvable shape falls back, it never skips the check
         root = None
 
-    resolved: dict[int, str | None] = {}  # id(column) -> physical table, None = derived
+    resolved: dict[int, list[str]] = {}  # id(column) -> source tables, [] = derived
     bare_bad: str | None = None
     if root is not None:
         claimed: set[int] = set()  # a correlated column is checked where it sits
@@ -729,7 +1237,9 @@ def _out_of_scope_column(
                 if col.table:
                     src = sources.get(col.table.lower())
                     if src is not None:
-                        resolved[id(col)] = src.name.lower() if isinstance(src, exp.Table) else None
+                        resolved[id(col)] = (
+                            _table_keys(src, allowed_cols) if isinstance(src, exp.Table) else []
+                        )
                     continue
                 if id(col) in claimed:
                     continue
@@ -750,8 +1260,8 @@ def _out_of_scope_column(
         tref = col.table.lower()
         if not tref:
             continue
-        phys = resolved.get(id(col), alias_to_table.get(tref))
-        if phys and phys in allowed_cols and col.name.lower() not in allowed_cols[phys]:
+        keys = resolved.get(id(col), alias_to_table.get(tref, []))
+        if any(col.name.lower() not in allowed_cols[k] for k in keys):
             return f"{tref}.{col.name}"
     return bare_bad
 
@@ -759,10 +1269,17 @@ def _out_of_scope_column(
 def _bare_column_in_scope(col: exp.Column, scope: Scope, allowed_cols: dict[str, set[str]]) -> bool:
     """Whether an unqualified column is admissible in the scope it sits in —
     the rule `_out_of_scope_column` states. Under-detection is the accepted
-    bias: any source in sight that could legitimately carry the name admits it."""
+    bias: any source in sight that could legitimately carry the name admits it.
+
+    In sight means this scope's sources and, only where a reference can be
+    correlated (from a subquery, a lateral, a set-operation branch), the
+    scopes above it — never the scope a CTE or derived table defines itself
+    for: `WITH x AS (SELECT ssn FROM customers)` is not admitted by `x`
+    projecting `ssn`, which is the very read being checked."""
     name = col.name.lower()
     physical_in_sight = False
     current: Scope | None = scope
+    came_from: Scope | None = None
     while current is not None:
         select = current.expression
         if isinstance(select, exp.Select) and name in {s.lower() for s in select.named_selects}:
@@ -772,6 +1289,8 @@ def _bare_column_in_scope(col: exp.Column, scope: Scope, allowed_cols: dict[str,
             if not any(col is c for p in select.expressions for c in p.find_all(exp.Column)):
                 return True
         for src in current.sources.values():
+            if src is came_from:
+                continue
             if isinstance(src, Scope):
                 projected = src.expression.selects if isinstance(src.expression, exp.Query) else []
                 if any(_is_star(e) for e in projected):
@@ -785,13 +1304,33 @@ def _bare_column_in_scope(col: exp.Column, scope: Scope, allowed_cols: dict[str,
                 if not names or name in names:
                     return True
             elif isinstance(src, exp.Table):
-                table = src.name.lower()
-                if table in allowed_cols:
+                keys = _table_keys(src, allowed_cols)
+                if keys:
                     physical_in_sight = True
-                    if name in allowed_cols[table]:
+                    if all(name in allowed_cols[k] for k in keys):
                         return True
-        current = current.parent
+        if not (_is_set_branch(current) or _correlatable(current)):
+            break
+        came_from, current = current, current.parent
     return not physical_in_sight
+
+
+def _is_set_branch(scope: Scope) -> bool:
+    """A branch of a set operation (`UNION`, `INTERSECT`, `EXCEPT`). Read off
+    the parent's expression: sqlglot renamed the scope's own flag between the
+    versions this package allows."""
+    return scope.parent is not None and isinstance(scope.parent.expression, exp.SetOperation)
+
+
+def _correlatable(scope: Scope) -> bool:
+    """Can a reference in ``scope`` name a column of a scope above it? From a
+    subquery or a lateral/table function, or anything nested in one."""
+    current: Scope | None = scope
+    while current is not None:
+        if current.scope_type in (ScopeType.SUBQUERY, ScopeType.UDTF):
+            return True
+        current = current.parent
+    return False
 
 
 def _is_star(projection: exp.Expr) -> bool:

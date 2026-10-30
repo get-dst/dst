@@ -1,0 +1,100 @@
+name: tickets
+description: >-
+  Zendesk tickets, latest version, deleted dropped. Categories: Scheduling, Invoice question,
+  Warranty claim, Emergency, Webshop order, Complaint, Other. first_response_minutes and
+  resolved_at measure service; satisfaction is the good/bad rating when one was given. Tickets
+  link to a CRM customer, a webshop order or a work order, but carry no company (Nordlund LVI vs
+  Bergström) - Bergström's support does not run through this Zendesk.
+grain: one row per ticket
+use_cases:
+  - "Use when a question asks about tickets, ticket volume by category or priority, open tickets, first response time, resolution time, complaints, warranty claims, or ratings on tickets."
+  - "Avoid for: CSAT as a monthly rate (csat_monthly); anything per company or per entity (not recorded)"
+common_questions:
+  - how many tickets came in during August 2026 by category
+  - average first response time this quarter
+  - how many tickets are open
+source: {connection: warehouse, table: staging.stg_zendesk__tickets}
+default_time_field: created_at
+primary_key: [ticket_id]
+population: all Zendesk tickets since January 2025 - Finnish operations and the webshop; no Bergström tickets
+fields:
+  - {name: ticket_id, type: integer}
+  - {name: created_at, type: timestamp}
+  - {name: requester, type: string, description: "requester type - b2b contact, webshop customer, ..."}
+  - {name: customer_id, type: string, description: "CRM customer when known"}
+  - {name: order_id, type: integer, description: "webshop order when the ticket is about one"}
+  - {name: work_order_id, type: string}
+  - {name: category, type: string}
+  - {name: priority, type: string, description: "low, normal, high, urgent"}
+  - {name: subject, type: string}
+  - {name: description, type: string}
+  - {name: status, type: string, description: "open, pending, closed"}
+  - {name: assignee, type: string, description: "support agent"}
+  - {name: resolution, type: string}
+  - {name: first_response_minutes, type: integer}
+  - {name: resolved_at, type: timestamp}
+  - {name: satisfaction, type: string, description: "good or bad when rated, else null"}
+dimensions:
+  - {name: category, aliases: [ticket category, ticket type, topic]}
+  - {name: priority}
+  - {name: status, aliases: [ticket status]}
+  - {name: requester, aliases: [requester type]}
+  - {name: assignee, aliases: [agent, support agent]}
+  - {name: satisfaction, aliases: [rating]}
+internal: [description, subject, order_id, work_order_id]
+metrics:
+  - name: ticket_count
+    agg: count
+    label: tickets
+    aliases: [number of tickets, ticket volume, cases]
+  - name: open_tickets
+    agg: count
+    filters: ["tickets.status IN ('open', 'pending')"]
+    label: open tickets
+    aliases: [unresolved tickets, tickets still open, backlog]
+    better: lower
+  - name: complaints
+    agg: count
+    filters: ["tickets.category = 'Complaint'"]
+    label: complaints
+    aliases: [complaint tickets]
+    better: lower
+  - name: warranty_claims
+    agg: count
+    filters: ["tickets.category = 'Warranty claim'"]
+    label: warranty claims
+    aliases: [warranty tickets]
+  - name: webshop_tickets
+    agg: count
+    filters: ["tickets.category = 'Webshop order'"]
+    label: webshop order tickets
+  - name: avg_first_response_minutes
+    agg: avg
+    expr: tickets.first_response_minutes
+    label: average first response time (minutes)
+    aliases: [first response time, time to first response, response time]
+    better: lower
+  - name: avg_resolution_hours
+    agg: avg
+    expr: "date_diff('hour', tickets.created_at, tickets.resolved_at)"
+    filters: ["tickets.resolved_at IS NOT NULL"]
+    label: average resolution time (hours)
+    aliases: [resolution time, time to resolve, time to resolution]
+    better: lower
+  - name: rated_tickets
+    agg: count
+    filters: ["tickets.satisfaction IS NOT NULL"]
+    label: rated tickets
+  - name: good_rated_tickets
+    agg: count
+    filters: ["tickets.satisfaction = 'good'"]
+    label: tickets rated good
+  - name: good_rating_share
+    type: ratio
+    numerator: good_rated_tickets
+    denominator: rated_tickets
+    label: share of tickets rated good
+    aliases: [satisfaction rate, share rated good, good rating share]
+    description: good ratings over all ratings on the asked tickets
+    format: percent
+    better: higher

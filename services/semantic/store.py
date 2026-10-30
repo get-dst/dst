@@ -1,7 +1,7 @@
-"""Shared semantic assets — org-scoped storage for entities, definitions and
-relationships.
+"""Shared semantic assets — org-scoped storage for entities, definitions,
+relationships and table blueprints.
 
-One row per asset (kind 'entity' | 'definition' | 'relationship'), body as the
+One row per asset (kind 'entity' | 'definition' | 'relationship' | 'blueprint'), body as the
 pydantic dump, content_hash for staleness detection (compile provenance
 compares against it). RLS org-scoped like siblings; sessions come from
 org_session().
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from services.contracts.shared_semantic import asset_content_hash
 
-AssetKind = Literal["entity", "definition", "relationship"]
+AssetKind = Literal["entity", "definition", "relationship", "blueprint"]
 
 
 @dataclass(frozen=True)

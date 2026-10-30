@@ -1,9 +1,10 @@
 """Shared-layer file I/O: `semantic/` on disk ⇄ SharedEntity / Definition /
-SharedRelationship.
+SharedRelationship / TableBlueprint.
 
-Entities and relationships render one YAML file each
+Entities, relationships and table blueprints render one YAML file each
 (`semantic/entities/<name>.yaml`, `semantic/relationships/<left>__<right>.yaml`,
-full model_dump); definitions render the same frontmatter pages lenses use
+`semantic/tables/<table>.yaml`, full model_dump); definitions render the same
+frontmatter pages lenses use
 (`semantic/definitions/<slug>.md`), so the whole project speaks one page
 format. Parse is the pure inverse — malformed files raise ValueError naming
 the path (machine-actionable, per the era principle).
@@ -23,12 +24,23 @@ from services.certdefs import (
     render_definition_page,
 )
 from services.contracts.authoring import parse_authored
-from services.contracts.semantic_model import Definition
+from services.contracts.semantic_model import Definition, TableBlueprint
 from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 
 ENTITY_DIR = "semantic/entities"
 DEFINITION_DIR = "semantic/definitions"
 RELATIONSHIP_DIR = "semantic/relationships"
+TABLE_DIR = "semantic/tables"
+
+
+def is_yaml_under(path: str, directory: str) -> bool:
+    return path.startswith(directory + "/") and path.endswith((".yaml", ".yml"))
+
+
+def table_slug(table: str) -> str:
+    """A blueprint's file stem: the table name as its connection names it,
+    dots kept (`raw_crm.contacts.yaml`), anything a path cannot hold dashed."""
+    return re.sub(r"[^a-z0-9._-]+", "-", table.lower()).strip("-.") or "untitled"
 
 
 def slug(term: str) -> str:
@@ -121,6 +133,7 @@ def render_semantic_files(
     entities: list[SharedEntity],
     definitions: list[Definition],
     relationships: list[SharedRelationship],
+    blueprints: list[TableBlueprint] | None = None,
 ) -> dict[str, str]:
     files: dict[str, str] = {}
     for e in entities:
@@ -138,12 +151,21 @@ def render_semantic_files(
         files[f"{RELATIONSHIP_DIR}/{slug(r.name)}.yaml"] = yaml.safe_dump(
             r.model_dump(mode="json", exclude_none=True), sort_keys=False, allow_unicode=True
         )
+    for b in blueprints or []:
+        files[f"{TABLE_DIR}/{table_slug(b.table)}.yaml"] = render_blueprint(b)
     return files
+
+
+def render_blueprint(blueprint: TableBlueprint) -> str:
+    """One blueprint as its file: the authored fields only, empty ones left out."""
+    data = blueprint.model_dump(mode="json", exclude_defaults=True)
+    data = {"connection": blueprint.connection, "table": blueprint.table, **data}
+    return str(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
 def parse_semantic_file(
     path: str, content: str, *, notes: list[str] | None = None
-) -> SharedEntity | Definition | SharedRelationship | None:
+) -> SharedEntity | Definition | SharedRelationship | TableBlueprint | None:
     """One `semantic/**` file → its asset, or None when the path isn't one.
 
     The single validation seam: plan and apply both go through it, so plan can
@@ -153,7 +175,8 @@ def parse_semantic_file(
     is_entity = path.startswith(ENTITY_DIR + "/") and path.endswith((".yaml", ".yml"))
     is_relationship = path.startswith(RELATIONSHIP_DIR + "/") and path.endswith((".yaml", ".yml"))
     is_definition = path.startswith(DEFINITION_DIR + "/") and path.endswith(".md")
-    if not (is_entity or is_relationship or is_definition):
+    is_table = is_yaml_under(path, TABLE_DIR)
+    if not (is_entity or is_relationship or is_definition or is_table):
         return None
     try:
         if is_definition:
@@ -165,6 +188,8 @@ def parse_semantic_file(
         raise ValueError(f"{path}: {exc}") from exc
     if is_relationship:
         return parse_authored(SharedRelationship, data, path, notes=notes)
+    if is_table:
+        return parse_authored(TableBlueprint, data, path, notes=notes)
     return parse_authored(SharedEntity, data, path, notes=notes)
 
 
@@ -187,7 +212,8 @@ def parse_semantic_files(
     files: dict[str, str], *, notes: list[str] | None = None
 ) -> tuple[dict[str, SharedEntity], dict[str, Definition], dict[str, SharedRelationship]]:
     """`semantic/**` paths → (entities by name, definitions by term,
-    relationships by derived name)."""
+    relationships by derived name). Table blueprints are read by
+    ``parse_blueprint_files``; here they are validated and skipped."""
     entities: dict[str, SharedEntity] = {}
     definitions: dict[str, Definition] = {}
     relationships: dict[str, SharedRelationship] = {}
@@ -227,3 +253,38 @@ def parse_semantic_files(
             definition_paths[asset.term] = path
             definitions[asset.term] = asset
     return entities, definitions, relationships
+
+
+def parse_blueprint_files(
+    files: dict[str, str], *, notes: list[str] | None = None
+) -> dict[str, TableBlueprint]:
+    """`semantic/tables/**` paths → blueprints by table name. Two files for one
+    table are a competing claim, named — the same rule as two entity files for
+    one entity. Tables match when one name is the trailing parts of the other
+    on the same connection (`raw.contacts` and `proj.raw.contacts`)."""
+    from services.project.lineage import same_table
+
+    out: dict[str, TableBlueprint] = {}
+    paths: dict[str, str] = {}
+    for path, content in sorted(files.items()):
+        if not is_yaml_under(path, TABLE_DIR):
+            continue
+        blueprint = parse_semantic_file(path, content, notes=notes)
+        assert isinstance(blueprint, TableBlueprint)
+        twin = next(
+            (
+                name
+                for name, other in out.items()
+                if same_table(other.table, blueprint.table)
+                and (other.connection == blueprint.connection or other.table == blueprint.table)
+            ),
+            None,
+        )
+        if twin is not None:
+            raise ValueError(
+                f"table '{blueprint.table}' has a blueprint in both {paths[twin]} and {path} "
+                "— a table has one blueprint"
+            )
+        out[blueprint.name] = blueprint
+        paths[blueprint.name] = path
+    return out

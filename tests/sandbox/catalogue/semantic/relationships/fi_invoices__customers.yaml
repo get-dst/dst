@@ -1,0 +1,5 @@
+left: fi_invoices
+right: customers
+"on": fi_invoices.customer_id = customers.customer_id
+type: left
+relationship: many_to_one

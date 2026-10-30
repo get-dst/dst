@@ -17,7 +17,7 @@ from contextlib import ExitStack, contextmanager
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -29,6 +29,8 @@ from services.certify import store as certify_store
 from services.certify.store import CertifiedAnswer
 from services.config import settings
 from services.contracts.correction import CorrectionDelta
+from services.contracts.cube_meta import view_members
+from services.contracts.cube_query import CubeQuery, from_intent
 from services.contracts.lens_config import LensConfig
 from services.contracts.protocols import Connector, Decision, DecisionUsage, SharedSnapshot
 from services.contracts.query_intent import QueryIntent
@@ -39,7 +41,9 @@ from services.contracts.response import (
     ConsumerAnswer,
     QueryResponse,
 )
+from services.contracts.semantic_model import SemanticModel
 from services.contracts.trace import TraceLog
+from services.cube.context import CubeContext
 from services.db.session import org_session
 from services.governance import audit, drift_watch, quota, ratelimit
 from services.governance.credentials import CallerIdentity
@@ -48,12 +52,14 @@ from services.lenses import profile_enrich, profile_store
 from services.lenses import store as lens_store
 from services.lenses.connections import resolve_connector
 from services.lenses.describe import (
+    DESCRIBE_MAX_CHARS,
     LensDescription,
     MetricCatalog,
     catalog_of,
     describe_model,
     metric_tree,
 )
+from services.lenses.describe_cube import CubeLensDescription, describe_view
 from services.lenses.store import LensBundle, list_published_for_org, load_published_lens
 from services.llm.registry import ResolvedModel
 from services.observability import cost
@@ -62,7 +68,7 @@ from services.observability.logger import log_trace
 from services.project import demo_page
 from services.reviews import service as reviews_service
 from services.reviews import store as reviews_store
-from services.runtime import assembly, value_guard
+from services.runtime import assembly, sql_guard, value_guard
 from services.runtime.answer import AnswerComposer, Audience
 from services.runtime.attribution import Attribution, attributed
 from services.runtime.compiler import CompileError, UnpinnedDimension, compile_intent
@@ -78,6 +84,7 @@ from services.runtime.typed_resolver import (
     pin_intent,
     sole_metric_intent,
 )
+from services.serve import door as cube_door
 
 log = logging.getLogger("dst")
 
@@ -284,6 +291,11 @@ class MetricsBody(QueryIntent):
     # and composing costs an LLM round-trip that is most of the latency — on the
     # certified door it is nearly all of it, since nothing else calls a model.
     format: AnswerFormat = Field(default="structured", description=FORMAT_HELP)
+    cube_query: CubeQuery | None = Field(
+        default=None,
+        description="a Cube query (the /v1/load body) instead of an intent: served "
+        "through the cube lane's checks, compiled by Cube, executed by dst",
+    )
 
 
 class CertifiedLibrary(BaseModel):
@@ -357,19 +369,32 @@ def lookup_definitions(
     return DefinitionLookup(q=q, definitions=hits)
 
 
-@router.get("/lenses/{name}", response_model=LensDescription)
+@router.get("/lenses/{name}", response_model=LensDescription | CubeLensDescription)
 def describe_lens_for_caller(
     name: str,
+    table: str | None = None,
+    view: str | None = None,
     caller: CallerIdentity = Depends(get_caller),
-) -> LensDescription:
+) -> LensDescription | CubeLensDescription:
     """A lens's entities, fields, and definitions — so an agent knows what it can ask.
+
+    Each exposed table is a summary; ``table`` returns that one in full. The
+    whole is bounded (``DESCRIBE_MAX_CHARS``) and says what it left out.
 
     Goes through `_authorized_bundle` like every other caller door. A hand-rolled
     prologue here would check existence BEFORE authorization (a 404/403 oracle)
     and never reach the rate limiter — leaving the metadata surface both more
     revealing and less throttled than the query surface, and duplicated logic is
-    how two paths drift apart."""
+    how two paths drift apart.
+
+    A lens served through Cube describes itself as Cube shows it to this
+    caller (``CubeLensDescription``): its views, one in full (``view``), each
+    member's meta.dst facts and observed values, the overlay's refusals and
+    ambiguous terms, the monitor's freshness and the certified pairs — what
+    an agent writing its own Cube queries reads."""
     bundle = _authorized_bundle(name, caller)
+    if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube" and not table:
+        return _describe_cube(name, bundle, caller, view)
     sm = bundle.semantic_model
     # The count is search's own predicate counted in SQL, so it can never say
     # 0 while search_certified finds answers; the examples are decoration and
@@ -378,21 +403,74 @@ def describe_lens_for_caller(
     with org_session(caller.org_id) as session:
         certified_count = certify_store.count_active(session, name)
         try:
-            certified_examples = [e.question for e in active_certified(session, name)[:3]]
+            library = active_certified(session, name)
+            readable = readable_certified(library, sm)
+            # An answer reading a column withheld from this caller is not
+            # theirs to see: it leaves the count and the examples alike.
+            certified_count -= len(library) - len(readable)
+            certified_examples = [e.question for e in readable[:3]]
         except Exception:
             log.exception("certified example lookup failed for lens %s", name)
     domains, certified, unsampled = _catalog_facts(bundle, caller, name)
-    return describe_model(
-        name,
-        display_name=bundle.config.display_name,
-        description=bundle.config.description,
-        model=sm,
-        certified_count=certified_count,
-        certified_examples=certified_examples,
-        domains=domains,
-        certified=certified,
-        unsampled=unsampled,
+    profiles, _as_of, age, _stamps = (
+        assembly.profile_facts(bundle, caller.org_id)
+        if any(e.exposed for e in sm.entities)
+        else ([], None, None, {})
     )
+    try:
+        return describe_model(
+            name,
+            display_name=bundle.config.display_name,
+            description=bundle.config.description,
+            model=sm,
+            certified_count=certified_count,
+            certified_examples=certified_examples,
+            domains=domains,
+            certified=certified,
+            unsampled=unsampled,
+            profiles={p.table: p for p in profiles},
+            profiles_fresh=age is None or not age.stale,
+            exposed="summary",
+            table=table,
+            max_chars=DESCRIBE_MAX_CHARS,
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"lens '{name}' exposes no table named '{table}' — its exposed_tables "
+            "list the names",
+        ) from None
+
+
+def _describe_cube(
+    name: str, bundle: LensBundle, caller: CallerIdentity, view: str | None
+) -> CubeLensDescription:
+    rid = "req_" + uuid.uuid4().hex[:16]
+    try:
+        _client, lens_view = cube_door.open_view(
+            name, bundle.config, ctx=CubeContext.of(caller, lens=name, request_id=rid)
+        )
+    except cube_door.CubeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    with org_session(caller.org_id) as session:
+        certified_count = certify_store.count_active(session, name)
+    try:
+        return describe_view(
+            lens_view,
+            name=name,
+            display_name=bundle.config.display_name,
+            description=bundle.config.description,
+            groups=sorted(caller.groups),
+            full_view=view,
+            not_computable=bundle.config.not_computable,
+            certified=cube_door.load_exemplars(cube_door.project_root(), name),
+            certified_count=certified_count,
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"lens '{name}' serves no view named '{view}' — its views list the names",
+        ) from None
 
 
 def _catalog_facts(
@@ -413,7 +491,10 @@ def _catalog_facts(
     certified: list[tuple[str, list[str]]] = []
     try:
         with org_session(caller.org_id) as session:
-            certified = [(a.id, list(a.terms or [])) for a in active_certified(session, name)]
+            certified = [
+                (a.id, list(a.terms or []))
+                for a in readable_certified(active_certified(session, name), bundle.semantic_model)
+            ]
     except Exception:
         log.exception("certified terms lookup failed for lens %s", name)
     return domains, certified, unsampled
@@ -503,7 +584,27 @@ def _authorized_bundle(
                     detail=f"this deployment's daily cap of {cap} answers is reached",
                     headers={"Retry-After": str(use.retry_after())},
                 )
-    return bundle
+    return caller_view(bundle, caller)
+
+
+def caller_view(bundle: LensBundle, caller: CallerIdentity) -> LensBundle:
+    """The bundle as this caller reads it: every column a group `hide` entry
+    withholds stays withheld unless the caller's groups — from its verified
+    credential, never from the request — are excepted
+    (``SemanticModel.for_groups``). Every caller-scoped door gets its bundle
+    from ``_authorized_bundle``, which ends here."""
+    view = bundle.semantic_model.for_groups(caller.groups)
+    if view is bundle.semantic_model:
+        return bundle
+    return bundle.model_copy(update={"semantic_model": view})
+
+
+def readable_certified(
+    answers: list[CertifiedAnswer], model: SemanticModel
+) -> list[CertifiedAnswer]:
+    """The certified answers whose SQL reads no column *model* withholds — the
+    library as the caller whose view *model* is may see, run and be served."""
+    return [a for a in answers if not sql_guard.withheld_reads(a.sql, model)]
 
 
 def _authorized_connector(bundle: LensBundle, caller: CallerIdentity) -> Connector:
@@ -951,6 +1052,8 @@ def _run_lens_query(
     rid: str,
 ) -> QueryResponse | ConsumerAnswer:
     bundle = _authorized_bundle(name, caller, rid)
+    if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube":
+        return _serve_cube(name, bundle, caller, background, fmt, rid, purpose, routing, q=q)
 
     resolved = require_llm(bundle.config.model.model_ref())
     try:
@@ -1020,6 +1123,88 @@ def _run_lens_query(
     if _auto_review_flags(bundle.config.auto_review, result.response):
         background.add_task(_auto_review, caller.org_id, result.response.request_id)
     return _shaped(result.response, fmt, audience)
+
+
+def _serve_cube(
+    name: str,
+    bundle: LensBundle,
+    caller: CallerIdentity,
+    background: BackgroundTasks,
+    fmt: AnswerFormat,
+    rid: str,
+    purpose: str = "",
+    routing: Decision | None = None,
+    *,
+    q: str | None = None,
+    query: CubeQuery | None = None,
+    intent: QueryIntent | None = None,
+) -> QueryResponse | ConsumerAnswer:
+    """A lens on ``serving: cube``: the question through the frontier lane,
+    or the caller's own Cube query, checked, compiled by Cube and executed
+    through the lens's connection. 503 when Cube is not there to compile."""
+    try:
+        connector = _authorized_connector(bundle, caller)
+    except (IndexError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
+    try:
+        lane = cube_door.open_lane(
+            name,
+            bundle.config,
+            connector=connector,
+            dialect=bundle.semantic_model.dialect,
+            ctx=CubeContext.of(caller, lens=name, request_id=rid),
+            today=assembly.business_today_date(bundle.config.timezone),
+            org_id=str(caller.org_id),
+            caller=caller.name,
+            groups=sorted(caller.groups),
+            request_id=rid,
+        )
+    except cube_door.CubeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if intent is not None:
+        # Today's intent, member for member over its entity's view.
+        try:
+            query = from_intent(
+                intent, view_members(lane.view.doc, intent.entity or ""), today=lane.today
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"intent: {exc}") from exc
+        q = describe_intent(intent)
+    with (
+        ai_usage.no_models(caller.driver),
+        attributed(
+            Attribution(
+                principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
+            )
+        ),
+    ):
+        if query is not None:
+            response, trace = cube_door.answer_query(lane, query, text=q or _query_text(query))
+        elif caller.driver:
+            # An agent drives: dst reads no question into a Cube query for it.
+            raise HTTPException(status_code=400, detail=DRIVER_QUESTION_REFUSAL)
+        else:
+            model = cube_door.frontier_model(bundle.config)
+            response, trace = cube_door.answer_question(lane, q or "", model)
+    if routing is not None:
+        _charge_routing(trace, routing)
+    trace.agent = caller.agent
+    trace.purpose = _logged_purpose(purpose, bundle.config)
+    background.add_task(log_trace, trace)
+    return _shaped(response, fmt, _audience(caller))
+
+
+DRIVER_QUESTION_REFUSAL = (
+    "driver mode: this lens serves through Cube and dst reads no question into a Cube "
+    "query when an agent drives — describe_lens, then send your own Cube query and word "
+    "ledger with query_cube(lens, query, ledger, question)"
+)
+
+
+def _query_text(query: CubeQuery) -> str:
+    """A caller's Cube query spelled for the request log and the
+    question-level rails: its member names, never its values."""
+    return " ".join(m.split(".")[-1].replace("_", " ") for m in query.members())
 
 
 def routing_spend(
@@ -1170,6 +1355,7 @@ def serve_lens_question(
         table_domains=assembled.table_domains,
         entity_coverage=assembled.entity_coverage,
         profile_age=assembled.profile_age,
+        table_profiles=assembled.table_profiles,
         decisions=assembled.decisions,
         spent=assembled.spent,
         connector=connector,
@@ -1331,6 +1517,8 @@ def run_lens_metrics(
     """
     rid = "req_" + uuid.uuid4().hex[:16]
     bundle = _authorized_bundle(name, caller, rid)
+    if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube":
+        return _serve_cube(name, bundle, caller, background, fmt, rid, intent=intent)
     serve = _MetricsServe.prepare(name, bundle, caller, fmt)
     intent, pinned = serve.pinned(intent)
     sql = serve.compiled(intent)
@@ -1477,7 +1665,13 @@ def query_lens_metrics(
     """Ask with a structured intent — metrics/dimensions/filters instead of prose.
     Same governance, receipts, and trace as the prose door; the intent is spelled
     back into words for the request log."""
-    intent = QueryIntent(**body.model_dump(exclude={"format"}))
+    intent = QueryIntent(**body.model_dump(exclude={"format", "cube_query"}))
+    if body.cube_query is not None:
+        rid = "req_" + uuid.uuid4().hex[:16]
+        bundle = _authorized_bundle(name, caller, rid)
+        return _serve_cube(
+            name, bundle, caller, background, body.format, rid, query=body.cube_query
+        )
     return run_lens_metrics(name, intent, caller, background, body.format)
 
 
@@ -1693,13 +1887,13 @@ def list_certified_for_caller(
     With `q`, results are similarity-ranked against the question (top 5, scored);
     without it (or when embeddings are unconfigured), the full library, newest first.
     """
-    _authorized_bundle(name, caller)
+    model = _authorized_bundle(name, caller).semantic_model
     qvec = assembly.embed_question(q) if q else None
     with org_session(caller.org_id) as session:
-        library = active_certified(session, name)
+        library = readable_certified(active_certified(session, name), model)
         if qvec is not None:
             hits = certify_store.search(session, name, qvec, k=5)
-            answers = [h.answer for h in hits]
+            answers = readable_certified([h.answer for h in hits], model)
             scores = {h.answer.id: h.score for h in hits}
         else:
             answers, scores = list(library), {}
@@ -1733,6 +1927,80 @@ def list_certified_for_caller(
     )
 
 
+def _run_certified_cube(
+    name: str,
+    bundle: LensBundle,
+    caller: CallerIdentity,
+    background: BackgroundTasks,
+    connector: Connector,
+    cert: Any,
+    pair: dict[str, Any],
+    bound: dict[str, str] | None,
+    question: str,
+    match: Literal["exact", "parameterized"],
+    fmt: AnswerFormat,
+) -> QueryResponse | ConsumerAnswer:
+    """A certified pair on a lens served through Cube: its Cube query, a
+    template's rendered with the validated bindings, through every check,
+    compiled by Cube and executed by dst; no model call, whoever asks."""
+    rid = "req_" + uuid.uuid4().hex[:16]
+    try:
+        query = cube_door.render_pair_query(pair, dict(bound or {}))
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"the certified pair's Cube query does not render: {exc}"
+        ) from exc
+    try:
+        lane = cube_door.open_lane(
+            name,
+            bundle.config,
+            connector=connector,
+            dialect=bundle.semantic_model.dialect,
+            ctx=CubeContext.of(caller, lens=name, request_id=rid),
+            today=assembly.business_today_date(bundle.config.timezone),
+            org_id=str(caller.org_id),
+            caller=caller.name,
+            groups=sorted(caller.groups),
+            request_id=rid,
+        )
+    except cube_door.CubeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    with (
+        ai_usage.no_models(),
+        attributed(
+            Attribution(
+                principal=caller.name, agent=caller.agent, request_id=rid, org_id=str(caller.org_id)
+            )
+        ),
+    ):
+        response, trace = cube_door.answer_certified(lane, query, text=question, cert_id=cert.id)
+    if response.status == "ok":
+        provenance = CertifiedProvenance(
+            cert_id=cert.id,
+            certified_by=cert.created_by,
+            certified_at=cert.created_at,
+            bound_values=bound,
+        )
+        said = (
+            "approved Cube query shape, your values: "
+            + ", ".join(f"{k}={v}" for k, v in sorted((bound or {}).items()))
+            if match == "parameterized"
+            else "served from the approved Cube query"
+        )
+        response = response.model_copy(
+            update={
+                "certified_match": match,
+                "certified_provenance": provenance,
+                "trust_summary": f"Certified answer — approved by {cert.created_by} on "
+                f"{str(cert.created_at)[:10]}; {said}, checked and compiled by Cube, "
+                "no AI generation.",
+            }
+        )
+    trace.agent = caller.agent
+    background.add_task(log_trace, trace)
+    return _shaped(response, fmt, _audience(caller))
+
+
 @router.post(
     "/lenses/{name}/certified/{cert_id}/run", response_model=QueryResponse | ConsumerAnswer
 )
@@ -1761,7 +2029,13 @@ def run_certified_for_caller(
             cert = certify_store.get(session, cert_id)
     except Exception:  # malformed id (not a uuid) — treat as not found
         cert = None
-    if cert is None or cert.lens != name or not certify_store.is_active(cert.status):
+    if (
+        cert is None
+        or cert.lens != name
+        or not certify_store.is_active(cert.status)
+        # An answer reading a column withheld from this caller is absent to them.
+        or sql_guard.withheld_reads(cert.sql, bundle.semantic_model)
+    ):
         # A retired answer keeps its history but never serves — same 404 as absent.
         raise HTTPException(
             status_code=404, detail=f"certified answer '{cert_id}' not found for lens '{name}'"
@@ -1805,13 +2079,33 @@ def run_certified_for_caller(
     except (IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"lens connection error: {exc}") from exc
 
-    resolved = require_llm(bundle.config.model.model_ref())
-    llm, model_name = resolved.llm, resolved.name
+    fmt: AnswerFormat = body.format if body else "both"
+    if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube":
+        pair = cube_door.certified_query(cube_door.project_root(), name, cert.question, cert.sql)
+        if pair is not None:
+            # The pair's Cube query is the approved reading: it serves through
+            # the cube lane's checks, Cube's compile and dst's execution; the
+            # SQL is the fallback for a pair that carries none.
+            return _run_certified_cube(
+                name, bundle, caller, background, connector, cert, pair, bound, question, match, fmt
+            )
+    # The approved rows need no model: only the prose does. A driver on a lens
+    # served through Cube writes its own reply, so dst composes none for it
+    # and needs no provider at all.
+    driven = (
+        caller.driver and cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube"
+    )
+    composer = None
+    model_name = "none"
+    if fmt not in _ROWS_ONLY and not driven:
+        resolved = require_llm(bundle.config.model.model_ref())
+        model_name = resolved.name
+        composer = AnswerComposer(resolved.llm, model=model_name)
     profiles, as_of, age, stamps = assembly.profile_facts(bundle, caller.org_id)
     coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
-    fmt: AnswerFormat = body.format if body else "both"
     audience = _audience(caller)
     with (
+        ai_usage.no_models(driven),
         calls_logged(background, caller, rid, name),
         attributed(
             Attribution(
@@ -1832,7 +2126,7 @@ def run_certified_for_caller(
             semantic_model=bundle.semantic_model,
             connector=connector,
             generator=FixedSQLGenerator(served_sql),
-            composer=None if fmt in _ROWS_ONLY else AnswerComposer(llm, model=model_name),
+            composer=composer,
             max_rows=bundle.config.model.max_rows_to_return,
             compose_rows=bundle.config.model.max_rows_to_compose,
             model_name=model_name,
@@ -1853,6 +2147,7 @@ def run_certified_for_caller(
             table_as_of=stamps,
             entity_coverage=coverage,
             profile_age=age,
+            table_profiles={p.table: p for p in profiles},
             generator_tier="certified",
             log_samples=bundle.config.logging.log_samples,
         )

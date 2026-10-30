@@ -28,6 +28,7 @@ from services.contracts.warehouse import (
     SchemaSnapshot,
     TableSchema,
 )
+from services.runtime.external_access import ensure_contained, refusal
 
 
 class MySQLConnector:
@@ -237,6 +238,8 @@ class MySQLConnector:
         )
 
     def dry_run(self, sql: str) -> DryRunResult:
+        if reason := refusal(sql, "mysql"):
+            return DryRunResult(valid=False, error=f"SQL refused: {reason}")
         con = self._connect()
         try:
             with con.cursor() as cur:
@@ -250,6 +253,7 @@ class MySQLConnector:
     def execute(
         self, sql: str, *, read_only: bool = True, row_limit: int | None = None
     ) -> QueryResult:
+        ensure_contained(sql, "mysql")
         query = (
             sql
             if row_limit is None

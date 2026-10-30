@@ -65,8 +65,7 @@ decline — not an empty result dressed up as `0`. A result row where every
 aggregate is NULL counts as *no evidence* in verification: for a question whose
 data does not exist, declining is the correct outcome.
 
-Where dst measures answer quality — the benchmark harness, and the declined
-column in Observe — it scores three ways (correct / wrong / declined), with
+Where dst measures answer quality — the declined column in Observe — it scores three ways (correct / wrong / declined), with
 wrong-rate as a co-headline, because a wrong answer is worse than no answer.
 
 A related failure hides one layer down: the data EXISTS, but the filter is

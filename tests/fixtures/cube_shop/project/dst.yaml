@@ -1,0 +1,12 @@
+name: cube-shop
+
+connections:
+  warehouse:
+    type: duckdb
+    config: {path: shop.duckdb, read_only: true}
+
+cube:
+  url: http://localhost:4100
+  api_secret_env: CUBEJS_API_SECRET
+
+groups: [ops]

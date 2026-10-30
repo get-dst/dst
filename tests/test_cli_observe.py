@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from services.cli import main as cli
+from services.cli import observe as cli
 
 
 class _Resp:

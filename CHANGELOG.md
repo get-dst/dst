@@ -29,49 +29,286 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
-## [Unreleased]
+## [0.15.0] — 2026-10-30
 
-No schema change.
+Governed questions can now be served through Cube. A project with a `cube:` block in
+`dst.yaml` and `cube/overlay.yaml` serves its lenses through the Cube lane by default: the
+question resolves to a Cube query, dst checks it before and after execution, Cube compiles the
+SQL and dst runs it through the lens's own connection. Projects authored as entity YAML keep
+serving exactly as before, on the typed lane, with no file change. `dst migrate-model` moves an
+entity project to Cube; `dst init --cube` starts a new one.
+
+Four migrations: 0073 (`blueprint` as a shared asset kind), 0074 (`mode` on `request_log` and
+`eval_result`), 0075 (drops `patch_candidate`), 0076 (`caller.driver`). Run `dst migrate`
+before serving.
+
+A security release. Upgrade if dst serves a DuckDB file or MotherDuck, a Postgres, MySQL or
+Snowflake connection whose credential can read server files, other databases or stages, or any
+lens that hides columns.
+
+### Security
+
+- **SQL can no longer reach past the warehouse's tables.** Affected: every release through
+  0.14.0. On DuckDB, an admin token's connection probe (`dst sql --connection`) could read any
+  file or URL the server process could reach (`read_json_auto`, `read_text`, `glob`, a quoted
+  path in `FROM`) and write files with `COPY`; a caller key on the lens door could do the same
+  through `LATERAL read_text(...)`, which the guard treated as a derived relation. On Postgres,
+  a caller key could call `query_to_xml` or `table_to_xml` to read tables and hidden columns
+  the lens does not expose, and `pg_read_file` or `dblink` where the credential allows them. On
+  Snowflake, `TABLE(...)` targets (`RESULT_SCAN`, `INFORMATION_SCHEMA.QUERY_HISTORY`) were not
+  checked; on MySQL, `LOAD_FILE` was not. Severity: high for a deployed server on a local
+  DuckDB file (server files readable with a caller key); high for Postgres lenses with hidden
+  columns; lower where the warehouse credential already lacks the privilege. Now every door
+  refuses a table function that is not a row generator (`range`, `generate_series`, `unnest`,
+  `FLATTEN`, `GENERATOR`), on DuckDB a table name that looks like a path, Snowflake stages,
+  `ATTACH`, `DETACH`, `COPY`, `INSTALL`, `LOAD`, `PRAGMA`, `SET`, `SELECT ... INTO`,
+  `EXPORT`/`IMPORT DATABASE`, and a named list of file, network, SQL-string and configuration
+  functions, including on certified SQL and the connection probe, where the table allow-list
+  is relaxed. The DuckDB, Postgres and MySQL connectors run the same check on every statement,
+  whichever path sent it. A local DuckDB file opens with `enable_external_access` off and its
+  configuration locked. MotherDuck keeps its open as before (its extension loads at open) and
+  relies on the statement check. A test enumerates DuckDB's table functions from
+  `duckdb_functions()` and fails if any besides the row generators would be served.
+- **Certified SQL is checked against `hide`.** Affected: 0.8.0 through 0.14.0 (`expose:` hide
+  since 0.8.0, entity `hide:` since 0.11.0). The guard trusted a certified answer's tables and
+  skipped the column check, so certified SQL could serve a hidden column to any caller of the
+  lens. Certified SQL reading a hidden column now fails apply; one reading a column hidden
+  with `except_groups` is listed, matched and served only to callers in those groups.
+- **Hidden columns through CTEs, derived tables and `expose:` grants.** Affected: 0.8.0
+  through 0.14.0. The column check resolved a reference only as far as a CTE or derived table,
+  so `WITH x AS (SELECT * FROM t) SELECT x.hidden FROM x` read a hidden column. An `expose:`
+  grant's `hide` only dropped the column from the exposed table's fields, and the trusted door
+  (certified answers, authored definitions) does not read fields. Every reference now resolves
+  through CTEs, derived tables, set operations, laterals, correlation, struct paths and `USING`
+  keys to the base column it reads, on every door, trusted or not; a star, `COLUMNS()`,
+  positional or whole-row read over a table that hides columns is refused where its output
+  reaches the caller. An `expose:` grant records the columns it withholds as the exposed
+  table's own `hide`.
+- **Columns are scoped per source table, never per bare table name.** Affected: every release
+  through 0.14.0. The column allow-list was keyed by bare table name, so two tables sharing one
+  (`sales.targets` and `raw.targets`) were checked against whichever came last: a column the
+  lens never modeled on one passed because the other modeled it, and a star over an exposed
+  table expanded into its twin's columns. A CTE projecting an unmodeled column also admitted
+  that column in the scope above (`WITH x AS (SELECT ssn FROM customers) SELECT x.ssn FROM x`).
+  Columns, aliases and star expansion now key by the source table a reference denotes, a
+  reference that could denote either is held to both, and the walk never counts the scope it
+  came from.
+- **What may break.** Certified answers, blueprint probes or eval oracles that call a table
+  function other than a row generator, or `current_setting` on DuckDB, are refused; certified
+  SQL that reads a hidden column fails apply; an exposed table stored by an earlier apply reads
+  only the columns it lists until it is applied again.
 
 ### Added
 
-- **Troubleshooting guide and a `dst-debug` skill.** `docs/guides/troubleshooting.md`
-  names the failure modes seen against real warehouses (runs that cannot be found,
-  certified answers that never match, slot-lane gold, `did not type`, apply timeouts,
-  routing between sibling lenses, test traffic in the KPIs) with the evidence to read and
-  the owner of each: dst, the project's files, or configuration. The scaffold ships the
-  same table as a seventh skill, `.claude/skills/dst-debug/`; `dst init --skills-only`
-  adds it to an existing project.
-- **`dst runs --all [--last N]`.** Every lens on the server with its last N recorded runs
-  (default 5), as a table or `--json` (`{"runs": [{"lens", "runs": [...]}]}`); a lens with
-  no history is listed as such. `--diff` still takes one lens.
-- **Stable ids on `dst test --json` rows.** Data-lane and slot-lane rows carry `answer_id`
-  (the certified answer's id, what `eval_result.case_id` holds as `certified:<id>`), and
-  behavioral rows carry `case_id`, so a report joins history on the id instead of the
-  question text, which a rewording breaks.
-
-### Fixed
-
-- **`eval_result.actual_value` was never written.** A certified case now stores the
-  generated value there, and `checks` carries both `certified` and `generated` as the
-  JSON output renders them, so a copy of the eval tables holds the numbers, not only
-  verdicts and SQL.
-- **Month-grain rows compared on their day label.** A trend certified on month-end dates
-  against a generation that labels each bucket by its first day carried identical values
-  and graded as every row missing and extra. When every date column on both sides names
-  the same months, the rows match within the usual tolerance, and no row folds into
-  another, the case passes with a `month-lenient:` reason; such a pass is never stored as
-  typed gold.
+- **The Cube lane.** A lens served through Cube (`serving: cube`) resolves a question into one
+  to three Cube queries and a word ledger from the members of its views in Cube's `/v1/meta`,
+  the probe's values, the overlay and the lens's certified Cube queries. Checks run before
+  execution (not computable, not for this lens, scope, hidden members, undeclared members,
+  ambiguous terms, the word ledger, unasked filters, values against the dictionary, windows on
+  the declared clock) and after it (feed freshness, partial periods, empty results, ties at the
+  limit, level snapshots). Cube compiles the SQL (`/v1/sql`) and dst runs it through the lens's
+  connection under the SQL guard. The receipt adds `query_sha256`, `result_sha256`,
+  `model_version` and every check with what it decided. The structured door
+  (`POST /v1/lenses/{name}/metrics`) takes a `cube_query`, or a structured intent translated
+  member for member. With no Cube configured the lens answers 503 naming Cube.
+- **`dst init --cube`.** Scaffolds a Cube-backed project: `cube/model/`, `cube/cube.js`,
+  `cube/overlay.yaml` with its reference block, a lens over views reading through the
+  warehouse connection init declared, a `cube:` block in
+  `dst.yaml`, a generated `CUBEJS_API_SECRET` in `.env`, the pinned Cube Core sidecar in
+  `docker-compose.yml` behind the profile `cube`, and the `dst-cube-overlay` skill.
+- **`dst migrate-model`.** Writes an entity project as a Cube model: entities as cubes
+  (versions and population baked into the cube's `sql`, text `YYYY-MM` months as time
+  dimensions, hidden and internal columns non-public), metrics as measures, relationships as
+  joins, definitions with SQL as segments, each lens as views that list their members, and
+  everything Cube has no word for in `cube/overlay.yaml` (feed axes, clock kinds, company
+  names, caveats). `cube/MIGRATION.md` lists every item the model does not carry as authored,
+  with the failure mode a question would meet there. Re-runs are idempotent, keep files edited
+  by hand, follow cubes authored after the migration, and never touch a file dst did not write.
+  `--check` prints the diff and exits 2 when something would change; every run ends with the
+  steps from files to serving, each marked when the project already shows it.
+- **`cube/overlay.yaml` and `meta.dst`.** dst's facts over a Cube model: per lens its views and
+  policy; per cube its clock, clock kinds (`event` or `schedule`), feed axes, feed measures,
+  caveats and member caveats; definitions, ambiguous terms (with an optional `default:`
+  reading), company scope and hide exceptions. `meta.dst` on cubes, views and members is a
+  closed schema: an unknown key fails plan. Lens `views:` names the views a lens serves.
+- **Plan and apply over Cube.** A push carrying `cube/overlay.yaml` is checked against Cube's
+  own `/v1/meta`: unknown views and members, unknown `meta.dst` keys, a level measure with no
+  clock, a default segment that is no segment, a certified query naming a member the lens lacks
+  or hides, a hidden member Cube still serves to a caller in no group, and text months. Each
+  lens prints a table of the `meta.dst` keys its members carry and what reads each. Apply
+  refuses on an error and stamps each lens with the `model_version` its views compile to.
+- **`dst probe --cube` and `dst monitor`.** Data quality read through Cube: value dictionaries,
+  data ends per time dimension and per feed, and findings with one failure mode each (a stale
+  clock, a stopped feed, rows dated after the clock, a partial latest month judged by the
+  feed's declared measures, a dictionary the warehouse moved off). `dst monitor` exits 0 clean,
+  2 on findings, 1 when Cube cannot be read, and writes its findings per lens under
+  `lenses/<lens>/results/`. Applied, the result is the `data_quality` block on `/ready`.
+- **`dst cube status`.** Reachability, version, `model_version` and member counts of the
+  project's Cube.
+- **The Cube Core sidecar** in `deploy/docker-compose.yml` (profile `cube`), the demo and the
+  Helm chart (`cube.enabled`, `cube.external.url`), pinned by `deploy/cube.version` to
+  v1.6.75. The model is mounted read-only; `cube.js` attaches a DuckDB file read-only.
+- **Cube on BigQuery.** Cube's BigQuery SQL runs through dst's BigQuery connector with
+  parameters inlined in BigQuery's quoting. On a BigQuery project `dst migrate-model` writes
+  `DATE`, `DATETIME` and text-month time dimensions as `TIMESTAMP(...)`, since Cube bounds
+  windows with `TIMESTAMP(?)`; a column the probe types `TIMESTAMP` stays bare so partitions
+  still prune. Compose, `dst init --cube` and the chart pass the BigQuery driver settings
+  through (`CUBEJS_DB_BQ_PROJECT_ID`, `CUBEJS_DB_BQ_LOCATION`, `CUBEJS_DB_BQ_KEY_FILE`); Cube
+  needs its own service-account key with `roles/bigquery.dataViewer` and
+  `roles/bigquery.jobUser`. A member Cube's access policy drops from a caller's meta is
+  refused as `hidden_column`, not as one the model lacks.
+- **Driver mode.** A caller that is an agent (the MCP server sends `X-DST-Driver: 1`, or an
+  admin marks the caller with `dst keys create --driver` or `PUT /mgmt/callers/{name}/driver`)
+  gets no model call from dst on lenses served through Cube: `route_query` routes on
+  deterministic coverage and returns ties for the agent to choose, and the agent writes the
+  Cube query. New MCP tools and endpoints: `query_cube` (`POST /v1/lenses/{name}/cube`, every
+  check of the Cube lane on the agent's query, with `retry` naming what to change when a check
+  stops it), `values`, `data_end` and `grain`. `run_certified` serves a pair's Cube query with
+  no model. Typed lenses answer every door as before.
+- **Every non-answer names one failure mode.** A refusal, a clarification and a capped answer
+  carry `mode`, one of twenty names, on the response, the receipt, the request log, routing
+  records, eval results, validation and drift findings. `dst test` and `dst observe` print
+  counts by mode. The list and what fixes each: [Failure modes](docs/reference/failure-modes.md).
+- **Table blueprints.** `semantic/tables/<table>.yaml` declares a table's grain, key, rows that
+  repeat per sync, clocks, joins and caveats. Plan checks each against the probe or one bounded
+  live count; an entity on the table inherits grain and key. Every answer that reads an exposed
+  table carries a `GRAIN` line (rows against distinct key, or why it could not be verified). A
+  stored blueprint that stops holding is a drift warning, not an apply failure. `dst init`
+  scaffolds a `dst-blueprints` skill.
+- **Hide except named groups.** A `hide` entry may be `{column: <pattern>, except_groups: [..]}`.
+  Groups come from the verified credential, never the request; admins set them with
+  `dst keys create --group` or `PUT /mgmt/callers/{name}/groups`, and they are declared under
+  `groups:` in `dst.yaml`. An answer that read a group column names it on its signed receipt
+  (`column_access`) and its request-log row keeps no row sample.
+- **Disclosures and caveats on the answer.** A partial period, a data gap on some of an ask's
+  queries, and the overlay caveats of every cube and member a Cube query read ride the answer
+  text, the checks list and new signed receipt fields `disclosures` and `caveats`.
+- **`dst doctor`, `/ready` and `dst plan` name the lane.** Plan prints
+  `serving: <lens> → <lane> (<why>)` for every lens of the push. `dst doctor` and a new
+  `serving` block on `/ready` list each published lens with its lane and, for a Cube lane,
+  whether Cube is configured, whether the monitor has run, and whether a chat model serves the
+  HTTP question door for callers that are not agents. None of these is a readiness gate.
 
 ### Changed
 
-- **`dst test` says where the run went.** The sweep ends with a `recorded:` line per lens
-  naming the run id and the database it was written to (`DATABASE_URL`, password hidden),
-  and `--json` carries `recorded` and `database`. `dst test` writes in-process while
-  `dst runs` and the dashboard read through the server at `DST_URL`; when those name
-  different databases the run existed and nothing in the output said where. The empty
-  `dst runs` message now says the same, and the docs name the failure mode (FAQ,
-  Evaluation, Environments and CI).
+- **The serving default.** Lens `serving:` is optional. Unset, a lens of a Cube-backed project
+  (the push carries `cube/overlay.yaml`, and it lists the lens or the lens names `views:`)
+  serves through Cube and every other lens serves typed. An explicit `serving:` wins, and `DST_SERVING` wins over both, install-wide.
+  A push without the overlay, or one that no longer lists a lens, clears that lens's Cube
+  stamp on apply, and it serves typed again.
+- **Routing reads whole-question coverage.** Lenses are ranked by similarity with a named
+  metric as one signal, and a lens covers a question when every word some lens declares has
+  somewhere to land in it. A named metric routes without a model only when its lens covers the
+  question; ties are read among covering lenses, and a lens named after the asked thing wins
+  one. A routed lens that refuses for data it does not hold hands the question to the next
+  covering lens, and the routing record carries the chain. Cube-backed lenses route on the
+  members of their views, never on the entity YAML they were migrated from. A tie is never
+  cut by lens name.
+- **Spoken periods and comparisons.** "vs a year earlier", "a year ago" and "the year before"
+  compare year on year; a month compared with "last year" compares the same month; growth per
+  unit over a range is one row per unit; month ranges without a year take the question's year
+  or the latest on the lens clock; "today", "now" and "currently" on a level read its latest
+  snapshot. On the Cube lane, calendar phrases resolve on the lens clock before generation and
+  every window is bound to them. A value on an entity reached by a declared, non-fanning join
+  filters through the join instead of asking.
+- **Partial periods and partial data gaps disclose, never refuse.** A comparison against a
+  partly loaded period serves the figure and says which period, how complete, and judged by
+  which measure. A gap on some of an ask's queries is disclosed beside the loaded ones; only a
+  gap on every query refuses.
+- **Event dates and schedule dates.** A date is an event or a schedule as the overlay
+  declares, else as its name, title or description says, else by whether it holds future rows.
+  A schedule date (a due or end date) is never clipped to the clock; an event date with future
+  rows is.
+- **`describe_lens`** is bounded: exposed tables are one summary each (`table` returns one in
+  full), a Cube lens summarises each view (`view` returns one in full), and the output says
+  what it left out. Blueprint text withholds every hidden column.
+- **The explore kit** ranks exposed tables by the question's words and is offered beside
+  covering lenses when a table holds as many of them. Two exposed tables sharing a bare name
+  are exposed under qualified names.
+- **`dst apply` demands only the providers a lens uses.** A lens with `untyped_fallback: false`
+  and no model pin applies on an install whose only provider is a typed-decision provider, and
+  a Cube lens applies with no chat-capable provider, each with a `lens_model_unservable`
+  warning naming the door that still needs one.
+- **DuckDB connections read on a UTC clock.** A timestamp compared with a timestamp-with-zone
+  no longer moves its window edges by the host's offset.
+- `clarification.kind` is deprecated; read `mode`.
+- `services/cli/main.py` is split into one module per command; `dst --help` is unchanged.
+
+### Fixed
+
+- **`run_certified` answered 503 on an install with no chat model**, even for
+  `format: structured`, which composes nothing. The model is resolved only when prose is
+  composed.
+- **A declared default reading kept the asked measure's window.** When an ambiguous term's
+  `default:` switched the asked measure to its counterpart, a window on the asked measure's
+  clock stayed put whenever that clock lived on a joined cube (an order date read by a
+  line-level measure), so the query came back as a clarification instead of an answer. The
+  window now maps to the counterpart's own clock wherever the asked clock lives; when the
+  counterpart has no clock that reads it, or its cube has no join path to a member the query
+  keeps, the caller is asked, naming which.
+- **Figures printed beside a served reading carried no caveats.** An ambiguous term discloses
+  its other readings with their figures. Those figures went out without the caveats they
+  would carry as an answer (a member caveat such as an allocation, a partial period), and a
+  later check that asked back still printed them, so an allocated figure could reach the
+  caller bare inside a clarification. Every disclosed figure now carries its own caveats, in an
+  answer and in a non-answer alike.
+- **A complete but low month read as a partial load.** The monitor flagged a month below 70%
+  of its trailing six-month median and below every complete month in its history, so a small
+  feed's genuinely quiet month was reported as "loaded at 11%" and every answer over it said
+  so. A month the volume rule flags is now a partial load only on evidence beyond volume: the
+  feed's last load before the period ended (the new `cubes.<cube>.loaded_at` in
+  `cube/overlay.yaml`), a period still open on the clock, or a closed period with no rows on
+  its last seven days or a second half loaded well below its first. A month that dipped alike a
+  year earlier is a seasonal low and is not flagged. A month-grained clock has no day coverage,
+  so volume still decides there. The finding and the answer's partial-period disclosure name
+  the evidence.
+
+### Removed
+
+- **The benchmark runner** (`services/benchmark/` and its Makefile targets). It measured dst
+  against other approaches and was never a feature a user runs.
+- **The dbt importer** and `dst import dbt`. Table selectors that walk dbt lineage
+  (`table/NAME+`, `lineage:`) stay; they read `manifest.json` directly.
+- **The OSI bridge**: `dst import`, `dst export osi` and its `--name` and `--dialect` flags.
+  `dst export` writes server lenses to the project, as before.
+- **Server-side patch drafting**: the draft-patch and patch routes, `dst patches`, the
+  dashboard's patch rail and Draft definition button, and the `patch_candidate` table. The
+  review queue (tickets, the judge, rulings, certify-on-approve) stays; fixes are authored in
+  the project's files.
+- **The corpus distiller** and `POST /mgmt/lenses/{lens}/distill`.
+- **The decider calibration lane** in `dst test`. `dst test` still reports the slot lane's
+  decisions per decider and slot.
+
+### Upgrade notes
+
+1. `pip install -U dst-core`, then `dst migrate` (0073 to 0076) before serving. `dst serve`
+   refuses to start on a schema behind its build.
+2. Entity-YAML projects need no change and keep serving typed.
+3. In a project with `cube/overlay.yaml`, a lens the overlay lists or that names `views:`,
+   with no `serving:` key, now serves through Cube. Set `serving: typed` on it, or `DST_SERVING=typed` install-wide, to
+   keep the typed lane.
+4. Re-apply projects with `expose:` grants: until then, an exposed table stored by an earlier
+   apply reads only the columns it lists.
+5. Run `dst plan` before applying: certified SQL that reads a hidden column, or calls a table
+   function other than a row generator, now fails.
+6. Read `mode` instead of `clarification.kind`. Receipts gain `mode`, `column_access`,
+   `caveats` and `disclosures`; each is left out of the signed bytes while unset, so earlier
+   receipts still verify.
+7. Scripts calling `dst import`, `dst export osi`, `dst patches` or the distill endpoint need
+   another path; see Removed.
+8. To move an entity project to Cube: [Migrate to Cube](docs/guides/migrate-to-cube.md).
+
+### Known issues
+
+- Routing scores a lens on its member names, titles and values, but not on a member's declared
+  aliases, so a question phrased only in an alias can tie across several lenses. The agent is
+  shown every tied lens with what it matched.
+- `dst apply` does not yet reject a certified answer that can never serve, such as one whose
+  window reads a clock its ambiguous term's default reading cannot read. Such an answer asks
+  back every time instead of serving.
+- The partial-period disclosure says a period is not fully loaded where its rows are complete
+  but not yet final (work completed but not yet invoiced, refunds still arriving for recent
+  orders).
 
 ## [0.14.0] — 2026-10-22
 
@@ -271,6 +508,13 @@ bounded to tested ranges.
   `certified_answer_id` on every row. **Every answer carries `source`** (certified, compiled or
   generated) and `certified_answer_id`.
 - **`make ci-newest`** runs the suite against the newest sqlglot and duckdb the bounds allow.
+- **Troubleshooting guide and a `dst-debug` skill.** `docs/guides/troubleshooting.md`
+  names the failure modes seen against real warehouses (runs that cannot be found,
+  certified answers that never match, slot-lane gold, `did not type`, apply timeouts,
+  routing between sibling lenses, test traffic in the KPIs) with the evidence to read and
+  the owner of each: dst, the project's files, or configuration. The scaffold ships the
+  same table as a seventh skill, `.claude/skills/dst-debug/`; `dst init --skills-only`
+  adds it to an existing project.
 
 ### Changed
 
@@ -294,6 +538,13 @@ bounded to tested ranges.
   and warns about a name that matches nothing.
 - **A SQL error dst compiled is reported as dst's.** When the warehouse rejects compiled SQL and
   the schema has not changed since apply, no data-team ticket is opened.
+- **`dst test` says where the run went.** The sweep ends with a `recorded:` line per lens
+  naming the run id and the database it was written to (`DATABASE_URL`, password hidden),
+  and `--json` carries `recorded` and `database`. `dst test` writes in-process while
+  `dst runs` and the dashboard read through the server at `DST_URL`; when those name
+  different databases the run existed and nothing in the output said where. The empty
+  `dst runs` message now says the same, and the docs name the failure mode (FAQ,
+  Evaluation, Environments and CI).
 
 ### Fixed
 
@@ -351,6 +602,12 @@ bounded to tested ranges.
   copied into tests, docs, code comments and the changelog are replaced with invented examples.
 - **Package installs match CI.** sqlglot (`>=30.8,<30.25`), duckdb (`>=1.5.3,<2.1`) and fastapi
   (`>=0.115,<0.159`) are bounded to the versions the suite was run on.
+- **Month-grain rows compared on their day label.** A trend certified on month-end dates
+  against a generation that labels each bucket by its first day carried identical values
+  and graded as every row missing and extra. When every date column on both sides names
+  the same months, the rows match within the usual tolerance, and no row folds into
+  another, the case passes with a `month-lenient:` reason; such a pass is never stored as
+  typed gold.
 
 ## [0.12.0] — 2026-10-18
 

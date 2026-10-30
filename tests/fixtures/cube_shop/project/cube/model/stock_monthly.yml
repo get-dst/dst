@@ -1,0 +1,40 @@
+cubes:
+- name: stock_monthly
+  title: stock monthly
+  description: Units on hand per store at each month end.
+  sql_table: bakery.stock_monthly
+  meta:
+    dst:
+      grain: one row per month and store
+      key:
+      - month
+      - store_id
+  joins:
+  - name: stores
+    relationship: many_to_one
+    sql: '{CUBE}.store_id = {stores}.store_id'
+  dimensions:
+  - name: month
+    sql: CAST({CUBE}.month || '-01' AS DATE)
+    type: time
+    title: month (text YYYY-MM cast to a date)
+    description: YYYY-MM
+    primary_key: true
+    public: true
+  - name: store_id
+    sql: '{CUBE}.store_id'
+    type: number
+    primary_key: true
+    public: true
+  - name: units_on_hand
+    sql: '{CUBE}.units_on_hand'
+    type: number
+  measures:
+  - name: stock_on_hand
+    title: stock on hand
+    type: sum
+    sql: '{CUBE}.units_on_hand'
+    meta:
+      dst:
+        additivity: level
+        snapshot_grain: month

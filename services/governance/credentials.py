@@ -34,6 +34,10 @@ class CallerIdentity:
     # data plane when nobody said, "mcp" for an MCP request whose client did not name
     # itself — see services/auth/deps.py.
     agent: str | None = None
+    # Driver mode: the caller is an agent doing its own reading (an admin set
+    # it on the caller, or the request said ``X-DST-Driver: 1``), so dst calls
+    # no model for it — see services/serve/driver.py.
+    driver: bool = False
 
 
 def create_caller(
@@ -47,6 +51,26 @@ def create_caller(
         {"n": name, "t": type_, "g": groups or []},
     ).scalar_one()
     return uuid.UUID(str(cid))
+
+
+def set_groups(session: Session, name: str, groups: list[str]) -> int:
+    """Replace a caller's groups — the admin-managed membership a lens's
+    `access.allow` and a `hide` entry's ``except_groups`` read. 0 = no such
+    caller in this org."""
+    res = session.execute(
+        text("UPDATE caller SET groups = :g WHERE name = :n"),
+        {"g": sorted(set(groups)), "n": name},
+    )
+    return int(res.rowcount)  # type: ignore[attr-defined]
+
+
+def set_driver(session: Session, name: str, driver: bool) -> int:
+    """Mark a caller a driver (an agent that writes its own queries) or not.
+    0 = no such caller in this org."""
+    res = session.execute(
+        text("UPDATE caller SET driver = :d WHERE name = :n"), {"d": driver, "n": name}
+    )
+    return int(res.rowcount)  # type: ignore[attr-defined]
 
 
 def caller_id_by_name(session: Session, name: str) -> uuid.UUID | None:
@@ -110,8 +134,13 @@ def touch_key(key_hash: str) -> None:
 
 
 def list_callers(session: Session) -> list[dict[str, object]]:
-    rows = session.execute(text("SELECT id, name, type, groups FROM caller ORDER BY name")).all()
-    return [{"id": str(r[0]), "name": r[1], "type": r[2], "groups": list(r[3] or [])} for r in rows]
+    rows = session.execute(
+        text("SELECT id, name, type, groups, driver FROM caller ORDER BY name")
+    ).all()
+    return [
+        {"id": str(r[0]), "name": r[1], "type": r[2], "groups": list(r[3] or []), "driver": r[4]}
+        for r in rows
+    ]
 
 
 def list_keys(session: Session, caller_name: str) -> list[dict[str, object]]:
@@ -217,7 +246,7 @@ def verify_caller_key(raw: str, *, resource: str | None = None) -> CallerIdentit
             return None
         conn.execute(text("SELECT set_config('app.current_org', :o, true)"), {"o": str(row[0])})
         caller = conn.execute(
-            text("SELECT name, groups FROM caller WHERE id = :c"), {"c": row[1]}
+            text("SELECT name, groups, driver FROM caller WHERE id = :c"), {"c": row[1]}
         ).first()
     if caller is None:
         return None
@@ -229,4 +258,5 @@ def verify_caller_key(raw: str, *, resource: str | None = None) -> CallerIdentit
         is_admin=False,
         groups=list(caller[1] or []),
         scopes=list(row[2] or []),
+        driver=bool(caller[2]),
     )

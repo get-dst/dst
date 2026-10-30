@@ -37,7 +37,7 @@ def test_the_scrub_covers_the_names_no_setting_claims() -> None:
     """The model-cache knobs steer services/context/local_embedder.py without
     naming a Settings field, so they are listed — and therefore pinned."""
     env = dict.fromkeys(_EXTRA_AMBIENT, "planted")
-    env["DST_ADMIN_TOKEN"] = "dstadm_from_the_shell"  # services/cli/main.py
+    env["DST_ADMIN_TOKEN"] = "dstadm_from_the_shell"  # services/cli/_common.py
     env["DST_URL"] = "http://someone-elses-server"  # services/mcp/server.py
     _scrub(env)
     assert env == {}

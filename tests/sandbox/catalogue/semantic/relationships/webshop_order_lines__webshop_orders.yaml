@@ -1,0 +1,5 @@
+left: webshop_order_lines
+right: webshop_orders
+"on": webshop_order_lines.order_id = webshop_orders.order_id
+type: left
+relationship: many_to_one

@@ -1,0 +1,5 @@
+left: maintenance_contracts
+right: customers
+"on": maintenance_contracts.customer_id = customers.customer_id
+type: left
+relationship: many_to_one

@@ -31,7 +31,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from services.benchmark.contamination import normalize
+from services.evals.contamination import normalize
 
 #: Fewest usable pairs of each label a fit needs: a band fitted on fewer
 #: moves with every pair added, and the exact band rests on the highest

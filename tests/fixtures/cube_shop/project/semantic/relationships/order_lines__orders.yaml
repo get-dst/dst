@@ -1,0 +1,5 @@
+left: order_lines
+right: orders
+"on": order_lines.order_id = orders.order_id
+type: left
+relationship: many_to_one

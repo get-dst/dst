@@ -71,7 +71,6 @@ beforeEach(() => {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
-      if (url.includes('/patches')) return json([])
       if (url.includes('/mgmt/observe/requests/')) return json(trace)
       if (url.includes('/mgmt/observe/requests')) return json([request])
       if (url.includes('/mgmt/reviews')) return json([ticket])
@@ -108,7 +107,7 @@ test('queue renders clickable rows: question, lens, state, origin + correction c
   expect(screen.getByRole('button', { name: 'Open review rev_abc123' })).toBeInTheDocument()
 })
 
-test('row click opens the detail: story, correction diff, and the action rail', async () => {
+test('row click opens the detail: story, correction diff, and the ruling', async () => {
   renderPanel()
   fireEvent.click(await screen.findByRole('button', { name: 'Open review rev_abc123' }))
 
@@ -123,10 +122,6 @@ test('row click opens the detail: story, correction diff, and the action rail', 
   expect(screen.getByText('Governed scope')).toBeInTheDocument()
   expect(screen.getByText('NORTHWIND.GOLD.SALES')).toBeInTheDocument()
   expect(screen.getByText('no filter')).toBeInTheDocument()
-
-  // The rail: the loop appears because a correction is recorded, with a draftable patch
-  expect(screen.getByText('The loop')).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Draft patch' })).toBeInTheDocument()
 
   // Human ruling stays available, secondary
   expect(screen.getByText('Human ruling')).toBeInTheDocument()

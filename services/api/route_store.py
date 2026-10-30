@@ -85,6 +85,27 @@ def record(
     return _row_to_decision(row)
 
 
+def amend(
+    session: Session,
+    decision_id: str,
+    routed_lens: str,
+    decision: dict[str, object] | None,
+) -> None:
+    """Point a recorded route at the lens that answered (a fallback after the
+    routed lens refused), with the decision record that says why."""
+    session.execute(
+        text(
+            "UPDATE routing_decision SET routed_lens = :l, decision = CAST(:dc AS jsonb) "
+            "WHERE id = :i"
+        ),
+        {
+            "i": decision_id,
+            "l": routed_lens,
+            "dc": json.dumps(decision) if decision is not None else None,
+        },
+    )
+
+
 def list_window(session: Session, *, days: int = 30, limit: int = 1000) -> list[RoutingDecision]:
     """The org's routing decisions over the trailing ``days``, newest first."""
     rows = session.execute(

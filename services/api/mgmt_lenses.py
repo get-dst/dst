@@ -368,7 +368,8 @@ def _unselected_shared(session: Session, bundle: store.LensBundle) -> list[tuple
     return [
         (a.kind, a.name)
         for a in semantic_store.list_assets(session)
-        if (a.kind, a.name) not in selected
+        # A blueprint is a fact about a table, never selected: not a candidate.
+        if a.kind != "blueprint" and (a.kind, a.name) not in selected
     ]
 
 

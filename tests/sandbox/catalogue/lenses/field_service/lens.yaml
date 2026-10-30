@@ -1,0 +1,53 @@
+name: field_service
+display_name: Field service
+description: Work orders (emergency callouts and maintenance visits) with full-cost margin, technician hours and utilisation, maintenance contracts, renewals, contract churn and the renewal wall - for field operations and customer success.
+owner: field-operations
+timezone: Europe/Helsinki
+stale_after_days: 3
+connections: [warehouse]
+select:
+  entities:
+    - work_orders
+    - work_order_margin_monthly
+    - technician_utilisation_monthly
+    - maintenance_contracts
+    - contract_renewals_monthly
+    - contract_book_month_end
+    - customers
+  definitions: [work_order, completed_job, emergency_callout, margin, utilisation, maintenance_contract, renewal, contract_churn, renewal_wall, region, segment]
+sources: [FieldFlow]
+scope: own
+untyped_fallback: true
+not_for:
+  - ask: customer churn
+    sibling: customers
+  - ask: customers churned
+    sibling: customers
+  - ask: churned customers
+    sibling: customers
+  - ask: subscription churn
+    sibling: pro_app
+  - ask: service contract revenue
+    sibling: group_finance
+  - ask: webshop margin
+    sibling: webshop
+  - ask: emergency tickets
+    sibling: support
+not_computable:
+  - measure: labour-only margin
+    aliases: [margin without materials, labour margin, margin excluding materials, emergency margin from fct_work_orders]
+    reason: "the labour-only emergency margin (about 53 %) is the labour-only defect; margin here is always full cost - labour and materials"
+  - measure: contract renewal risk
+    aliases: [contracts at risk of not renewing, renewal risk, likelihood of renewal, which contracts will churn, risk of not renewing, not renewing, highest risk, at risk]
+    reason: "no risk score exists; the layer can list contracts by end date, value and auto-renew flag, not predict renewals"
+  - measure: technician resolution time
+    aliases: [technician by resolution time, fastest technician, resolution time per technician]
+    reason: "work orders carry a scheduled and a completed date but no per-technician response or resolution measure; hours and utilisation per technician are available"
+  - measure: contract renewal rate by segment
+    aliases: [renewal rate for housing company contracts, renewal rate by customer segment, household contract renewals, renewal rate by tier, contract tier]
+    reason: "maintenance contracts carry no tier and the 12 decided renewals to date are too few to split; the customer type of each contract is available through the customer"
+access:
+  allow:
+    - group: everyone
+eval_gate: block
+auto_review: unverified

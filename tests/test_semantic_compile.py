@@ -534,7 +534,7 @@ def test_hide_withholds_the_column_on_every_door() -> None:
 def test_a_hide_that_matches_nothing_fails_the_compile_by_name() -> None:
     with pytest.raises(CompileError) as exc:
         _compile_patients(hide=["birth_date", "ssn"])
-    assert "hides 'ssn' but no field matches it" in str(exc.value)
+    assert "hides 'ssn' but no field or dimension matches it" in str(exc.value)
 
 
 def test_a_hidden_column_an_expression_still_reads_fails_the_compile() -> None:

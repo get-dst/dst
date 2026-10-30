@@ -7,6 +7,7 @@ grounded against it and `sql_guard` derives its allow-list from it.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from fnmatch import fnmatchcase
 from typing import Annotated, Any, Literal, get_args
 
@@ -409,6 +410,45 @@ class EntitySource(Authored):
     )
 
 
+class HideRule(Authored):
+    """A `hide` entry withheld from every caller except the named groups.
+
+    Groups are the caller groups an admin attaches to a caller (or an identity
+    provider asserts in a verified token), never anything a request says about
+    itself. Every caller outside them reads the lens as if the entry were a
+    plain pattern."""
+
+    column: str = PField(
+        description="the column pattern, fnmatch on the column name like a plain "
+        "`hide` entry — bare ('contact_email', '*_email') or qualified"
+    )
+    except_groups: StrList = PField(
+        description="the caller groups that may still read the column, each one "
+        "declared under `groups:` in dst.yaml (e.g. [support, sales])"
+    )
+
+    @field_validator("column")
+    @classmethod
+    def _some_column(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("column must name a column pattern, e.g. contact_email")
+        return v.strip()
+
+    @field_validator("except_groups")
+    @classmethod
+    def _some_groups(cls, v: list[str]) -> list[str]:
+        cleaned = [g.strip() for g in v if g and g.strip()]
+        if not cleaned:
+            raise ValueError(
+                "except_groups needs at least one group; a column nobody may read "
+                "is a plain `hide` entry"
+            )
+        return cleaned
+
+
+HideList = Annotated[list[str | HideRule], BeforeValidator(_one_string_is_one_entry)]
+
+
 class Entity(Authored):
     name: str = PField(
         description="the entity's identity, unique project-wide (folders are "
@@ -487,11 +527,17 @@ class Entity(Authored):
     # no field and on a hidden column a dimension, metric or key still reads:
     # a hide that withholds nothing is a column the author believes is hidden
     # and is not.
-    hide: StrList = PField(
+    # An entry may also be a mapping, `{column: <pattern>, except_groups: [..]}`:
+    # the column is withheld exactly like a plain pattern from every caller
+    # outside those groups, and compiled into ``SemanticModel.group_columns`` so
+    # a caller inside one reads it (``SemanticModel.for_groups``).
+    hide: HideList = PField(
         default_factory=list,
         description="column patterns to withhold from every door, fnmatch on the "
         "column name — bare ('ssn', '*_email') or qualified ('patients.birth_date'). "
-        "A hidden column is absent from the lens: naming it is out of scope",
+        "A hidden column is absent from the lens: naming it is out of scope. An "
+        "entry `{column: contact_email, except_groups: [support]}` withholds the "
+        "column from every caller outside those groups",
     )
 
     # Columns the lens keeps but never offers a question: a surrogate key a
@@ -505,18 +551,48 @@ class Entity(Authored):
     )
 
     def hidden_columns(self) -> set[str]:
-        """The field names `hide` withholds — the compile keeps the fields off
-        the entity, and the allow-list subtracts them again so a column an
-        expression still names cannot come back through the guard."""
-        return {f.name for f in self.fields if column_hidden(f.name, self)}
+        """The column names `hide` withholds, read from the fields and the
+        passthrough dimensions (a bare dimension is the lens reading its
+        column) — the compile keeps both off the entity, and the allow-list
+        subtracts them again so a column an expression still names cannot come
+        back through the guard."""
+        names = {f.name for f in self.fields}
+        names |= {d.name for d in self.dimensions if passthrough_dimension(d)}
+        return {n for n in names if column_hidden(n, self)}
+
+    def withhold_hidden(self) -> None:
+        """Drop the fields and passthrough dimensions `hide` names, in place."""
+        self.fields = [f for f in self.fields if not column_hidden(f.name, self)]
+        self.dimensions = [
+            d
+            for d in self.dimensions
+            if not (passthrough_dimension(d) and column_hidden(d.name, self))
+        ]
+
+
+def hide_patterns(entity: Entity, *, plain_only: bool = False) -> list[str]:
+    """The column patterns of the entity's `hide` entries; a group entry's
+    pattern included unless *plain_only*."""
+    return [
+        h if isinstance(h, str) else h.column
+        for h in entity.hide
+        if isinstance(h, str) or not plain_only
+    ]
 
 
 def column_hidden(column: str, entity: Entity) -> bool:
     """Does one of the entity's `hide` patterns name this column? Matched
     case-insensitively against the bare name, `entity.column`, and the source
     table's `table.column` (bare or qualified), so every spelling an author
-    reaches for reads naturally."""
-    return _patterned(column, entity, entity.hide)
+    reaches for reads naturally. A group entry counts: the model a caller reads
+    keeps only the entries that caller is not excepted from."""
+    return _patterned(column, entity, hide_patterns(entity))
+
+
+def passthrough_dimension(dimension: Dimension) -> bool:
+    """A dimension that IS its column: no expression, or one naming only its
+    own name. Hiding the column withholds the dimension with it."""
+    return not dimension.expr or dimension.expr.strip() == dimension.name
 
 
 def _patterned(column: str, entity: Entity, patterns: list[str]) -> bool:
@@ -552,6 +628,284 @@ class Join(Authored):
     @classmethod
     def _on_key(cls, data: object) -> object:
         return _restore_on_key(data)
+
+
+def _valid_zone(v: str | None) -> str | None:
+    """An IANA zone or nothing: a clock declared in a zone no database knows is
+    a false fact, and it fails at plan rather than at the first answer."""
+    if v is None or not v.strip():
+        return None
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(v.strip())
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"'{v}' is not an IANA timezone (e.g. UTC, Europe/Helsinki)") from exc
+    return v.strip()
+
+
+class BlueprintVersions(Authored):
+    """Rows that repeat once per sync of the same record."""
+
+    sync_column: str = PField(
+        description="the column that stamps each sync or load; a record has one row per "
+        "value of it, e.g. _synced_at",
+    )
+    latest_only: StrList = PField(
+        default_factory=list,
+        description="columns that hold only on a record's latest version, e.g. a delete flag",
+    )
+
+    @model_validator(mode="after")
+    def _sync_not_latest_only(self) -> BlueprintVersions:
+        if self.sync_column in self.latest_only:
+            raise ValueError(
+                f"'{self.sync_column}' is the sync column and cannot also be latest_only"
+            )
+        return self
+
+
+class BlueprintClock(Authored):
+    """What one timestamp column records, and in which zone it is stored."""
+
+    meaning: str | None = PField(
+        default=None, description="what the column records, e.g. when the contact was created"
+    )
+    timezone: str | None = PField(
+        default=None,
+        description="the IANA zone the stored values are in, e.g. UTC or Europe/Helsinki",
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def _zone(cls, v: str | None) -> str | None:
+        return _valid_zone(v)
+
+
+class BlueprintJoin(Authored):
+    """A join from this table to another table on the same connection."""
+
+    to: str = PField(description="the other table, named as its connection names it")
+    on: str = PField(
+        validation_alias=_ON_ALIASES,
+        description="join condition with columns qualified by the bare table names, e.g. "
+        'contacts.account_id = accounts.id (type the key as `"on":` or `condition:`)',
+    )
+    cardinality: Literal["one", "many"] = PField(
+        description="rows of `to` per row of this table: one, or many (the join fans out)",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _on_key(cls, data: object) -> object:
+        return _restore_on_key(data)
+
+
+class TableBlueprint(Authored):
+    """Facts about one warehouse table, authored in semantic/tables/**.yaml.
+
+    Project-wide, not per lens: every entity whose `source.table` is this table
+    inherits `grain` and `key` when it declares none, and an exposed table
+    carries the blueprint to describe and to the grain check on its answers."""
+
+    connection: str = PField(description="the dst.yaml connection the table lives on")
+    table: str = PField(
+        description="the table, named exactly as its connection names it (schema.table)"
+    )
+    system: str | None = PField(
+        default=None,
+        description="the source system the table is loaded from, as the team names it, "
+        "e.g. billing, or legacy CRM extract; plan never hints a join between tables "
+        "of two different systems",
+    )
+    grain: str | None = PField(
+        default=None,
+        description="one line: what one row is, e.g. one row per contact per sync",
+    )
+    key: StrList = PField(
+        default_factory=list,
+        description="the columns one row is unique on; with `versions`, the sync "
+        "column is part of it whether listed or not",
+    )
+    versions: BlueprintVersions | None = PField(
+        default=None,
+        description="set when rows repeat once per sync of the same record: "
+        "{sync_column: <the column that stamps each sync>, latest_only: [<columns that "
+        "hold on the latest version only, e.g. a delete flag>]}",
+    )
+    clocks: dict[str, BlueprintClock] = PField(
+        default_factory=dict,
+        description="timestamp columns by name: {<column>: {meaning: <what it records>, "
+        "timezone: <IANA zone the values are stored in>}}",
+    )
+    joins: list[BlueprintJoin] = PField(
+        default_factory=list, description="joins to other tables on the same connection"
+    )
+    caveats: StrList = PField(
+        default_factory=list,
+        description="what a reader of this table must know, one sentence each",
+    )
+
+    @field_validator("key")
+    @classmethod
+    def _distinct_key(cls, v: list[str]) -> list[str]:
+        if len({c.lower() for c in v}) != len(v):
+            raise ValueError(f"key names a column twice: {v}")
+        return v
+
+    @property
+    def name(self) -> str:
+        """The asset identity: the table as its connection names it. One
+        blueprint per table name in a project, whichever connection holds it."""
+        return self.table
+
+    @property
+    def full(self) -> bool:
+        """Grain and key both declared: what the grain check needs."""
+        return bool(self.grain and self.grain.strip() and self.key)
+
+    def record_key(self) -> list[str]:
+        """The key one record is unique on, the sync column left out."""
+        sync = self.versions.sync_column.lower() if self.versions else None
+        return [c for c in self.key if c.lower() != sync]
+
+    def unique_on(self) -> list[str]:
+        """The columns every row is unique on: the key, plus the sync column
+        when rows repeat per sync."""
+        if self.versions and self.versions.sync_column.lower() not in {c.lower() for c in self.key}:
+            return [*self.key, self.versions.sync_column]
+        return list(self.key)
+
+    def own_columns(self) -> list[tuple[str, str]]:
+        """``(where, column)`` for every column this blueprint names on its own
+        table, join conditions excluded (those name two tables)."""
+        out = [("key", c) for c in self.key]
+        if self.versions:
+            out.append(("versions.sync_column", self.versions.sync_column))
+            out += [("versions.latest_only", c) for c in self.versions.latest_only]
+        out += [("clocks", c) for c in self.clocks]
+        return out
+
+
+def blueprint_lines(blueprint: TableBlueprint | None, readable: set[str]) -> list[str]:
+    """What a table's blueprint adds to a generation prompt, beyond `grain`
+    (which the entity inherits): repeated rows per sync, the clocks, the
+    caveats. Both prompts render the same lines (a fact that reaches one tier
+    does not exist); a column the entity does not read is never named."""
+    if blueprint is None:
+        return []
+    out: list[str] = []
+    versions = blueprint.versions
+    if versions is not None and versions.sync_column.lower() in readable:
+        latest = [c for c in versions.latest_only if c.lower() in readable]
+        out.append(
+            f"rows repeat once per sync ({versions.sync_column}): a count or sum reads "
+            "the latest version of each record"
+            + (f"; {', '.join(latest)} holds on the latest version only" if latest else "")
+        )
+    for column, clock in blueprint.clocks.items():
+        if column.lower() not in readable:
+            continue
+        said = ", ".join(
+            x for x in (clock.meaning, clock.timezone and f"stored in {clock.timezone}") if x
+        )
+        if said:
+            out.append(f"clock {column}: {said}")
+    out += [f"caveat: {c}" for c in blueprint.caveats]
+    return out
+
+
+# What a blueprint's prose reads in place of a column the lens hides.
+WITHHELD_COLUMN = "[withheld column]"
+
+
+def withheld_columns(entity: Entity, columns: Iterable[str]) -> set[str]:
+    """The columns of *entity*'s table the lens withholds, lowercased, out of
+    *columns* (the table's names as profiled, or the fields before `hide`): on
+    an exposed table every one it does not read, on a governed entity the ones
+    its `hide` names."""
+    if entity.exposed:
+        readable = {f.name.lower() for f in entity.fields}
+        return {c.lower() for c in columns if c.lower() not in readable}
+    return {c.lower() for c in columns if column_hidden(c, entity)}
+
+
+def hidden_names(table: str, hidden: Mapping[str, set[str]], readable: Iterable[str]) -> set[str]:
+    """Every spelling of a hidden column that blueprint prose about *table*
+    must not carry: its own hidden columns bare, any table's hidden column as
+    `table.column`, and another table's hidden column bare when *table* has no
+    readable column of that name. ``hidden`` maps a table to its withheld
+    columns (``withheld_columns``)."""
+    own = next((cs for t, cs in hidden.items() if t.lower() == table.lower()), set())
+    keep = {c.lower() for c in readable}
+    out = set(own)
+    for t, columns in hidden.items():
+        bare = t.rsplit(".", 1)[-1].lower()
+        out |= {f"{bare}.{c}" for c in columns}
+        out |= {c for c in columns if c not in keep}
+    return out
+
+
+def _mention(name: str) -> re.Pattern[str]:
+    # Word-bounded, any qualifier in front, each part optionally quoted:
+    # salary_eur, employees.salary_eur, hr.employees."salary_eur".
+    q = r'["`]?'
+    body = (q + r"\." + q).join(re.escape(part) for part in name.split("."))
+    return re.compile(rf"(?<![\w$])(?:{q}[\w$]+{q}\.)*{q}{body}{q}(?![\w$])", re.IGNORECASE)
+
+
+def redact_columns(text: str, names: Iterable[str]) -> str:
+    """*text* with every mention of *names* (``hidden_names``) replaced by
+    ``WITHHELD_COLUMN``."""
+    for name in sorted(names, key=len, reverse=True):
+        text = _mention(name).sub(WITHHELD_COLUMN, text)
+    return text
+
+
+def blueprint_mentions(blueprint: TableBlueprint, names: Iterable[str]) -> list[str]:
+    """Where the blueprint's prose (grain, caveats, clock meanings, joins)
+    names one of *names*, as ``"<slot> names <column>"``."""
+    found = sorted(names, key=len, reverse=True)
+    slots: list[tuple[str, str]] = [("grain", blueprint.grain or "")]
+    slots += [(f"caveat {n}", c) for n, c in enumerate(blueprint.caveats, 1)]
+    slots += [(f"clock {k}", c.meaning or "") for k, c in blueprint.clocks.items()]
+    slots += [(f"join to {j.to}", j.on) for j in blueprint.joins]
+    out: list[str] = []
+    for slot, text in slots:
+        hits = [n for n in found if _mention(n).search(text)]
+        if hits:
+            out.append(f"{slot} names {hits[0]}")
+    return out
+
+
+def withhold_hidden(blueprint: TableBlueprint, names: Iterable[str]) -> TableBlueprint:
+    """The blueprint as a lens may serve it: every mention of a hidden column
+    in its prose replaced by ``WITHHELD_COLUMN``, and a join whose condition
+    names one dropped, with a caveat counting the drops. Structure the checks
+    count with (key, versions, clock names) is kept: those doors withhold by
+    column already."""
+    names = set(names)
+    if not names:
+        return blueprint
+    joins = [j for j in blueprint.joins if redact_columns(j.on, names) == j.on]
+    caveats = [redact_columns(c, names) for c in blueprint.caveats]
+    if dropped := len(blueprint.joins) - len(joins):
+        caveats.append(
+            f"{dropped} declared join(s) withheld: the condition names a {WITHHELD_COLUMN}"
+        )
+    return blueprint.model_copy(
+        update={
+            "grain": redact_columns(blueprint.grain, names) if blueprint.grain else None,
+            "caveats": caveats,
+            "clocks": {
+                k: c.model_copy(
+                    update={"meaning": redact_columns(c.meaning, names) if c.meaning else None}
+                )
+                for k, c in blueprint.clocks.items()
+            },
+            "joins": joins,
+        }
+    )
 
 
 # The shapes a definition's `period` may take; the dates they span are read by
@@ -717,6 +1071,31 @@ def _referenced_columns(expr: str | None, entity_name: str) -> set[str]:
     return out
 
 
+class GroupColumn(BaseModel):
+    """A column an entity's `hide` withholds from every caller outside
+    ``groups`` — kept here, off the entity, so a model read without a caller
+    (or by a caller outside the groups) never carries it, and
+    ``SemanticModel.for_groups`` puts it back for a caller inside one."""
+
+    entity: str
+    column: str
+    groups: list[str]
+    field: Field | None = None
+    dimensions: list[Dimension] = PField(default_factory=list)
+
+
+class CubeStamp(BaseModel):
+    """What apply recorded about a lens's Cube views: the model and overlay
+    versions they compiled to, when, and the ``LensModel`` itself as JSON
+    (``services.contracts.lens_model``), so a reader needs no second fetch."""
+
+    model_version: str
+    overlay_version: str
+    stamped_at: str
+    views: StrList = PField(default_factory=list)
+    lens_model: dict[str, Any] = PField(default_factory=dict)
+
+
 class SemanticModel(BaseModel):
     # No `version` field. There was one, defaulted to 1, written into every
     # stored bundle and every compiled.yaml, and read by nothing — a schema
@@ -767,6 +1146,69 @@ class SemanticModel(BaseModel):
     # Set when this model was compiled from the project's shared semantic layer:
     # which assets (at which content-hash) went in — the staleness signal.
     shared_provenance: SharedProvenance | None = None
+    # The table blueprints (semantic/tables/) of the tables this model reads,
+    # keyed by the entity's compiled source.table. Describe shows them for an
+    # exposed table, and the grain check on an answer reads the declared key.
+    blueprints: dict[str, TableBlueprint] = PField(default_factory=dict)
+    # The columns a group `hide` entry withholds, compiled off their entities.
+    # Only ``for_groups`` reads them: every door serves the entities, so a
+    # door that never asked for a caller's view serves none of these.
+    group_columns: list[GroupColumn] = PField(default_factory=list)
+    # Set on a caller's view only: "entity.column (group)" for each column it
+    # reads by a group exception — the receipt and the answer name them.
+    column_grants: list[str] = PField(default_factory=list)
+    # The Cube views the lens serves (LensConfig.views, or the overlay's), and
+    # the versions apply stamped them at. None = not a Cube-backed lens.
+    cube_views: StrList = PField(default_factory=list)
+    cube: CubeStamp | None = None
+
+    def for_groups(self, groups: Iterable[str]) -> SemanticModel:
+        """The model as a caller in *groups* reads it.
+
+        Each group `hide` entry naming one of *groups* is dropped from its
+        entity and the columns it withheld come back (field and passthrough
+        dimensions), unless another entry still hides them: deny wins. Every
+        entity is then stripped of whatever its remaining `hide` names, so a
+        model that reached storage without the compile's withholding serves
+        nothing hidden either. ``group_columns`` is emptied on the view."""
+        held = set(groups)
+        if not self.group_columns and not any(
+            isinstance(h, HideRule) for e in self.entities for h in e.hide
+        ):
+            return self
+        view = self.model_copy(deep=True)
+        by_entity: dict[str, list[GroupColumn]] = {}
+        for gc in view.group_columns:
+            by_entity.setdefault(gc.entity, []).append(gc)
+        grants: list[str] = []
+        for entity in view.entities:
+            granted = [
+                h for h in entity.hide if isinstance(h, HideRule) and held & set(h.except_groups)
+            ]
+            if granted:
+                entity.hide = [h for h in entity.hide if not any(h is g for g in granted)]
+                for gc in by_entity.get(entity.name, []):
+                    if column_hidden(gc.column, entity):
+                        continue
+                    if gc.field is not None and gc.field.name not in {
+                        f.name for f in entity.fields
+                    }:
+                        entity.fields.append(gc.field)
+                    known = {d.name for d in entity.dimensions}
+                    entity.dimensions += [d for d in gc.dimensions if d.name not in known]
+                    via = sorted(held & set(gc.groups))
+                    grants.append(f"{entity.name}.{gc.column} (group {', '.join(via)})")
+            entity.withhold_hidden()
+        view.group_columns = []
+        view.column_grants = grants
+        return view
+
+    def every_exception(self) -> SemanticModel:
+        """The view of a caller in every group a `hide` entry excepts — the
+        widest any caller reads. What a certified answer is checked against
+        when it is approved: it may serve a group-excepted column (only to
+        callers in the group), never a column hidden from everyone."""
+        return self.for_groups({g for gc in self.group_columns for g in gc.groups})
 
     def allowed_columns(self) -> dict[str, set[str]]:
         """Map physical table -> allowed column names. Consumed by sql_guard.

@@ -1,0 +1,56 @@
+name: customers
+description: >-
+  One row per CRM customer (Nordlund LVI's 100 companies and private customers), current state:
+  type, region, city, lifetime invoiced, active maintenance contracts and partner link. This is
+  the "customer" group reports count. Webshop shoppers and Bergström's Fortnox customers are
+  different populations and are not here. primary_segment carries legacy labels and is never a
+  breakdown; the transaction tables (quotes, bookings, invoices, leads) carry the clean segment.
+grain: one row per CRM customer
+use_cases:
+  - "Use when a question asks about CRM customers, customers by region, city or type, lifetime value, or how many customers we have."
+  - "Avoid for: active customers per month and lapses (customer_health_monthly); webshop shoppers (webshop lens); Bergström's customers (finance lens)"
+common_questions:
+  - how many customers do we have by region
+  - customers by type
+source: {connection: warehouse, table: marts_customer.dim_customer_360}
+primary_key: [customer_id]
+population: Finnish CRM customers only (100), current state
+fields:
+  - {name: customer_id, type: string}
+  - {name: customer_name, type: string}
+  - {name: customer_type, type: string, description: "Housing company, Company, Construction firm, Public sector, Private individual, Retail, Building services, Property investor, Property management"}
+  - {name: primary_segment, type: string, description: "legacy segment label, inconsistent spellings - not a breakdown"}
+  - {name: region, type: string, description: "Uusimaa, Pirkanmaa, Pohjois-Pohjanmaa, Varsinais-Suomi, Keski-Suomi, Päijät-Häme"}
+  - {name: city, type: string}
+  - {name: customer_since, type: date}
+  - {name: first_activity_date, type: date}
+  - {name: last_activity_date, type: date}
+  - {name: lifetime_invoiced_eur, type: number}
+  - {name: active_contracts, type: integer}
+  - {name: active_contract_value_eur, type: number}
+  - {name: is_partner, type: boolean}
+  - {name: partner_id, type: string}
+  - {name: hubspot_company_id, type: integer}
+  - {name: days_since_activity, type: integer}
+dimensions:
+  - {name: customer_type, aliases: [type, customer category]}
+  - {name: region, aliases: [area, maakunta]}
+  - {name: city, aliases: [town]}
+  - {name: is_partner, aliases: [partner customer]}
+internal: [primary_segment, partner_id, hubspot_company_id]
+metrics:
+  - name: customer_count
+    agg: count
+    label: customers
+    aliases: [number of customers, CRM customers, customer base]
+  - name: lifetime_invoiced_eur
+    agg: sum
+    expr: customers.lifetime_invoiced_eur
+    label: lifetime invoiced
+    aliases: [lifetime value, lifetime revenue]
+    format: currency
+    currency: EUR
+  - name: customers_with_contracts
+    agg: count
+    filters: ["customers.active_contracts > 0"]
+    label: customers with an active maintenance contract

@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from services.cli import main as cli
+from services.cli import project as project_cmd
 
 
 def _run_cli(monkeypatch, argv: list[str]) -> int:
@@ -179,8 +180,8 @@ def _parsed(monkeypatch, argv: list[str]) -> argparse.Namespace:
         seen["args"] = args
         return 0
 
-    monkeypatch.setattr(cli, "_apply", capture)
-    monkeypatch.setattr(cli, "_plan", capture)
+    monkeypatch.setattr(project_cmd, "_apply", capture)
+    monkeypatch.setattr(project_cmd, "_plan", capture)
     assert _run_cli(monkeypatch, argv) == 0
     return seen["args"]
 
@@ -188,17 +189,17 @@ def _parsed(monkeypatch, argv: list[str]) -> argparse.Namespace:
 def test_apply_takes_lens_repeated(monkeypatch) -> None:
     args = _parsed(monkeypatch, ["apply", "--lens", "x", "--lens", "y"])
     assert args.lens == ["x", "y"]
-    assert cli._selectors(args) == ["lens/x", "lens/y"]
+    assert project_cmd._selectors(args) == ["lens/x", "lens/y"]
 
 
 def test_plan_takes_lens(monkeypatch) -> None:
     args = _parsed(monkeypatch, ["plan", "--lens", "x"])
-    assert cli._selectors(args) == ["lens/x"]
+    assert project_cmd._selectors(args) == ["lens/x"]
 
 
 def test_lens_and_select_combine(monkeypatch) -> None:
     args = _parsed(monkeypatch, ["apply", "--select", "entity/loaves+", "--lens", "x"])
-    assert cli._selectors(args) == ["entity/loaves+", "lens/x"]
+    assert project_cmd._selectors(args) == ["entity/loaves+", "lens/x"]
 
 
 @pytest.mark.parametrize("verb", ["apply", "plan"])

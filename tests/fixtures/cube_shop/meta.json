@@ -1,0 +1,3315 @@
+{
+ "cubes": [
+  {
+   "connectedComponent": 1,
+   "description": "Products on each order; the order discount repeats on every line of its order.",
+   "dimensions": [
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines.order_id",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "Order ID",
+     "sql": "`${CUBE}.order_id`",
+     "suggestFilterValues": true,
+     "title": "order lines Order ID",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines.line_number",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "Line Number",
+     "sql": "`${CUBE}.line_number`",
+     "suggestFilterValues": true,
+     "title": "order lines Line Number",
+     "type": "number"
+    },
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "item"
+       ],
+       "dictionary": [
+        "cinnamon bun",
+        "coffee",
+        "rye loaf",
+        "sourdough"
+       ]
+      }
+     },
+     "name": "order_lines.product",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Product",
+     "sql": "`${CUBE}.product`",
+     "suggestFilterValues": true,
+     "title": "order lines Product",
+     "type": "string"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines.qty",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Qty",
+     "sql": "`${CUBE}.qty`",
+     "suggestFilterValues": true,
+     "title": "order lines Qty",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines.line_total_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Line Total Eur",
+     "sql": "`${CUBE}.line_total_eur`",
+     "suggestFilterValues": true,
+     "title": "order lines Line Total Eur",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines.order_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Discount Eur",
+     "sql": "`${CUBE}.order_discount_eur`",
+     "suggestFilterValues": true,
+     "title": "order lines Order Discount Eur",
+     "type": "number"
+    }
+   ],
+   "fileName": "order_lines.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [
+    {
+     "name": "orders",
+     "relationship": "belongsTo",
+     "sql": "`${CUBE}.order_id = ${orders}.order_id`"
+    }
+   ],
+   "measures": [
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines.units_sold",
+     "public": true,
+     "shortTitle": "units sold",
+     "sql": "`${CUBE}.qty`",
+     "title": "order lines units sold",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "order_lines.product_revenue",
+     "public": true,
+     "shortTitle": "product revenue",
+     "sql": "`${CUBE}.line_total_eur`",
+     "title": "order lines product revenue",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "grain": "one row per order line",
+     "key": [
+      "order_id",
+      "line_number"
+     ]
+    }
+   },
+   "name": "order_lines",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "title": "order lines",
+   "type": "cube"
+  },
+  {
+   "connectedComponent": 1,
+   "description": "order_lines collapsed to one row per order_id so that sum_distinct_on measures sum one value per key.",
+   "dimensions": [
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines_by_order_id.order_id",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "Order ID",
+     "sql": "`${CUBE}.order_id`",
+     "suggestFilterValues": true,
+     "title": "order lines by order id Order ID",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines_by_order_id.line_number",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Line Number",
+     "sql": "`${CUBE}.line_number`",
+     "suggestFilterValues": true,
+     "title": "order lines by order id Line Number",
+     "type": "number"
+    },
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "item"
+       ],
+       "dictionary": [
+        "cinnamon bun",
+        "coffee",
+        "rye loaf",
+        "sourdough"
+       ]
+      }
+     },
+     "name": "order_lines_by_order_id.product",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Product",
+     "sql": "`${CUBE}.product`",
+     "suggestFilterValues": true,
+     "title": "order lines by order id Product",
+     "type": "string"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines_by_order_id.qty",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Qty",
+     "sql": "`${CUBE}.qty`",
+     "suggestFilterValues": true,
+     "title": "order lines by order id Qty",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines_by_order_id.line_total_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Line Total Eur",
+     "sql": "`${CUBE}.line_total_eur`",
+     "suggestFilterValues": true,
+     "title": "order lines by order id Line Total Eur",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "order_lines_by_order_id.order_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Discount Eur",
+     "sql": "`${CUBE}.order_discount_eur`",
+     "suggestFilterValues": true,
+     "title": "order lines by order id Order Discount Eur",
+     "type": "number"
+    }
+   ],
+   "fileName": "order_lines_by_order_id.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [
+    {
+     "name": "orders",
+     "relationship": "belongsTo",
+     "sql": "`${CUBE}.order_id = ${orders}.order_id`"
+    }
+   ],
+   "measures": [
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "order_lines_by_order_id.order_discount",
+     "public": true,
+     "shortTitle": "order discount",
+     "sql": "`${CUBE}._order_discount`",
+     "title": "order lines by order id order discount",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "grain": "one row per order_id",
+     "key": [
+      "order_id"
+     ],
+     "population": null,
+     "sources": [
+      "order_lines"
+     ]
+    }
+   },
+   "name": "order_lines_by_order_id",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "sql": "`SELECT order_id, ANY_VALUE(line_number) AS line_number, ANY_VALUE(product) AS product, ANY_VALUE(qty) AS qty, ANY_VALUE(line_total_eur) AS line_total_eur, ANY_VALUE(order_discount_eur) AS order_discount_eur, MAX(order_discount_eur) AS _order_discount\nFROM bakery.order_lines\nGROUP BY order_id`",
+   "title": "order lines by order id",
+   "type": "cube"
+  },
+  {
+   "connectedComponent": 1,
+   "description": "Orders at the tills and on the web shop, one row per order (the latest sync).",
+   "dimensions": [
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.order_id",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "Order ID",
+     "sql": "`${CUBE}.order_id`",
+     "suggestFilterValues": true,
+     "title": "orders Order ID",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Store ID",
+     "sql": "`${CUBE}.store_id`",
+     "suggestFilterValues": true,
+     "title": "orders Store ID",
+     "type": "number"
+    },
+    {
+     "description": "counter or web",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "sales channel"
+       ],
+       "dictionary": [
+        "counter",
+        "web"
+       ]
+      }
+     },
+     "name": "orders.channel",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Channel",
+     "sql": "`${CUBE}.channel`",
+     "suggestFilterValues": true,
+     "title": "orders Channel",
+     "type": "string"
+    },
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "dictionary": [
+        "open",
+        "paid",
+        "refunded"
+       ]
+      }
+     },
+     "name": "orders.status",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Status",
+     "sql": "`${CUBE}.status`",
+     "suggestFilterValues": true,
+     "title": "orders Status",
+     "type": "string"
+    },
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": {
+        "meaning": "when the customer paid",
+        "timezone": "Europe/Helsinki"
+       }
+      }
+     },
+     "name": "orders.ordered_at",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Ordered at",
+     "sql": "`${CUBE}.ordered_at`",
+     "suggestFilterValues": true,
+     "title": "orders Ordered at",
+     "type": "time"
+    },
+    {
+     "isVisible": true,
+     "name": "orders.shipped_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Shipped on",
+     "sql": "`${CUBE}.shipped_on`",
+     "suggestFilterValues": true,
+     "title": "orders Shipped on",
+     "type": "time"
+    },
+    {
+     "description": "order total incl. VAT",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.amount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Amount Eur",
+     "sql": "`${CUBE}.amount_eur`",
+     "suggestFilterValues": true,
+     "title": "orders Amount Eur",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Discount Eur",
+     "sql": "`${CUBE}.discount_eur`",
+     "suggestFilterValues": true,
+     "title": "orders Discount Eur",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.tips_eur_value",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "tips_eur (the column)",
+     "sql": "`${CUBE}.tips_eur`",
+     "suggestFilterValues": true,
+     "title": "orders tips_eur (the column)",
+     "type": "number"
+    }
+   ],
+   "fileName": "orders.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [
+    {
+     "name": "stores",
+     "relationship": "belongsTo",
+     "sql": "`${CUBE}.store_id = ${stores}.store_id`"
+    }
+   ],
+   "measures": [
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "filters": [
+      {
+       "sql": "`${CUBE}.status = 'paid'`"
+      }
+     ],
+     "format": "currency",
+     "formatDescription": {
+      "name": "currency",
+      "specifier": "$,.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "additivity": "flow",
+       "aliases": [
+        "sales",
+        "turnover"
+       ],
+       "better": "higher",
+       "currency": "EUR"
+      }
+     },
+     "name": "orders.revenue",
+     "public": true,
+     "shortTitle": "revenue",
+     "sql": "`${CUBE}.amount_eur`",
+     "title": "orders revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "count",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.order_count",
+     "public": true,
+     "shortTitle": "orders",
+     "title": "orders orders",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "orders.discount_total",
+     "public": true,
+     "shortTitle": "discount_total",
+     "sql": "`${CUBE}.discount_eur`",
+     "title": "orders discount_total",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.tips_eur",
+     "public": true,
+     "shortTitle": "tips",
+     "sql": "`${CUBE}.tips_eur`",
+     "title": "orders tips",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "filters": [
+      {
+       "sql": "`${CUBE}.channel = 'web'`"
+      }
+     ],
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": "shipped_on"
+      }
+     },
+     "name": "orders.shipped_revenue",
+     "public": true,
+     "shortTitle": "shipped web revenue",
+     "sql": "`${CUBE}.amount_eur`",
+     "title": "orders shipped web revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "number",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "AOV"
+       ]
+      }
+     },
+     "name": "orders.average_order_value",
+     "public": true,
+     "shortTitle": "average order value",
+     "sql": "`${revenue} / NULLIF(${order_count}, 0)`",
+     "title": "orders average order value",
+     "type": "number"
+    },
+    {
+     "aggType": "number",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "orders.net_revenue",
+     "public": true,
+     "shortTitle": "net revenue",
+     "sql": "`${revenue} - ${discount_total}`",
+     "title": "orders net revenue",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "grain": "one row per order per sync version",
+     "key": [
+      "order_id"
+     ],
+     "population": "real orders; test orders excluded",
+     "system": "the till and the web shop"
+    }
+   },
+   "name": "orders",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "online order",
+        "web orders"
+       ],
+       "meaning": "An order placed on the web shop.",
+       "term": "web_order"
+      }
+     },
+     "name": "orders.web_order",
+     "public": true,
+     "shortTitle": "Web Order",
+     "sql": "`${CUBE}.channel = 'web'`",
+     "title": "orders Web Order"
+    }
+   ],
+   "sql": "`SELECT * FROM (SELECT * FROM bakery.orders_raw QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY _synced DESC) = 1) AS orders\nWHERE NOT is_test`",
+   "title": "orders",
+   "type": "cube"
+  },
+  {
+   "connectedComponent": 1,
+   "description": "Units on hand per store at each month end.",
+   "dimensions": [
+    {
+     "description": "YYYY-MM",
+     "isVisible": true,
+     "name": "stock_monthly.month",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "month (text YYYY-MM cast to a date)",
+     "sql": "`CAST(${CUBE}.month || '-01' AS DATE)`",
+     "suggestFilterValues": true,
+     "title": "stock monthly month (text YYYY-MM cast to a date)",
+     "type": "time"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "stock_monthly.store_id",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "Store ID",
+     "sql": "`${CUBE}.store_id`",
+     "suggestFilterValues": true,
+     "title": "stock monthly Store ID",
+     "type": "number"
+    },
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "stock_monthly.units_on_hand",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Units on Hand",
+     "sql": "`${CUBE}.units_on_hand`",
+     "suggestFilterValues": true,
+     "title": "stock monthly Units on Hand",
+     "type": "number"
+    }
+   ],
+   "fileName": "stock_monthly.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [
+    {
+     "name": "stores",
+     "relationship": "belongsTo",
+     "sql": "`${CUBE}.store_id = ${stores}.store_id`"
+    }
+   ],
+   "measures": [
+    {
+     "aggType": "sum",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "additivity": "level",
+       "snapshot_grain": "month"
+      }
+     },
+     "name": "stock_monthly.stock_on_hand",
+     "public": true,
+     "shortTitle": "stock on hand",
+     "sql": "`${CUBE}.units_on_hand`",
+     "title": "stock monthly stock on hand",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "grain": "one row per month and store",
+     "key": [
+      "month",
+      "store_id"
+     ]
+    }
+   },
+   "name": "stock_monthly",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "title": "stock monthly",
+   "type": "cube"
+  },
+  {
+   "connectedComponent": 1,
+   "description": "The bakeries.",
+   "dimensions": [
+    {
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "stores.store_id",
+     "primaryKey": true,
+     "public": true,
+     "shortTitle": "Store ID",
+     "sql": "`${CUBE}.store_id`",
+     "suggestFilterValues": true,
+     "title": "stores Store ID",
+     "type": "number"
+    },
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "store",
+        "bakery"
+       ],
+       "dictionary": [
+        "Harbour",
+        "Mill Hill",
+        "Old Town",
+        "Pier Road"
+       ]
+      }
+     },
+     "name": "stores.store_name",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Store Name",
+     "sql": "`${CUBE}.store_name`",
+     "suggestFilterValues": true,
+     "title": "stores Store Name",
+     "type": "string"
+    },
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "area"
+       ],
+       "dictionary": [
+        "Coast",
+        "North",
+        "South"
+       ],
+       "value_aliases": [
+        {
+         "alias": "seaside",
+         "value": "Coast"
+        },
+        {
+         "alias": "northern",
+         "value": "North"
+        }
+       ]
+      }
+     },
+     "name": "stores.region",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Region",
+     "sql": "`${CUBE}.region`",
+     "suggestFilterValues": true,
+     "title": "stores Region",
+     "type": "string"
+    },
+    {
+     "isVisible": true,
+     "name": "stores.opened_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Opened on",
+     "sql": "`${CUBE}.opened_on`",
+     "suggestFilterValues": true,
+     "title": "stores Opened on",
+     "type": "time"
+    }
+   ],
+   "fileName": "stores.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [],
+   "measures": [
+    {
+     "aggType": "count",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "stores.store_count",
+     "public": true,
+     "shortTitle": "stores",
+     "title": "stores stores",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "grain": "one row per store",
+     "key": [
+      "store_id"
+     ]
+    }
+   },
+   "name": "stores",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "title": "stores",
+   "type": "cube"
+  },
+  {
+   "description": "Orders, revenue and stock across the bakeries.",
+   "dimensions": [
+    {
+     "aliasMember": "orders.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.channel",
+     "description": "counter or web",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "sales channel"
+       ],
+       "dictionary": [
+        "counter",
+        "web"
+       ]
+      }
+     },
+     "name": "sales_lens.orders_channel",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Channel",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Channel",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.status",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "dictionary": [
+        "open",
+        "paid",
+        "refunded"
+       ]
+      }
+     },
+     "name": "sales_lens.orders_status",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Status",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Status",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.ordered_at",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": {
+        "meaning": "when the customer paid",
+        "timezone": "Europe/Helsinki"
+       }
+      }
+     },
+     "name": "sales_lens.orders_ordered_at",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Ordered at",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Ordered at",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.shipped_on",
+     "isVisible": true,
+     "name": "sales_lens.orders_shipped_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Shipped on",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Shipped on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.amount_eur",
+     "description": "order total incl. VAT",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_amount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Amount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Amount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales Orders Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.tips_eur_value",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_tips_eur_value",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "tips_eur (the column)",
+     "suggestFilterValues": true,
+     "title": "Sales tips_eur (the column)",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.line_number",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_line_number",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Line Number",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines Line Number",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.product",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "item"
+       ],
+       "dictionary": [
+        "cinnamon bun",
+        "coffee",
+        "rye loaf",
+        "sourdough"
+       ]
+      }
+     },
+     "name": "sales_lens.order_lines_product",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Product",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines Product",
+     "type": "string"
+    },
+    {
+     "aliasMember": "order_lines.qty",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_qty",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Qty",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines Qty",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.line_total_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_line_total_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Line Total Eur",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines Line Total Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.order_discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_order_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Order Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines Order Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_by_order_id_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines by Order ID Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.line_number",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_by_order_id_line_number",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Line Number",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines by Order ID Line Number",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.product",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "item"
+       ],
+       "dictionary": [
+        "cinnamon bun",
+        "coffee",
+        "rye loaf",
+        "sourdough"
+       ]
+      }
+     },
+     "name": "sales_lens.order_lines_by_order_id_product",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Product",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines by Order ID Product",
+     "type": "string"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.qty",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_by_order_id_qty",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Qty",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines by Order ID Qty",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.line_total_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_by_order_id_line_total_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Line Total Eur",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines by Order ID Line Total Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.order_discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_by_order_id_order_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Order Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales Order Lines by Order ID Order Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.stores_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales Stores Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_name",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "store",
+        "bakery"
+       ],
+       "dictionary": [
+        "Harbour",
+        "Mill Hill",
+        "Old Town",
+        "Pier Road"
+       ]
+      }
+     },
+     "name": "sales_lens.stores_store_name",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store Name",
+     "suggestFilterValues": true,
+     "title": "Sales Stores Store Name",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.region",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "area"
+       ],
+       "dictionary": [
+        "Coast",
+        "North",
+        "South"
+       ],
+       "value_aliases": [
+        {
+         "alias": "seaside",
+         "value": "Coast"
+        },
+        {
+         "alias": "northern",
+         "value": "North"
+        }
+       ]
+      }
+     },
+     "name": "sales_lens.stores_region",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Region",
+     "suggestFilterValues": true,
+     "title": "Sales Stores Region",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.opened_on",
+     "isVisible": true,
+     "name": "sales_lens.stores_opened_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Opened on",
+     "suggestFilterValues": true,
+     "title": "Sales Stores Opened on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stores.manager_email",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "hide": {
+        "except_groups": [
+         "ops"
+        ]
+       }
+      }
+     },
+     "name": "sales_lens.stores_manager_email",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Manager Email",
+     "suggestFilterValues": true,
+     "title": "Sales Stores Manager Email",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stock_monthly.month",
+     "description": "YYYY-MM",
+     "isVisible": true,
+     "name": "sales_lens.stock_monthly_month",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "month (text YYYY-MM cast to a date)",
+     "suggestFilterValues": true,
+     "title": "Sales month (text YYYY-MM cast to a date)",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stock_monthly.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.stock_monthly_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stock Monthly Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales Stock Monthly Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stock_monthly.units_on_hand",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.stock_monthly_units_on_hand",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stock Monthly Units on Hand",
+     "suggestFilterValues": true,
+     "title": "Sales Stock Monthly Units on Hand",
+     "type": "number"
+    }
+   ],
+   "fileName": "views/sales.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [],
+   "measures": [
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "format": "currency",
+     "formatDescription": {
+      "name": "currency",
+      "specifier": "$,.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "additivity": "flow",
+       "aliases": [
+        "sales",
+        "turnover"
+       ],
+       "better": "higher",
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_lens.orders_revenue",
+     "public": true,
+     "shortTitle": "revenue",
+     "title": "Sales revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "count",
+     "aliasMember": "orders.order_count",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_order_count",
+     "public": true,
+     "shortTitle": "orders",
+     "title": "Sales orders",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.discount_total",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_lens.orders_discount_total",
+     "public": true,
+     "shortTitle": "discount_total",
+     "title": "Sales discount_total",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.tips_eur",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_tips_eur",
+     "public": true,
+     "shortTitle": "tips",
+     "title": "Sales tips",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.shipped_revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": "shipped_on"
+      }
+     },
+     "name": "sales_lens.orders_shipped_revenue",
+     "public": true,
+     "shortTitle": "shipped web revenue",
+     "title": "Sales shipped web revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "number",
+     "aliasMember": "orders.average_order_value",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "AOV"
+       ]
+      }
+     },
+     "name": "sales_lens.orders_average_order_value",
+     "public": true,
+     "shortTitle": "average order value",
+     "title": "Sales average order value",
+     "type": "number"
+    },
+    {
+     "aggType": "number",
+     "aliasMember": "orders.net_revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.orders_net_revenue",
+     "public": true,
+     "shortTitle": "net revenue",
+     "title": "Sales net revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "order_lines.units_sold",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.order_lines_units_sold",
+     "public": true,
+     "shortTitle": "units sold",
+     "title": "Sales units sold",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "order_lines.product_revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_lens.order_lines_product_revenue",
+     "public": true,
+     "shortTitle": "product revenue",
+     "title": "Sales product revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "order_lines_by_order_id.order_discount",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_lens.order_lines_by_order_id_order_discount",
+     "public": true,
+     "shortTitle": "order discount",
+     "title": "Sales order discount",
+     "type": "number"
+    },
+    {
+     "aggType": "count",
+     "aliasMember": "stores.store_count",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_lens.stores_store_count",
+     "public": true,
+     "shortTitle": "stores",
+     "title": "Sales stores",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "stock_monthly.stock_on_hand",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "additivity": "level",
+       "snapshot_grain": "month"
+      }
+     },
+     "name": "sales_lens.stock_monthly_stock_on_hand",
+     "public": true,
+     "shortTitle": "stock on hand",
+     "title": "Sales stock on hand",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "sources": [
+      "till",
+      "web shop"
+     ]
+    }
+   },
+   "name": "sales_lens",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "online order",
+        "web orders"
+       ],
+       "meaning": "An order placed on the web shop.",
+       "term": "web_order"
+      }
+     },
+     "name": "sales_lens.orders_web_order",
+     "public": true,
+     "shortTitle": "Orders Web Order",
+     "title": "Sales Orders Web Order"
+    }
+   ],
+   "title": "Sales",
+   "type": "view"
+  },
+  {
+   "description": "order_lines with the dimensions of orders, stores joined (the sales lens).",
+   "dimensions": [
+    {
+     "aliasMember": "order_lines.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.order_lines_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Order Lines Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.line_number",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.order_lines_line_number",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Line Number",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Order Lines Line Number",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.product",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "item"
+       ],
+       "dictionary": [
+        "cinnamon bun",
+        "coffee",
+        "rye loaf",
+        "sourdough"
+       ]
+      }
+     },
+     "name": "sales_order_lines.order_lines_product",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Product",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Order Lines Product",
+     "type": "string"
+    },
+    {
+     "aliasMember": "order_lines.qty",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.order_lines_qty",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Qty",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Order Lines Qty",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.line_total_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.order_lines_line_total_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Line Total Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Order Lines Line Total Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines.order_discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.order_lines_order_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines Order Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Order Lines Order Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.orders_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.orders_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.channel",
+     "description": "counter or web",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "sales channel"
+       ],
+       "dictionary": [
+        "counter",
+        "web"
+       ]
+      }
+     },
+     "name": "sales_order_lines.orders_channel",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Channel",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Channel",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.status",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "dictionary": [
+        "open",
+        "paid",
+        "refunded"
+       ]
+      }
+     },
+     "name": "sales_order_lines.orders_status",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Status",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Status",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.ordered_at",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": {
+        "meaning": "when the customer paid",
+        "timezone": "Europe/Helsinki"
+       }
+      }
+     },
+     "name": "sales_order_lines.orders_ordered_at",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Ordered at",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Ordered at",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.shipped_on",
+     "isVisible": true,
+     "name": "sales_order_lines.orders_shipped_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Shipped on",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Shipped on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.amount_eur",
+     "description": "order total incl. VAT",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.orders_amount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Amount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Amount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.orders_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Orders Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.tips_eur_value",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.orders_tips_eur_value",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "tips_eur (the column)",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions tips_eur (the column)",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.stores_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Stores Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_name",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "store",
+        "bakery"
+       ],
+       "dictionary": [
+        "Harbour",
+        "Mill Hill",
+        "Old Town",
+        "Pier Road"
+       ]
+      }
+     },
+     "name": "sales_order_lines.stores_store_name",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store Name",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Stores Store Name",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.region",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "area"
+       ],
+       "dictionary": [
+        "Coast",
+        "North",
+        "South"
+       ],
+       "value_aliases": [
+        {
+         "alias": "seaside",
+         "value": "Coast"
+        },
+        {
+         "alias": "northern",
+         "value": "North"
+        }
+       ]
+      }
+     },
+     "name": "sales_order_lines.stores_region",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Region",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Stores Region",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.opened_on",
+     "isVisible": true,
+     "name": "sales_order_lines.stores_opened_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Opened on",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Stores Opened on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stores.manager_email",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "hide": {
+        "except_groups": [
+         "ops"
+        ]
+       }
+      }
+     },
+     "name": "sales_order_lines.stores_manager_email",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Manager Email",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines with its dimensions Stores Manager Email",
+     "type": "string"
+    }
+   ],
+   "fileName": "views/sales.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [],
+   "measures": [
+    {
+     "aggType": "sum",
+     "aliasMember": "order_lines.units_sold",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines.order_lines_units_sold",
+     "public": true,
+     "shortTitle": "units sold",
+     "title": "Sales: order_lines with its dimensions units sold",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "order_lines.product_revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_order_lines.order_lines_product_revenue",
+     "public": true,
+     "shortTitle": "product revenue",
+     "title": "Sales: order_lines with its dimensions product revenue",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "sources": [
+      "till",
+      "web shop"
+     ]
+    }
+   },
+   "name": "sales_order_lines",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "title": "Sales: order_lines with its dimensions",
+   "type": "view"
+  },
+  {
+   "description": "orders with the dimensions of stores joined (the sales lens).",
+   "dimensions": [
+    {
+     "aliasMember": "orders.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.channel",
+     "description": "counter or web",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "sales channel"
+       ],
+       "dictionary": [
+        "counter",
+        "web"
+       ]
+      }
+     },
+     "name": "sales_orders.orders_channel",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Channel",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Channel",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.status",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "dictionary": [
+        "open",
+        "paid",
+        "refunded"
+       ]
+      }
+     },
+     "name": "sales_orders.orders_status",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Status",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Status",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.ordered_at",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": {
+        "meaning": "when the customer paid",
+        "timezone": "Europe/Helsinki"
+       }
+      }
+     },
+     "name": "sales_orders.orders_ordered_at",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Ordered at",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Ordered at",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.shipped_on",
+     "isVisible": true,
+     "name": "sales_orders.orders_shipped_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Shipped on",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Shipped on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.amount_eur",
+     "description": "order total incl. VAT",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_amount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Amount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Amount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Orders Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.tips_eur_value",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_tips_eur_value",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "tips_eur (the column)",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions tips_eur (the column)",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.stores_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Stores Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_name",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "store",
+        "bakery"
+       ],
+       "dictionary": [
+        "Harbour",
+        "Mill Hill",
+        "Old Town",
+        "Pier Road"
+       ]
+      }
+     },
+     "name": "sales_orders.stores_store_name",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store Name",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Stores Store Name",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.region",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "area"
+       ],
+       "dictionary": [
+        "Coast",
+        "North",
+        "South"
+       ],
+       "value_aliases": [
+        {
+         "alias": "seaside",
+         "value": "Coast"
+        },
+        {
+         "alias": "northern",
+         "value": "North"
+        }
+       ]
+      }
+     },
+     "name": "sales_orders.stores_region",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Region",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Stores Region",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.opened_on",
+     "isVisible": true,
+     "name": "sales_orders.stores_opened_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Opened on",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Stores Opened on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stores.manager_email",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "hide": {
+        "except_groups": [
+         "ops"
+        ]
+       }
+      }
+     },
+     "name": "sales_orders.stores_manager_email",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Manager Email",
+     "suggestFilterValues": true,
+     "title": "Sales: orders with its dimensions Stores Manager Email",
+     "type": "string"
+    }
+   ],
+   "fileName": "views/sales.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [],
+   "measures": [
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "format": "currency",
+     "formatDescription": {
+      "name": "currency",
+      "specifier": "$,.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "additivity": "flow",
+       "aliases": [
+        "sales",
+        "turnover"
+       ],
+       "better": "higher",
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_orders.orders_revenue",
+     "public": true,
+     "shortTitle": "revenue",
+     "title": "Sales: orders with its dimensions revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "count",
+     "aliasMember": "orders.order_count",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_order_count",
+     "public": true,
+     "shortTitle": "orders",
+     "title": "Sales: orders with its dimensions orders",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.discount_total",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_orders.orders_discount_total",
+     "public": true,
+     "shortTitle": "discount_total",
+     "title": "Sales: orders with its dimensions discount_total",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.tips_eur",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_tips_eur",
+     "public": true,
+     "shortTitle": "tips",
+     "title": "Sales: orders with its dimensions tips",
+     "type": "number"
+    },
+    {
+     "aggType": "sum",
+     "aliasMember": "orders.shipped_revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": "shipped_on"
+      }
+     },
+     "name": "sales_orders.orders_shipped_revenue",
+     "public": true,
+     "shortTitle": "shipped web revenue",
+     "title": "Sales: orders with its dimensions shipped web revenue",
+     "type": "number"
+    },
+    {
+     "aggType": "number",
+     "aliasMember": "orders.average_order_value",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "AOV"
+       ]
+      }
+     },
+     "name": "sales_orders.orders_average_order_value",
+     "public": true,
+     "shortTitle": "average order value",
+     "title": "Sales: orders with its dimensions average order value",
+     "type": "number"
+    },
+    {
+     "aggType": "number",
+     "aliasMember": "orders.net_revenue",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_orders.orders_net_revenue",
+     "public": true,
+     "shortTitle": "net revenue",
+     "title": "Sales: orders with its dimensions net revenue",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "sources": [
+      "till",
+      "web shop"
+     ]
+    }
+   },
+   "name": "sales_orders",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [
+    {
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "online order",
+        "web orders"
+       ],
+       "meaning": "An order placed on the web shop.",
+       "term": "web_order"
+      }
+     },
+     "name": "sales_orders.orders_web_order",
+     "public": true,
+     "shortTitle": "Orders Web Order",
+     "title": "Sales: orders with its dimensions Orders Web Order"
+    }
+   ],
+   "title": "Sales: orders with its dimensions",
+   "type": "view"
+  },
+  {
+   "description": "stock_monthly with the dimensions of stores joined (the sales lens).",
+   "dimensions": [
+    {
+     "aliasMember": "stock_monthly.month",
+     "description": "YYYY-MM",
+     "isVisible": true,
+     "name": "sales_stock_monthly.stock_monthly_month",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "month (text YYYY-MM cast to a date)",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions month (text YYYY-MM cast to a date)",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stock_monthly.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_stock_monthly.stock_monthly_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stock Monthly Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stock Monthly Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stock_monthly.units_on_hand",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_stock_monthly.stock_monthly_units_on_hand",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stock Monthly Units on Hand",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stock Monthly Units on Hand",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_stock_monthly.stores_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stores Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_name",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "store",
+        "bakery"
+       ],
+       "dictionary": [
+        "Harbour",
+        "Mill Hill",
+        "Old Town",
+        "Pier Road"
+       ]
+      }
+     },
+     "name": "sales_stock_monthly.stores_store_name",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store Name",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stores Store Name",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.region",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "area"
+       ],
+       "dictionary": [
+        "Coast",
+        "North",
+        "South"
+       ],
+       "value_aliases": [
+        {
+         "alias": "seaside",
+         "value": "Coast"
+        },
+        {
+         "alias": "northern",
+         "value": "North"
+        }
+       ]
+      }
+     },
+     "name": "sales_stock_monthly.stores_region",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Region",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stores Region",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.opened_on",
+     "isVisible": true,
+     "name": "sales_stock_monthly.stores_opened_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Opened on",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stores Opened on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stores.manager_email",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "hide": {
+        "except_groups": [
+         "ops"
+        ]
+       }
+      }
+     },
+     "name": "sales_stock_monthly.stores_manager_email",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Manager Email",
+     "suggestFilterValues": true,
+     "title": "Sales: stock_monthly with its dimensions Stores Manager Email",
+     "type": "string"
+    }
+   ],
+   "fileName": "views/sales.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [],
+   "measures": [
+    {
+     "aggType": "sum",
+     "aliasMember": "stock_monthly.stock_on_hand",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "additivity": "level",
+       "snapshot_grain": "month"
+      }
+     },
+     "name": "sales_stock_monthly.stock_monthly_stock_on_hand",
+     "public": true,
+     "shortTitle": "stock on hand",
+     "title": "Sales: stock_monthly with its dimensions stock on hand",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "sources": [
+      "till",
+      "web shop"
+     ]
+    }
+   },
+   "name": "sales_stock_monthly",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "title": "Sales: stock_monthly with its dimensions",
+   "type": "view"
+  },
+  {
+   "description": "order_lines_by_order_id with the dimensions of orders, stores joined (the sales lens).",
+   "dimensions": [
+    {
+     "aliasMember": "order_lines_by_order_id.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Order Lines by Order ID Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.line_number",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_line_number",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Line Number",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Order Lines by Order ID Line Number",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.product",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "item"
+       ],
+       "dictionary": [
+        "cinnamon bun",
+        "coffee",
+        "rye loaf",
+        "sourdough"
+       ]
+      }
+     },
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_product",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Product",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Order Lines by Order ID Product",
+     "type": "string"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.qty",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_qty",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Qty",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Order Lines by Order ID Qty",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.line_total_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_line_total_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Line Total Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Order Lines by Order ID Line Total Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "order_lines_by_order_id.order_discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_order_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Order Lines by Order ID Order Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Order Lines by Order ID Order Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.order_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.orders_order_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Order ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Order ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.orders_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.channel",
+     "description": "counter or web",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "sales channel"
+       ],
+       "dictionary": [
+        "counter",
+        "web"
+       ]
+      }
+     },
+     "name": "sales_order_lines_by_order_id.orders_channel",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Channel",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Channel",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.status",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "dictionary": [
+        "open",
+        "paid",
+        "refunded"
+       ]
+      }
+     },
+     "name": "sales_order_lines_by_order_id.orders_status",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Status",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Status",
+     "type": "string"
+    },
+    {
+     "aliasMember": "orders.ordered_at",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "clock": {
+        "meaning": "when the customer paid",
+        "timezone": "Europe/Helsinki"
+       }
+      }
+     },
+     "name": "sales_order_lines_by_order_id.orders_ordered_at",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Ordered at",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Ordered at",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.shipped_on",
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.orders_shipped_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Shipped on",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Shipped on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "orders.amount_eur",
+     "description": "order total incl. VAT",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.orders_amount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Amount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Amount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.discount_eur",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.orders_discount_eur",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Orders Discount Eur",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Orders Discount Eur",
+     "type": "number"
+    },
+    {
+     "aliasMember": "orders.tips_eur_value",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.orders_tips_eur_value",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "tips_eur (the column)",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions tips_eur (the column)",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_id",
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.stores_store_id",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store ID",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Stores Store ID",
+     "type": "number"
+    },
+    {
+     "aliasMember": "stores.store_name",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "store",
+        "bakery"
+       ],
+       "dictionary": [
+        "Harbour",
+        "Mill Hill",
+        "Old Town",
+        "Pier Road"
+       ]
+      }
+     },
+     "name": "sales_order_lines_by_order_id.stores_store_name",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Store Name",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Stores Store Name",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.region",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "aliases": [
+        "area"
+       ],
+       "dictionary": [
+        "Coast",
+        "North",
+        "South"
+       ],
+       "value_aliases": [
+        {
+         "alias": "seaside",
+         "value": "Coast"
+        },
+        {
+         "alias": "northern",
+         "value": "North"
+        }
+       ]
+      }
+     },
+     "name": "sales_order_lines_by_order_id.stores_region",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Region",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Stores Region",
+     "type": "string"
+    },
+    {
+     "aliasMember": "stores.opened_on",
+     "isVisible": true,
+     "name": "sales_order_lines_by_order_id.stores_opened_on",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Opened on",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Stores Opened on",
+     "type": "time"
+    },
+    {
+     "aliasMember": "stores.manager_email",
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "hide": {
+        "except_groups": [
+         "ops"
+        ]
+       }
+      }
+     },
+     "name": "sales_order_lines_by_order_id.stores_manager_email",
+     "primaryKey": false,
+     "public": true,
+     "shortTitle": "Stores Manager Email",
+     "suggestFilterValues": true,
+     "title": "Sales: order_lines_by_order_id with its dimensions Stores Manager Email",
+     "type": "string"
+    }
+   ],
+   "fileName": "views/sales.yml",
+   "folders": [],
+   "hierarchies": [],
+   "isVisible": true,
+   "joins": [],
+   "measures": [
+    {
+     "aggType": "sum",
+     "aliasMember": "order_lines_by_order_id.order_discount",
+     "cumulative": false,
+     "cumulativeTotal": false,
+     "drillMembers": [],
+     "drillMembersGrouped": {
+      "dimensions": [],
+      "measures": []
+     },
+     "formatDescription": {
+      "name": "number",
+      "specifier": ",.2~f"
+     },
+     "isVisible": true,
+     "meta": {
+      "dst": {
+       "currency": "EUR"
+      }
+     },
+     "name": "sales_order_lines_by_order_id.order_lines_by_order_id_order_discount",
+     "public": true,
+     "shortTitle": "order discount",
+     "title": "Sales: order_lines_by_order_id with its dimensions order discount",
+     "type": "number"
+    }
+   ],
+   "meta": {
+    "dst": {
+     "sources": [
+      "till",
+      "web shop"
+     ]
+    }
+   },
+   "name": "sales_order_lines_by_order_id",
+   "nestedFolders": [],
+   "preAggregations": [],
+   "public": true,
+   "segments": [],
+   "title": "Sales: order_lines_by_order_id with its dimensions",
+   "type": "view"
+  }
+ ]
+}

@@ -141,7 +141,7 @@ def test_rotate_key_refuses_a_single_key(
     would have silently skipped every row it could not decrypt."""
     import argparse
 
-    from services.cli.main import _rotate_key
+    from services.cli.keys import _rotate_key
 
     # The verb calls _adopt_project_env, which rebuilds the settings singleton from
     # <dir>/.env — so the key has to arrive through the environment, not a

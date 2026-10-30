@@ -1,0 +1,13 @@
+{
+ "generated_by": "dst migrate-model",
+ "files": {
+  "MIGRATION.md": "79aaa8c429bee254b197fc24c88270130f565f40d9533fc71cf00524746af8e3",
+  "model/order_lines.yml": "d0b0cbc7c81e3fb9bcee886139f85947679a2e400d20c6308030fc0215b60a82",
+  "model/order_lines_by_order_id.yml": "fcbc8b2672694ba57056a504caf101cb36338bbe3f03fa03c00f86632d0ba69f",
+  "model/orders.yml": "147ba5c6be113e023d203b37c078870bf7f43351688efebbe61329b19ee22c34",
+  "model/stock_monthly.yml": "b8f7d03c5cee69fedefcf09608c849a40c57e20bd88f6d0b6fd5a1843256aa5a",
+  "model/stores.yml": "765c3c938abfa3c7de625bc4c05d1ea52384b3df63d65b89c2995b13437b28e4",
+  "model/views/sales.yml": "308221a34d61d179d0b8086e1d52ca7242fd3abc3fc97eda58ea66b1f7d169f8",
+  "overlay.yaml": "0842c65a21964d8ce0ffed31e6fe632a12934728a1523e126306bbe623da58a5"
+ }
+}

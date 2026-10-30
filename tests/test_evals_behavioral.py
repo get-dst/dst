@@ -438,7 +438,7 @@ def _scaffold(tmp_path: Path) -> Path:
 
 
 def test_migrate_moves_value_cases_into_certified_answers(tmp_path, capsys) -> None:
-    from services.cli.main import _evals_migrate
+    from services.cli.evals import _evals_migrate
 
     root = _scaffold(tmp_path)
     lens_dir = root / "lenses" / "customer_value"
@@ -530,7 +530,7 @@ def test_migrate_of_every_case_leaves_no_live_placeholder(tmp_path, capsys) -> N
     """When every case migrates, the rewritten cases.yaml keeps its comment head
     and nothing live — a `[]` here would re-plant the append trap the scaffold
     dropped (appending an entry after `[]` is malformed YAML)."""
-    from services.cli.main import _evals_migrate
+    from services.cli.evals import _evals_migrate
 
     root = _scaffold(tmp_path)
     cases_path = root / "lenses" / "customer_value" / "evals" / "cases.yaml"
@@ -551,7 +551,7 @@ def test_migrate_of_every_case_leaves_no_live_placeholder(tmp_path, capsys) -> N
 
 
 def test_migrate_without_value_cases_is_an_honest_no_op(tmp_path, capsys) -> None:
-    from services.cli.main import _evals_migrate
+    from services.cli.evals import _evals_migrate
 
     root = _scaffold(tmp_path)
     assert _evals_migrate(argparse.Namespace(dir=str(root))) == 0

@@ -413,6 +413,95 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     )
 
 
+# ── the failure-mode tripwire ─────────────────────────────────────────────────
+# Every refusal, rejection and clarification the product builds carries exactly
+# one failure mode (services/contracts/failure_modes.py). The static scan in
+# tests/test_failure_modes.py reads the construction sites; this half watches
+# every response `services/` actually builds while the suite runs, so a mode
+# lost on a path the scan cannot read (a derived status, a copied response)
+# fails the session instead of shipping. Constructions written by tests
+# themselves are fakes and are not counted.
+MODELESS: list[str] = []
+MODE_CHECKED: list[int] = [0]
+_NON_ANSWERS = frozenset({"refused", "rejected", "clarification"})
+
+
+def _watch_modes() -> None:
+    import sys
+
+    from services.api.route import UncoveredEnvelope
+    from services.contracts.response import QueryResponse
+
+    def wrap(cls: type, needs: object) -> None:
+        orig = cls.__init__
+
+        def init(self: object, *a: object, **k: object) -> None:
+            orig(self, *a, **k)  # type: ignore[misc]
+            where = sys._getframe(1).f_code.co_filename
+            if f"{_os.sep}services{_os.sep}" not in where or not needs(self):  # type: ignore[operator]
+                return
+            MODE_CHECKED[0] += 1
+            if getattr(self, "mode", None) is None:
+                frame = sys._getframe(1)
+                MODELESS.append(f"{cls.__name__} at {frame.f_code.co_filename}:{frame.f_lineno}")
+
+        cls.__init__ = init  # type: ignore[method-assign]
+
+    wrap(QueryResponse, lambda r: r.status in _NON_ANSWERS)
+    wrap(UncoveredEnvelope, lambda r: True)
+
+
+_watch_modes()
+
+
+# The wrong-served repro set (tests/sandbox/): each test fails until the defect
+# it names is fixed, so each runs as a strict expected failure. A fix flips its
+# test to an unexpected pass, which fails the suite until the name moves into
+# this set; from then on it is an ordinary test and cannot quietly break again.
+SANDBOX_FIXED = frozenset(
+    {
+        "test_apply_lands_a_lens_on_a_typed_decision_provider_alone",
+        # The same questions replayed through the cube lane (tests/sandbox/_cube.py).
+        "test_q25_on_the_cube_lane",
+        "test_q41_on_the_cube_lane",
+        "test_q46_on_the_cube_lane",
+        "test_q47_on_the_cube_lane",
+        "test_q43_on_the_cube_lane",
+        "test_q03_on_the_cube_lane",
+        "test_q03_through_a_named_day_on_the_cube_lane",
+        "test_w1_on_the_cube_lane",
+        "test_q08_on_the_cube_lane",
+        "test_q26_on_the_cube_lane",
+        "test_q27_on_the_cube_lane",
+        "test_q45_on_the_cube_lane",
+        "test_rule_renewal_rate_in_a_named_quarter_on_the_cube_lane",
+    }
+)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if item.nodeid.startswith("tests/sandbox/") and item.name not in SANDBOX_FIXED:
+            item.add_marker(
+                pytest.mark.xfail(strict=True, reason="wrong-served repro, not fixed yet")
+            )
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # The count is printed so a pass is never vacuous: zero checked is a
+    # tripwire that saw nothing, not one that held.
+    session.config.get_terminal_writer().line(
+        f"failure-mode tripwire: {MODE_CHECKED[0]} non-answer(s) built by services/ checked"
+    )
+    if MODELESS:
+        session.config.get_terminal_writer().line(
+            "FAILURE-MODE TRIPWIRE: non-answers built without a mode:\n  "
+            + "\n  ".join(sorted(set(MODELESS))),
+            red=True,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _hermetic_cwd() -> Iterator[None]:
     """Run the tests from the empty directory reserved above (see `_CWD`), so no
@@ -432,7 +521,7 @@ def _no_env_escapes_a_test() -> Iterator[None]:
     """What one test leaves in os.environ is the next test's ambient state.
 
     ``monkeypatch.setenv`` undoes itself; code under test need not.
-    ``services/cli/main.py::_adopt_project_env`` used to seed os.environ with
+    ``services/cli/_common.py::_adopt_project_env`` used to seed os.environ with
     ``os.environ.setdefault`` from a project's .env and never unwind it — a single
     CLI test run against a project that had one handed its secrets to every test
     that followed, for the rest of the session. That was fixed in the product (it

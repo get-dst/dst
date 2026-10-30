@@ -2,11 +2,9 @@
 
 A ticket that carries one of these is a *correction*: not just "this answer was wrong"
 but which kind of wrong and, when the caller/owner knows it, the corrected answer/SQL.
-The patch drafter (`services/reviews/patch.py`) routes on ``target`` first and
-``kind`` second; ``corrected_sql`` is the strongest signal — it can become a
-certified candidate. ``target`` pins WHERE a definition patch lands (P19a): the
-note's prose steered placement by vocabulary similarity alone, which mistargeted
-cross-cutting notes onto unrelated shared definitions.
+``corrected_sql`` is the strongest signal — a ruling can certify it. ``target``
+pins WHICH term the correction is about, so the fix the reviewer authors lands
+on the right definition page rather than on whichever page shares the most words.
 """
 
 from __future__ import annotations

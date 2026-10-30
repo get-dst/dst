@@ -20,7 +20,7 @@ extracted from prose.
 | metric, dimension, grain | the entity's declared metrics, dimensions and time grains (an entity that declares no `dimensions:` groups, when the question asks a breakdown such as "per SDR", "by source" or a ranking, by its string, boolean and date fields and by an integer field whose profile holds a complete value dictionary: the dimensions its metric catalog lists); a metric the question names word for word — by its identifier read as words, its `label`, or one of its `aliases` (`otd_rate` with `label: on-time delivery rate`) — is read off the text, and a question naming exactly one and nothing else is compiled without any decision; a metric named word for word outranks a voted metric whose words the question says only inside that phrase ("net new members", an alias of the net metric, against `new_members`); a dimension is named by its name or its `aliases` ("by region" for `store_region` with `aliases: [region]`), in a breakdown, a ranking and a binding key | the entity file |
 | ranking direction | "highest", "top 5" and "fewest" in the question; "best" and "worst" from the metric's declared `better: higher \| lower` | the entity file |
 | filter column and value | the entity's fields; a value from the column's complete dictionary, or a stored value the question names word for word (declared dimensions keep a whole dictionary for this; a value spelled like a common word, such as a team named `Most`, only where the question writes it as a name: capitalised mid-sentence, quoted, or possessive), or a word a definition maps to one (`value_aliases: {offlaner: offlane}` on a definition `about: entity.column`) | the column profile (`dst introspect --profile`); `definitions` |
-| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"), days included ("on 28 August 2026", "August 28, 2026", "between 5 and 12 October", "5–12 Oct", "the week of 5 October", "the first half of August 2026", "the first 7 days of October", "the last 3 days of August", "the start of August", "the end of last month"), periods included ("the end of Q3 2026" and "the end of 2026" are the period's last day, "the first 2 quarters of 2026" and "the last 3 months of 2025" that part of the year, and the number in such a phrase is never a top N); a day written without a year is its most recent occurrence on or before the lens clock, and a day window on a month-form period column asks rather than serving the month. A vague part of a month ("early", "mid-", "late August") asks, offering the days each reading would use, and so does any other day-level qualifier beside a month the parser cannot turn into days ("the first few days of August"): neither is ever served as the whole month. A level metric reads "the end of August" as August's last snapshot, and "the end of Q3 2026" as the quarter's; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
+| window | none — a stated period is parsed, never decided ("in August 2026", "at the end of August 2026", "as of 2026-08-31", "Q3 2026"), days included ("on 28 August 2026", "August 28, 2026", "between 5 and 12 October", "5–12 Oct", "the week of 5 October", "the first half of August 2026", "the first 7 days of October", "the last 3 days of August", "the start of August", "the end of last month"), ranges included ("January to September", "between March and May", "Jan–Sep 2026", "from 1 January to 25 October", "2021 to 2025"; a range of months without a year takes the year the question states elsewhere, else the most recent one starting on or before the lens clock), periods included ("the end of Q3 2026" and "the end of 2026" are the period's last day, "the first 2 quarters of 2026" and "the last 3 months of 2025" that part of the year, and the number in such a phrase is never a top N); a day written without a year is its most recent occurrence on or before the lens clock, and a day window on a month-form period column asks rather than serving the month. A vague part of a month ("early", "mid-", "late August") asks, offering the days each reading would use, and so does any other day-level qualifier beside a month the parser cannot turn into days ("the first few days of August"): neither is ever served as the whole month. A level metric reads "the end of August" as August's last snapshot, and "the end of Q3 2026" as the quarter's; on a timestamp column its bounds are midnights in the lens's declared `timezone` (DuckDB, Postgres), whatever the server's zone; a metric declared `additivity: level` reads the window as its last snapshot | `timewindow`; the entity file |
 
 A slot the question does not settle is asked back as a **clarification naming
 the slot**: which metric, which value of `status`. The asking agent answers by
@@ -91,7 +91,27 @@ can only move an answer toward a clarification:
 - **The current period is to date.** "This month", "this week", "today"
   resolve on the lens clock from the period's first day through today, and
   the ledger carries the window it used. A `level` metric over a window asks
-  no further restriction: the window and the snapshot rule settle it.
+  no further restriction: the window and the snapshot rule settle it. A month
+  named beside the period it restates ("so far this month (October)") is the
+  same window. A `level` metric asked for "today", "now" or "currently" reads
+  its latest snapshot, and the answer names that snapshot's day; a flow asked
+  for today before today's rows are loaded is answered with where the data
+  ends.
+- **A change is a comparison, with every restriction.** "vs August 2026",
+  "vs a year earlier", "compared with the same month last year" and "how did
+  it change" compare two windows and keep every filter, binding and snapshot
+  reading the plain question would carry. A month compared with "last year"
+  or "2025" is compared with the same month that year, never the whole year.
+  A change per unit ("growth per year, 2021 to 2025", "yearly growth", "each
+  year between 2021 and 2025") is one row per unit against the unit before;
+  a breakdown by another unit asks which is meant. "From 2024 to 2025" with no
+  unit compares 2025 with 2024.
+- **A value on a joined entity filters through the join.** A stored value or
+  a true/false field the question names on an entity the lens's `joins:`
+  reach without duplicating the figure's rows ("passengers on in service
+  vessels", the status on `vessels`, the figure on `crossings`) is a filter
+  through that join. A join whose `relationship:` is undeclared or fans the
+  rows out asks which entity should answer instead.
 
 What the chosen metric's own name carries belongs to the metric. A number in
 it (`answered_within_15m`) is its setting, never a value a numeric filter takes

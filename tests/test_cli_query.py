@@ -13,7 +13,7 @@ import json
 import httpx
 import pytest
 
-from services.cli.main import EXIT_DECLINED
+from services.cli.query import EXIT_DECLINED
 
 
 def _run_cli(monkeypatch, argv: list[str]) -> int:

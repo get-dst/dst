@@ -1,0 +1,65 @@
+name: orders
+description: Orders at the tills and on the web shop, one row per order (the latest sync).
+grain: one row per order per sync version
+use_cases:
+  - "Use when a question asks about orders, revenue, discounts or basket size."
+common_questions:
+  - revenue by store last month
+source: {connection: warehouse, table: bakery.orders_raw}
+primary_key: [order_id, _synced]
+population: real orders; test orders excluded
+population_filter: "NOT orders.is_test"
+default_time_field: ordered_at
+fields:
+  - {name: order_id, type: integer}
+  - {name: store_id, type: integer}
+  - {name: channel, type: string, description: "counter or web"}
+  - {name: status, type: string}
+  - {name: ordered_at, type: timestamp}
+  - {name: shipped_on, type: date}
+  - {name: amount_eur, type: number, description: "order total incl. VAT"}
+  - {name: discount_eur, type: number}
+  - {name: tips_eur, type: number}
+  - {name: _synced, type: timestamp}
+  - {name: is_test, type: boolean}
+dimensions:
+  - {name: channel, aliases: [sales channel]}
+internal: [_synced, is_test]
+metrics:
+  - name: revenue
+    agg: sum
+    expr: orders.amount_eur
+    filters: ["orders.status = 'paid'"]
+    label: revenue
+    aliases: [sales, turnover]
+    format: currency
+    currency: EUR
+    additivity: flow
+    better: higher
+  - name: order_count
+    agg: count
+    label: orders
+  - name: discount_total
+    agg: sum
+    expr: orders.discount_eur
+    currency: EUR
+  - name: tips_eur
+    agg: sum
+    expr: orders.tips_eur
+    label: tips
+  - name: shipped_revenue
+    agg: sum
+    expr: orders.amount_eur
+    filters: ["orders.channel = 'web'"]
+    label: shipped web revenue
+    agg_time_field: shipped_on
+  - name: average_order_value
+    type: ratio
+    numerator: revenue
+    denominator: order_count
+    label: average order value
+    aliases: [AOV]
+  - name: net_revenue
+    type: derived
+    expr: "{revenue} - {discount_total}"
+    label: net revenue

@@ -194,56 +194,6 @@ def test_parameterized_trust_summary_names_the_values() -> None:
     assert "approved SQL shape" in res.response.trust_summary
 
 
-# ── detection-only template candidates ───────────────────────────────────────
-
-
-def test_template_candidates_cluster_literal_families() -> None:
-    from services.evals.distill import template_candidates
-
-    q2 = CertifiedAnswer(
-        "a1",
-        "t",
-        "revenue in Q2 2026?",
-        "SELECT SUM(amount) FROM orders WHERE d >= '2026-04-01' AND d < '2026-07-01'",
-        "m",
-        "2026-08-01",
-    )
-    q3 = CertifiedAnswer(
-        "a2",
-        "t",
-        "revenue in Q3 2026?",
-        "SELECT SUM(amount) FROM orders WHERE d >= '2026-07-01' AND d < '2026-10-01'",
-        "m",
-        "2026-08-01",
-    )
-    other = CertifiedAnswer(
-        "a3", "t", "how many orders?", "SELECT count(*) FROM orders", "m", "2026-08-01"
-    )
-    retired = CertifiedAnswer(
-        "a4",
-        "t",
-        "revenue in 2024?",
-        "SELECT SUM(amount) FROM orders WHERE d >= '2024-01-01' AND d < '2025-01-01'",
-        "m",
-        "2026-08-01",
-        status="retired",
-    )
-    out = template_candidates([q2, q3, other, retired], "t", "duckdb")
-    (cand,) = out  # one family; the singleton and the retired row never cluster
-    assert cand.kind == "certified" and cand.target.startswith("template: revenue in Q2")
-    assert "differ only in" in cand.diff_after
-    assert "revenue in Q3 2026?" in cand.diff_after
-
-
-def test_template_candidates_skip_templates_and_stable_repeats() -> None:
-    from services.evals.distill import template_candidates
-
-    already = _template_answer()  # slots set — never re-clusters
-    twin_a = CertifiedAnswer("b1", "t", "q one?", "SELECT count(*) FROM t", "m", "2026-08-01")
-    twin_b = CertifiedAnswer("b2", "t", "q two?", "SELECT count(*) FROM t", "m", "2026-08-01")
-    assert template_candidates([already, twin_a, twin_b], "t", "duckdb") == []
-
-
 def test_a_bare_yaml_date_in_sample_bindings_loads_as_iso_text() -> None:
     """YAML reads `asof: 2026-01-31` as a date object; the loader hands apply
     its ISO text so the row stores (json) and the grammar reads the same value

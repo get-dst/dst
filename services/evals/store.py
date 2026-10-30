@@ -58,6 +58,7 @@ class EvalResultRow:
     actual_sql: str | None
     actual_value: str | None
     reason: str | None
+    mode: str | None = None
 
 
 @dataclass
@@ -434,13 +435,13 @@ def record_results(session: Session, run_id: str, results: list[EvalResult]) -> 
                 INSERT INTO eval_result (
                     org_id, run_id, case_id, question, passed,
                     grade, checks, actual_sql, actual_value, reason,
-                    ai_input_tokens, ai_output_tokens, ai_cost_usd
+                    ai_input_tokens, ai_output_tokens, ai_cost_usd, mode
                 )
                 VALUES (
                     NULLIF(current_setting('app.current_org', true), '')::uuid,
                     :run_id, :case_id, :question, :passed,
                     :grade, CAST(:checks AS jsonb), :actual_sql, :actual_value, :reason,
-                    :ai_input_tokens, :ai_output_tokens, :ai_cost_usd
+                    :ai_input_tokens, :ai_output_tokens, :ai_cost_usd, :mode
                 )
                 """
             ),
@@ -457,6 +458,7 @@ def record_results(session: Session, run_id: str, results: list[EvalResult]) -> 
                 "ai_input_tokens": r.ai_input_tokens,
                 "ai_output_tokens": r.ai_output_tokens,
                 "ai_cost_usd": r.ai_cost_usd,
+                "mode": r.mode,
             },
         )
 
@@ -466,7 +468,7 @@ def list_results(session: Session, run_id: str) -> list[EvalResultRow]:
     rows = session.execute(
         text(
             "SELECT id, run_id, case_id, question, passed, grade, checks, "
-            "actual_sql, actual_value, reason "
+            "actual_sql, actual_value, reason, mode "
             "FROM eval_result WHERE run_id = :r ORDER BY passed, question, case_id"
         ),
         {"r": run_id},
@@ -483,6 +485,7 @@ def list_results(session: Session, run_id: str) -> list[EvalResultRow]:
             r[7],
             r[8],
             r[9],
+            r[10],
         )
         for r in rows
     ]

@@ -262,15 +262,12 @@ def delete_lens(session: Session, name: str) -> int:
     res = session.execute(text("DELETE FROM lens WHERE name = :n"), {"n": name})
     if int(res.rowcount) == 0:  # type: ignore[attr-defined]
         return 0
-    # review rows stay alongside request_log (rulings are observability history);
-    # patch_candidate goes — a stale candidate resurfacing on a same-named lens
-    # is exactly the hazard this cascade exists to kill.
+    # review rows stay alongside request_log (rulings are observability history).
     for table in (
         "lens_version",
         "certified_answer",
         "eval_case",
         "eval_run",
-        "patch_candidate",
         "router_anchor",
     ):
         session.execute(text(f"DELETE FROM {table} WHERE lens = :n"), {"n": name})

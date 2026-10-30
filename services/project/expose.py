@@ -12,12 +12,19 @@ answering.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from fnmatch import fnmatchcase
 
 from services.contracts.lens_config import LensConfig
 from services.contracts.profile import TableProfile
-from services.contracts.semantic_model import Entity, EntitySource, Field, warehouse_field_type
+from services.contracts.semantic_model import (
+    Entity,
+    EntitySource,
+    Field,
+    HideRule,
+    warehouse_field_type,
+)
 
 
 def _matches(pattern: str, name: str) -> bool:
@@ -33,12 +40,22 @@ def _hidden(column: str, table: str, hide: Sequence[str]) -> bool:
     return any(_matches(p, f"{bare}.{column}") or _matches(p, f"{table}.{column}") for p in hide)
 
 
+def _literal(name: str) -> str:
+    """``name`` as an fnmatch pattern that matches only itself."""
+    return "".join(f"[{c}]" if c in "*?[" else c for c in name)
+
+
 def _entity(profile: TableProfile, hide: Sequence[str]) -> Entity:
     fields: list[Field] = []
-    withheld = False
+    withheld: list[str | HideRule] = []
+    bare = profile.table.rsplit(".", 1)[-1]
     for column in profile.columns:
         if _hidden(column.name, profile.table, hide):
-            withheld = True
+            # Dropping the field keeps it out of the allow-list, which binds
+            # only generated SQL; recorded as the entity's own `hide` (exactly
+            # this column, whatever the grant's pattern also matched) it holds
+            # on every door, trusted SQL included.
+            withheld.append(f"{_literal(bare)}.{_literal(column.name)}")
             continue
         fields.append(
             Field(
@@ -57,6 +74,7 @@ def _entity(profile: TableProfile, hide: Sequence[str]) -> Entity:
         fields=fields,
         exposed=True,
         exposed_whole=not withheld,
+        hide=withheld,
     )
 
 
@@ -75,8 +93,20 @@ def resolve_expose(
     one of them fails, naming the table, instead of exposing a stale profile."""
     entities: list[Entity] = []
     errors: list[str] = []
-    seen: dict[str, str] = {}  # bare name -> table that claimed it
+    seen: dict[str, str] = {}  # entity name -> table that claimed it
     taken = set(declared)
+    # A bare name two granted tables share, or a selected entity holds, names
+    # neither table alone: each such exposed table is named by its qualified
+    # name instead (`legacy.customers` -> `legacy_customers`), so a bare
+    # reference keeps meaning the selected entity and a qualified one the table.
+    granted_tables = {
+        p.table
+        for grant in config.expose
+        if grant.connection in config.connections
+        for p in profiles.get(grant.connection, ())
+        if any(_matches(t, p.table) for t in grant.tables)
+    }
+    bare_claims = Counter(t.rsplit(".", 1)[-1] for t in granted_tables)
     for grant in config.expose:
         if grant.connection not in config.connections:
             errors.append(
@@ -110,19 +140,21 @@ def resolve_expose(
                 if any(e.source.table == profile.table for e in entities):
                     continue  # two patterns matched the same table: one entity
                 entity = _entity(profile, grant.hide)
+                if entity.name in taken or bare_claims[entity.name] > 1:
+                    entity.name = profile.table.replace(".", "_")
                 if entity.name in taken:
                     errors.append(
                         f"lens '{config.name}' exposes '{profile.table}' (pattern "
-                        f"'{pattern}'), whose bare name '{entity.name}' collides with a "
-                        "selected entity of the same lens — exclude it from the pattern, "
-                        "or drop the entity from `select`"
+                        f"'{pattern}') as '{entity.name}', which collides with a selected "
+                        "entity of the same lens — exclude it from the pattern, or drop the "
+                        "entity from `select`"
                     )
                     continue
                 if entity.name in seen:
                     errors.append(
                         f"lens '{config.name}' exposes '{profile.table}' and "
-                        f"'{seen[entity.name]}', which share the bare name "
-                        f"'{entity.name}' — narrow the patterns so one lens exposes one "
+                        f"'{seen[entity.name]}', which share the name '{entity.name}' "
+                        "even qualified — narrow the patterns so one lens exposes one "
                         "table under that name"
                     )
                     continue

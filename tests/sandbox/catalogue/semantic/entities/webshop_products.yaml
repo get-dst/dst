@@ -1,0 +1,36 @@
+name: webshop_products
+description: >-
+  The webshop product catalogue (Shopify), with category, list price and unit cost. The raw table
+  keeps one row per Fivetran sync version: 132 rows for 125 products, 7 products with a superseded
+  earlier version and 2 deleted. Category and SKU never change between versions, so a category
+  breakdown is safe; a count of products must count distinct product_id.
+grain: one row per product per sync version (superseded versions kept)
+use_cases:
+  - "Use when a question asks about product categories, the catalogue, list prices or active products - usually joined to webshop_order_lines."
+common_questions:
+  - how many active products are in the catalogue by category
+source: {connection: warehouse, table: raw_shopify.product}
+primary_key: [product_id, _fivetran_synced]
+population: every product ever listed, latest and superseded sync versions; filter on active for the live range
+population_filter: "NOT webshop_products._fivetran_deleted"
+fields:
+  - {name: product_id, type: integer}
+  - {name: sku, type: string}
+  - {name: title, type: string, description: "product name"}
+  - {name: category, type: string, description: "Valves, Tools & consumables, Drain & sewer parts, PEX pipe & fittings, Thermostats & controls, Radiators, Water heaters, Circulation pumps"}
+  - {name: unit_cost_eur, type: number}
+  - {name: price_eur, type: number, description: "list price incl. VAT"}
+  - {name: active, type: boolean}
+  - {name: _fivetran_synced, type: timestamp, description: "sync version stamp"}
+  - {name: _fivetran_deleted, type: boolean, description: "delete flag, meaningful on the latest version only"}
+dimensions:
+  - {name: category, aliases: [product category, product group]}
+  - {name: title, aliases: [product name, product title]}
+  - {name: active, aliases: [active product]}
+internal: [_fivetran_synced, _fivetran_deleted]
+metrics:
+  - name: product_count
+    agg: count_distinct
+    expr: webshop_products.product_id
+    label: products
+    aliases: [number of products, catalogue size, SKUs listed]

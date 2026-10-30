@@ -14,9 +14,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from sqlalchemy.orm import Session
 
+from services.contracts.failure_modes import DRIFT_MODES, FailureMode
 from services.contracts.profile import TableProfile
 from services.lenses import profile_store
 
@@ -52,6 +53,14 @@ class ProfileDrift(BaseModel):
     table: str
     kind: DriftKind
     detail: str
+
+    # The failure mode a reader of this table serves under: ``stale`` on the
+    # kinds that change what a declared reader gets back; None on the quiet,
+    # informational kinds (contracts/failure_modes.py::DRIFT_MODES).
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mode(self) -> FailureMode | None:
+        return DRIFT_MODES.get(self.kind)
 
 
 def diff_profiles(previous: TableProfile, current: TableProfile) -> list[ProfileDrift]:

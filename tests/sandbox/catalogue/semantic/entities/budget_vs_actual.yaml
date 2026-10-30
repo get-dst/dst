@@ -1,0 +1,56 @@
+name: budget_vs_actual
+description: >-
+  Board budget (approved December 2025, fixed, set at the planning rate 10.80 EUR/SEK) vs actual
+  revenue by entity and month. Actuals are at the monthly average rate, so Bergström's variance
+  carries an FX component. The budget is not the target - targets live in revenue_vs_target.
+grain: one row per month and entity, 2026 only
+use_cases:
+  - "Use when a question asks about the budget, budget variance, tracking against budget, or attainment vs budget."
+  - "Avoid for: targets and the reforecast (revenue_vs_target)"
+common_questions:
+  - how are we tracking against budget for Q3 2026
+  - budget variance by entity year to date
+source: {connection: warehouse, table: marts_finance.mart_budget_vs_actual_monthly}
+default_time_field: month
+primary_key: [month, entity]
+population: months with actuals loaded, January to August 2026; later months carry a budget and no actual
+population_filter: "budget_vs_actual.month <= '2026-08'"
+fields:
+  - {name: month, type: string}
+  - {name: entity, type: string}
+  - {name: line_item, type: string, description: "always Revenue"}
+  - {name: budget_eur, type: number, description: "board budget, planning FX 10.80"}
+  - {name: actual_eur, type: number, description: "actual revenue, average FX"}
+  - {name: variance_eur, type: number, description: "actual - budget"}
+  - {name: attainment_pct, type: number, description: "actual / budget per row - never average these"}
+dimensions:
+  - {name: entity, aliases: [company, business]}
+metrics:
+  - name: budget_eur
+    agg: sum
+    expr: budget_vs_actual.budget_eur
+    label: board budget
+    aliases: [budget, budgeted revenue]
+    format: currency
+    currency: EUR
+  - name: actual_vs_budget_eur
+    agg: sum
+    expr: budget_vs_actual.actual_eur
+    label: actual revenue (budget basis)
+    format: currency
+    currency: EUR
+  - name: budget_variance_eur
+    agg: sum
+    expr: budget_vs_actual.variance_eur
+    label: budget variance
+    aliases: [variance to budget, over or under budget]
+    format: currency
+    currency: EUR
+  - name: attainment_vs_budget
+    type: ratio
+    numerator: actual_vs_budget_eur
+    denominator: budget_eur
+    label: attainment vs budget
+    aliases: [budget attainment]
+    format: percent
+    better: higher

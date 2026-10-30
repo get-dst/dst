@@ -35,6 +35,40 @@ def create_caller(body: CallerBody, session: Session = Depends(get_app_session))
     return {"id": str(cid), "name": body.name}
 
 
+class GroupsBody(BaseModel):
+    groups: list[str]
+
+
+@router.put("/{name}/groups")
+def set_groups(
+    name: str, body: GroupsBody, session: Session = Depends(get_app_session)
+) -> dict[str, object]:
+    """Replace a caller's groups. Admin-only, like every route here: a caller's
+    groups decide which lenses and which group-excepted columns it reads, so
+    they are never taken from the caller's own requests."""
+    groups = sorted({g.strip() for g in body.groups if g.strip()})
+    if credentials.set_groups(session, name, groups) == 0:
+        raise HTTPException(status_code=404, detail=f"caller '{name}' not found")
+    return {"name": name, "groups": groups}
+
+
+class DriverBody(BaseModel):
+    driver: bool
+
+
+@router.put("/{name}/driver")
+def set_driver(
+    name: str, body: DriverBody, session: Session = Depends(get_app_session)
+) -> dict[str, object]:
+    """Mark a caller a driver: an agent that writes its own Cube queries and
+    SQL. On lenses served through Cube dst then calls no model for its
+    requests (coverage-only routing, no question read by a model) and runs
+    every check on what it submits; typed lenses are unaffected."""
+    if credentials.set_driver(session, name, body.driver) == 0:
+        raise HTTPException(status_code=404, detail=f"caller '{name}' not found")
+    return {"name": name, "driver": body.driver}
+
+
 @router.post("/{name}/keys", status_code=201)
 def issue_key(name: str, session: Session = Depends(get_app_session)) -> dict[str, str]:
     """Mint a `dst_` API key for this caller — the plaintext is returned once, never stored."""

@@ -25,6 +25,7 @@ from services.llm import registry
 from services.llm.assist import assist_llm
 from services.reviews.store import get_trace
 from services.runtime import sql_guard
+from services.runtime.pipeline import WITHHELD_ANSWER
 
 router = APIRouter(prefix="/mgmt/lenses/{lens}/certified", tags=["certified"])
 
@@ -145,7 +146,7 @@ def create_certified(
             raise HTTPException(
                 status_code=422, detail=f"SQL does not parse as {model.dialect}: {exc}"
             ) from exc
-        shape = sql_guard.check(body.sql, model, trust_tables=True)
+        shape = sql_guard.check(body.sql, model.every_exception(), trust_tables=True)
         if not shape.ok:
             raise HTTPException(status_code=422, detail=str(shape.reason))
         if foreign:
@@ -291,7 +292,12 @@ def certify_request(
     # Prose belongs to the SQL it was composed from: keep it only when the
     # traced SQL is what we are certifying (a correction invalidates it).
     verified_prose = (
-        trace.answer if trace.answer and trace.confidence and sql == trace.sql else None
+        trace.answer
+        if trace.answer
+        and trace.confidence
+        and sql == trace.sql
+        and not trace.answer.startswith(WITHHELD_ANSWER)
+        else None
     )
     # One question, one certified pair. Re-certifying the same question REPLACES
     # (the same rule `_apply_certified` follows) — stacking a second active row

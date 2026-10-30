@@ -394,6 +394,12 @@ class LensConfig(Authored):
         default_factory=SelectSpec,
         description="what this lens pulls from the shared semantic layer (semantic/)",
     )
+    views: StrList = Field(
+        default_factory=list,
+        description="the Cube views this lens serves, in a project with cube/overlay.yaml; "
+        "overrides the overlay's `lenses.<lens>.views`. Plan reads them from Cube's "
+        "/v1/meta and apply stamps the model_version they compile to",
+    )
     expose: list[ExposeGrant] = Field(
         default_factory=list,
         description="tables this lens reads WITHOUT definitions: {connection, tables: "
@@ -510,6 +516,21 @@ class LensConfig(Authored):
         default=False,
         description="when a question does not type, fall to raw-SQL generation "
         "(disclosed UNTYPED) unless the caller passes allow_untyped: false",
+    )
+
+    # Which serving core answers this lens's questions: "typed" is the typed
+    # resolver over the compiled semantic model; "cube" resolves the question
+    # into a Cube query, verifies it, and executes the SQL Cube compiles for it
+    # through this lens's own connection. Unset, a lens of a Cube-backed
+    # project (cube/overlay.yaml lists it, or it names `views:`) serves
+    # through Cube and every other lens typed. DST_SERVING overrides it
+    # install-wide.
+    serving: Literal["typed", "cube"] | None = Field(
+        default=None,
+        description="the serving core: 'cube' (questions resolve to a Cube query over the "
+        "lens's views, checked before and after execution) or 'typed' (the typed resolver "
+        "over the entity model). Unset: 'cube' for a lens of a Cube-backed project, "
+        "'typed' otherwise",
     )
 
     @field_validator("sources")

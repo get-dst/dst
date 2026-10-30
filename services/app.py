@@ -30,6 +30,7 @@ from services.api.auth_local import router as auth_local_router
 from services.api.auth_local import users_router as mgmt_users_router
 from services.api.demo import router as demo_router
 from services.api.demo import skill_router
+from services.api.driver import router as driver_router
 from services.api.mgmt import router as mgmt_router
 from services.api.mgmt_activation import router as mgmt_activation_router
 from services.api.mgmt_audit import router as mgmt_audit_router
@@ -37,7 +38,6 @@ from services.api.mgmt_callers import router as mgmt_callers_router
 from services.api.mgmt_catalog import router as mgmt_catalog_router
 from services.api.mgmt_certify import router as mgmt_certify_router
 from services.api.mgmt_connections import router as mgmt_connections_router
-from services.api.mgmt_distill import router as mgmt_distill_router
 from services.api.mgmt_evals import router as mgmt_evals_router
 from services.api.mgmt_gap_map import router as mgmt_gap_map_router
 from services.api.mgmt_lenses import router as mgmt_lenses_router
@@ -56,7 +56,6 @@ from services.api.query import router as query_router
 from services.api.receipts import router as receipts_router
 from services.api.reviews import data_router as reviews_data_router
 from services.api.reviews import mgmt_router as reviews_mgmt_router
-from services.api.reviews import patches_router as reviews_patches_router
 from services.api.route import router as route_router
 from services.api.security_headers import SecurityHeaders
 from services.api.sql import router as sql_router
@@ -172,7 +171,7 @@ _openapi_tags = [
         "name": "profile",
         "description": "Stored table profiles, join candidates, and profile drift.",
     },
-    {"name": "evals", "description": "Per-lens eval cases and recorded runs; the distiller."},
+    {"name": "evals", "description": "Per-lens eval cases and recorded runs."},
     {
         "name": "standards",
         "description": "Org-standard definitions — the baseline drift checks compare against.",
@@ -281,15 +280,14 @@ app.include_router(profile_connection_router)
 app.include_router(profile_lens_drift_router)
 app.include_router(profile_lens_profile_router)
 app.include_router(mgmt_evals_router)
-app.include_router(mgmt_distill_router)
 app.include_router(mgmt_standards_router)
 app.include_router(mgmt_semantic_router)
 app.include_router(reviews_data_router)
 app.include_router(reviews_mgmt_router)
-app.include_router(reviews_patches_router)
 app.include_router(query_router)
 app.include_router(receipts_router)
 app.include_router(sql_router)
+app.include_router(driver_router)
 app.include_router(route_router)
 app.include_router(surface_router)
 app.include_router(mgmt_gap_map_router)
@@ -595,6 +593,28 @@ def _typed_status() -> str:
         return "unknown"
 
 
+def _cube_status() -> dict[str, object] | str:
+    from services.cube.client import status
+
+    try:
+        return status()
+    except Exception:  # readiness must never crash on a status read
+        log.exception("readiness cube check failed")
+        return "unknown"
+
+
+def _lanes_status() -> dict[str, object] | str:
+    from services.serve import lanes
+
+    return lanes.report()
+
+
+def _data_quality_status() -> dict[str, object] | str:
+    from services.monitor.status import ready_status
+
+    return ready_status()
+
+
 def _schema_status() -> tuple[str, bool]:
     """(one-line schema state, is-it-a-gate). `SELECT 1` answered "the database is
     reachable" and was read as "the database is right" — a schema two revisions behind
@@ -671,6 +691,9 @@ async def ready() -> dict[str, object]:
     traces = trace_logger.trace_write_status()
     typed = await run_in_threadpool(_typed_status)
     profiles = await run_in_threadpool(_profiles_status)
+    cube = await run_in_threadpool(_cube_status)
+    data_quality = await run_in_threadpool(_data_quality_status)
+    serving = await run_in_threadpool(_lanes_status)
     return {
         "status": (
             "ready"
@@ -708,6 +731,18 @@ async def ready() -> dict[str, object]:
         # Serving works on a stale one, degraded and saying so on every answer;
         # this is where the operator sees the probe job stopped.
         "profiles": profiles,
+        # The Cube this install points at: reachable, its version, the
+        # model_version and member counts; "not configured" when none is.
+        # Never a readiness gate: a lens served through Cube answers 503
+        # naming Cube while it is down, and every other lens is unaffected.
+        "cube": cube,
+        # Per published lens: the lane it serves on (cube | typed) and why;
+        # for a Cube lane, whether Cube is configured, the monitor has run,
+        # and a chat tier serves the HTTP question door without a driver.
+        "serving": serving,
+        # The latest `dst monitor` run each org applied: its clock, its age
+        # against probe.max_age, its findings by failure mode. Never a gate.
+        "data_quality": data_quality,
         "environment": settings.environment,
     }
 

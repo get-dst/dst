@@ -1,0 +1,253 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"group_revenue_monthly.entity\"], \"measures\": [\"group_revenue_monthly.revenue_eur\"], \"timeDimensions\": [{\"dateRange\": [\"2025-07-01\", \"2025-09-30\"], \"dimension\": \"group_revenue_monthly.month\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "group_revenue_monthly__entity": "group_revenue_monthly.entity",
+      "group_revenue_monthly__revenue_eur": "group_revenue_monthly.revenue_eur"
+     },
+     "sql": [
+      "SELECT\n      \"group_revenue_monthly\".entity \"group_revenue_monthly__entity\", sum(\"group_revenue_monthly\".revenue_eur) \"group_revenue_monthly__revenue_eur\"\n    FROM\n      (SELECT * FROM intermediate.int_revenue_by_entity_month\nWHERE revenue_stream <> 'Intercompany') AS \"group_revenue_monthly\"  WHERE (CAST(\"group_revenue_monthly\".month || '-01' AS DATE) >= ?::timestamptz AND CAST(\"group_revenue_monthly\".month || '-01' AS DATE) <= ?::timestamptz) GROUP BY 1 ORDER BY 2 DESC LIMIT 10000",
+      [
+       "2025-07-01T00:00:00.000Z",
+       "2025-09-30T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"group_revenue_monthly.entity\"], \"measures\": [\"group_revenue_monthly.revenue_eur\"], \"timeDimensions\": [{\"dateRange\": [\"2026-07-01\", \"2026-09-30\"], \"dimension\": \"group_revenue_monthly.month\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "group_revenue_monthly__entity": "group_revenue_monthly.entity",
+      "group_revenue_monthly__revenue_eur": "group_revenue_monthly.revenue_eur"
+     },
+     "sql": [
+      "SELECT\n      \"group_revenue_monthly\".entity \"group_revenue_monthly__entity\", sum(\"group_revenue_monthly\".revenue_eur) \"group_revenue_monthly__revenue_eur\"\n    FROM\n      (SELECT * FROM intermediate.int_revenue_by_entity_month\nWHERE revenue_stream <> 'Intercompany') AS \"group_revenue_monthly\"  WHERE (CAST(\"group_revenue_monthly\".month || '-01' AS DATE) >= ?::timestamptz AND CAST(\"group_revenue_monthly\".month || '-01' AS DATE) <= ?::timestamptz) GROUP BY 1 ORDER BY 2 DESC LIMIT 10000",
+      [
+       "2026-07-01T00:00:00.000Z",
+       "2026-09-30T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"group_revenue_monthly.month\"], \"limit\": 1, \"order\": [[\"group_revenue_monthly.month\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "group_revenue_monthly__month": "group_revenue_monthly.month"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', CAST(\"group_revenue_monthly\".month || '-01' AS DATE)::timestamptz) \"group_revenue_monthly__month\"\n    FROM\n      (SELECT * FROM intermediate.int_revenue_by_entity_month\nWHERE revenue_stream <> 'Intercompany') AS \"group_revenue_monthly\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "Revenue per entity, revenue stream and month in EUR, ex-VAT, as BOOKED in the ledgers. Finland from the Netvisor GL (NETVISOR journal only; the MIGRATION opening-balance batch is excluded upstream), including the webshop line (GL account 3040, UTC month, refunds not netted), Bergström Rör from the Fortnox export converted at the monthly average EUR/SEK rate. Group revenue as the finance handbook recognises it (webshop net of refunds, Helsinki time) is group_revenue_handbook_monthly.",
+    "dimensions": [
+     {
+      "description": "calendar month, YYYY-MM",
+      "isVisible": true,
+      "name": "group_revenue_monthly.month",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "month (text YYYY-MM cast to a date)",
+      "suggestFilterValues": true,
+      "title": "group revenue monthly month (text YYYY-MM cast to a date)",
+      "type": "time"
+     },
+     {
+      "description": "the operating company the revenue belongs to",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "company",
+         "business",
+         "operating company",
+         "legal entity"
+        ],
+        "dictionary": [
+         "Nordlund LVI Oy",
+         "Nordlund Verkkokauppa",
+         "Bergström Rör AB"
+        ]
+       }
+      },
+      "name": "group_revenue_monthly.entity",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Entity",
+      "suggestFilterValues": true,
+      "title": "group revenue monthly Entity",
+      "type": "string"
+     },
+     {
+      "description": "Contracting, Service contracts or Webshop",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "stream",
+         "revenue line",
+         "line of business"
+        ],
+        "dictionary": [
+         "Contracting",
+         "Service contracts",
+         "Webshop",
+         "Intercompany"
+        ]
+       }
+      },
+      "name": "group_revenue_monthly.revenue_stream",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Revenue Stream",
+      "suggestFilterValues": true,
+      "title": "group revenue monthly Revenue Stream",
+      "type": "string"
+     },
+     {
+      "description": "revenue in EUR, ex-VAT, Bergström at the monthly average rate",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "group_revenue_monthly.revenue_eur_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "revenue_eur (the column)",
+      "suggestFilterValues": true,
+      "title": "group revenue monthly revenue_eur (the column)",
+      "type": "number"
+     },
+     {
+      "description": "FX method used for Bergström rows (always average here)",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "dictionary": [
+         "average"
+        ]
+       }
+      },
+      "name": "group_revenue_monthly.fx_method",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Fx Method",
+      "suggestFilterValues": true,
+      "title": "group revenue monthly Fx Method",
+      "type": "string"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "revenue in EUR ex-VAT by booking month with the webshop line as booked on GL 3040 (UTC month, refunds not netted) - not the handbook group revenue (group_revenue_handbook_monthly.revenue_eur); use when the ledger / GL-booked figure is asked for",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "GL revenue",
+         "booked revenue",
+         "revenue as booked"
+        ],
+        "better": "higher",
+        "currency": "EUR"
+       }
+      },
+      "name": "group_revenue_monthly.revenue_eur",
+      "public": true,
+      "shortTitle": "revenue as booked in the GL (webshop line before refunds, UTC month)",
+      "title": "group revenue monthly revenue as booked in the GL (webshop line before refunds, UTC month)",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per entity, revenue stream and month (YYYY-MM)",
+      "key": [
+       "month",
+       "entity",
+       "revenue_stream"
+      ],
+      "population": "group revenue only - the three operating entities' external sales; intercompany sales (Nordlund LVI to Bergström) are excluded",
+      "system": "dbt (Netvisor GL + Fortnox + Shopify)"
+     }
+    },
+    "name": "group_revenue_monthly",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "group revenue monthly",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "group_revenue_monthly": {
+   "time_dimensions": {
+    "month": {
+     "data_end": "2026-08-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-01"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "dimensions": [
+    "group_revenue_monthly.entity"
+   ],
+   "measures": [
+    "group_revenue_monthly.revenue_eur"
+   ],
+   "timeDimensions": [
+    {
+     "compareDateRange": [
+      [
+       "2026-07-01",
+       "2026-09-30"
+      ],
+      [
+       "2025-07-01",
+       "2025-09-30"
+      ]
+     ],
+     "dimension": "group_revenue_monthly.month"
+    }
+   ]
+  }
+ ],
+ "question": "revenue this quarter vs same quarter last year by business"
+}

@@ -1,0 +1,11 @@
+connection: warehouse
+table: bakery.orders_raw
+system: the till and the web shop
+grain: one row per order per sync
+key: [order_id, _synced]
+versions:
+  sync_column: _synced
+caveats:
+  - rows repeat once per sync; the latest sync per order is the order
+clocks:
+  ordered_at: {meaning: when the customer paid, timezone: Europe/Helsinki}

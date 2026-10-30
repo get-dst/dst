@@ -1,0 +1,73 @@
+cubes:
+- name: stores
+  title: stores
+  description: The bakeries.
+  sql_table: bakery.stores
+  meta:
+    dst:
+      grain: one row per store
+      key:
+      - store_id
+  dimensions:
+  - name: store_id
+    sql: '{CUBE}.store_id'
+    type: number
+    primary_key: true
+    public: true
+  - name: store_name
+    sql: '{CUBE}.store_name'
+    type: string
+    meta:
+      dst:
+        aliases:
+        - store
+        - bakery
+        dictionary:
+        - Harbour
+        - Mill Hill
+        - Old Town
+        - Pier Road
+  - name: region
+    sql: '{CUBE}.region'
+    type: string
+    meta:
+      dst:
+        aliases:
+        - area
+        dictionary:
+        - Coast
+        - North
+        - South
+        value_aliases:
+        - alias: seaside
+          value: Coast
+        - alias: northern
+          value: North
+  - name: opened_on
+    sql: '{CUBE}.opened_on'
+    type: time
+  - name: manager_email
+    sql: '{CUBE}.manager_email'
+    type: string
+    public: false
+    meta:
+      dst:
+        hide:
+          except_groups:
+          - ops
+  - name: legacy_code
+    sql: '{CUBE}.legacy_code'
+    type: string
+    public: false
+    meta:
+      dst:
+        internal: true
+        dictionary:
+        - H1
+        - M3
+        - O2
+        - P4
+  measures:
+  - name: store_count
+    title: stores
+    type: count

@@ -1,0 +1,417 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"fi_invoices.as_of_date\"], \"limit\": 1, \"order\": [[\"fi_invoices.as_of_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "fi_invoices__as_of_date": "fi_invoices.as_of_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"fi_invoices\".as_of_date::timestamptz) \"fi_invoices__as_of_date\"\n    FROM\n      (SELECT i.*, CASE i.revenue_stream\n  WHEN 'Contracting' THEN least((SELECT max(issue_date) FROM staging.stg_netvisor__invoices WHERE issue_date < current_date),\n                                (SELECT max(payment_date) FROM staging.stg_netvisor__payments WHERE payment_date < current_date))\n  ELSE (SELECT max(issue_date) FROM staging.stg_netvisor__service_invoices WHERE issue_date < current_date) END AS as_of_date\nFROM marts.fct_invoices i) AS \"fi_invoices\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"fi_invoices.due_date\"], \"limit\": 1, \"order\": [[\"fi_invoices.due_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "fi_invoices__due_date": "fi_invoices.due_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"fi_invoices\".due_date::timestamptz) \"fi_invoices__due_date\"\n    FROM\n      (SELECT i.*, CASE i.revenue_stream\n  WHEN 'Contracting' THEN least((SELECT max(issue_date) FROM staging.stg_netvisor__invoices WHERE issue_date < current_date),\n                                (SELECT max(payment_date) FROM staging.stg_netvisor__payments WHERE payment_date < current_date))\n  ELSE (SELECT max(issue_date) FROM staging.stg_netvisor__service_invoices WHERE issue_date < current_date) END AS as_of_date\nFROM marts.fct_invoices i) AS \"fi_invoices\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"fi_invoices.issue_date\"], \"limit\": 1, \"order\": [[\"fi_invoices.issue_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "fi_invoices__issue_date": "fi_invoices.issue_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"fi_invoices\".issue_date::timestamptz) \"fi_invoices__issue_date\"\n    FROM\n      (SELECT i.*, CASE i.revenue_stream\n  WHEN 'Contracting' THEN least((SELECT max(issue_date) FROM staging.stg_netvisor__invoices WHERE issue_date < current_date),\n                                (SELECT max(payment_date) FROM staging.stg_netvisor__payments WHERE payment_date < current_date))\n  ELSE (SELECT max(issue_date) FROM staging.stg_netvisor__service_invoices WHERE issue_date < current_date) END AS as_of_date\nFROM marts.fct_invoices i) AS \"fi_invoices\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "Every Nordlund LVI Oy invoice: contracting invoices (Netvisor sales module) and maintenance-contract invoices (Netvisor service module), with the ex-VAT amount, the current outstanding balance and the customer. The Netvisor sales-invoice sync last landed invoices dated 2026-06-05, so contracting revenue here stops in June 2026 while service-contract invoices run to August. Outstanding balances are only as current as the feed that reports their payments: as_of_date is that day per row, and overdue is aged against it, never against today.",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "fi_invoices.invoice_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Invoice ID",
+      "suggestFilterValues": true,
+      "title": "fi invoices Invoice ID",
+      "type": "string"
+     },
+     {
+      "description": "CRM customer id (Cxxx)",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "customer"
+        ]
+       }
+      },
+      "name": "fi_invoices.customer_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer ID",
+      "suggestFilterValues": true,
+      "title": "fi invoices Customer ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "fi_invoices.issue_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Issue Date",
+      "suggestFilterValues": true,
+      "title": "fi invoices Issue Date",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "name": "fi_invoices.due_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Due Date",
+      "suggestFilterValues": true,
+      "title": "fi invoices Due Date",
+      "type": "time"
+     },
+     {
+      "description": "ex-VAT - the revenue basis",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "fi_invoices.net_amount_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Net Amount Eur",
+      "suggestFilterValues": true,
+      "title": "fi invoices Net Amount Eur",
+      "type": "number"
+     },
+     {
+      "description": "incl. VAT 25.5 %",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "fi_invoices.gross_amount_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Gross Amount Eur",
+      "suggestFilterValues": true,
+      "title": "fi invoices Gross Amount Eur",
+      "type": "number"
+     },
+     {
+      "description": "unpaid as of the row's as_of_date (its feed's data end); 0 when paid",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "fi_invoices.outstanding_eur_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "outstanding_eur (the column)",
+      "suggestFilterValues": true,
+      "title": "fi invoices outstanding_eur (the column)",
+      "type": "number"
+     },
+     {
+      "description": "the last day the row's feed holds - its outstanding balance and overdue status are as of the close of this day (contracting stops with the Netvisor sales-invoice / payment sync; service invoices have their own)",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "as of",
+         "position date"
+        ]
+       }
+      },
+      "name": "fi_invoices.as_of_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "As of Date",
+      "suggestFilterValues": true,
+      "title": "fi invoices As of Date",
+      "type": "time"
+     },
+     {
+      "description": "days an unpaid invoice is past its due date on its as_of_date (its feed's data end; 0 when paid or not yet due; Netvisor's own aging convention, raw_netvisor.ar_aging) - for \"more than N days overdue\" filter days_overdue > N, never due_date against today",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "fi_invoices.days_overdue",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Days Overdue",
+      "suggestFilterValues": true,
+      "title": "fi invoices Days Overdue",
+      "type": "number"
+     },
+     {
+      "description": "Contracting or Service contract",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "stream"
+        ],
+        "dictionary": [
+         "Contracting",
+         "Service contract"
+        ]
+       }
+      },
+      "name": "fi_invoices.revenue_stream",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Revenue Stream",
+      "suggestFilterValues": true,
+      "title": "fi invoices Revenue Stream",
+      "type": "string"
+     },
+     {
+      "description": "service line (Bathroom renovation, Heating system, Maintenance contract, ...)",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "service line",
+         "job type",
+         "service type"
+        ],
+        "dictionary": [
+         "Maintenance contract",
+         "Domestic water pipe renovation",
+         "Emergency & rapid service",
+         "Bathroom renovation",
+         "Drain & sewer renovation",
+         "Heating system"
+        ]
+       }
+      },
+      "name": "fi_invoices.service",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Service",
+      "suggestFilterValues": true,
+      "title": "fi invoices Service",
+      "type": "string"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "invoiced amount",
+         "invoiced ex-VAT",
+         "Finnish revenue",
+         "LVI revenue"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "fi_invoices.invoiced_net_eur",
+      "public": true,
+      "shortTitle": "invoiced revenue",
+      "title": "fi invoices invoiced revenue",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "invoiced incl VAT"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "fi_invoices.invoiced_gross_eur",
+      "public": true,
+      "shortTitle": "invoiced gross",
+      "title": "fi invoices invoiced gross",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "unpaid balance across the asked invoices, each as of its feed's data end (as_of_date)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "owed",
+         "unpaid amount",
+         "open balance"
+        ],
+        "as_of": "as_of_date",
+        "currency": "EUR"
+       }
+      },
+      "name": "fi_invoices.outstanding_eur",
+      "public": true,
+      "shortTitle": "outstanding",
+      "title": "fi invoices outstanding",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "number of invoices"
+        ]
+       }
+      },
+      "name": "fi_invoices.invoice_count",
+      "public": true,
+      "shortTitle": "invoices",
+      "title": "fi invoices invoices",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "invoices with an unpaid balance whose due date had passed at their feed's data end (due_date < as_of_date)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "fi_invoices.overdue_invoice_count",
+      "public": true,
+      "shortTitle": "overdue invoices",
+      "title": "fi invoices overdue invoices",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per invoice",
+      "key": [
+       "invoice_id"
+      ],
+      "population": "Nordlund LVI Oy invoices only (Finland); Bergström invoices live in bergstrom_invoices",
+      "system": "dbt (Netvisor)"
+     }
+    },
+    "name": "fi_invoices",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "fi invoices",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "fi_invoices": {
+   "time_dimensions": {}
+  }
+ },
+ "queries": [
+  {
+   "measures": [
+    "fi_invoices.invoiced_net_eur"
+   ],
+   "timeDimensions": [
+    {
+     "dateRange": [
+      "2026-01-01",
+      "2026-08-31"
+     ],
+     "dimension": "fi_invoices.issue_date"
+    }
+   ]
+  }
+ ],
+ "question": "what was total invoiced revenue between jan 1 and aug 31 2026"
+}

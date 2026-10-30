@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from services.benchmark.contamination import ContaminationError, train_test_split
 from services.contracts.fakes import HashEmbedder
+from services.evals.contamination import ContaminationError, train_test_split
 from services.router import (
     DEFAULT_CONFIDENT,
     DEFAULT_MARGIN,

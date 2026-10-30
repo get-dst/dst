@@ -10,8 +10,8 @@ A Decision that measured nothing (``probs is None``) reproduces the legacy
 behaviour byte-for-byte: act on a choice, decline on none. The regime only
 binds where a probability was actually measured.
 
-A slot's defaults are PLACEHOLDERS until the calibration experiment stamps
-them (scripts/decision_calibration.py) — STAMPED_BY names the run per slot, or
+A slot's defaults are PLACEHOLDERS until a calibration run stamps
+them — STAMPED_BY names the run per slot, or
 None. Callers may pass a policy so the eval grid can vary it.
 """
 

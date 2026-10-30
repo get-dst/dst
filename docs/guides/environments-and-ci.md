@@ -22,7 +22,7 @@ migrates both at once. Rehearse migrations somewhere else.
 
 ## Which server did that command talk to
 
-Resolution order, for every remote command (`services/cli/main.py:1540`):
+Resolution order, for every remote command (`_client` in `services/cli/_common.py`):
 
 1. `--url` on the command
 2. `DST_URL` in the process environment

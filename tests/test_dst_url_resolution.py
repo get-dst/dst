@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-import services.cli.main as cli
+import services.cli.serve as cli
 import services.config
 from services.config import settings
 from services.db import schema_state as schema

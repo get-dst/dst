@@ -15,7 +15,7 @@ it — the correct outcome is a DECLINE). We run the router over the set and rep
   * **correct declines** — declined an uncovered question (the right call — this
     is surface area working).
 
-Contamination guard (reuses ``services/benchmark/contamination.py``): the eval's
+Contamination guard (reuses ``services/evals/contamination.py``): the eval's
 TEST questions must not be verbatim among the anchors that *taught* the lenses —
 otherwise we'd be measuring lookup, not routing. ``assert_eval_held_out`` refuses
 to score a set that leaks, exactly as the benchmark refuses to score a question
@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from services.benchmark.contamination import assert_held_out, taught_set
+from services.evals.contamination import assert_held_out, taught_set
 from services.router import (
     DEFAULT_CONFIDENT,
     DEFAULT_MARGIN,

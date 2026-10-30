@@ -344,7 +344,7 @@ def test_a_shift_past_tolerance_in_the_newest_artifact_is_breaking(
 def test_a_deploy_advances_the_baseline_to_the_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from services.cli.main import _advance_baselines
+    from services.cli.project import _advance_baselines
 
     root = _project(tmp_path)
     where = ["--connection", "warehouse", "--dir", str(root)]
@@ -374,7 +374,7 @@ def test_a_deploy_leaves_the_baseline_alone_over_a_breaking_finding(
     and bury the breakage in the run that found it. So apply lands the layer
     but leaves the baseline, names the findings and the two ways to accept;
     `--accept-drift` advances and prints what it signed off, old -> new."""
-    from services.cli.main import _advance_baselines
+    from services.cli.project import _advance_baselines
 
     root = _project(tmp_path)
     where = ["--connection", "warehouse", "--dir", str(root)]

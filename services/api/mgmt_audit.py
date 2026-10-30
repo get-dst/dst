@@ -15,14 +15,6 @@ migration 0018), and returns it. The run path is factored into a thin
 ``run_and_store(session, connection, days, execute)`` so a scheduled job can drive
 the SAME flow. (This module does not schedule anything itself.) Connectors without
 a history catalog are a clear 400, not a silent empty report.
-
-``POST /mgmt/connections/{name}/audit/draft-definition`` is the bridge: one
-conflict finding + a chosen lens → the drafted canon definition
-(``services/probe/report.draft_definition`` — deterministic canon choice,
-rejected readings kept in the body), recorded as a ticket-less
-``PatchCandidate(kind="definition")`` through the patch store. Audit
-findings ride the SAME approval rail as corrections and distillation:
-``GET /mgmt/lenses/{lens}/patches`` and the Reviews UI.
 """
 
 from __future__ import annotations
@@ -44,16 +36,13 @@ from services.auth.deps import get_admin_org, get_app_session
 from services.contracts.protocols import Connector
 from services.contracts.query_history import HistoryReader
 from services.definitions import standards as std_store
-from services.lenses import store as lens_store
 from services.lenses.connections import resolve_connector
 from services.llm import registry
 from services.observability import observe
 from services.probe.correctness import annotate_correctness
 from services.probe.drift import DriftFinding, execute_variants, mine_drift
 from services.probe.gap_map import Gap
-from services.probe.report import annotate_against_canon, draft_definition
-from services.reviews import patch_store
-from services.reviews.patch import PatchCandidate
+from services.probe.report import annotate_against_canon
 
 router = APIRouter(prefix="/mgmt/connections/{name}/audit", tags=["audit"])
 log = logging.getLogger("dst")
@@ -375,54 +364,3 @@ def run_audit(
     """
     run = run_and_store(session, name, days, execute=execute, org_id=org_id)
     return run.model_dump(mode="json")
-
-
-class DraftDefinitionBody(BaseModel):
-    """One finding from the audit response + the lens that should own the canon."""
-
-    finding: DriftFinding
-    lens: str
-
-
-def _existing_definition_body(session: Session, lens: str, term: str) -> str | None:
-    """The lens's current body for ``term`` (diff_before), 404 if the lens is unknown."""
-    row = lens_store.get_lens(session, lens)
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"lens '{lens}' not found")
-    raw = row.get("draft") or row.get("published")
-    if raw is None:
-        return None
-    bundle = lens_store.LensBundle.model_validate(raw)
-    match = next(
-        (d for d in bundle.semantic_model.definitions if d.term.lower() == term.lower()), None
-    )
-    return match.body if match is not None else None
-
-
-@router.post("/draft-definition", status_code=201)
-def draft_definition_patch(
-    name: str,
-    body: DraftDefinitionBody,
-    session: Session = Depends(get_app_session),
-) -> dict[str, object]:
-    """Turn one drift finding into a definition PatchCandidate on the chosen lens.
-
-    The proposal reuses the report's canon-choice logic verbatim; the candidate
-    is ticket-less (like distilled ones) and lands on the lens's existing patch
-    queue — approval and apply stay human.
-    """
-    if not body.finding.variants:
-        raise HTTPException(status_code=400, detail="finding has no variants to draft from")
-    diff_before = _existing_definition_body(session, body.lens, body.finding.metric_intent)
-    draft = draft_definition(body.finding)
-    candidate = PatchCandidate(
-        ticket_id=None,
-        lens=body.lens,
-        kind="definition",
-        target=draft["term"],
-        diff_before=diff_before,
-        diff_after=draft["body"],
-        status="candidate",
-    )
-    candidate.id = patch_store.record(session, candidate)
-    return candidate.model_dump()

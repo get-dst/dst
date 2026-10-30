@@ -1,8 +1,18 @@
 # Quickstart
 
-From an empty directory to a governed answer over the bundled demo warehouse, then over
-your own. Everything runs from the terminal against the scaffolded project. The
-dashboard is optional throughout.
+From an empty directory to a governed answer. Everything runs from the terminal against
+the scaffolded project. The dashboard is optional throughout.
+
+There are two ways to start, and the install step is the same for both:
+
+- **[A Cube-backed project](#a-cube-backed-project)** (`dst init --cube`): the model is a
+  Cube model under `cube/model/`, and every question resolves to a Cube query that dst
+  checks, Cube compiles and dst runs through your connection. This is the path for a new
+  project.
+- **[An entity project](#an-entity-project-over-the-demo-warehouse)**: the model is dst's
+  own `semantic/` files, served on the typed core. It starts over a bundled demo
+  warehouse, with no sidecar to run. Existing entity projects keep working unchanged;
+  [Migrate to Cube](guides/migrate-to-cube.md) moves one over when you choose to.
 
 Prerequisites: Python 3.12+, Docker (for the project's Postgres), and an API key for at
 least one model provider: Anthropic, or any openai-compatible endpoint (DeepSeek,
@@ -24,7 +34,110 @@ pinned fork)? Build the dashboard first, or you get an API-only build:
 `pnpm -C apps/web install && pnpm -C apps/web build`, then `uv build --wheel`.
 The build prints whether the dashboard was bundled.
 
-## 2. Scaffold a project
+## A Cube-backed project
+
+### 2. Scaffold it
+
+```bash
+dst init analytics --cube --warehouse duckdb --duckdb-path /path/to/shop.duckdb \
+  --no-example --yes
+cd analytics
+```
+
+`--no-example` leaves out the demo lens. `--warehouse` also takes `postgres`, `bigquery` and `snowflake`; fill that connection in
+`dst.yaml` and its credential in `.env` ([section 6](#6-connect-your-own-warehouse)
+shows the shape). Besides the files every project gets (below), `--cube` writes:
+
+- `cube/model/` (empty, for your cubes, with `views/` for the views),
+- `cube/cube.js`, the sidecar's config,
+- `cube/overlay.yaml`, what dst reads that no member's `meta.dst` carries,
+- `lenses/main/lens.yaml`, a lens over views (`views: []`),
+- a `cube:` block in `dst.yaml` and a generated `CUBEJS_API_SECRET` in `.env`,
+- the pinned Cube Core sidecar in `docker-compose.yml`, behind the profile `cube`,
+- the `.claude/skills/dst-cube-overlay/` skill: which file holds what, every
+  `meta.dst` key with what in dst reads it, and the checks plan runs.
+
+Set your model provider's key in `.env` (`DST_API_KEY_ANTHROPIC=sk-ant-...`). The
+sidecar reads the warehouse itself, with Cube's own settings from `.env`. For a DuckDB
+file, put it (or point `DST_CUBE_DATA`) at the directory the sidecar mounts as `/data`,
+by default `./cube/data`, and name it as the container sees it:
+
+```
+DST_DUCKDB_PATH=/data/shop.duckdb
+```
+
+`cube.js` attaches it read-only, so dst's own connection opens the same file beside it.
+For any other warehouse set `CUBEJS_DB_TYPE` and the `CUBEJS_DB_*` values Cube's driver
+reads, and leave `DST_DUCKDB_PATH` unset.
+
+### 3. Start the server and bootstrap
+
+```bash
+dst dev
+dst bootstrap --org me --email you@example.com   # in a second terminal
+```
+
+The same as for an entity project: [steps 3 and 4](#3-start-the-server) below say
+what each does.
+
+### 4. Write the model
+
+Write cubes into `cube/model/*.yml` and views into `cube/model/views/*.yml` in Cube's own
+format; the `dst-cube-overlay` skill walks an agent through it. Then name the views the
+lens serves in `lenses/main/lens.yaml`. Init already wrote `connections:` with the
+warehouse connection it declared in `dst.yaml`:
+
+```yaml
+views: [orders_view]
+connections: [warehouse]
+access:
+  allow:
+    - group: everyone
+```
+
+Start the sidecar and check that dst reaches it and sees your model:
+
+```bash
+docker compose --profile cube up -d
+dst cube status
+```
+
+### 5. Probe, plan, apply
+
+```bash
+dst probe --cube
+dst plan
+dst apply
+dst monitor
+dst apply
+```
+
+`probe --cube` reads value dictionaries and data ends through Cube into
+`profiles/cube.probe.json`. `plan` checks the overlay against Cube's meta and prints
+the lane each lens serves on:
+
+```
+serving: main → cube (Cube-backed)
+```
+
+`apply` refuses on any Cube-side error and stamps the lens with the `model_version` its
+views compile to. `dst monitor` judges freshness, feeds and partial periods through
+Cube, and the second apply carries what it found into the answers.
+
+### 6. Ask
+
+```bash
+dst query main "How many orders were placed last month?"
+```
+
+The answer comes back with the Cube query, the SQL Cube compiled for it, and the
+[receipts](concepts/receipts.md). An agent connected over MCP writes its own Cube query
+and dst calls no model for it ([driver mode](guides/agents-mcp.md#driver-mode)). Then
+[let callers in](#7-let-callers-in).
+
+## An entity project over the demo warehouse
+
+### 2. Scaffold a project
 
 ```bash
 dst init analytics --warehouse demo --yes
@@ -38,7 +151,7 @@ the flags write the compose mapping, the database URLs, and `DST_URL` in one pas
 `dst init` writes a project laid out the way dbt users will recognize:
 `dst.yaml` (model providers + warehouse connections), a gitignored `.env` with a generated
 `DST_SECRET_KEY` and local database URLs, a `docker-compose.yml` for Postgres, a
-shared semantic layer — the files that describe your data — under `semantic/`
+shared semantic layer (the files that describe your data) under `semantic/`
 with example assets, an example lens at `lenses/customer_value/` over the demo
 warehouse, an `AGENTS.md` guide for AI agents, and a `git init`. `dst.yaml` and
 `lens.yaml` end with a commented reference block generated from the schema
@@ -54,7 +167,7 @@ DST_API_KEY_ANTHROPIC=sk-ant-...
 Secrets live only in `.env`; the tracked files refer to them by env-var name. A
 key pasted directly into `dst.yaml` is a parse error, not a lint warning.
 
-## 3. Start the server
+### 3. Start the server
 
 ```bash
 dst dev
@@ -65,7 +178,7 @@ answers at `DATABASE_URL`, runs migrations, then serves the API (and the
 dashboard, when bundled) on port 8000. Leave it running; the rest happens in a
 second terminal in the same directory.
 
-## 4. Bootstrap, then deploy the files
+### 4. Bootstrap, then deploy the files
 
 ```bash
 dst bootstrap --org me --email you@example.com
@@ -80,11 +193,11 @@ flags. `--email` also creates the first dashboard admin (log in at
 bootstrap is safe: it reuses the org and keeps the token already in `.env`.
 
 `apply` deploys the project directory to the server. Each declared connection
-is probed first — dst connects and reads — so a dead credential never replaces
+is probed first (dst connects and reads), so a dead credential never replaces
 a working one. Then shared assets and lenses land in one transaction: any error
 aborts everything, and the prior versions keep serving.
 
-## 5. First governed answer
+### 5. First governed answer
 
 ```bash
 dst query customer_value "How many customers are repeat customers?"
@@ -99,11 +212,11 @@ The answer comes back with the SQL that produced it and a confidence grade: the
     `status: ambiguous`, so dst asks which meaning is intended rather than guessing.
     See [Clarify & refusal](concepts/clarify-and-refusal.md).
 
-### Optional: a typed-decision provider
+#### Optional: a typed-decision provider
 
 With a `typesafe` provider in `dst.yaml` (key in `.env` under the name you
 give `api_key_env`), or an `openai-decisions` one (key in `OPENAI_API_KEY`), dst stops asking a model to write SQL: every slot of an
-answer — lens, entity, metric, dimension, grain, filter, value — becomes a
+answer (lens, entity, metric, dimension, grain, filter, value) becomes a
 decision over the semantic model and the column profiles, and the SQL is
 compiled from the decisions. Nothing else changes in the steps above. See
 [Typed decisions](concepts/typed-decisions.md).
@@ -115,7 +228,7 @@ providers:
     api_key_env: DST_API_KEY_JEV
 ```
 
-## 6. Connect your own warehouse
+### 6. Connect your own warehouse
 
 Declare the connection in `dst.yaml`. Warehouse types: `duckdb`, `postgres`,
 `mysql`, `bigquery`, `snowflake`:
@@ -129,13 +242,13 @@ connections:
 ```
 
 and put the credential in `.env`. A value of `@/path/to/file` loads that file's
-contents — the way to pass a BigQuery service-account JSON:
+contents, which is the way to pass a BigQuery service-account JSON:
 
 ```
 DST_API_KEY_WH=@/path/to/service-account.json
 ```
 
-Then author the semantic layer — the files that describe your data — from the
+Then author the semantic layer from the
 warehouse itself:
 
 ```bash
@@ -163,6 +276,8 @@ it), select them in a lens's `lens.yaml`, then `dst plan` → `dst apply` →
 and [Lenses](concepts/lens.md).
 
 ## 7. Let callers in
+
+The examples use the demo lens `customer_value`; on a Cube-backed project, ask `main`.
 
 ```bash
 dst keys create --caller alex
@@ -197,7 +312,7 @@ claude mcp add dst http://localhost:8000/mcp --transport http \
 ```
 
 The registration name is how people will invoke it in their AI ("check in dst
-what our ARR is") — pick your own ("watson") and set `DST_INSTANCE_NAME` in
+what our ARR is"). Pick your own ("watson") and set `DST_INSTANCE_NAME` in
 `.env` to match, so the server presents itself by the same name.
 
 The agent gets the same governed pipeline as every other caller; see

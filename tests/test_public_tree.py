@@ -35,8 +35,8 @@ DOCS = {
 }  # fmt: skip
 
 SCRIPTS = {
-    "__init__.py", "credential_regex.sh", "decision_calibration.py", "gen_env_example.py",
-    "gen_jaffle_expansion.py", "genuine_lint.py", "router_experiment.py",
+    "__init__.py", "credential_regex.sh", "gen_env_example.py",
+    "gen_jaffle_expansion.py", "genuine_lint.py",
 }  # fmt: skip
 
 

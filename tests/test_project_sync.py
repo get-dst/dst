@@ -286,6 +286,11 @@ def _second_lens_yaml() -> str:
     return yaml.safe_dump(config.model_dump(mode="json", exclude_none=True), sort_keys=False)
 
 
+# Plan rows that state standing facts rather than a change: hints, and the
+# table-blueprint warnings and coverage line.
+_STANDING = {"hint", "warning", "coverage"}
+
+
 @needs_db
 def test_apply_export_plan_fixed_point(org) -> None:
     _oid, headers = org
@@ -313,7 +318,7 @@ def test_apply_export_plan_fixed_point(org) -> None:
             assert exported[path] == content, path
 
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": exported}).json()
-    assert {e["status"] for e in plan if e.get("scope") == "semantic"} - {"hint"} == {"unchanged"}
+    assert {e["status"] for e in plan if e.get("scope") == "semantic"} - _STANDING == {"unchanged"}
     lens_rows = [e for e in plan if "lens" in e]
     assert [(e["lens"], e["status"]) for e in lens_rows] == [("customer_value", "unchanged")]
     assert "stale" not in lens_rows[0]
@@ -337,7 +342,7 @@ def test_apply_plan_converges_across_yaml_styles(org) -> None:
     plan = client.post("/mgmt/project/plan", headers=headers, json={"files": files}).json()
     lens_rows = [(e["lens"], e["status"]) for e in plan if "lens" in e]
     assert lens_rows == [("customer_value", "unchanged")]
-    assert {e["status"] for e in plan if e.get("scope") == "semantic"} - {"hint"} == {"unchanged"}
+    assert {e["status"] for e in plan if e.get("scope") == "semantic"} - _STANDING == {"unchanged"}
 
     # The no-op apply must not pay a real one's cost: no republish, no version
     # bump — the lens row reports `unchanged`.

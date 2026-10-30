@@ -236,6 +236,25 @@ def test_outermost_qualified_star_keeps_the_star_reason() -> None:
     assert r.reason == "SELECT * is not allowed; select explicit columns"
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * LIKE '%' FROM customers",
+        "SELECT COLUMNS('.*') FROM customers",
+        "SELECT #2 FROM customers",
+        "SELECT c.customer_id FROM customers c UNION ALL SELECT COLUMNS('.*') FROM customers",
+    ],
+)
+def test_what_stands_for_a_star_in_the_outer_projection_is_a_star(sql: str) -> None:
+    # DuckDB reads `* LIKE`, `COLUMNS(regex)` and `#n` as columns nobody named:
+    # in what the caller receives they return the table's unmodelled columns
+    # exactly as a star would.
+    r = sql_guard.check(sql, _model())
+    assert not r.ok
+    assert r.reason == "SELECT * is not allowed; select explicit columns"
+    assert sql_guard.check("SELECT COUNT(*) AS n FROM customers", _model()).ok
+
+
 def test_star_scan_falls_back_to_the_whole_statement_on_an_unclassifiable_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -437,7 +456,9 @@ def test_a_reserved_table_in_the_default_schema_executes(tmp_path) -> None:
     con.execute('CREATE TABLE "select" ("select" VARCHAR, "order" VARCHAR)')
     con.execute("INSERT INTO \"select\" VALUES ('a', 'b'), ('c', 'd')")
     con.close()
-    with pytest.raises(Exception, match="[Ss]yntax error"):
+    # unguarded, the statement never reaches a table: refused before the engine
+    # (it reads no table name), or a syntax error in it
+    with pytest.raises(Exception, match="[Ss]yntax error|SQL refused"):
         DuckDBConnector(path).execute(sql)
     assert DuckDBConnector(path).execute(r.sql).rows == [[2]]
 

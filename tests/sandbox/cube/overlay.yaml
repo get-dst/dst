@@ -1,0 +1,56 @@
+# The overlay the cube-lane repros read: the reference layer's ambiguous refund
+# basis, the words that name each company, and the cubes that hold one
+# company's figures with their group-level members.
+scope:
+  axes: [entity, country]
+  word_axes: [entity, revenue_stream]
+  names:
+    Nordlund LVI Oy: [lvi, nordlund lvi, finnish, finland, netvisor, 'dictionary:customers.region', 'dictionary:customers.city']
+    Bergström Rör AB: [bergström, bergstrom, swedish, sweden, stockholm, fortnox, sek, kronor]
+    Nordlund Verkkokauppa: [verkkokauppa, webshop, nordlundshop, shopify, online shop]
+    FI: [finland, finnish]
+    SE: [sweden, swedish]
+    EE: [estonia, estonian]
+cubes:
+  bergstrom_invoices:
+    entity_scope:
+      entity: Bergström Rör AB
+      group_level:
+        bergstrom_invoices.se_revenue_sek: group_revenue_handbook_monthly.revenue_eur
+        bergstrom_invoices.se_unpaid_invoices: group_receivables.open_invoices
+  fi_invoices:
+    entity_scope:
+      entity: Nordlund LVI Oy
+      group_level:
+        fi_invoices.invoiced_net_eur: group_revenue_handbook_monthly.revenue_eur (streams Contracting, Service contracts + Bergström)
+        fi_invoices.outstanding_eur: group_receivables.open_receivables_eur
+        fi_invoices.overdue_invoice_count: group_receivables.overdue_invoices
+  fi_payments:
+    entity_scope:
+      entity: Nordlund LVI Oy
+      group_level:
+        fi_payments.paid_eur: cash_collected.cash_collected_eur
+ambiguous:
+- metric: webshop_refund_basis
+  summary: Ambiguous - webshop revenue is net of refunds, but nothing says whether a refund is netted
+    against its own order's period or in the period it is issued. When the readings differ by more
+    than 1 % ask which, unless the question says; within 1 % serve the default reading and disclose
+    the other with its value.
+  readings:
+  - says: refunds netted against their own orders' period (order date)
+    members:
+    - webshop_orders.webshop_revenue_net_eur
+    - group_revenue_handbook_monthly.revenue_eur
+    - budget_vs_actual.actual_vs_budget_eur
+    - budget_vs_actual.budget_variance_eur
+    - budget_vs_actual.attainment_vs_budget
+    select_words: [order date, order cohort, on their orders, against their orders, orders placed]
+  - says: refunds netted in the period they are issued (refund date)
+    default: true
+    members:
+    - webshop_revenue_events.webshop_revenue_refund_date_eur
+    - group_revenue_handbook_monthly.revenue_refund_date_eur
+    - budget_vs_actual.actual_refund_date_eur
+    - budget_vs_actual.budget_variance_refund_date_eur
+    - budget_vs_actual.attainment_vs_budget_refund_date
+    select_words: [refund date, refunds issued, issued in, when refunded]

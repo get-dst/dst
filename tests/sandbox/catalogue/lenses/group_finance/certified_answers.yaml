@@ -1,0 +1,170 @@
+# Certified answers: question -> SQL pairs a named person vouched for, served verbatim.
+# Templates carry {slot} placeholders; the first sample binding is the test case.
+- question: group revenue in {period}
+  sql: >
+    SELECT SUM(revenue_eur) AS revenue_eur FROM intermediate.int_revenue_by_entity_month
+    WHERE revenue_stream <> 'Intercompany'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-Q2}, {period: 2026-05}, {period: 2026}]
+  source: "finance: group revenue definition (ex-VAT, average FX, intercompany and migration out)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: group revenue by month in {period}
+  sql: >
+    SELECT month, SUM(revenue_eur) AS revenue_eur FROM intermediate.int_revenue_by_entity_month
+    WHERE revenue_stream <> 'Intercompany'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026}, {period: 2026-Q1}]
+  source: "finance: group revenue definition"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: revenue by entity in {period}, ex-VAT
+  sql: >
+    SELECT entity, SUM(revenue_eur) AS revenue_eur FROM intermediate.int_revenue_by_entity_month
+    WHERE revenue_stream <> 'Intercompany'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 2 DESC, 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-08}, {period: 2026-Q2}]
+  source: "finance: revenue by entity"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: revenue by stream in {period}
+  sql: >
+    SELECT revenue_stream, SUM(revenue_eur) AS revenue_eur FROM intermediate.int_revenue_by_entity_month
+    WHERE revenue_stream <> 'Intercompany'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 2 DESC, 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026}, {period: 2026-08}]
+  source: "finance: revenue by stream"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: share of group revenue from Sweden in {period}
+  sql: >
+    SELECT SUM(CASE WHEN entity = 'Bergström Rör AB' THEN revenue_eur ELSE 0 END) / SUM(revenue_eur) AS sweden_share
+    FROM intermediate.int_revenue_by_entity_month
+    WHERE revenue_stream <> 'Intercompany'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2025-11-01/2026-08-31}, {period: 2026}]
+  source: "finance: Sweden share of group revenue since the acquisition (1 November 2025)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: Bergström Rör revenue in SEK by month in {period}
+  sql: >
+    SELECT strftime(fakturadatum, '%Y-%m') AS month, SUM(belopp_exkl_moms) AS se_revenue_sek
+    FROM raw_fortnox_bergstrom.fakturor
+    WHERE fakturadatum >= CAST({period.start} AS DATE) AND fakturadatum < CAST({period.end} AS DATE)
+    GROUP BY 1 ORDER BY 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-07-01/2026-08-31}, {period: 2026}]
+  source: "finance: Bergström SEK revenue from the Fortnox export, ex-VAT by invoice date"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: what did the month-end pack report for {period} by entity and stream
+  sql: >
+    SELECT month, entity, revenue_stream, revenue_eur AS pack_revenue_eur FROM marts_revenue.mart_revenue_month_end
+    WHERE month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    ORDER BY 1, 2, 3
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-05}, {period: 2026-Q2}]
+  source: "finance: month-end pack"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: how much revenue was restated after the pack closed, by month, in {period}
+  sql: >
+    SELECT month, SUM(restated_eur) AS restated_eur FROM marts_revenue.mart_revenue_movements
+    WHERE month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026}, {period: 2026-05}]
+  source: "finance: restatements = current books minus pack"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: how are we tracking against budget in {period}
+  sql: >
+    SELECT SUM(actual_eur) AS actual_eur, SUM(budget_eur) AS budget_eur, SUM(actual_eur) - SUM(budget_eur) AS variance_eur,
+           SUM(actual_eur) / SUM(budget_eur) AS attainment_vs_budget
+    FROM marts_finance.mart_budget_vs_actual_monthly
+    WHERE month <= '2026-08'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-Q3}, {period: 2026-Q2}, {period: 2026}]
+  source: "finance: budget vs actual, loaded months only (actuals end August 2026)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: budget variance by entity in {period}
+  sql: >
+    SELECT entity, SUM(actual_eur) AS actual_eur, SUM(budget_eur) AS budget_eur, SUM(variance_eur) AS variance_eur
+    FROM marts_finance.mart_budget_vs_actual_monthly
+    WHERE month <= '2026-08'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026}, {period: 2026-Q2}]
+  source: "finance: budget variance by entity"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: revenue attainment vs target by entity in {period}
+  sql: >
+    SELECT entity, SUM(actual_eur) AS actual_eur, SUM(target_eur) AS target_eur, SUM(actual_eur) / SUM(target_eur) AS attainment_vs_target
+    FROM marts_revenue.mart_revenue_goal_attainment
+    WHERE month <= '2026-08'
+      AND month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-Q2}, {period: 2026}]
+  source: "finance: attainment vs the planning-sheet target (latest version)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: what is the revenue target for Nordlund LVI in {month}
+  sql: >
+    SELECT month, target_eur, target_note FROM marts_revenue.mart_revenue_goal_attainment
+    WHERE entity = 'Nordlund LVI Oy' AND month = strftime(CAST({month.start} AS DATE), '%Y-%m')
+  slots: {month: {type: date_range}}
+  sample_bindings: [{month: 2026-07}, {month: 2026-09}]
+  source: "finance: planning-sheet target, latest version (July revised 2026-06-20)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: cash collected by entity in {period}
+  sql: >
+    SELECT entity, SUM(collected_eur) AS cash_collected_eur FROM marts_finance.mart_cash_collected_monthly
+    WHERE month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 1
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026-Q2}, {period: 2026}]
+  source: "finance: cash collected"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: overdue receivables at the end of {month}
+  sql: >
+    SELECT month, outstanding_eur AS overdue_receivables_eur, invoices AS overdue_invoices FROM marts_finance.mart_ar_aging_monthly
+    WHERE bucket = 'overdue' AND month = strftime(CAST({month.start} AS DATE), '%Y-%m')
+  slots: {month: {type: date_range}}
+  sample_bindings: [{month: 2026-05}, {month: 2026-03}]
+  source: "finance: AR aging month-end snapshot (last snapshot May 2026)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: which invoices are more than {days} days overdue
+  sql: >
+    SELECT invoice_id, customer_id, revenue_stream, due_date, outstanding_eur FROM marts.fct_invoices
+    WHERE outstanding_eur > 0 AND due_date < CURRENT_DATE - CAST({days} AS INTEGER) * INTERVAL 1 DAY
+    ORDER BY outstanding_eur DESC, invoice_id
+  slots: {days: {type: number}}
+  sample_bindings: [{days: 60}, {days: 30}]
+  source: "finance: overdue invoices = unpaid balance past due date, as of today"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: which customers owe us the most money
+  sql: >
+    SELECT c.customer_name, SUM(i.outstanding_eur) AS outstanding_eur FROM marts.fct_invoices i
+    JOIN marts_customer.dim_customer_360 c ON c.customer_id = i.customer_id
+    WHERE i.outstanding_eur > 0 GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 10
+  source: "finance: outstanding balance per customer, today"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: top 10 customers by invoiced revenue in {period}
+  sql: >
+    SELECT c.customer_name, SUM(r.invoiced_eur) AS invoiced_eur FROM marts_revenue.mart_revenue_by_customer_monthly r
+    JOIN marts_customer.dim_customer_360 c ON c.customer_id = r.customer_id
+    WHERE r.month >= strftime(CAST({period.start} AS DATE), '%Y-%m') AND r.month < strftime(CAST({period.end} AS DATE), '%Y-%m')
+    GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 10
+  slots: {period: {type: date_range}}
+  sample_bindings: [{period: 2026}, {period: 2025}]
+  source: "finance: revenue per CRM customer (invoiced ex-VAT)"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)
+- question: average EUR/SEK rate in {month}
+  sql: >
+    SELECT month, avg_rate, closing_rate FROM intermediate.int_fx_rates WHERE month = strftime(CAST({month.start} AS DATE), '%Y-%m')
+  slots: {month: {type: date_range}}
+  sample_bindings: [{month: 2026-06}, {month: 2026-08}]
+  source: "finance: fx_rates"
+  verified_by: data engineering lead (reference catalogue, verified by running the SQL against the warehouse)

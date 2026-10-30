@@ -1,0 +1,16 @@
+name: stock_monthly
+description: Units on hand per store at each month end.
+grain: one row per month and store
+source: {connection: warehouse, table: bakery.stock_monthly}
+primary_key: [month, store_id]
+default_time_field: month
+fields:
+  - {name: month, type: string, description: "YYYY-MM"}
+  - {name: store_id, type: integer}
+  - {name: units_on_hand, type: integer}
+metrics:
+  - name: stock_on_hand
+    agg: sum
+    expr: stock_monthly.units_on_hand
+    label: stock on hand
+    additivity: level

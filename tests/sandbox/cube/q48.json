@@ -1,0 +1,632 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"work_orders.completed_date\"], \"limit\": 1, \"order\": [[\"work_orders.completed_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "work_orders__completed_date": "work_orders.completed_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"work_orders\".completed_date::timestamptz) \"work_orders__completed_date\"\n    FROM\n      intermediate.int_work_order_costs AS \"work_orders\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"work_orders.scheduled_date\"], \"limit\": 1, \"order\": [[\"work_orders.scheduled_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "work_orders__scheduled_date": "work_orders.scheduled_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"work_orders\".scheduled_date::timestamptz) \"work_orders__scheduled_date\"\n    FROM\n      intermediate.int_work_order_costs AS \"work_orders\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"measures\": [\"work_orders.billed_eur\"], \"segments\": [\"work_orders.emergency_callout\"], \"timeDimensions\": [{\"dateRange\": [\"2025-01-01\", \"2025-08-31\"], \"dimension\": \"work_orders.completed_date\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "work_orders__billed_eur": "work_orders.billed_eur"
+     },
+     "sql": [
+      "SELECT\n      sum(\"work_orders\".billed_amount_eur) \"work_orders__billed_eur\"\n    FROM\n      intermediate.int_work_order_costs AS \"work_orders\"  WHERE (\"work_orders\".completed_date >= ?::timestamptz AND \"work_orders\".completed_date <= ?::timestamptz) AND (\"work_orders\".wo_type = 'Emergency callout') LIMIT 10000",
+      [
+       "2025-01-01T00:00:00.000Z",
+       "2025-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"measures\": [\"work_orders.billed_eur\"], \"segments\": [\"work_orders.emergency_callout\"], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"work_orders.completed_date\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "work_orders__billed_eur": "work_orders.billed_eur"
+     },
+     "sql": [
+      "SELECT\n      sum(\"work_orders\".billed_amount_eur) \"work_orders__billed_eur\"\n    FROM\n      intermediate.int_work_order_costs AS \"work_orders\"  WHERE (\"work_orders\".completed_date >= ?::timestamptz AND \"work_orders\".completed_date <= ?::timestamptz) AND (\"work_orders\".wo_type = 'Emergency callout') LIMIT 10000",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "FieldFlow work orders from the latest FULL sync batch, with the full job cost: labour AND materials. Margin = billed - (labour + materials), as a share of billed. The older core mart fct_work_orders carries a labour-only margin on emergency callouts (DATA-97) and is never served here. Emergency callouts are priced on labour with materials re-billed; their true margin is about 23 %, not the 53 % the labour-only figure shows.",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "work_orders.work_order_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Work Order ID",
+      "suggestFilterValues": true,
+      "title": "work orders Work Order ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "customer"
+        ]
+       }
+      },
+      "name": "work_orders.customer_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer ID",
+      "suggestFilterValues": true,
+      "title": "work orders Customer ID",
+      "type": "string"
+     },
+     {
+      "description": "Emergency callout or Maintenance visit",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "job type",
+         "work order type",
+         "type of job"
+        ],
+        "dictionary": [
+         "Emergency callout",
+         "Maintenance visit"
+        ]
+       }
+      },
+      "name": "work_orders.wo_type",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Wo Type",
+      "suggestFilterValues": true,
+      "title": "work orders Wo Type",
+      "type": "string"
+     },
+     {
+      "description": "Scheduled, In progress, Completed, Invoiced, Cancelled",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "job status"
+        ],
+        "dictionary": [
+         "Invoiced",
+         "Cancelled",
+         "In progress",
+         "Completed",
+         "Scheduled"
+        ]
+       }
+      },
+      "name": "work_orders.status",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Status",
+      "suggestFilterValues": true,
+      "title": "work orders Status",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "work_orders.scheduled_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Scheduled Date",
+      "suggestFilterValues": true,
+      "title": "work orders Scheduled Date",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "name": "work_orders.completed_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Completed Date",
+      "suggestFilterValues": true,
+      "title": "work orders Completed Date",
+      "type": "time"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "work_orders.hours_total",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Hours Total",
+      "suggestFilterValues": true,
+      "title": "work orders Hours Total",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "work_orders.labor_cost_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Labor Cost Eur",
+      "suggestFilterValues": true,
+      "title": "work orders Labor Cost Eur",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "work_orders.materials_cost_eur_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "materials_cost_eur (the column)",
+      "suggestFilterValues": true,
+      "title": "work orders materials_cost_eur (the column)",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "work_orders.billed_amount_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Billed Amount Eur",
+      "suggestFilterValues": true,
+      "title": "work orders Billed Amount Eur",
+      "type": "number"
+     },
+     {
+      "description": "billed - labour - materials",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "work_orders.margin_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Margin Eur",
+      "suggestFilterValues": true,
+      "title": "work orders Margin Eur",
+      "type": "number"
+     },
+     {
+      "description": "per-row margin - never average; use the ratio metric",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "work_orders.margin_pct",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Margin Pct",
+      "suggestFilterValues": true,
+      "title": "work orders Margin Pct",
+      "type": "number"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "jobs",
+         "number of jobs",
+         "callouts",
+         "visits"
+        ]
+       }
+      },
+      "name": "work_orders.work_order_count",
+      "public": true,
+      "shortTitle": "work orders",
+      "title": "work orders work orders",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "emergencies",
+         "emergency jobs",
+         "unscheduled jobs"
+        ]
+       }
+      },
+      "name": "work_orders.emergency_callouts",
+      "public": true,
+      "shortTitle": "emergency callouts",
+      "title": "work orders emergency callouts",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "planned maintenance visits",
+         "planned visits",
+         "scheduled maintenance"
+        ]
+       }
+      },
+      "name": "work_orders.maintenance_visits",
+      "public": true,
+      "shortTitle": "maintenance visits",
+      "title": "work orders maintenance visits",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "work order billings",
+         "service billings",
+         "billed on work orders",
+         "service revenue from jobs"
+        ],
+        "better": "higher",
+        "currency": "EUR"
+       }
+      },
+      "name": "work_orders.billed_eur",
+      "public": true,
+      "shortTitle": "billed amount",
+      "title": "work orders billed amount",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "labor cost"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "work_orders.labour_cost_eur",
+      "public": true,
+      "shortTitle": "labour cost",
+      "title": "work orders labour cost",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "currency": "EUR"
+       }
+      },
+      "name": "work_orders.materials_cost_eur",
+      "public": true,
+      "shortTitle": "materials cost",
+      "title": "work orders materials cost",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "margin amount",
+         "gross margin on jobs"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "work_orders.job_margin_eur",
+      "public": true,
+      "shortTitle": "job margin",
+      "title": "work orders job margin",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "(billed - labour - materials) / billed over the asked jobs, full cost",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "margin",
+         "margin percentage",
+         "margin on service work",
+         "work order margin",
+         "service margin"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "work_orders.job_margin_pct",
+      "public": true,
+      "shortTitle": "job margin rate",
+      "title": "work orders job margin rate",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "job hours",
+         "hours worked on jobs"
+        ]
+       }
+      },
+      "name": "work_orders.hours_on_jobs",
+      "public": true,
+      "shortTitle": "hours on work orders",
+      "title": "work orders hours on work orders",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per work order",
+      "key": [
+       "work_order_id"
+      ],
+      "population": "Nordlund LVI work orders from FieldFlow batch B2026-08-31 (the last full sync); scheduled and in-progress jobs have no completed date",
+      "system": "dbt (FieldFlow batch B2026-08-31)"
+     }
+    },
+    "name": "work_orders",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "completed jobs",
+         "completed work orders",
+         "done jobs",
+         "finished jobs",
+         "jobs completed"
+        ],
+        "meaning": "A work order counts as done when its status is Completed or Invoiced; Scheduled, In progress and Cancelled are not done.",
+        "term": "completed_job"
+       }
+      },
+      "name": "work_orders.completed_job",
+      "public": true,
+      "shortTitle": "Completed Job",
+      "title": "work orders Completed Job"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "emergency callout",
+         "emergency callouts",
+         "emergency",
+         "emergencies",
+         "emergency job",
+         "emergency jobs"
+        ],
+        "meaning": "An unscheduled job, wo_type = 'Emergency callout', priced on labour with materials re-billed.",
+        "term": "emergency_callout"
+       }
+      },
+      "name": "work_orders.emergency_callout",
+      "public": true,
+      "shortTitle": "Emergency Callout",
+      "title": "work orders Emergency Callout"
+     }
+    ],
+    "title": "work orders",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "work_orders": {
+   "time_dimensions": {
+    "completed_date": {
+     "data_end": "2026-08-28",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-28"
+    },
+    "scheduled_date": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2026-09-03"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "measures": [
+    "work_orders.billed_eur"
+   ],
+   "segments": [
+    "work_orders.emergency_callout"
+   ],
+   "timeDimensions": [
+    {
+     "compareDateRange": [
+      [
+       "2026-01-01",
+       "2026-08-31"
+      ],
+      [
+       "2025-01-01",
+       "2025-08-31"
+      ]
+     ],
+     "dimension": "work_orders.completed_date"
+    }
+   ]
+  }
+ ],
+ "question": "how much did emergency callout revenue grow or fall compared to this time last year"
+}

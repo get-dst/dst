@@ -194,12 +194,28 @@ load something else: the OpenAPI reference at `/docs`, which loads Swagger UI
 from a CDN, and the MCP consent page **when Clerk is configured**, which loads
 Clerk's SDK — that page restricts framing but does not restrict what it loads.
 
+**What a statement can reach.** Whoever wrote the SQL (a model, a caller on the
+`sql` tool, an admin probing a connection, a certified answer), it reads the
+warehouse's tables and nothing else. The guard refuses table functions other than
+row generators, DuckDB table names that look like file paths, Snowflake stages,
+`ATTACH`, `COPY`, `INSTALL`/`LOAD`, `PRAGMA`, `SET` and a named list of functions that
+reach files, other databases or the session configuration (`pg_read_file`,
+`query_to_xml`, `dblink`, `LOAD_FILE`, DuckDB's `current_setting`), and the DuckDB,
+Postgres and MySQL connectors repeat the check on every statement they run
+(`services/runtime/external_access.py`). A local DuckDB file is also opened with
+`enable_external_access` off and the configuration locked, so the engine itself can
+read only that file. MotherDuck cannot be opened that way, because its extension
+loads at open, so there the statement check is the boundary. On Postgres, Snowflake
+and BigQuery, grant dst's warehouse role no file, stage or external-connection
+privileges it does not need: the check refuses the functions it knows, the role
+decides what the rest can do.
+
 ## Personal data
 
-dst has no personal-data control. It does not classify columns, does not scan
-values, and does not redact anything from a prompt, a result row, or a stored
-trace. If a column is in a lens's scope, its values can reach the configured
-model provider and any caller allowed to ask.
+dst does not classify columns, does not scan values, and does not redact
+anything from a prompt, a result row, or a stored trace on its own. If a column
+is in a lens's scope, its values can reach the configured model provider and
+any caller allowed to ask.
 
 That is a deliberate omission rather than a gap waiting on a release. A
 classifier that recognises `email` but not `salary`, `henkilotunnus`, or a
@@ -222,9 +238,59 @@ So the boundary is yours to draw, and there is exactly one place to draw it:
   answer, and — only when a lens sets `logging.log_samples` — a row sample, and
   only when it sets `logging.log_purpose` — the caller's purpose sentence. It
   lives in your Postgres, under your retention policy.
+- Name the columns a lens must not serve with `hide` on the entity, below.
 
-Column-level exclusion may be reconsidered later as its own design. It is not
-in the product today, and this page will say so until it is.
+### Hidden columns and group exceptions
+
+An entity's `hide` patterns take a column out of the lens. The compile drops the
+column's field and its bare dimension (`services/project/compile.py`), and every
+door reads what is left: the SQL guard's allow-list, `describe_lens`, the metric
+catalog, the value dictionaries, the prompts the generators are given, and
+blueprint text, which shows `[withheld column]` in its place. The guard trusts a
+certified answer's tables, never past `hide`: a certified answer whose SQL reads
+a hidden column fails `dst plan` and `dst apply`, and is refused if it reaches
+serving (`services/runtime/sql_guard.py`). A pattern that matches nothing fails
+plan, so a typo cannot leave a column served while its author believes it hidden.
+
+An entry `{column: contact_email, except_groups: [support, sales]}` keeps the
+column for callers in those groups. The stored model holds it withheld, so
+anything that reads a lens without asking for a caller's view (routing, the
+dashboard, the eval cases) reads it hidden. A caller's view is built after the
+lens allow-list passes (`caller_view` in `services/api/query.py`): each entry
+naming one of the caller's groups is lifted, the column comes back unless another
+entry still hides it, and everything still hidden is stripped again, whatever
+the stored bundle carried. For a caller outside the groups:
+
+- the guard refuses the column on the `sql` tool, in generated SQL and in
+  certified SQL;
+- `describe_lens`, the catalog and the dictionaries do not list it;
+- a certified answer reading it is absent from the library, from the count and
+  examples in `describe_lens`, from matching and from the exemplars given to
+  generation, and running it by id returns 404.
+
+An answer that read the column for a caller in a group names it on its receipt
+(`column_access`, signed). Its `request_log` row keeps the question and the SQL,
+stores no row sample whatever `logging.log_samples` says, and keeps a marker in
+place of the answer text, because the log outlives the request and is read by
+people outside the group. The certified-answer test lanes (`dst test`, the
+publish gate) read the lens as a caller in every excepted group, since that is
+who those answers serve.
+
+Group membership comes only from the verified credential: the `caller` row an
+admin sets (`dst keys create --group`, `PUT /mgmt/callers/{name}/groups`, both
+admin-only), the role of a local dashboard session (`local:<role>`), a Clerk
+session's organization role, or the groups claim of a verified OIDC token. No
+header or request field is read for it (`services/auth/deps.py`). An admin token
+belongs to no group, so it reads the column hidden like anyone else. Group names
+must be declared under `groups:` in `dst.yaml`; plan and apply fail on an
+undeclared one, and declaring a name grants nothing.
+
+The limits: a caller in the group sends the column's values to the model
+provider when an answer is composed from them, exactly as for any other column
+in scope. Blueprint text stays withheld for every caller. An `expose:` grant's
+`hide` takes plain patterns only. And the database grant remains the stronger
+boundary: a column the warehouse role cannot read is out of reach even when a
+lens is misconfigured.
 
 ## Keeping everything in-network
 

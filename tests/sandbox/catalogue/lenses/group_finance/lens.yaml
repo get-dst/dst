@@ -1,0 +1,56 @@
+name: group_finance
+display_name: Group finance
+description: Revenue, the month-end pack, restatements, budget and target attainment, cash, receivables, FX and Bergström's SEK figures - for the controller and group finance.
+owner: group-finance
+timezone: Europe/Helsinki
+stale_after_days: 3
+connections: [warehouse]
+select:
+  entities:
+    - group_revenue_monthly
+    - revenue_month_end_pack
+    - revenue_restatements
+    - revenue_vs_target
+    - budget_vs_actual
+    - cash_collected
+    - ar_aging_monthly
+    - fi_invoices
+    - fi_payments
+    - bergstrom_invoices
+    - bergstrom_customers
+    - fx_rates
+    - revenue_by_customer
+    - customers
+  definitions: [revenue, net_revenue, month_end_pack, restatement, budget, target, attainment, fx_method, intercompany, migration_batch, cash, receivables, bergstrom_sek, segment, region]
+sources: [Netvisor, Fortnox, the planning sheet, the board budget, the month-end pack]
+scope: own
+untyped_fallback: true
+not_for:
+  - ask: bookings by month
+    sibling: sales_pipeline
+  - ask: deal size
+    sibling: sales_pipeline
+  - ask: webshop orders
+    sibling: webshop
+  - ask: product category revenue
+    sibling: webshop
+  - ask: MRR
+    sibling: pro_app
+  - ask: headcount
+    sibling: people
+not_computable:
+  - measure: intercompany revenue
+    aliases: [internal sales, intra-group sales, intercompany sales]
+    reason: "intercompany is eliminated from every revenue figure this lens serves; the monthly amounts are a finance reference table, ask group finance"
+  - measure: Bergström deal size
+    aliases: [Bergström quotes, Bergström win rate, Swedish quotes, Bergström deals]
+    reason: "Bergström Rör has no quote or deal data in the warehouse - only invoices from the Fortnox export"
+  - measure: forecast
+    aliases: [revenue forecast, full-year forecast, outlook]
+    reason: "no forecast is loaded; the target sheet and the board budget are the only plans in the warehouse"
+access:
+  allow:
+    - group: finance
+    - group: everyone
+eval_gate: block
+auto_review: unverified

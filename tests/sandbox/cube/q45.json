@@ -1,0 +1,476 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"contract_renewals_monthly.month\"], \"limit\": 1, \"order\": [[\"contract_renewals_monthly.month\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "contract_renewals_monthly__month": "contract_renewals_monthly.month"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', CAST(\"contract_renewals_monthly\".month || '-01' AS DATE)::timestamptz) \"contract_renewals_monthly__month\"\n    FROM\n      marts_service.mart_contract_renewals_monthly AS \"contract_renewals_monthly\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"measures\": [\"contract_renewals_monthly.contract_renewal_rate\"], \"timeDimensions\": [{\"dateRange\": [\"2026-04-01\", \"2026-06-30\"], \"dimension\": \"contract_renewals_monthly.month\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "contract_renewals_monthly__contract_renewal_rate": "contract_renewals_monthly.contract_renewal_rate"
+     },
+     "sql": [
+      "SELECT\n      sum(\"contract_renewals_monthly\".renewed) / NULLIF(sum(\"contract_renewals_monthly\".renewed + \"contract_renewals_monthly\".churned), 0) \"contract_renewals_monthly__contract_renewal_rate\"\n    FROM\n      marts_service.mart_contract_renewals_monthly AS \"contract_renewals_monthly\"  WHERE (CAST(\"contract_renewals_monthly\".month || '-01' AS DATE) >= ?::timestamptz AND CAST(\"contract_renewals_monthly\".month || '-01' AS DATE) <= ?::timestamptz) LIMIT 10000",
+      [
+       "2026-04-01T00:00:00.000Z",
+       "2026-06-30T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"measures\": [\"contract_renewals_monthly.contract_renewal_rate\"], \"timeDimensions\": [{\"dateRange\": [\"2026-07-01\", \"2026-09-30\"], \"dimension\": \"contract_renewals_monthly.month\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "contract_renewals_monthly__contract_renewal_rate": "contract_renewals_monthly.contract_renewal_rate"
+     },
+     "sql": [
+      "SELECT\n      sum(\"contract_renewals_monthly\".renewed) / NULLIF(sum(\"contract_renewals_monthly\".renewed + \"contract_renewals_monthly\".churned), 0) \"contract_renewals_monthly__contract_renewal_rate\"\n    FROM\n      marts_service.mart_contract_renewals_monthly AS \"contract_renewals_monthly\"  WHERE (CAST(\"contract_renewals_monthly\".month || '-01' AS DATE) >= ?::timestamptz AND CAST(\"contract_renewals_monthly\".month || '-01' AS DATE) <= ?::timestamptz) LIMIT 10000",
+      [
+       "2026-07-01T00:00:00.000Z",
+       "2026-09-30T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "The maintenance-contract book by month: contracts expiring, renewed and churned (by the month the renewal decision was recorded), the churned annual value, the renewal rate, and the active book at month end. The one churned contract so far ended on 2026-06-01 and its decision was recorded 2026-05-31, so this mart books it in May while the contract itself lapsed in June.",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "contract_renewals_monthly.month",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "month (text YYYY-MM cast to a date)",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly month (text YYYY-MM cast to a date)",
+      "type": "time"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.contracts_expiring_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "contracts_expiring (the column)",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly contracts_expiring (the column)",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.renewed",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Renewed",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly Renewed",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.churned",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Churned",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly Churned",
+      "type": "number"
+     },
+     {
+      "description": "annual value of churned contracts",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.churned_value_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Churned Value Eur",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly Churned Value Eur",
+      "type": "number"
+     },
+     {
+      "description": "per-row - never average",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.renewal_rate",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Renewal Rate",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly Renewal Rate",
+      "type": "number"
+     },
+     {
+      "description": "book at month end",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.active_contracts",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Active Contracts",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly Active Contracts",
+      "type": "number"
+     },
+     {
+      "description": "annual value of the active book at month end",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.book_value_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Book Value Eur",
+      "suggestFilterValues": true,
+      "title": "contract renewals monthly Book Value Eur",
+      "type": "number"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "expiries",
+         "contracts expiring"
+        ]
+       }
+      },
+      "name": "contract_renewals_monthly.contracts_expiring",
+      "public": true,
+      "shortTitle": "contracts up for renewal",
+      "title": "contract renewals monthly contracts up for renewal",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "renewals by month"
+        ]
+       }
+      },
+      "name": "contract_renewals_monthly.contracts_renewed",
+      "public": true,
+      "shortTitle": "contracts renewed",
+      "title": "contract renewals monthly contracts renewed",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "better": "lower"
+       }
+      },
+      "name": "contract_renewals_monthly.contracts_churned_monthly",
+      "public": true,
+      "shortTitle": "contracts churned (by decision month)",
+      "title": "contract renewals monthly contracts churned (by decision month)",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "better": "lower",
+        "currency": "EUR"
+       }
+      },
+      "name": "contract_renewals_monthly.churned_contract_value_eur",
+      "public": true,
+      "shortTitle": "churned contract value",
+      "title": "contract renewals monthly churned contract value",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "contract_renewals_monthly.contracts_decided",
+      "public": true,
+      "shortTitle": "contracts decided",
+      "title": "contract renewals monthly contracts decided",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "renewed over (renewed + churned) in the asked window",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "renewal rate",
+         "maintenance contract renewal rate"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "contract_renewals_monthly.contract_renewal_rate",
+      "public": true,
+      "shortTitle": "contract renewal rate",
+      "title": "contract renewals monthly contract renewal rate",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "maintenance contract churn rate",
+         "churn rate on maintenance contracts"
+        ],
+        "better": "lower"
+       }
+      },
+      "name": "contract_renewals_monthly.contract_churn_rate",
+      "public": true,
+      "shortTitle": "contract churn rate",
+      "title": "contract renewals monthly contract churn rate",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "additivity": "level",
+        "aliases": [
+         "contracts in force at month end"
+        ],
+        "snapshot_grain": "month"
+       }
+      },
+      "name": "contract_renewals_monthly.active_book_contracts",
+      "public": true,
+      "shortTitle": "active contract book",
+      "title": "contract renewals monthly active contract book",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "additivity": "level",
+        "aliases": [
+         "book value at month end"
+        ],
+        "currency": "EUR",
+        "snapshot_grain": "month"
+       }
+      },
+      "name": "contract_renewals_monthly.active_book_value_eur",
+      "public": true,
+      "shortTitle": "contract book value",
+      "title": "contract renewals monthly contract book value",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per month",
+      "key": [
+       "month"
+      ],
+      "system": "dbt (FieldFlow)"
+     }
+    },
+    "name": "contract_renewals_monthly",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "contract renewals monthly",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "contract_renewals_monthly": {
+   "time_dimensions": {
+    "month": {
+     "data_end": "2026-08-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-01"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "measures": [
+    "contract_renewals_monthly.contract_renewal_rate"
+   ],
+   "timeDimensions": [
+    {
+     "compareDateRange": [
+      [
+       "2026-07-01",
+       "2026-09-30"
+      ],
+      [
+       "2026-04-01",
+       "2026-06-30"
+      ]
+     ],
+     "dimension": "contract_renewals_monthly.month"
+    }
+   ]
+  }
+ ],
+ "question": "how does this quarter's maintenance contract renewal rate compare to last quarter"
+}

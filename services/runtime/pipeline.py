@@ -20,9 +20,9 @@ from typing import Literal, cast
 import sqlglot
 from sqlglot import exp
 
-from services.benchmark.contamination import normalize as contamination_normalize
 from services.connectors.tagging import query_context
-from services.contracts.profile import LOW_CARDINALITY_MAX
+from services.contracts.failure_modes import FailureMode
+from services.contracts.profile import LOW_CARDINALITY_MAX, TableProfile
 from services.contracts.protocols import (
     Connector,
     ContextChunk,
@@ -43,6 +43,7 @@ from services.contracts.response import (
 from services.contracts.semantic_model import Definition, Entity, Metric, SemanticModel
 from services.contracts.trace import TraceLog
 from services.contracts.verification import VerificationCheck
+from services.evals.contamination import normalize as contamination_normalize
 from services.lenses.profile_age import ProfileAge
 from services.lenses.profile_enrich import (
     EntityCoverage,
@@ -64,6 +65,7 @@ from services.runtime import (
     decision_policy,
     faithfulness,
     filter_guard,
+    grain,
     growth,
     reading,
     receipt,
@@ -72,6 +74,7 @@ from services.runtime import (
     shape_guard,
     sql_guard,
     time_guard,
+    timewindow,
     typed_health,
     value_guard,
     verification,
@@ -99,6 +102,15 @@ from services.runtime.compiler import CompileError, metric_sql
 from services.runtime.not_for import not_for_refusal
 
 FETCH_CAP = 5000
+# How a lens refuses a question its data does not hold (the generator's
+# confident decline, gap named): the routed door reads it to try the next lens
+# that covers the question instead of ending the request.
+LENS_DATA_REFUSAL = "I can't answer this from this lens's data: "
+
+# What the request_log row keeps in place of an answer that read a column by a
+# group exception to the lens's `hide`: the log outlives the request and is read
+# by people outside the group. Certifying such a request keeps no prose from it.
+WITHHELD_ANSWER = "[withheld: the answer read "
 
 # How many rows `logging.log_samples` puts on the request_log row. A sample is a
 # debugging aid, not a copy of the result — the trace already carries row_count,
@@ -683,6 +695,10 @@ def run_query(
     # is as fresh as what it read, and names that table. Without it, the
     # lens-wide `data_as_of` stands.
     table_as_of: Mapping[str, str] | None = None,
+    # table -> its stored profile (assembly.profile_facts): the probe's row and
+    # distinct-key counts the grain check reads on an exposed table before it
+    # counts live. None = no profile facts, so the check counts live.
+    table_profiles: Mapping[str, TableProfile] | None = None,
     scan_text: str | None = None,
     untyped: tuple[str, list[DecisionRecord]] | None = None,
     # What a decision assembly made billed before it failed (AssembledInputs.spent).
@@ -809,7 +825,11 @@ def run_query(
         *,
         error_kind: str | None = None,
         compiled: bool = False,
+        mode: FailureMode | None = None,
     ) -> PipelineResult:
+        """A non-answer. ``mode`` names which of the twenty failure modes it
+        is: every refusal and rejection carries one (the tripwire test pins
+        it); a fault (``error``) carries none."""
         reason = reason or "unknown reason"
         if status == "rejected":
             msg = (
@@ -875,6 +895,7 @@ def run_query(
                 certification=served_cert,
                 certified_match=certified_match,
                 certified_provenance=certified_provenance,
+                mode=mode,
                 request_id=rid,
             ),
             error_kind=error_kind,
@@ -894,6 +915,7 @@ def run_query(
                 generator_tier=generator_tier,
                 repairs=attempt,
                 latency_ms=latency_ms,
+                mode=mode,
                 ai_input_tokens=ai_in,
                 ai_output_tokens=ai_out,
                 ai_cost_usd=round(ai_cost, 6) if ai_cost is not None else None,
@@ -946,6 +968,7 @@ def run_query(
                 generator_tier=generator_tier,
                 repairs=attempt,
                 clarification=clar,
+                mode=clar.mode,
                 resolution=ledger,
                 latency_ms=latency_ms,
                 ai_input_tokens=ai_in,
@@ -978,6 +1001,7 @@ def run_query(
                     "rejected",
                     None,
                     shape_guard.refusal_reason([dropped], metric_carriers, named=True),
+                    mode=FailureMode.not_declared,
                 )
             # The knob bypassed the boundary — the serve must grade unverified
             # (fold_ungoverned below), or the knob's documented promise is vacuous.
@@ -990,7 +1014,7 @@ def run_query(
     if certification != "certified":
         nc = deterministic_refusal_not_computable(rails_text, semantic_model)
         if nc is not None:
-            return _trace_failure("refused", None, nc)
+            return _trace_failure("refused", None, nc, mode=FailureMode.not_declared)
     # An ask the lens declares it does not answer (`not_for`, or an entity's
     # `Avoid for:` use case): its tables could produce a figure, and that
     # figure is a different measure under the asked name. A certified answer
@@ -1002,7 +1026,7 @@ def run_query(
     )
     if not certified_verbatim:
         if (refusal := not_for_refusal(rails_text, semantic_model)) is not None:
-            return _trace_failure("refused", None, refusal)
+            return _trace_failure("refused", None, refusal, mode=FailureMode.misrouted)
 
     # An ambiguity the question already settles must not clarify (a refusal is
     # an outcome, but a clarify on a resolved ask is the rail misfiring): when
@@ -1103,6 +1127,7 @@ def run_query(
     # request_log ended up holding status='rejected' rows with a blank sql.
     refused: tuple[str, str | None] | None = None
     refused_kind = "policy"
+    refused_mode: FailureMode | None = FailureMode.scope_violation
     # The out-of-scope column one repair was told to drop so the rest of the
     # question could be answered; set once, and the served answer names it.
     left_out: str | None = None
@@ -1179,6 +1204,7 @@ def run_query(
                 "untyped_fallback, or the caller passed allow_untyped: false), so it "
                 "was not answered; retry when the provider recovers, or allow an "
                 "untyped answer",
+                mode=FailureMode.provider_down,
             )
             down.response.degraded = [f"DEGRADED: {exc}"]
             down.trace.degraded = list(down.response.degraded)
@@ -1223,9 +1249,10 @@ def run_query(
                 response=QueryResponse(
                     lens=lens_name,
                     status="refused",
-                    answer=(f"I can't answer this from this lens's data: {gen.no_answer_reason}"),
+                    answer=f"{LENS_DATA_REFUSAL}{gen.no_answer_reason}",
                     sql=None,
                     certification=certification,
+                    mode=FailureMode.not_declared,
                     request_id=rid,
                 ),
                 trace=TraceLog(
@@ -1243,6 +1270,7 @@ def run_query(
                     certification=certification,
                     generator_tier=generator_tier,
                     repairs=attempt,
+                    mode=FailureMode.not_declared,
                     latency_ms=latency_ms,
                     ai_input_tokens=ai_in,
                     ai_output_tokens=ai_out,
@@ -1265,6 +1293,7 @@ def run_query(
             if gen.sql.strip():
                 refused = (gen.sql, guard.reason)
                 refused_kind = guard.kind
+                refused_mode = guard.mode
             if left_out is not None:
                 # The one "drop it, answer the rest" repair did not land:
                 # refuse as any exhausted repair does, below.
@@ -1321,7 +1350,11 @@ def run_query(
                     *(refused or (None, guard.reason)),
                     error_kind="generation",
                 )
-            return _trace_failure("rejected", *(refused or (None, guard.reason)))
+            return _trace_failure(
+                "rejected",
+                *(refused or (None, guard.reason)),
+                mode=refused_mode if refused else guard.mode,
+            )
 
         # A question that names a table the SQL does not read clarifies instead
         # of serving a figure read from another table (scope_rails). The typed
@@ -1409,6 +1442,7 @@ def run_query(
                     guard.sql,
                     f"governed metric filter missing: {governs} — the answer could not "
                     f"be computed with the required filter(s) applied; {tail}",
+                    mode=FailureMode.not_expressible,
                 )
 
         # Ratio-population guarantee: a ratio whose denominator
@@ -1459,6 +1493,7 @@ def run_query(
                     guard.sql,
                     f"time grouping not bucketed: group by {fix}, never the raw "
                     f"timestamp column(s) {cols}",
+                    mode=FailureMode.wrong_grain,
                 )
 
         # Value guarantee (guard-class, generation path only): a filter literal
@@ -1511,6 +1546,7 @@ def run_query(
                         "rejected",
                         guard.sql,
                         shape_guard.refusal_reason(composed, metric_carriers),
+                        mode=FailureMode.not_declared,
                     )
                 ungoverned_reason = shape_guard.refusal_reason(composed, metric_carriers)
 
@@ -1619,7 +1655,7 @@ def run_query(
                 data_ends = None
             _mark("probe", probe_started)
             if data_ends is not None:
-                return _trace_failure("refused", guard.sql, data_ends)
+                return _trace_failure("refused", guard.sql, data_ends, mode=FailureMode.data_gap)
 
         # Probe-on-empty (generation path only): zero EVIDENCE behind a
         # string-literal filter is the confident-zero shape — zero rows, or the
@@ -1740,7 +1776,7 @@ def run_query(
     if certification != "certified":
         nc_column = not_computable_columns(served.columns, semantic_model)
         if nc_column is not None:
-            return _trace_failure("refused", guard.sql, nc_column)
+            return _trace_failure("refused", guard.sql, nc_column, mode=FailureMode.not_declared)
 
     # Before any prose: has the approved SQL's result MOVED since a human
     # verified it? Certify-time prose describes the value of that day; served
@@ -1954,7 +1990,9 @@ def run_query(
                     ),
                 }
             )
-        return _trace_failure("refused", guard.sql, _cannot(ans.no_answer_reason))
+        return _trace_failure(
+            "refused", guard.sql, _cannot(ans.no_answer_reason), mode=FailureMode.not_declared
+        )
     # The ambiguity-disclosure floor: when the clarification
     # rail missed (aliases cannot enumerate language) and the SQL identifiably
     # used ONE declared reading, the answer says which — every miss becomes a
@@ -1974,7 +2012,24 @@ def run_query(
     if certification != "certified" and gen.intent is not None:
         level_line = resolution.level_disclosure(gen.intent, semantic_model)
         if level_line is not None:
-            resolution_disclosures.append(level_line)
+            # Asked for today, now or currently: the line names the snapshot's day.
+            as_of: str | None = None
+            if timewindow.asks_present(question):
+                try:
+                    as_of = warehouse_bounded(
+                        "the latest-snapshot probe",
+                        functools.partial(
+                            data_end.latest_snapshot_line,
+                            question,
+                            gen.intent,
+                            semantic_model,
+                            connector,
+                        ),
+                        connection=wh,
+                    )
+                except WarehouseTimeout:
+                    as_of = None
+            resolution_disclosures.append(as_of or level_line)
     # A ratio asked over no period was read over the last complete month: the
     # answer says which, on every door that pinned it (growth.pin_disclosure).
     if gen.intent is not None and (
@@ -2092,7 +2147,12 @@ def run_query(
                 retry = None
             _mark("compose", retry_started)
             if retry is not None and retry.no_answer_reason:
-                return _trace_failure("refused", guard.sql, _cannot(retry.no_answer_reason))
+                return _trace_failure(
+                    "refused",
+                    guard.sql,
+                    _cannot(retry.no_answer_reason),
+                    mode=FailureMode.not_declared,
+                )
             if retry is not None:
                 retry_model = getattr(composer, "model", model_name)
                 ai_in += retry.input_tokens
@@ -2296,8 +2356,22 @@ def run_query(
     # at partial, on every path including certified: the EXPOSED line below
     # discloses it, and the grade must not say otherwise above it.
     exposed = sql_guard.exposed_tables(guard.sql, semantic_model)
+    grain_readings: list[grain.GrainReading] = []
     if exposed:
         report = verification.fold_exposed(report, exposed)
+        # Rows against distinct key for every exposed table read: the
+        # probe's counts while fresh, else one live count within the budget,
+        # else "could not verify" — never verified without a declared grain.
+        grain_readings = grain.read_grain(
+            semantic_model,
+            exposed,
+            profiles=table_profiles or {},
+            fresh=profile_age is None or not profile_age.stale,
+            connector=connector,
+            scope=org,
+            ttl=profile_age.max_age if profile_age is not None else None,
+        )
+        report = grain.fold(report, grain_readings)
     # Folded LAST so nothing upgrades past it: a serve that exists only because
     # serve_ungoverned_shapes bypassed the selection boundary grades unverified.
     if ungoverned_reason is not None:
@@ -2445,6 +2519,16 @@ def run_query(
     )
     if beyond is not None and beyond.reason:
         answer_text += f" Note: {beyond.reason}."
+    # The mode that capped the grade, named with the cap: a served answer
+    # carries one only when a check capped it. The gap past the data end, the
+    # declared freshness exceeded, or a grade the checks could not raise.
+    cap_mode: FailureMode | None = None
+    if beyond is not None:
+        cap_mode = FailureMode.data_gap
+    elif stale is not None:
+        cap_mode = FailureMode.stale
+    elif confidence == "unverified":
+        cap_mode = FailureMode.unverifiable
 
     # The data's age is stated UNPROMPTED: marts routinely run a day or two
     # behind, and a whole class of wrong answers is "current" resolved against
@@ -2567,6 +2651,10 @@ def run_query(
     # checks. Certified serves are exempt: their
     # guarantee is the approval, and their checks skip structurally.
     degraded_notes: list[str] = []
+    # Columns this caller read by a group exception: named on the receipt, and
+    # kept off the request log, which outlives the request and is read by
+    # people outside the group.
+    granted = sql_guard.granted_reads(guard.sql, semantic_model)
     if untyped_reason is not None:
         # Rule 4: an escalated figure says so on its face. The line rides
         # `degraded` so every surface (CLI, MCP rule, trace) relays it verbatim.
@@ -2581,6 +2669,7 @@ def run_query(
         degraded_notes.append(
             f"EXPOSED: reads {', '.join(exposed)}, {what} with no governed definitions"
         )
+        degraded_notes.extend(grain.lines(grain_readings))
     for item in declined:
         what, _, why = item.partition(": ")
         degraded_notes.append(f"answered the rest: {what} is {why}")
@@ -2651,8 +2740,11 @@ def run_query(
                 sql=guard.sql,
                 data_as_of=data_as_of,
                 resolution_tag=ledger.tag,
+                column_access=granted,
+                mode=cap_mode,
             ),
             resolution=ledger,
+            mode=cap_mode,
             composition=composition,
             # The stamped fact, on the envelope: `data` is dropped for
             # format=prose, and a caller must never have to parse English to
@@ -2680,9 +2772,15 @@ def run_query(
             # column with no author — declared observability that never observed.
             # It stays off by default: the sample is real result values, and the
             # log row outlives the request.
-            sample=[list(row) for row in served.rows[:_SAMPLE_ROWS]] if log_samples else None,
+            sample=(
+                [list(row) for row in served.rows[:_SAMPLE_ROWS]]
+                if log_samples and not granted
+                else None
+            ),
             answer=(
-                f"{answer_text}\n[withheld draft: {withheld_draft}]"
+                f"{WITHHELD_ANSWER}{', '.join(granted)}]"
+                if granted
+                else f"{answer_text}\n[withheld draft: {withheld_draft}]"
                 if withheld_draft
                 else answer_text
             ),
@@ -2698,6 +2796,7 @@ def run_query(
             degraded=degraded_notes,
             latency_ms=latency_ms,
             status="ok",
+            mode=cap_mode,
             ai_input_tokens=ai_in,
             ai_output_tokens=ai_out,
             ai_cost_usd=round(ai_cost, 6) if ai_cost is not None else None,

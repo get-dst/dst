@@ -104,7 +104,7 @@ def test_read_project_is_the_one_definition_of_present(tmp_path: Path) -> None:
     """The parent of a project is not a project: its lenses/ files are one level
     down, so they carry no `lenses/` prefix and nothing is collected — the
     directory a caller lands in one level too high."""
-    from services.cli.main import _read_project
+    from services.cli._common import _read_project
 
     (tmp_path / "proj" / "lenses" / "sales").mkdir(parents=True)
     (tmp_path / "proj" / "lenses" / "sales" / "lens.yaml").write_text("name: s\n", encoding="utf-8")

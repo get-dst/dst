@@ -6,7 +6,6 @@ from pathlib import Path
 
 from services.certdefs import (
     CertifiedDefinition,
-    ground_truth,
     load_certified_defs,
     parse_definition_page,
     render_context,
@@ -98,16 +97,6 @@ def test_render_includes_grain_and_sql_as_exemplar():
     assert "grain: invoice_id" in ctx and "canonical SQL:" in ctx and "SELECT SUM(x)" in ctx
     no_sql = render_context([m], include_sql=False)
     assert "canonical SQL:" not in no_sql
-
-
-def test_ground_truth_collects_known_assertions():
-    metrics = [
-        CertifiedDefinition(metric="rev", verified_value={"value": 35020740.0}),  # type: ignore[arg-type]
-        CertifiedDefinition(metric="count", verified_value={"value": 30}),  # type: ignore[arg-type]
-        CertifiedDefinition(metric="undocumented"),  # no verified value
-    ]
-    gt = ground_truth(metrics)
-    assert gt == {"rev": 35020740.0, "count": 30}
 
 
 def test_load_canon_reads_a_directory(tmp_path: Path):

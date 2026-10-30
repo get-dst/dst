@@ -1,0 +1,32 @@
+name: webshop_refunds
+description: Webshop refunds as separate rows (Shopify order_refund), with the refund date and reason (returned, wrong item, damaged, customer changed mind). Refund amounts include VAT. By refund date here; by the original order's date on webshop_orders.refunds_eur.
+grain: one row per refund
+use_cases:
+  - "Use when a question asks about refunds by reason, refunds issued in a period (by refund date), or returns."
+  - "Avoid for: refund rate against sales (webshop_orders)"
+common_questions:
+  - refunds by reason in Q3 2026
+source: {connection: warehouse, table: staging.stg_shopify__refunds}
+default_time_field: created_at
+primary_key: [refund_id]
+fields:
+  - {name: refund_id, type: integer}
+  - {name: order_id, type: integer}
+  - {name: created_at, type: timestamp, description: "UTC"}
+  - {name: amount_eur, type: number, description: "refunded amount incl. VAT"}
+  - {name: reason, type: string, description: "returned, wrong item, damaged, customer changed mind"}
+dimensions:
+  - {name: reason, aliases: [refund reason, return reason]}
+metrics:
+  - name: refunded_eur_by_refund_date
+    agg: sum
+    expr: webshop_refunds.amount_eur
+    label: refunds issued
+    aliases: [refunds by refund date, refund amount issued]
+    format: currency
+    currency: EUR
+    better: lower
+  - name: refund_count
+    agg: count
+    label: number of refunds
+    aliases: [refunds issued count, returns]

@@ -50,6 +50,13 @@ def _clean_agent(raw: str | None) -> str | None:
     return raw.strip()[:_AGENT_MAX]
 
 
+def _driver_header(raw: str | None) -> bool:
+    """``X-DST-Driver: 1`` (or true/yes): the request comes from an agent
+    doing its own reading. It only ever takes capability away (no model call
+    for this request), so it needs no trust."""
+    return (raw or "").strip().lower() in ("1", "true", "yes")
+
+
 def resolve_admin_token(raw: str) -> tuple[uuid.UUID, str | None] | None:
     """Admin token -> (org_id, label). The label is attribution, never authz."""
     with admin_engine.connect() as conn:
@@ -131,12 +138,24 @@ def get_caller(
     authorization: str | None = Header(default=None),
     dst_session: str | None = Cookie(default=None),
     x_dst_agent: str | None = Header(default=None),
+    x_dst_driver: str | None = Header(default=None),
 ) -> CallerIdentity:
     """Data-plane identity: caller API key (governed) or admin token (superuser).
 
     `X-dst-Agent` names the acting client (set by the MCP server, or by any
     direct caller that wants to identify itself). It is a label attached to the
-    resolved identity — never part of resolving it."""
+    resolved identity — never part of resolving it. `X-DST-Driver: 1` marks
+    the request driver mode (the MCP server sends it), as does a caller an
+    admin marked a driver."""
+    ident = _get_caller(authorization, dst_session, x_dst_agent)
+    if _driver_header(x_dst_driver) and not ident.driver:
+        return replace(ident, driver=True)
+    return ident
+
+
+def _get_caller(
+    authorization: str | None, dst_session: str | None, x_dst_agent: str | None
+) -> CallerIdentity:
     raw = _bearer(authorization, dst_session)
     agent = _clean_agent(x_dst_agent)
     if raw.startswith(ADMIN_PREFIX):

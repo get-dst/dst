@@ -16,6 +16,7 @@ import pytest
 from services.config import settings
 from services.connectors.duckdb import DuckDBConnector, is_motherduck
 from services.lenses.connections import build_connector
+from services.runtime.external_access import ExternalAccessRefused
 
 # --- statement timeout -------------------------------------------------------
 
@@ -64,8 +65,10 @@ def test_token_in_path_is_refused() -> None:
 
 def test_local_file_is_read_only_whatever_the_flag() -> None:
     c = DuckDBConnector(settings.duckdb_jaffle_path, read_only=False)
-    with pytest.raises(duckdb.Error):
+    with pytest.raises(ExternalAccessRefused):  # the statement check
         c.execute("CREATE TABLE should_not_exist (x INTEGER)")
+    with c._session() as con, pytest.raises(duckdb.Error):  # and the engine under it
+        con.execute("CREATE TABLE should_not_exist (x INTEGER)")
 
 
 def test_motherduck_connect_carries_token_and_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,7 +108,9 @@ def test_catalog_is_pinned_to_this_database(tmp_path: Path) -> None:
 
     class Attaching(DuckDBConnector):
         def _connect(self) -> duckdb.DuckDBPyConnection:
-            con = super()._connect()
+            # opened as MotherDuck is (external access on), since a contained
+            # local file can attach nothing
+            con = duckdb.connect(self._path, read_only=True)
             con.execute(f"ATTACH '{other}' AS other (READ_ONLY)")
             return con
 

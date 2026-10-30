@@ -1,0 +1,76 @@
+name: maintenance_contracts
+description: >-
+  Maintenance contracts (yearly service agreements with housing companies and property managers)
+  from FieldFlow, latest FULL sync batch only - the July batch was a partial sync that timed out
+  at 8 % and was never cleaned up, so it is excluded here. status is Active, Renewed (replaced by
+  a successor contract) or Churned (not renewed). The "renewal wall" is the contracts whose
+  end_date falls in the same quarter - Q1 2027 is the one everybody watches.
+grain: one row per contract
+use_cases:
+  - "Use when a question asks about maintenance contracts, contracts ending or expiring in a period, the renewal wall, contract value, contracts by billing frequency or customer."
+  - "Avoid for: monthly renewal rates and churn by month (contract_renewals_monthly)"
+common_questions:
+  - how many maintenance contracts end in Q1 2027 and what is their annual value
+  - contracts expiring in October 2026
+  - active maintenance contracts and their annual value
+source: {connection: warehouse, table: raw_fieldflow.maintenance_contracts}
+default_time_field: end_date
+primary_key: [contract_id]
+population: contracts in the last full FieldFlow batch (B2026-08-31); the partial July batch is excluded
+population_filter: "maintenance_contracts._synced_batch = 'B2026-08-31'"
+fields:
+  - {name: contract_id, type: string}
+  - {name: customer_id, type: string}
+  - {name: customer_name, type: string}
+  - {name: start_date, type: date}
+  - {name: end_date, type: date, description: "the day the current term ends - when the contract is up for renewal"}
+  - {name: annual_value_eur, type: number}
+  - {name: billing_frequency, type: string, description: "Quarterly or Annual"}
+  - {name: status, type: string, description: "Active, Renewed, Churned"}
+  - {name: renewed_from, type: string, description: "the predecessor contract when this one is a renewal"}
+  - {name: auto_renew, type: boolean}
+  - {name: _synced_batch, type: string}
+  - {name: _loaded_at, type: timestamp}
+dimensions:
+  - {name: status, aliases: [contract status]}
+  - {name: billing_frequency, aliases: [billing]}
+  - {name: customer_name, aliases: [customer]}
+  - {name: auto_renew}
+internal: [_synced_batch, _loaded_at, renewed_from, customer_id]
+metrics:
+  - name: contract_count
+    agg: count
+    label: maintenance contracts
+    aliases: [contracts, number of contracts, service agreements]
+  - name: active_contracts
+    agg: count
+    filters: ["maintenance_contracts.status = 'Active'"]
+    label: active maintenance contracts
+    aliases: [live contracts, contracts in force, contract book]
+  - name: contract_annual_value_eur
+    agg: sum
+    expr: maintenance_contracts.annual_value_eur
+    label: annual contract value
+    aliases: [contract value, annual value, ACV, value of contracts]
+    format: currency
+    currency: EUR
+  - name: active_contract_value_eur
+    agg: sum
+    expr: maintenance_contracts.annual_value_eur
+    filters: ["maintenance_contracts.status = 'Active'"]
+    label: active contract value
+    aliases: [book value, value of active contracts]
+    format: currency
+    currency: EUR
+  - name: churned_contracts
+    agg: count
+    filters: ["maintenance_contracts.status = 'Churned'"]
+    label: churned contracts
+    aliases: [contracts not renewed, lost contracts, contract churn]
+    better: lower
+  - name: renewed_contracts
+    agg: count
+    filters: ["maintenance_contracts.status = 'Renewed'"]
+    label: renewed contracts
+    aliases: [renewals]
+    better: higher

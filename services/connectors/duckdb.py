@@ -2,7 +2,10 @@
 
 Read-only by construction: every QUERY connection is opened with ``read_only=True``,
 so writes/DDL raise regardless of the ``read_only`` argument. The SQL-level SELECT-only
-guarantee is additionally enforced by sql_guard. The single exception is
+guarantee is additionally enforced by sql_guard, and every statement this connector
+runs is checked to stay inside the database (``runtime.external_access``: no file,
+URL, ATTACH, COPY or extension); a local file also opens with DuckDB's external
+access off and its configuration locked. The single exception is
 ``probe_write``, which exists to prove write access and reopens the file writable —
 it is reached only when a connection is registered asking for ``access: ["write"]``,
 never from serving or from ``dst apply``.
@@ -73,6 +76,7 @@ from services.contracts.warehouse import (
     TableSchema,
 )
 from services.runtime.bounded import Stalled, WarehouseTimeout, on_abandon, run_bounded
+from services.runtime.external_access import ensure_contained, refusal
 
 log = logging.getLogger("dst")
 
@@ -130,6 +134,26 @@ OPEN_TIMEOUT_S = 60.0
 # How long an interrupted statement may take to let go of its connection before
 # the connection counts as occupied for good.
 INTERRUPT_GRACE_S = 5.0
+
+
+# A local file opens with nothing but itself in reach. Not applicable to
+# MotherDuck: its extension loads at open, which this setting forbids, so there
+# the statement check (``ensure_contained``) is the boundary.
+_CONTAINED: dict[str, str | bool | int | float | list[str]] = {
+    "enable_external_access": False,
+    "lock_configuration": True,
+}
+
+
+def _locked(con: duckdb.DuckDBPyConnection) -> bool:
+    row = con.execute("SELECT current_setting('lock_configuration')").fetchone()
+    return bool(row and row[0])
+
+
+# The same, with the lock applied after the clock is set (``_connect``).
+_OPEN_UNLOCKED: dict[str, str | bool | int | float | list[str]] = {
+    "enable_external_access": False,
+}
 
 
 def is_motherduck(path: str) -> bool:
@@ -321,8 +345,28 @@ class DuckDBConnector:
             _motherduck_open(self._path, self._read_only, self._token)
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        """A connection to the local file for one call; the caller closes it."""
-        return duckdb.connect(self._path, read_only=True)
+        """A connection to the local file for one call; the caller closes it.
+
+        External access is off and the configuration locked: the database file is
+        the only thing this connection can read, so no statement reaches another
+        file, a URL, an extension or a setting, whichever path sent it."""
+        con = duckdb.connect(self._path, read_only=True, config=_OPEN_UNLOCKED)
+        # The clock is UTC, whatever the host's, set before the lock (the
+        # setting needs an extension a locked open cannot load): a TIMESTAMP
+        # compared with a TIMESTAMPTZ (as Cube compiles a window,
+        # ``col >= ?::timestamptz``) is read in the database's zone, so a host
+        # zone would move every window edge by its offset and one statement
+        # would answer differently on a laptop and on a server. Connections to
+        # one file share one database: the first sets and locks it.
+        try:
+            if not _locked(con):
+                con.execute("SET GLOBAL TimeZone = 'UTC'")
+                con.execute("SET lock_configuration = true")
+        except duckdb.Error:
+            if not _locked(con):  # another connection did not lock it: a real failure
+                con.close()
+                raise
+        return con
 
     @contextmanager
     def _session(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -489,6 +533,8 @@ class DuckDBConnector:
         )
 
     def dry_run(self, sql: str) -> DryRunResult:
+        if reason := refusal(sql, "duckdb"):
+            return DryRunResult(valid=False, error=f"SQL refused: {reason}")
         with self._session() as con:
             try:
                 self._run(con, f"EXPLAIN {sql}")
@@ -499,6 +545,7 @@ class DuckDBConnector:
     def execute(
         self, sql: str, *, read_only: bool = True, row_limit: int | None = None
     ) -> QueryResult:
+        ensure_contained(sql, "duckdb")
         with self._session() as con:  # always read-only
             query = (
                 sql

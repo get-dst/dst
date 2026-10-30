@@ -61,18 +61,6 @@ const summary = {
   has_run: true,
 }
 
-const candidate = {
-  id: 'p1',
-  ticket_id: null,
-  lens: 'finance',
-  kind: 'definition',
-  target: 'Monthly net revenue',
-  owner: 'lens-owner',
-  diff_before: null,
-  diff_after: 'Canonical reading …',
-  status: 'candidate',
-}
-
 let fetchMock: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
@@ -83,7 +71,6 @@ beforeEach(() => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       })
-    if (url.includes('/audit/draft-definition')) return json(candidate)
     if (url.includes('/audit/summary')) return json(summary)
     if (url.includes('/audit/latest')) return json({ found: false }) // never audited → empty state
     if (url.includes('/audit')) return json(auditResult) // POST refresh → the fresh run
@@ -142,31 +129,10 @@ test('a finding shows as a colored summary, then drills down to numbers + canon'
   expect(screen.getByText(/blast radius 47 runs/)).toBeInTheDocument()
   expect(screen.getAllByText('show SQL').length).toBeGreaterThan(0)
 
-  // A finding never offers to build a lens: lenses are authored in files. The
-  // definition PatchCandidate bridge is the only route out of a finding.
+  // A finding never offers to build a lens: lenses are authored in files.
   expect(screen.queryByText('Build a lens to fix this')).toBeNull()
 
   // the audit POST carried the window
   const calls = fetchMock.mock.calls.map((c) => String(c[0]))
   expect(calls.some((u) => u.includes('/mgmt/connections/snowflake-prod/audit?days=30'))).toBe(true)
-})
-
-test('draft definition posts the finding + lens and links to the patch queue', async () => {
-  renderAudit()
-  await screen.findByRole('option', { name: 'snowflake-prod' }) // connections loaded
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
-
-  // expand the finding to reach its draft-definition bridge
-  fireEvent.click(await screen.findByRole('button', { name: /Monthly net revenue/ }))
-  const lensSelect = await screen.findByLabelText('Target lens')
-  await screen.findByRole('option', { name: 'finance' }) // lenses loaded
-  fireEvent.change(lensSelect, { target: { value: 'finance' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Draft definition' }))
-
-  expect(await screen.findByText('Review in the patch queue')).toBeInTheDocument()
-  const draftCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/audit/draft-definition'))
-  expect(draftCall).toBeTruthy()
-  const body = JSON.parse(String((draftCall![1] as RequestInit).body))
-  expect(body.lens).toBe('finance')
-  expect(body.finding.metric_intent).toBe('Monthly net revenue')
 })

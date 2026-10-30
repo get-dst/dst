@@ -51,9 +51,16 @@ def probe_path(root: Path, connection: str) -> Path:
     return root / BASELINE_DIR / f"{connection_slug(connection)}{PROBE_SUFFIX}"
 
 
+# `dst probe --cube`'s artifact: values and data ends read through Cube, not a
+# warehouse connection's profile (so no connection may be named `cube`).
+CUBE_PROBE = f"{BASELINE_DIR}/cube{PROBE_SUFFIX}"
+
+
 def is_probe_path(path: str) -> bool:
     """Whether a pushed project path is a probe artifact (apply's selection rule)."""
-    return path.startswith(f"{BASELINE_DIR}/") and path.endswith(PROBE_SUFFIX)
+    return (
+        path.startswith(f"{BASELINE_DIR}/") and path.endswith(PROBE_SUFFIX) and path != CUBE_PROBE
+    )
 
 
 def entity_map(profiles: list[TableProfile], entities: list[SharedEntity]) -> dict[str, list[str]]:

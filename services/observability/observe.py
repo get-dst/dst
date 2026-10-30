@@ -183,6 +183,18 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
     # certified or declared definition. NULL rows predate the ledger and are
     # reported as `unknown`, never folded into "not governed".
     resolution_histogram = _resolution_histogram(session, f"status = 'ok' AND {governed}", {})
+    # Every non-clean outcome by its failure mode (0074): what a refusal, a
+    # clarification or a capped answer was, in the twenty-name vocabulary.
+    # Rows from before the column, and faults, carry none and are not here.
+    modes = {
+        str(r[0]): int(r[1])
+        for r in session.execute(
+            text(
+                "SELECT mode, count(*) FROM request_log "
+                f"WHERE mode IS NOT NULL AND {governed} GROUP BY 1 ORDER BY 2 DESC, 1"
+            )
+        )
+    }
     basis = _basis(session, include_test=include_test)
     routing = _routing_total(_routing_spend(session, include_test=include_test))
     from services.lenses.profile_age import connection_ages
@@ -222,6 +234,7 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
         },
         "confidence_histogram": histogram,
         "resolution_histogram": resolution_histogram,
+        "modes": modes,
         # Raw-SQL probes, reported as what they are — never as governed
         # queries. `admin_sql` is the connection passthrough (an admin's own
         # SQL against an org credential); `lens_scoped` is a caller probing

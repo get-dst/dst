@@ -320,3 +320,39 @@ def test_a_pinned_model_no_provider_serves_never_reaches_another_vendor(
             dialect="duckdb",
         )
     assert recorder.models == ["claude-haiku-4-5"]
+
+
+@pytest.mark.parametrize(
+    "providers",
+    [
+        # declared but keyless
+        {"anthropic": ProviderConfig(type="anthropic", api_key_env="NO_SUCH_KEY_SET")},
+        # embeddings only: no chat tier at all
+        {
+            "local": ProviderConfig(
+                type="openai-compatible",
+                api_key="unused",
+                base_url="http://localhost:11434/v1",
+                embedding_model="bge-small",
+                embedding_dim=384,
+            )
+        },
+    ],
+)
+def test_a_lens_served_through_cube_needs_no_chat_model_to_publish(
+    monkeypatch: pytest.MonkeyPatch, providers: dict[str, ProviderConfig]
+) -> None:
+    """An agent driving through MCP writes its own Cube query: dst calls no
+    model for it, so a provider that cannot chat never blocks the lens. The
+    HTTP question door without a driver still needs one, and the warning says so."""
+    _use(monkeypatch, providers)
+    monkeypatch.delenv("NO_SUCH_KEY_SET", raising=False)
+    bundle = _bundle()
+    bundle.config.serving = "cube"
+    report = validate_bundle(bundle, [], [])
+    assert report.ok, [i.message for i in report.issues if i.severity == "error"]
+    issue = next(i for i in report.issues if i.code == "lens_model_unservable")
+    assert issue.severity == "warning"
+    assert "503" in issue.message and "driver" in issue.message
+    # the typed core still refuses: its question door reads with a model
+    assert not validate_bundle(_bundle(), [], []).ok

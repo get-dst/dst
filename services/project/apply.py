@@ -37,7 +37,9 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import sqlglot
 from sqlalchemy.orm import Session
+from sqlglot import exp
 
 from services.certify import binding as certify_binding
 from services.certify import store as certify_store
@@ -48,7 +50,12 @@ from services.contracts.authoring import collapse_notes
 from services.contracts.lens_config import LensConfig
 from services.contracts.profile import TableProfile
 from services.contracts.protocols import Connector, Embedder
-from services.contracts.semantic_model import Definition, SemanticModel
+from services.contracts.semantic_model import (
+    CubeStamp,
+    Definition,
+    SemanticModel,
+    TableBlueprint,
+)
 from services.contracts.shared_semantic import (
     SharedEntity,
     SharedRelationship,
@@ -60,8 +67,8 @@ from services.definitions import standards as std_store
 from services.evals import service as eval_service
 from services.evals import store as eval_store
 from services.evals.certified_suite import format_result
-from services.evals.rewrite import rewrite_to_sources
 from services.lenses import connection_store, store
+from services.project import caller_groups
 from services.project.compile import (
     CompileError,
     compile_lens_model,
@@ -79,13 +86,35 @@ from services.runtime.canon import canon_summary
 from services.runtime.identifiers import reserved_in
 from services.security.crypto import CryptoNotConfigured
 from services.semantic import store as semantic_store
-from services.semantic.files import parse_semantic_files
+from services.semantic.files import parse_blueprint_files, parse_semantic_files
 from services.validate.report import (
     ValidationReport,
     collapse_warnings,
     status_done_family_warnings,
     validate_bundle,
 )
+
+
+def rewrite_to_sources(sql: str, dialect: str, leaf_to_table: dict[str, str]) -> str:
+    """Repoint leaf-named table references at their fully-qualified LIVE source
+    tables, for probing an expected_sql against the warehouse: a case written
+    the way a lens reads it (`FROM customers`) must probe where the physical
+    table is `db.schema.customers`. ``leaf_to_table`` maps a lowercased leaf
+    name to the entity's physical source table. An unaliased table is aliased
+    back to its leaf so qualified column references keep binding."""
+    tree = sqlglot.parse_one(sql, read=dialect)
+    for tbl in tree.find_all(exp.Table):
+        table = leaf_to_table.get(tbl.name.lower())
+        if table is None:
+            continue
+        if not tbl.alias:
+            tbl.set("alias", exp.TableAlias(this=exp.to_identifier(tbl.name)))
+        parts = table.split(".")
+        tbl.set("this", exp.to_identifier(parts[-1]))
+        tbl.set("db", exp.to_identifier(parts[-2]) if len(parts) > 1 else None)
+        tbl.set("catalog", exp.to_identifier(parts[-3]) if len(parts) > 2 else None)
+    return tree.sql(dialect=dialect)
+
 
 if TYPE_CHECKING:
     from services.lenses.connection_eval import EvalResult
@@ -549,6 +578,7 @@ def apply_semantic_assets(session: Session, files: dict[str, str]) -> tuple[list
     An unknown key never reaches this point — it is an error at the parse seam."""
     notes: list[str] = []
     entities, definitions, relationships = parse_semantic_files(files, notes=notes)
+    blueprints = parse_blueprint_files(files, notes=notes)
     before = semantic_store.asset_hashes(session)
     applied: list[str] = []
     items: list[tuple[str, str, dict[str, object]]] = (
@@ -560,6 +590,10 @@ def apply_semantic_assets(session: Session, files: dict[str, str]) -> tuple[list
         + [
             ("relationship", name, relationship.model_dump(mode="json"))
             for name, relationship in relationships.items()
+        ]
+        + [
+            ("blueprint", name, blueprint.model_dump(mode="json"))
+            for name, blueprint in blueprints.items()
         ]
     )
     for kind, name, body in sorted(items):
@@ -734,10 +768,24 @@ def _shared_layer(
         elif asset.kind == "relationship":
             relationship = SharedRelationship.model_validate(asset.body)
             relationships[relationship.name] = relationship
-        else:
+        elif asset.kind == "definition":
             definition = Definition.model_validate(asset.body)
             definitions[definition.term] = definition
     return entities, definitions, relationships
+
+
+def stored_blueprints(session: Session) -> dict[str, TableBlueprint]:
+    """The DB's table blueprints by table name — compile's inheritance input."""
+    out: dict[str, TableBlueprint] = {}
+    for asset in semantic_store.list_assets(session, "blueprint"):
+        blueprint = TableBlueprint.model_validate(asset.body)
+        out[blueprint.name] = blueprint
+    return out
+
+
+def lens_tables(model: SemanticModel) -> list[str]:
+    """The tables a compiled model reads — what blueprint staleness matches."""
+    return [e.source.table for e in model.entities]
 
 
 def _default_qualifiers(
@@ -1137,11 +1185,13 @@ def apply_lens(
     gate_override: str | None = None,
     allow_cases: frozenset[str] | None = None,
     incoming_profiles: Mapping[str, Sequence[TableProfile]] | None = None,
+    cube_stamp: CubeStamp | None = None,
 ) -> LensApplyResult:
     """``incoming_profiles`` is the push's own probe artifacts (already landed
     by ``apply_profiles``): the catalog an `expose:` grant resolves against,
     so a table the probe no longer lists fails the grant here as it does in
-    the plan."""
+    the plan. ``cube_stamp``: the model_version this lens's Cube views compile
+    to, from the push's ``cube/overlay.yaml`` (``cube_plan.check``)."""
     config = source.config
     if config.name != name:
         return LensApplyResult(
@@ -1166,9 +1216,13 @@ def apply_lens(
             default_qualifiers=_default_qualifiers(session),
             profiles=profiles,
             dropped_tables=dropped,
+            blueprints=stored_blueprints(session),
+            groups=caller_groups.load(session),
         )
     except CompileError as exc:
         return LensApplyResult(lens=name, action="rejected", errors=[str(exc)])
+    if cube_stamp is not None:
+        model.cube, model.cube_views = cube_stamp, list(cube_stamp.views)
 
     existed = store.lens_exists(session, name)
     bundle = store.LensBundle(config=config, semantic_model=model)
@@ -1298,8 +1352,13 @@ def check_lens(
     asset_hashes: dict[str, str],
     incoming_profiles: Mapping[str, Sequence[TableProfile]] | None = None,
     warnings_out: list[str] | None = None,
+    incoming_blueprints: Mapping[str, TableBlueprint] | None = None,
+    incoming_groups: list[str] | None = None,
 ) -> list[str]:
     """Every gate ``apply_lens`` would REJECT this lens on that a dry run can run.
+
+    ``incoming_groups`` is the push's own dst.yaml ``groups:`` (None when the
+    push carries no dst.yaml: the stored list holds).
 
     ``warnings_out``, when given, collects the deterministic WARNINGS apply
     would print that need the compiled model (the value-dictionary lints) —
@@ -1326,6 +1385,7 @@ def check_lens(
     shared_definitions.update(incoming_definitions)
     shared_relationships.update(incoming_relationships)
     profiles, dropped = _expose_profiles(session, config, incoming=incoming_profiles)
+    blueprints = {**stored_blueprints(session), **(incoming_blueprints or {})}
     try:
         model, compile_warnings = compile_lens_model(
             config=config,
@@ -1340,6 +1400,8 @@ def check_lens(
             default_qualifiers=_default_qualifiers(session, declared=incoming_connections),
             profiles=profiles,
             dropped_tables=dropped,
+            blueprints=blueprints,
+            groups=caller_groups.load(session) if incoming_groups is None else incoming_groups,
         )
     except CompileError as exc:
         return [str(exc)]
@@ -1384,6 +1446,8 @@ def check_recompiles(
     asset_hashes: dict[str, str],
     incoming_connections: dict[str, ConnectionDecl] | None = None,
     skip: frozenset[str] | set[str] = frozenset(),
+    incoming_blueprints: Mapping[str, TableBlueprint] | None = None,
+    incoming_groups: list[str] | None = None,
 ) -> dict[str, list[str]]:
     """``{lens: errors}`` for published lenses whose RECOMPILE this push would break.
 
@@ -1397,13 +1461,16 @@ def check_recompiles(
     shared_entities.update(incoming_entities)
     shared_definitions.update(incoming_definitions)
     shared_relationships.update(incoming_relationships)
+    blueprints = {**stored_blueprints(session), **(incoming_blueprints or {})}
     pairs = relationship_pairs(shared_relationships)
     out: dict[str, list[str]] = {}
     for name, _dn, _desc, bundle in store.list_published(session):
         provenance = bundle.semantic_model.shared_provenance
         if name in skip or provenance is None:
             continue
-        if not stale_asset_keys(provenance.assets, asset_hashes, pairs):
+        if not stale_asset_keys(
+            provenance.assets, asset_hashes, pairs, lens_tables(bundle.semantic_model)
+        ):
             continue
         sm = bundle.semantic_model
         try:
@@ -1419,6 +1486,8 @@ def check_recompiles(
                 asset_hashes=asset_hashes,
                 default_qualifiers=_default_qualifiers(session, declared=incoming_connections),
                 profiles=_expose_profiles(session, bundle.config)[0],
+                blueprints=blueprints,
+                groups=caller_groups.load(session) if incoming_groups is None else incoming_groups,
             )
         except CompileError as exc:
             out[name] = [str(exc)]
@@ -1443,6 +1512,7 @@ def recompile_stale(
     failing run would 'recompile' the very definition the gate just blocked."""
     hashes = semantic_store.asset_hashes(session)
     shared_entities, shared_definitions, shared_relationships = _shared_layer(session)
+    blueprints = stored_blueprints(session)
     pairs = relationship_pairs(shared_relationships)
     # Connections landed before this pass, so the records ARE the push's own.
     qualifiers = _default_qualifiers(session)
@@ -1453,7 +1523,9 @@ def recompile_stale(
         provenance = bundle.semantic_model.shared_provenance
         if provenance is None:
             continue  # never compiled from the shared layer — nothing to be stale against
-        changed = stale_asset_keys(provenance.assets, hashes, pairs)
+        changed = stale_asset_keys(
+            provenance.assets, hashes, pairs, lens_tables(bundle.semantic_model)
+        )
         if not changed:
             continue
         sm = bundle.semantic_model
@@ -1470,12 +1542,17 @@ def recompile_stale(
                 asset_hashes=hashes,
                 default_qualifiers=qualifiers,
                 profiles=_expose_profiles(session, bundle.config)[0],
+                blueprints=blueprints,
+                groups=caller_groups.load(session),
             )
         except CompileError as exc:
             results.append(
                 LensApplyResult(lens=name, action="rejected-recompile", errors=[str(exc)])
             )
             continue
+        # A recompile from the shared layer leaves the Cube side as stamped.
+        if sm.cube is not None:
+            model.cube, model.cube_views = sm.cube, list(sm.cube_views)
         fresh = store.LensBundle(config=bundle.config, semantic_model=model)
         version, errors, validate_warnings, gate, gate_detail = _publish_bundle(
             session,
@@ -2203,7 +2280,7 @@ def _certified_entry_errors(answer: dict[str, Any], model: SemanticModel) -> lis
     # Shape gate and boundary gate report TOGETHER — "SELECT * is not allowed"
     # otherwise masks the real foreign-table rejection, and the author fixes
     # syntax only to hit the governance wall on the next apply.
-    shape = sql_guard.check(gated, model, trust_tables=True)
+    shape = sql_guard.check(gated, model.every_exception(), trust_tables=True)
     reasons: list[str] = []
     if not shape.ok:
         reasons.append(str(shape.reason))

@@ -114,7 +114,7 @@ def _layer(
                 relationships[f"semantic/relationships/{asset.name}.yaml"] = (
                     SharedRelationship.model_validate(asset.body)
                 )
-            else:
+            elif asset.kind == "definition":
                 definitions[f"semantic/definitions/{asset.name}.md"] = Definition.model_validate(
                     asset.body
                 )

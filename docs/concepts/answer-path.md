@@ -24,15 +24,39 @@ The stages, in order:
    candidate; a question that is one lens's certified question goes to that
    lens; a question naming a source system some lens declares in `sources`
    goes only to the lenses declaring it, and is uncovered, naming the system,
-   when no lens the caller may use does; a metric named by its name or `label`
-   that only one lens declares goes to that lens (an alias does not route: it
-   is read inside the lens); a metric several lenses declare goes to the one
-   that alone carries a table or entity the question names, or alone can split
-   it over time when the question asks for that, and otherwise the question is
-   asked which lens; text two lenses carry word for word counts for neither
-   when ranking, though the decider still sees both lenses whole; and between
-   two remaining candidates, a table, entity or metric only one of them
-   declares picks it.
+   when no lens the caller may use does.
+
+   The remaining lenses are ranked by similarity, with a lens that declares a
+   metric the question names (by its name or `label`) ahead of one that does
+   not. Then routing checks **whole-question coverage** on the top three: a
+   lens covers the question when every word of it has somewhere to land in
+   that lens (a metric's name, label, aliases or description, a field or
+   dimension, a stored value, a definition, the period). A word counts against
+   a lens only when some lens the caller may use declares it; a word no lens
+   declares is left to the routed lens's own checks. A metric named by one
+   lens alone routes to that lens without a model call, but only when the
+   lens covers the question: "late fees by format" does not go to the one
+   lens that declares late fees if that lens has no format. A metric several
+   of the top lenses declare and cover is a tie between them: a lens named
+   after the asked thing wins, then a table or entity only one of them
+   carries, then the only one that can split over time when the question
+   asks for that; otherwise the question is asked which lens. Lenses outside
+   the top three never make a tie. Otherwise the decider picks over its
+   shortlist, shown each lens's metrics, time fields, dimensions and a few
+   stored values per dimension, and the question goes to the first lens of
+   the decider's pick, then the ranking, that covers it.
+
+   When none of the top three covers the question, the caller gets the
+   **explore scope** if it may use one: a lens that exposes tables and
+   answers untyped serves it from those tables, described by their
+   [blueprints](../guides/project-files.md#table-blueprints-facts-about-a-table), with the `EXPOSED` line on the
+   answer. Otherwise the question is declined, naming the closest lens and
+   the words it has nothing for. When the routed lens refuses because its
+   data does not hold what was asked, the question goes to the next lens
+   that covered it instead of ending there; a declared refusal (a
+   `not_computable` term, a `not_for` ask) is the answer and does not fall
+   through. Every routing record lists the lenses tried, in order, and why
+   each was passed over or refused.
 2. **Match.** If a [certified answer](certified.md) covers the question, its
    approved SQL is served verbatim and generation is skipped.
 3. **Check, then generate.** Before generation runs, deterministic code

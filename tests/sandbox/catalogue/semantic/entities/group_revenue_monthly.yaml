@@ -1,0 +1,39 @@
+name: group_revenue_monthly
+description: >-
+  Revenue per entity, revenue stream and month in EUR, ex-VAT, by invoice date. Finland from the
+  Netvisor GL (NETVISOR journal only; the MIGRATION opening-balance batch is excluded upstream),
+  Bergström Rör from the Fortnox export converted at the monthly average EUR/SEK rate, the
+  webshop from Shopify orders net of VAT. This is the carrier of group revenue.
+grain: one row per entity, revenue stream and month (YYYY-MM)
+use_cases:
+  - "Use when a question asks for revenue, group revenue, revenue by entity or by stream, or revenue trends - the current books, at the average FX rate."
+  - "Avoid for: the month-end pack figure (revenue_month_end_pack); restatements (revenue_restatements); bookings (bookings are not revenue); Bergström figures in SEK (bergstrom_invoices)"
+common_questions:
+  - group revenue by month in 2026
+  - revenue by entity for August 2026, ex-VAT
+  - how much of group revenue comes from Sweden since the acquisition
+  - webshop revenue vs contracting revenue this year
+source: {connection: warehouse, table: intermediate.int_revenue_by_entity_month}
+default_time_field: month
+primary_key: [month, entity, revenue_stream]
+population: group revenue only - the three operating entities' external sales; intercompany sales (Nordlund LVI to Bergström) are excluded
+population_filter: "group_revenue_monthly.revenue_stream <> 'Intercompany'"
+fields:
+  - {name: month, type: string, description: "calendar month, YYYY-MM"}
+  - {name: entity, type: string, description: "the operating company the revenue belongs to"}
+  - {name: revenue_stream, type: string, description: "Contracting, Service contracts or Webshop"}
+  - {name: revenue_eur, type: number, description: "revenue in EUR, ex-VAT, Bergström at the monthly average rate"}
+  - {name: fx_method, type: string, description: "FX method used for Bergström rows (always average here)"}
+dimensions:
+  - {name: entity, aliases: [company, business, operating company, legal entity]}
+  - {name: revenue_stream, aliases: [stream, revenue line, line of business]}
+metrics:
+  - name: revenue_eur
+    agg: sum
+    expr: group_revenue_monthly.revenue_eur
+    label: revenue
+    aliases: [group revenue, net revenue, revenue ex-VAT, sales revenue, turnover]
+    description: revenue in EUR ex-VAT by invoice month; summing across entities gives group revenue (intercompany already out)
+    format: currency
+    currency: EUR
+    better: higher

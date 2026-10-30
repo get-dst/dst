@@ -12,7 +12,7 @@ layer exists to kill.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,12 +22,19 @@ from services.contracts.semantic_model import (
     Definition,
     Entity,
     EntitySource,
+    GroupColumn,
+    HideRule,
     Join,
     Metric,
     SampleQuery,
     SemanticModel,
     SharedProvenance,
+    TableBlueprint,
     column_hidden,
+    hidden_names,
+    passthrough_dimension,
+    withheld_columns,
+    withhold_hidden,
 )
 from services.contracts.shared_semantic import (
     SharedEntity,
@@ -109,11 +116,17 @@ def compile_lens_model(
     default_qualifiers: Mapping[str, str] | None = None,
     profiles: Mapping[str, Sequence[TableProfile]] | None = None,
     dropped_tables: Mapping[str, Sequence[str]] | None = None,
+    blueprints: Mapping[str, TableBlueprint] | None = None,
+    groups: Collection[str] = (),
 ) -> tuple[SemanticModel, list[str]]:
-    """``profiles`` (connection -> stored table profiles) is what the lens's
+    """``groups`` are the caller groups dst.yaml declares: a group `hide`
+    entry naming any other group fails the compile.
+    ``profiles`` (connection -> stored table profiles) is what the lens's
     `expose:` grants resolve against; a lens that exposes nothing needs none.
     ``dropped_tables`` names the profiled tables the push's own probe no longer
-    lists, so a grant that matches only one of them fails by name."""
+    lists, so a grant that matches only one of them fails by name.
+    ``blueprints`` (semantic/tables/, by table name) are the table facts every
+    entity on a blueprinted table inherits (``inherit_blueprints``)."""
     warnings: list[str] = []
     consumed: dict[str, str] = {}
     hashes = asset_hashes or {}
@@ -129,6 +142,8 @@ def compile_lens_model(
             if n not in {q.name for q in picks}
         ]
     entities: list[Entity] = []
+    pre_hide: dict[str, set[str]] = {}  # table -> the columns it read before `hide`
+    group_columns: list[GroupColumn] = []
     joins: list[Join] = []
     selected_names: set[str] = set()
     dropped_metrics: set[str] = set()
@@ -166,9 +181,13 @@ def compile_lens_model(
             )
             entity_dict["source"] = source
         entity = Entity.model_validate(entity_dict)
-        hide_errors = _apply_hide(entity, config.name)
+        pre_hide[entity.source.table] = {f.name for f in entity.fields} | {
+            d.name for d in entity.dimensions if passthrough_dimension(d)
+        }
+        hide_errors, withheld = _apply_hide(entity, config.name, groups)
         if hide_errors:
             raise CompileError("\n".join(hide_errors))
+        group_columns += withheld
         entities.append(entity)
         selected_names.add(pick.name)
         consumed[f"entity/{pick.name}"] = hashes.get(f"entity/{pick.name}", "")
@@ -188,6 +207,13 @@ def compile_lens_model(
             )
             entity.source = EntitySource(connection=entity.source.connection, table=table)
             entities.append(entity)
+    attached = inherit_blueprints(
+        entities,
+        blueprints or {},
+        consumed,
+        hashes,
+        hidden=_withheld_by_table(entities, profiles or {}, pre_hide),
+    )
     # A relationship rides iff the lens selects BOTH endpoints; with exactly one
     # selected it is dropped with a warning (the author meant to join something
     # this lens cannot see). Neither endpoint selected = not this lens's fact.
@@ -276,6 +302,9 @@ def compile_lens_model(
         shared_provenance=SharedProvenance(
             compiled_at=datetime.now(UTC).isoformat(), assets=consumed
         ),
+        blueprints=attached,
+        group_columns=group_columns,
+        cube_views=list(config.views),
     )
     # References resolve or the compile fails. Table-qualified refs are
     # rewritten to entity form on the compiled model only (authored files stay).
@@ -286,26 +315,122 @@ def compile_lens_model(
     return model, warnings
 
 
-def _apply_hide(entity: Entity, lens: str) -> list[str]:
-    """Withhold the entity's `hide` columns from its fields, in place. Every
-    error names the pattern and the fix: a pattern that withholds nothing is
-    the same silent miss as an `expose:` hide that matches no column, and a
-    hidden column a dimension, metric, key or filter still reads would come
-    back through the expression — so both fail the compile rather than hide
-    less than the author believes."""
+def _withheld_by_table(
+    entities: Sequence[Entity],
+    profiles: Mapping[str, Sequence[TableProfile]],
+    pre_hide: Mapping[str, set[str]],
+) -> dict[str, set[str]]:
+    """Table -> the columns this lens withholds on it (``withheld_columns``),
+    read from the table's profile and its fields before `hide`."""
+    from services.project.lineage import same_table
+
+    out: dict[str, set[str]] = {}
+    for entity in entities:
+        table = entity.source.table
+        profiled = next(
+            (p for p in profiles.get(entity.source.connection, ()) if same_table(p.table, table)),
+            None,
+        )
+        columns = {c.name for c in profiled.columns} if profiled else set()
+        if withheld := withheld_columns(entity, columns | pre_hide.get(table, set())):
+            out[table] = withheld
+    return out
+
+
+def inherit_blueprints(
+    entities: Sequence[Entity],
+    blueprints: Mapping[str, TableBlueprint],
+    consumed: dict[str, str],
+    hashes: Mapping[str, str],
+    hidden: Mapping[str, set[str]] | None = None,
+) -> dict[str, TableBlueprint]:
+    """Attach each entity's table blueprint, in place, and return them keyed by
+    the entity's compiled ``source.table``.
+
+    An entity declares only what its file says; the table's own facts come from
+    the blueprint, once, for every entity and exposed table on it. ``grain`` is
+    inherited when the entity states none, and ``key`` becomes the entity's
+    ``primary_key`` when it names none and every key column is one the entity
+    reads (a hidden column never comes back as a key). Every blueprint whose
+    table name matches is recorded as consumed, the one on the entity's own
+    connection is attached, so a blueprint edit marks the lens stale.
+
+    ``hidden`` maps a table to the columns the lens withholds on it: the
+    attached copy names none of them in its prose (``withhold_hidden``), so no
+    door that reads the compiled model can serve the name."""
+    from services.project.lineage import same_table
+
+    attached: dict[str, TableBlueprint] = {}
+    for entity in entities:
+        table = entity.source.table
+        for blueprint in blueprints.values():
+            if not same_table(blueprint.table, table):
+                continue
+            key = f"blueprint/{blueprint.name}"
+            consumed[key] = hashes.get(key, "") or shared_blueprint_hash(blueprint)
+            if blueprint.connection != entity.source.connection:
+                continue
+            readable = {f.name.lower() for f in entity.fields}
+            blueprint = withhold_hidden(blueprint, hidden_names(table, hidden or {}, readable))
+            attached[table] = blueprint
+            if not entity.grain and blueprint.grain:
+                entity.grain = blueprint.grain
+            if (
+                not entity.primary_key
+                and blueprint.key
+                and all(c.lower() in readable for c in blueprint.key)
+            ):
+                entity.primary_key = list(blueprint.key)
+    return attached
+
+
+def _apply_hide(
+    entity: Entity, lens: str, groups: Collection[str] = ()
+) -> tuple[list[str], list[GroupColumn]]:
+    """Withhold the entity's `hide` columns from its fields and passthrough
+    dimensions, in place, and return ``(errors, group_columns)``.
+
+    A column the lens reads is a field or a bare dimension (``allowed_columns``
+    treats both as in scope), so a pattern matches either; a bare dimension of
+    a hidden column is the column, and goes with it. Every error names the
+    pattern and the fix: a pattern that withholds nothing is the same silent
+    miss as an `expose:` hide that matches no column, a hidden column an
+    expression, key or filter still reads would come back through it, and a
+    group entry naming a group dst.yaml does not declare is a typo that would
+    lock its own group out — all three fail the compile rather than hide other
+    than the author believes. ``group_columns`` are the columns hidden only by
+    group entries, kept for ``SemanticModel.for_groups``."""
     if not entity.hide:
-        return []
+        return [], []
     errors: list[str] = []
-    for pattern in entity.hide:
-        if not any(column_hidden(f.name, _one_pattern(entity, pattern)) for f in entity.fields):
+    scope = [f.name for f in entity.fields] + [
+        d.name for d in entity.dimensions if passthrough_dimension(d)
+    ]
+    declared = set(groups)
+    for entry in entity.hide:
+        pattern = entry if isinstance(entry, str) else entry.column
+        if not any(column_hidden(c, _one_pattern(entity, entry)) for c in scope):
             errors.append(
                 f"lens '{lens}': entity '{entity.name}' hides '{pattern}' but no field "
-                f"matches it — fix the pattern (the column name, bare or as "
-                f"{entity.name}.column) or drop it"
+                f"or dimension matches it — fix the pattern (the column name, bare or "
+                f"as {entity.name}.column) or drop it"
+            )
+        if isinstance(entry, HideRule) and (
+            unknown := [g for g in entry.except_groups if g not in declared]
+        ):
+            known = f"it declares {sorted(declared)}" if declared else "it declares none"
+            errors.append(
+                f"lens '{lens}': entity '{entity.name}' hides '{pattern}' except for "
+                f"group(s) {unknown}, which dst.yaml does not declare ({known}) — add "
+                "them under `groups:` in dst.yaml or fix the name"
             )
     hidden = entity.hidden_columns()
     readers: list[tuple[str, str | None]] = [
-        *((f"dimension {d.name}", d.expr or d.name) for d in entity.dimensions),
+        *(
+            (f"dimension {d.name}", d.expr)
+            for d in entity.dimensions
+            if not passthrough_dimension(d)
+        ),
         *((f"metric {m.name}", m.expr) for m in entity.metrics),
         *((f"metric {m.name} filter", f) for m in entity.metrics for f in m.filters or []),
         ("primary_key", " ".join(entity.primary_key)),
@@ -323,11 +448,33 @@ def _apply_hide(entity: Entity, lens: str) -> list[str]:
                 f"still reads it — a hidden column cannot ride an expression; drop the "
                 f"{label.split(' ')[0]} or the hide"
             )
-    entity.fields = [f for f in entity.fields if f.name not in hidden]
-    return errors
+    plain = entity.model_copy(update={"hide": [h for h in entity.hide if isinstance(h, str)]})
+    rules = [h for h in entity.hide if isinstance(h, HideRule)]
+    withheld = [
+        GroupColumn(
+            entity=entity.name,
+            column=column,
+            groups=sorted(
+                {
+                    g
+                    for r in rules
+                    if column_hidden(column, _one_pattern(entity, r))
+                    for g in r.except_groups
+                }
+            ),
+            field=next((f for f in entity.fields if f.name == column), None),
+            dimensions=[
+                d for d in entity.dimensions if passthrough_dimension(d) and d.name == column
+            ],
+        )
+        for column in sorted(hidden)
+        if not column_hidden(column, plain)
+    ]
+    entity.withhold_hidden()
+    return errors, withheld
 
 
-def _one_pattern(entity: Entity, pattern: str) -> Entity:
+def _one_pattern(entity: Entity, pattern: str | HideRule) -> Entity:
     """The entity as if `hide` held only this pattern — for naming the one
     that withholds nothing."""
     return entity.model_copy(update={"hide": [pattern]})
@@ -347,20 +494,24 @@ SENSITIVE_COLUMNS = "sensitive_columns"
 def sensitive_column_warnings(
     entities: Sequence[Entity], definitions: Sequence[Definition]
 ) -> list[str]:
-    """One `sensitive_columns` warning per entity whose in-scope fields are
-    named like personal data — personal_id, ssn, email, phone, birth_date,
-    date_of_birth, address — with no `hide` on them and no definition about
-    them (`about: entity.column`). The column reaching a door is the fact; the
-    author decides whether a hide or a definition is the fix."""
+    """One `sensitive_columns` warning per entity whose in-scope columns (fields
+    and passthrough dimensions) are named like personal data — personal_id,
+    ssn, email, phone, birth_date, date_of_birth, address — with no `hide` on
+    them and no definition about them (`about: entity.column`). The column
+    reaching a door is the fact; the author decides whether a hide or a
+    definition is the fix."""
     described = {d.about for d in definitions if d.about}
     out: list[str] = []
     for e in entities:
+        served = {f.name for f in e.fields} | {
+            d.name for d in e.dimensions if passthrough_dimension(d)
+        }
         flagged = sorted(
-            f.name
-            for f in e.fields
-            if _SENSITIVE.search(f.name.lower())
-            and not column_hidden(f.name, e)
-            and f"{e.name}.{f.name}" not in described
+            name
+            for name in served
+            if _SENSITIVE.search(name.lower())
+            and not column_hidden(name, e)
+            and f"{e.name}.{name}" not in described
         )
         if flagged:
             out.append(
@@ -459,6 +610,10 @@ def shared_definition_hash(definition: Definition) -> str:
 
 def shared_relationship_hash(relationship: SharedRelationship) -> str:
     return asset_content_hash("relationship", relationship.model_dump(mode="json"))
+
+
+def shared_blueprint_hash(blueprint: TableBlueprint) -> str:
+    return asset_content_hash("blueprint", blueprint.model_dump(mode="json"))
 
 
 def relationship_pairs(

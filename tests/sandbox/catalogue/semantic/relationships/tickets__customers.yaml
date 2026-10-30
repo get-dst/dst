@@ -1,0 +1,5 @@
+left: tickets
+right: customers
+"on": tickets.customer_id = customers.customer_id
+type: left
+relationship: many_to_one

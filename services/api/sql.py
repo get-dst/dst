@@ -56,15 +56,18 @@ from services.api.query import (
     _logged_purpose,
 )
 from services.auth.deps import get_caller
+from services.contracts.profile import TableProfile
 from services.contracts.protocols import Connector
-from services.contracts.semantic_model import SemanticModel
+from services.contracts.response import Receipt
+from services.contracts.semantic_model import Entity, SemanticModel
 from services.contracts.trace import TraceLog
 from services.contracts.warehouse import QueryResult
 from services.governance.credentials import CallerIdentity
 from services.lenses.connections import ConnectionUnavailable, resolve_connector
 from services.observability import cost
 from services.observability.logger import log_trace
-from services.runtime import scope_rails, sql_guard
+from services.runtime import grain, scope_rails, sql_guard
+from services.runtime import receipt as receipts
 from services.runtime.bounded import WarehouseTimeout, warehouse_bounded
 from services.runtime.pipeline import not_computable_refusal
 
@@ -97,6 +100,16 @@ class SqlResponse(BaseModel):
     truncated: bool
     scope: str
     request_id: str
+    # For each exposed table the statement read: rows against distinct key, or
+    # "could not verify" and why (services/runtime/grain). Lens scope only.
+    grain: list[str] = Field(default_factory=list)
+    # For each exposed table read: where its dated columns end, from the
+    # stored profile, or "could not verify" and why. Lens scope only.
+    data_end: list[str] = Field(default_factory=list)
+    # Every post-check, as the receipt lists it: ``name:outcome``, or
+    # ``name:exposed, could not verify …`` where a check could not run.
+    checks: list[str] = Field(default_factory=list)
+    receipt: Receipt | None = None
 
 
 def _probe_model(dialect: str) -> SemanticModel:
@@ -215,6 +228,30 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
 
     truncated = len(result.rows) > body.limit
     rows = [list(r) for r in result.rows[: body.limit]]
+    grain_lines: list[str] = []
+    end_lines: list[str] = []
+    checks: list[str] = []
+    if scope_model is not None and (exposed := sql_guard.exposed_tables(guard.sql, scope_model)):
+        readings, profiles, fresh = _grain_readings(scope_model, exposed, connector, caller)
+        grain_lines = [r.line for r in readings]
+        checks += [
+            f"grain:exposed, {r.line}" if r.status == "unverified" else f"grain:{r.status}"
+            for r in readings
+        ]
+        for table in exposed:
+            line, ok = _data_end_line(scope_model, table, profiles, fresh)
+            end_lines.append(line)
+            checks.append("data_end:pass" if ok else f"data_end:exposed, {line}")
+    if rows:
+        checks.append("empty_result:pass")
+    else:
+        # No rows is not a zero: the filter values or the window may be what
+        # is wrong, and nothing here can tell which.
+        checks.append(
+            "empty_result:disclose: the statement returned no rows; an empty result is not "
+            "a zero — check the filter values and where the data ends before reporting one"
+        )
+    trace.confidence = "unverified"
     trace.valid, trace.row_count, trace.wh_bytes = True, len(rows), result.bytes_scanned
     # Priced exactly like the lens-query trace (pipeline.py): bytes recorded
     # without a cost read as $0.00 in observe, so a heavy authoring phase can
@@ -228,7 +265,99 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         truncated=truncated,
         scope=scope,
         request_id=request_id,
+        grain=grain_lines,
+        data_end=end_lines,
+        checks=checks,
+        # The rows are the caller's own SQL over the lens's tables: nothing
+        # governed their meaning, so the receipt never grades them verified.
+        receipt=receipts.build(
+            request_id=request_id,
+            lens=scope,
+            certification="none",
+            cert_id=None,
+            confidence="unverified",
+            sql=body.sql,
+            data_as_of=None,
+            checks=checks,
+        ),
     )
+
+
+def _grain_lines(
+    model: SemanticModel, tables: list[str], connector: Connector, caller: CallerIdentity
+) -> list[str]:
+    """The grain check over the exposed tables a lens-scope statement read: the
+    same rule an EXPOSED `query` answer carries, from the stored profiles of
+    the tables' connections while they are within probe.max_age."""
+    return [r.line for r in _grain_readings(model, tables, connector, caller)[0]]
+
+
+def clock_columns(entity: Entity, model: SemanticModel) -> list[str]:
+    """The dated columns of an exposed table: its blueprint's clocks, else
+    every date or timestamp field the lens reads."""
+    blueprint = model.blueprints.get(entity.source.table)
+    if blueprint is not None and blueprint.clocks:
+        return list(blueprint.clocks)
+    dated = ("date", "timestamp", "time", "datetime")
+    return [f.name for f in entity.fields if (f.type or "").lower() in dated]
+
+
+def _data_end_line(
+    model: SemanticModel, table: str, profiles: dict[str, TableProfile], fresh: bool
+) -> tuple[str, bool]:
+    """``(line, verified)``: where an exposed table's dated columns end, from
+    its stored profile within probe.max_age, or why that could not be told."""
+    entity = next((e for e in model.entities if e.source.table == table), None)
+    columns = clock_columns(entity, model) if entity is not None else []
+    if not columns:
+        return f"could not verify the data end of {table}: it has no dated column", False
+    profile = grain.profile_for(profiles, table)
+    if profile is None:
+        return f"could not verify the data end of {table}: no fresh stored profile", False
+    ends = {
+        c.name: c.max for c in profile.columns if any(c.name.lower() == x.lower() for x in columns)
+    }
+    shown = [f"{name} through {end[:10]}" for name, end in ends.items() if end]
+    if not shown:
+        return f"could not verify the data end of {table}: the probe holds no maximum", False
+    probed = profile.profiled_at.date().isoformat()
+    return f"DATA END {table}: {', '.join(shown)} (probe of {probed})", fresh
+
+
+def _grain_readings(
+    model: SemanticModel, tables: list[str], connector: Connector, caller: CallerIdentity
+) -> tuple[list[grain.GrainReading], dict[str, TableProfile], bool]:
+    """The grain readings, and the fresh stored profiles they read."""
+    from services.db.session import org_session
+    from services.lenses import profile_store
+    from services.project import probe_settings
+    from services.project.blueprints import fresh_within
+
+    connections = {e.source.connection for e in model.entities if e.source.table in tables}
+    # A profile past probe.max_age proves nothing about today's rows: it is
+    # left out, and the check counts live.
+    profiles: dict[str, TableProfile] = {}
+    max_age = None
+    try:
+        with org_session(caller.org_id) as session:
+            max_age = probe_settings.load(session).max_age_delta
+            fresh = fresh_within(max_age)
+            for connection in connections:
+                for stored in profile_store.list_profiles(session, connection):
+                    if fresh(stored.profile):
+                        profiles[stored.profile.table] = stored.profile
+    except Exception:  # noqa: BLE001 — without profiles the check counts live
+        log.exception("profile lookup for the grain check failed")
+    readings = grain.read_grain(
+        model,
+        tables,
+        profiles=profiles,
+        fresh=True,
+        connector=connector,
+        scope=str(caller.org_id),
+        ttl=max_age,
+    )
+    return readings, profiles, True
 
 
 @router.post("/sql", response_model=SqlResponse)

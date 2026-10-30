@@ -1,3 +1,10 @@
+{{- $sidecar := and .Values.cube.enabled (not .Values.cube.external.url) -}}
+{{- if and $sidecar (gt (int .Values.replicaCount) 1) -}}
+{{- fail "cube.enabled runs Cube as a sidecar with no shared cache (no Cube Store): keep replicaCount at 1, or run Cube yourself and set cube.external.url" -}}
+{{- end -}}
+{{- if and $sidecar (not (or .Values.cube.model.configMap .Values.cube.model.existingClaim)) -}}
+{{- fail "cube.enabled needs the model: set cube.model.configMap or cube.model.existingClaim" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,6 +39,15 @@ spec:
             # Migrations belong to the hook Job, not serving pods.
             - name: DST_MIGRATE_ON_START
               value: "false"
+            {{- if or .Values.cube.enabled .Values.cube.external.url }}
+            - name: DST_CUBE_URL
+              value: {{ .Values.cube.external.url | default "http://localhost:4000" | quote }}
+            - name: CUBEJS_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cube.secret.name }}
+                  key: {{ .Values.cube.secret.key }}
+            {{- end }}
           {{- with .Values.envFrom }}
           envFrom: {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -51,9 +67,74 @@ spec:
             # filesystem is read-only by default.
             - name: tmp
               mountPath: /tmp
+        {{- if $sidecar }}
+        # Cube Core beside the app, on localhost: one per pod, the model
+        # read-only, the same restricted security context.
+        - name: cube
+          image: "{{ .Values.cube.image.repository }}:{{ .Values.cube.image.tag }}"
+          imagePullPolicy: {{ .Values.cube.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: CUBEJS_DEV_MODE
+              value: "false"
+            - name: CUBEJS_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cube.secret.name }}
+                  key: {{ .Values.cube.secret.key }}
+            - name: CUBEJS_CACHE_AND_QUEUE_DRIVER
+              value: memory
+            - name: CUBEJS_SCHEDULED_REFRESH_DEFAULT
+              value: "false"
+            {{- range $k, $v := .Values.cube.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- with .Values.cube.envFrom }}
+          envFrom: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: 4000 }
+            periodSeconds: 10
+          resources: {{- toYaml .Values.cube.resources | nindent 12 }}
+          volumeMounts:
+            - name: cube-model
+              mountPath: /cube/conf/model
+              readOnly: true
+            - name: cube-config
+              mountPath: /cube/conf/cube.js
+              subPath: cube.js
+              readOnly: true
+            - name: cube-tmp
+              mountPath: /tmp
+            {{- with .Values.cube.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if $sidecar }}
+        - name: cube-model
+          {{- if .Values.cube.model.configMap }}
+          configMap:
+            name: {{ .Values.cube.model.configMap }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.cube.model.existingClaim }}
+            readOnly: true
+          {{- end }}
+        - name: cube-config
+          configMap:
+            name: {{ include "dst.fullname" . }}-cube-config
+        - name: cube-tmp
+          emptyDir: {}
+        {{- with .Values.cube.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}

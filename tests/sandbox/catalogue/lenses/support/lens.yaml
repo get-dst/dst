@@ -1,0 +1,38 @@
+name: support
+display_name: Support
+description: Zendesk tickets by category, priority and status, first response and resolution times, complaints and warranty claims, and CSAT - for customer service.
+owner: customer-service
+timezone: Europe/Helsinki
+stale_after_days: 3
+connections: [warehouse]
+select:
+  entities:
+    - tickets
+    - tickets_monthly
+    - csat_monthly
+    - customers
+  definitions: [ticket, csat, region, segment]
+sources: [Zendesk]
+scope: own
+untyped_fallback: true
+not_for:
+  - ask: emergency callouts
+    sibling: field_service
+  - ask: webshop refunds
+    sibling: webshop
+not_computable:
+  - measure: NPS
+    aliases: [net promoter score, promoters, detractors, NPS score]
+    reason: "the group runs no NPS survey; CSAT (share of tickets rated good) is the only satisfaction measure"
+  - measure: tickets by company
+    aliases: [tickets per entity, tickets for Bergström, Bergström tickets, CSAT by business, satisfaction by company, tickets split LVI vs Bergström, tickets across the three companies, all three companies, three companies, by business, split by business, per business, by company, per company, by entity, LVI vs Bergström]
+    reason: "tickets carry no company field, and Bergström's support does not run through this Zendesk; tickets can be split by category, customer, order or work order"
+  - measure: tickets about a specific product
+    aliases: [tickets by product, broken product tickets, wrong product tickets, product mentioned in tickets, specific product, about a product, product being broken, being broken or wrong, broken or wrong, by SKU]
+    reason: "tickets reference a webshop order, not a product or SKU; the subject and description are free text and are not served"
+access:
+  allow:
+    - group: support
+    - group: everyone
+eval_gate: block
+auto_review: unverified

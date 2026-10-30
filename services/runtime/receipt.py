@@ -27,6 +27,7 @@ import json
 from datetime import UTC, datetime
 from typing import Literal
 
+from services.contracts.failure_modes import FailureMode
 from services.contracts.response import Receipt
 from services.security.crypto import signing_keys
 
@@ -37,7 +38,21 @@ def _canonical(receipt: Receipt) -> bytes:
     # A field added after receipts were already in the wild is excluded while
     # unset, so a receipt signed before it existed still recomputes to the same
     # bytes; once set it is pinned like every other claim.
-    exclude = {"digest"} | ({"resolution_tag"} if receipt.resolution_tag is None else set())
+    exclude = {"digest"} | {
+        k
+        for k in (
+            "resolution_tag",
+            "column_access",
+            "mode",
+            "query_sha256",
+            "result_sha256",
+            "model_version",
+            "checks",
+            "caveats",
+            "disclosures",
+        )
+        if getattr(receipt, k) is None
+    }
     payload = receipt.model_dump(exclude=exclude)
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
@@ -60,6 +75,14 @@ def build(
     sql: str | None,
     data_as_of: str | None,
     resolution_tag: str | None = None,
+    column_access: list[str] | None = None,
+    mode: FailureMode | None = None,
+    query_sha256: str | None = None,
+    result_sha256: str | None = None,
+    model_version: str | None = None,
+    checks: list[str] | None = None,
+    caveats: list[str] | None = None,
+    disclosures: list[str] | None = None,
 ) -> Receipt:
     receipt = Receipt(
         request_id=request_id,
@@ -71,6 +94,14 @@ def build(
         sql_sha256=sql_hash(sql),
         data_as_of=data_as_of,
         resolution_tag=resolution_tag,
+        column_access=column_access or None,
+        mode=mode,
+        query_sha256=query_sha256,
+        result_sha256=result_sha256,
+        model_version=model_version,
+        checks=checks,
+        caveats=caveats or None,
+        disclosures=disclosures or None,
     )
     keys = signing_keys()
     if keys:

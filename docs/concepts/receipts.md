@@ -31,7 +31,15 @@ answer came from is not a log you dig up afterwards. It is part of the output.
   snapshot inside each period rather than summed across its snapshots. An
   answer read from an exposed table (one with no governed
   definitions) grades at most `partial`, with the check `governed_read` naming
-  the ungoverned read. A `partial` grade always says why: `partial_reason` on
+  the ungoverned read. It also carries a `grain` check and a `GRAIN` line for
+  each exposed table it read: the table's rows against the distinct count of
+  the key its [blueprint](../guides/project-files.md#table-blueprints-facts-about-a-table)
+  declares, from the probe or one live count. A table whose rows repeat per sync
+  keeps the grade at `partial` and says which column to read the latest version
+  by; counts that contradict the declared key grade the answer `unverified`. A
+  table with no declared key, or one that could not be counted, is a plain
+  "could not verify" with the reason, and the answer is never `verified`: the
+  EXPOSED label does not stand in for the count. A `partial` grade always says why: `partial_reason` on
   the report names the check that capped it, or the abstention that kept it
   short of `verified`. The adversarial reviewer, when a lens opts in, folds its
   challenges onto the same report and a blocking challenge caps the grade; a
@@ -74,6 +82,11 @@ checked against the logged trace.
   as forgery.
 - **Refusals and clarifications carry no receipt**: they make no data claim to
   attest.
+- An answer that read a column by a group exception to the lens's `hide`
+  carries `column_access`, naming the column and the caller's group
+  (`["accounts.contact_email (group support)"]`). It is signed with the rest,
+  and absent when no exception applied, so receipts issued before it existed
+  still verify.
 
 ## The freshness contract
 

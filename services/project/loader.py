@@ -28,6 +28,8 @@ from services.semantic.files import (
     DEFINITION_DIR,
     ENTITY_DIR,
     RELATIONSHIP_DIR,
+    TABLE_DIR,
+    is_yaml_under,
     page_to_definition,
 )
 
@@ -59,8 +61,29 @@ _CERTIFIED_ANSWER_KEYS = frozenset(
         "verified_value",
         "verified_prose",
         "status",
+        # A Cube query for the question (a Cube-backed lens): the frontier
+        # lane's exemplar today; the pair stays certified by its sql.
+        "query",
     }
 )
+
+
+def _check_cube_query(entry: dict[str, Any]) -> None:
+    """A certified pair's ``query`` reads as a Cube query, and stands beside
+    the pair's sql (a Cube query alone is not yet certified by anything)."""
+    from pydantic import ValidationError
+
+    from services.contracts.cube_query import CubeQuery
+
+    what = f"certified_answers.yaml: answer '{str(entry.get('question', '?'))[:60]}'"
+    if not entry.get("sql"):
+        raise ValueError(f"{what}: a `query` is read beside the pair's `sql`, which is missing")
+    try:
+        CubeQuery.model_validate(entry["query"])
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(p) for p in first["loc"])
+        raise ValueError(f"{what}: `query` is not a Cube query: {where}: {first['msg']}") from exc
 
 
 def parse_yaml(text: str, path: str) -> Any:
@@ -101,6 +124,8 @@ def asset_dir(path: str) -> str | None:
         return ENTITY_DIR
     if path.startswith(RELATIONSHIP_DIR + "/") and path.endswith((".yaml", ".yml")):
         return RELATIONSHIP_DIR
+    if is_yaml_under(path, TABLE_DIR):
+        return TABLE_DIR
     if path.startswith(DEFINITION_DIR + "/") and path.endswith(".md"):
         return DEFINITION_DIR
     parts = path.split("/")
@@ -137,6 +162,9 @@ def asset_key(path: str, content: str) -> tuple[str, str] | None:
             left = data.get("left", "") if isinstance(data, dict) else ""
             right = data.get("right", "") if isinstance(data, dict) else ""
             name = f"{left}__{right}" if left and right else ""
+        elif directory == TABLE_DIR:
+            data = parse_yaml(content, path)
+            name = data.get("table", "") if isinstance(data, dict) else ""
         else:
             data = parse_yaml(content, path)
             name = data.get("name", "") if isinstance(data, dict) else ""
@@ -227,6 +255,8 @@ def load_lens_source(files: dict[str, str]) -> LensSource:
         )
         if error:
             raise ValueError(error)
+        if "query" in entry:
+            _check_cube_query(entry)
         if isinstance(entry.get("sample_bindings"), list):
             # YAML reads a bare `day: 2026-01-01` as a date object; the
             # binding grammar and the stored row both want its ISO text.
@@ -263,13 +293,14 @@ def split_by_lens(files: dict[str, str]) -> dict[str, dict[str, str]]:
 
 def split_semantic(files: dict[str, str]) -> dict[str, str]:
     """The project-level shared layer: ``semantic/entities/*.yaml`` +
-    ``semantic/relationships/*.yaml`` + ``semantic/definitions/*.md``
-    (never under lenses/)."""
+    ``semantic/relationships/*.yaml`` + ``semantic/tables/*.yaml`` +
+    ``semantic/definitions/*.md`` (never under lenses/)."""
     return {
         path: content
         for path, content in files.items()
         if (path.startswith(ENTITY_DIR + "/") and path.endswith((".yaml", ".yml")))
         or (path.startswith(RELATIONSHIP_DIR + "/") and path.endswith((".yaml", ".yml")))
+        or is_yaml_under(path, TABLE_DIR)
         or (path.startswith(DEFINITION_DIR + "/") and path.endswith(".md"))
     }
 

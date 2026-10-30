@@ -358,7 +358,7 @@ def test_plan_and_apply_warn_on_a_stale_artifact(
     assert probe_age_warnings(files, timedelta(days=30)) == []
     assert probe_age_warnings({"profiles/warehouse.json": "{}"}, timedelta(days=7)) == []
 
-    from services.cli import main as cli
+    from services.cli import project as cli
 
     (tmp_path / "profiles").mkdir()
     (tmp_path / "profiles" / "warehouse.probe.json").write_text(
@@ -380,7 +380,7 @@ def test_the_sweep_skips_a_stale_lens_and_exits_4(
     """`dst test --all` cannot call a lens verified when the guards behind the
     verdict abstained: the lens is SKIPped with the reason and the run exits 4,
     the same not-green a CI gate already branches on."""
-    from services.cli import main as cli
+    from services.cli import test as cli
     from services.lenses import store as lens_store
     from services.llm import registry
 

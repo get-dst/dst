@@ -54,6 +54,7 @@ nav:
       - Clarify & refusal: concepts/clarify-and-refusal.md
       - Typed decisions: concepts/typed-decisions.md
   - Guides:
+      - Migrate to Cube: guides/migrate-to-cube.md
       - Project files: guides/project-files.md
       - Connect a warehouse: guides/connect-a-warehouse.md
       - Answerable tables: guides/answerable-tables.md
@@ -73,5 +74,6 @@ nav:
       - CLI: reference/cli.md
       - API: reference/api.md
       - Configuration: reference/configuration.md
+      - Failure modes: reference/failure-modes.md
   - FAQ: faq.md
   - Blog: blog/index.md

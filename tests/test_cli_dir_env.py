@@ -67,8 +67,8 @@ def test_out_of_tree_dir_env_beats_cwd_env(monkeypatch, tmp_path, verb) -> None:
     assert seen["auth"] == "Bearer dstadm_right"
 
 
-def test_patches_list_out_of_tree_uses_dir_env(monkeypatch, tmp_path) -> None:
-    # The second of the two live 401s: `patches` resolving the shell's secrets.
+def test_reviews_out_of_tree_uses_dir_env(monkeypatch, tmp_path) -> None:
+    # The second of the two live 401s: a read verb resolving the shell's secrets.
     project = _isolate(
         monkeypatch,
         tmp_path,
@@ -82,9 +82,9 @@ def test_patches_list_out_of_tree_uses_dir_env(monkeypatch, tmp_path) -> None:
         return httpx.Response(200, json=[], request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    argv = ["patches", "list", "--lens", "sales", "--dir", str(project)]
+    argv = ["reviews", "--dir", str(project)]
     assert _run_cli(monkeypatch, argv) == 0
-    assert seen["url"] == "http://right:2/mgmt/lenses/sales/patches"
+    assert seen["url"] == "http://right:2/mgmt/reviews"
     assert seen["auth"] == "Bearer dstadm_right"
 
 

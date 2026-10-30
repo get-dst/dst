@@ -1,0 +1,83 @@
+name: contract_renewals_monthly
+description: >-
+  The maintenance-contract book by month: contracts expiring, renewed and churned (by the month the
+  renewal decision was recorded), the churned annual value, the renewal rate, and the active book
+  at month end. The one churned contract so far ended on 2026-06-01 and its decision was recorded
+  2026-05-31, so this mart books it in May while the contract itself lapsed in June.
+grain: one row per month
+use_cases:
+  - "Use when a question asks for the renewal rate, renewals vs churn by month, or the contract book trend."
+  - "Avoid for: which contracts end when (maintenance_contracts)"
+common_questions:
+  - contract renewal rate in 2026
+  - active contract book value by month
+source: {connection: warehouse, table: marts_service.mart_contract_renewals_monthly}
+default_time_field: month
+primary_key: [month]
+fields:
+  - {name: month, type: string}
+  - {name: contracts_expiring, type: integer}
+  - {name: renewed, type: integer}
+  - {name: churned, type: integer}
+  - {name: churned_value_eur, type: number, description: "annual value of churned contracts"}
+  - {name: renewal_rate, type: number, description: "per-row - never average"}
+  - {name: active_contracts, type: integer, description: "book at month end"}
+  - {name: book_value_eur, type: number, description: "annual value of the active book at month end"}
+metrics:
+  - name: contracts_expiring
+    agg: sum
+    expr: contract_renewals_monthly.contracts_expiring
+    label: contracts up for renewal
+    aliases: [expiries, contracts expiring]
+  - name: contracts_renewed
+    agg: sum
+    expr: contract_renewals_monthly.renewed
+    label: contracts renewed
+    aliases: [renewals by month]
+  - name: contracts_churned_monthly
+    agg: sum
+    expr: contract_renewals_monthly.churned
+    label: contracts churned (by decision month)
+    better: lower
+  - name: churned_contract_value_eur
+    agg: sum
+    expr: contract_renewals_monthly.churned_value_eur
+    label: churned contract value
+    format: currency
+    currency: EUR
+    better: lower
+  - name: contracts_decided
+    agg: sum
+    expr: contract_renewals_monthly.renewed + contract_renewals_monthly.churned
+    label: contracts decided
+  - name: contract_renewal_rate
+    type: ratio
+    numerator: contracts_renewed
+    denominator: contracts_decided
+    label: contract renewal rate
+    aliases: [renewal rate, maintenance contract renewal rate]
+    description: renewed over (renewed + churned) in the asked window
+    format: percent
+    better: higher
+  - name: contract_churn_rate
+    type: ratio
+    numerator: contracts_churned_monthly
+    denominator: contracts_decided
+    label: contract churn rate
+    aliases: [maintenance contract churn rate, churn rate on maintenance contracts]
+    format: percent
+    better: lower
+  - name: active_book_contracts
+    agg: sum
+    expr: contract_renewals_monthly.active_contracts
+    additivity: level
+    label: active contract book
+    aliases: [contracts in force at month end]
+  - name: active_book_value_eur
+    agg: sum
+    expr: contract_renewals_monthly.book_value_eur
+    additivity: level
+    label: contract book value
+    aliases: [book value at month end]
+    format: currency
+    currency: EUR

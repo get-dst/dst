@@ -20,14 +20,10 @@ from services.config import settings
 from services.contracts.correction import CorrectionDelta
 from services.contracts.fakes import ScriptedLLM, fake_llm_providers
 from services.db.session import org_session
-from services.lenses.demo import jaffle_customer_value_bundle
-from services.llm import registry
-from services.llm.registry import ResolvedModel
 from services.mcp import server as mcp_srv
 from services.reviews import service
 from services.reviews import store as rev_store
 from services.reviews.judge import NO_VERDICT, judge_trace
-from services.reviews.patch import draft_patch
 from services.reviews.store import Trace
 
 client = TestClient(app)
@@ -152,7 +148,6 @@ def _seed_trace(
 def _cleanup(org: object) -> None:
     admin = create_engine(settings.database_admin_url)
     with admin.begin() as c:
-        c.execute(text("DELETE FROM patch_candidate WHERE org_id = :o"), {"o": org})
         c.execute(text("DELETE FROM review WHERE org_id = :o"), {"o": org})
         c.execute(text("DELETE FROM request_log WHERE org_id = :o"), {"o": org})
         c.execute(text("DELETE FROM lens WHERE org_id = :o"), {"o": org})
@@ -505,59 +500,6 @@ def test_passing_or_absent_adversary_check_does_not_prefill(
     assert service.open_review(None, _trace(), llm=None).correction is None  # type: ignore[arg-type]
 
 
-def test_prefilled_ticket_drafts_patch_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The loop closes: challenge → scope correction → drafted, approvable patch."""
-    _fake_store(monkeypatch)
-    trace = _trace().model_copy(update={"verification": _challenge_verification()})
-    ticket = service.open_review(None, trace, llm=None)  # type: ignore[arg-type]
-    llm = ScriptedLLM(['{"instruction": "Exclude internal and test accounts unless asked."}'])
-    out = draft_patch(llm, ticket, trace, jaffle_customer_value_bundle(), [])
-    assert out is not None
-    assert out.kind == "instruction"  # a scope correction routes to a lens instruction
-    assert out.diff_after == "Exclude internal and test accounts unless asked."
-    assert out.ticket_id == ticket.ticket_id
-    assert out.status == "candidate"
-
-
-@needs_db
-def test_challenge_trace_prefills_via_api_and_drafts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Full path on Postgres: a challenged trace → review pre-filled with the scope
-    correction → the draft-patch endpoint emits an approvable instruction candidate."""
-    org, raw = _make_org_token()
-    rid = f"req-{uuid.uuid4()}"
-    _seed_trace(org, rid, verification=json.dumps(_challenge_verification()))
-    h = {"Authorization": f"Bearer {raw}"}
-    monkeypatch.setattr(settings, "providers", fake_llm_providers())
-    # One shared script: the judge consumes the first response, the drafter the second.
-    llm = ScriptedLLM(
-        [
-            '{"verdict": "changes", "reasoning": "challenge unresolved"}',  # judge
-            '{"instruction": "Exclude internal and test accounts unless asked."}',  # drafter
-        ]
-    )
-    monkeypatch.setattr("services.llm.anthropic_provider.AnthropicProvider", lambda _k, **_: llm)
-    monkeypatch.setattr(
-        "services.llm.registry.resolve",
-        lambda ref: ResolvedModel(llm, "fake", registry.wire_name(ref)),
-    )
-    try:
-        body = jaffle_customer_value_bundle().model_dump(mode="json")
-        assert client.post("/mgmt/lenses", json=body, headers=h).status_code == 201
-
-        ticket = client.post("/v1/reviews", headers=h, json={"request_id": rid}).json()
-        assert ticket["correction"]["kind"] == "scope"
-        assert ticket["correction"]["note"] == _CHALLENGE_REASON
-
-        drafted = client.post(f"/mgmt/reviews/{ticket['ticket_id']}/draft-patch", headers=h)
-        assert drafted.status_code == 201, drafted.text
-        cand = drafted.json()
-        assert cand["kind"] == "instruction"
-        assert cand["diff_after"] == "Exclude internal and test accounts unless asked."
-        assert cand["status"] == "candidate"
-    finally:
-        _cleanup(org)
-
-
 # ─── the data plane is caller-scoped ─────────────────────────────────────────
 #
 # `POST /v1/reviews` was org-scoped and nothing more: any caller key could file a
@@ -659,9 +601,7 @@ def test_a_caller_key_cannot_touch_another_callers_request() -> None:
         #    admin verb — filing is a report, not a ruling.
         for method, path in [
             ("post", f"/mgmt/reviews/{mine_tid}/rule"),
-            ("post", f"/mgmt/reviews/{mine_tid}/draft-patch"),
             ("get", "/mgmt/reviews"),
-            ("post", "/mgmt/reviews/patches/pc_1/approve"),
         ]:
             call = getattr(client, method)
             r = (

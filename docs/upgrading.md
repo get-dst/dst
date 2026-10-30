@@ -39,7 +39,7 @@ confirmation that pulling a new version actually needed migrating.
 !!! note "`dst dev` migrates for you"
 
     `dst dev` is Postgres-up → migrate → serve in one command
-    (`services/cli/main.py`), so a local development loop never hits the refusal. It is
+    (`services/cli/serve.py`), so a local development loop never hits the refusal. It is
     only the `pip install -U` + `dst serve` path that needs the explicit step.
 
 ## Containers
@@ -122,7 +122,7 @@ and a project created after the change never sees it at all.
 ## After upgrading, refresh the scaffolded skills
 
 `AGENTS.md` and `.claude/skills/` are written by `dst init` and then never touched
-again — they are a snapshot of the release you scaffolded with. Improvements to the
+again: they are a snapshot of the release you scaffolded with. Improvements to the
 authoring skills ship with the package, so a project created before them keeps the old
 copies indefinitely, and nothing in `plan` or `apply` can tell you: they are your files,
 not managed project files.
@@ -132,9 +132,62 @@ dst init . --skills-only
 ```
 
 Rewrites exactly those files from the installed dst and reports each as unchanged,
-updated (`+N -M`), or new. It touches nothing else, and the write is unconditional — a
+updated (`+N -M`), or new. It touches nothing else, and the write is unconditional; a
 local edit is replaced, and survives as a diff in your own git. Worth running as the last
 step of every upgrade.
+
+## 0.15.0
+
+### Migrations
+
+Run `dst migrate` before serving, as for every release. It applies four revisions:
+
+| Revision | What it does | Downgrade |
+|---|---|---|
+| `0073` | admits `blueprint` as a shared semantic asset kind, for table blueprints (`semantic/tables/*.yaml`) | deletes the blueprint rows, then narrows the check |
+| `0074` | adds `request_log.mode` and `eval_result.mode`: the [failure mode](reference/failure-modes.md), one name per row; nullable, and rows written before stay as they are | drops both columns |
+| `0075` | drops `patch_candidate`: server-side patch drafting is retired, and the review queue (tickets, rulings, certify-on-approve) stays | recreates the table empty; candidates are not preserved |
+| `0076` | adds `caller.driver` (default `false`): a caller an admin marked a [driver](guides/agents-mcp.md#driver-mode) | drops the column |
+
+### Which lenses change lane
+
+A project with only entity files (`semantic/`, `lenses/`, no `cube/overlay.yaml`) keeps
+serving every lens on the typed core, with no file change.
+
+A lens's `serving:` key is now optional. Unset, a Cube-backed lens (the push carries
+`cube/overlay.yaml`, and the overlay lists the lens or its `lens.yaml` names `views:`)
+serves through Cube, where 0.14 served it typed. To keep such a lens on the old lane,
+set `serving: typed` in its `lens.yaml` before the first apply on 0.15.0, or
+`DST_SERVING=typed` for the whole install. `dst plan` prints the lane of every lens
+and why; `dst doctor` and `/ready` print it per published lens. A push without
+`cube/overlay.yaml` clears every Cube stamp on apply, so removing the overlay puts its
+lenses back on the typed core. Moving an entity
+project to Cube on purpose is [Migrate to Cube](guides/migrate-to-cube.md).
+
+### Removed
+
+- The `import` verb, with `import dbt` (the dbt importer) and the OSI import. Write
+  `semantic/` from `dst introspect`, or a Cube model with `dst migrate-model`.
+- `dst export osi`. `dst export` keeps one meaning: server lenses into this project.
+- The benchmark runner.
+- The corpus distiller and its endpoint, `POST /mgmt/lenses/{lens}/distill`.
+- Server-side patch drafting, with the `patches` verb and its candidates. Corrections still
+  open review tickets; the fix is drafted from the ticket and the files by the
+  reviewer's own agent.
+
+### Rolling back to 0.14.x
+
+Downgrade the schema to `0072`, the 0.14 head, with the 0.15.0 package still installed
+(its migrations carry the downgrades), then install the older package:
+
+```bash
+alembic downgrade 0072            # from the directory holding alembic.ini (below)
+pip install 'dst-core<0.15'
+```
+
+Blueprints, failure-mode columns and driver flags are dropped on the way, and
+`patch_candidate` comes back empty. 0.14 has no Cube lane and its lens schema has no
+`serving:` or `views:` key, so take them out of `lens.yaml` before applying with it.
 
 ## Downgrading
 

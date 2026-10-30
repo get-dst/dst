@@ -42,17 +42,21 @@ from sqlalchemy.orm import Session
 from services.auth.deps import AdminIdentity, get_admin_identity, get_admin_org, get_app_session
 from services.certify import store as certify_store
 from services.contracts.lens_config import LensConfig
-from services.contracts.semantic_model import Definition
+from services.contracts.profile import TableProfile
+from services.contracts.semantic_model import Definition, TableBlueprint
 from services.contracts.shared_semantic import SharedEntity, SharedRelationship
 from services.db.session import org_session
 from services.evals import store as eval_store
 from services.lenses import connection_store, store
 from services.lenses.repo import render_lens_repo
+from services.monitor import status as monitor_status
 from services.project import apply as apply_engine
-from services.project import demo_page, probe_settings
+from services.project import blueprints as blueprint_checks
+from services.project import caller_groups, cube_plan, demo_page, probe_settings
 from services.project import plan as plan_engine
 from services.project.compile import (
     relationship_pairs,
+    shared_blueprint_hash,
     shared_definition_hash,
     shared_entity_hash,
     shared_relationship_hash,
@@ -63,10 +67,14 @@ from services.project.schema import ConnectionDecl, parse_project_yaml
 from services.runtime.bounded import APPLY_ABORTED_PREFIX, ApplyStepTimeout
 from services.semantic import store as semantic_store
 from services.semantic.files import (
+    TABLE_DIR,
+    parse_blueprint_files,
     parse_semantic_files,
     render_semantic_files,
+    table_slug,
     validate_semantic_files,
 )
+from services.serve import lanes
 from services.validate.report import definition_double_truth
 
 router = APIRouter(prefix="/mgmt/project", tags=["project"])
@@ -268,6 +276,7 @@ def _db_semantic(session: Session) -> dict[str, str]:
         [SharedEntity.model_validate(a.body) for a in assets if a.kind == "entity"],
         [Definition.model_validate(a.body) for a in assets if a.kind == "definition"],
         [SharedRelationship.model_validate(a.body) for a in assets if a.kind == "relationship"],
+        [TableBlueprint.model_validate(a.body) for a in assets if a.kind == "blueprint"],
     )
 
 
@@ -319,6 +328,7 @@ def _effective_hashes(
     incoming_entities: dict[str, SharedEntity],
     incoming_definitions: dict[str, Definition],
     incoming_relationships: dict[str, SharedRelationship],
+    incoming_blueprints: dict[str, TableBlueprint] | None = None,
 ) -> dict[str, str]:
     """Current DB asset hashes with the push's incoming assets layered on."""
     effective = semantic_store.asset_hashes(session)
@@ -331,6 +341,9 @@ def _effective_hashes(
             f"relationship/{n}": shared_relationship_hash(r)
             for n, r in incoming_relationships.items()
         }
+    )
+    effective.update(
+        {f"blueprint/{n}": shared_blueprint_hash(b) for n, b in (incoming_blueprints or {}).items()}
     )
     return effective
 
@@ -354,13 +367,20 @@ def _stale_map(
     incoming_relationships: dict[str, SharedRelationship] | None = None,
 ) -> dict[str, list[str]]:
     """Published-lens staleness against the effective hashes."""
-    provenances = {
-        name: bundle.semantic_model.shared_provenance.assets
+    published = [
+        (name, bundle)
         for (name, _dn, _desc, bundle) in store.list_published(session)
         if bundle.semantic_model.shared_provenance is not None
+    ]
+    provenances = {
+        name: bundle.semantic_model.shared_provenance.assets  # type: ignore[union-attr]
+        for name, bundle in published
     }
     return plan_engine.stale_lenses(
-        provenances, effective, _effective_relationship_pairs(session, incoming_relationships)
+        provenances,
+        effective,
+        _effective_relationship_pairs(session, incoming_relationships),
+        {name: apply_engine.lens_tables(bundle.semantic_model) for name, bundle in published},
     )
 
 
@@ -422,6 +442,18 @@ def _declared_connections(
     except ValueError as exc:
         return None, str(exc)
     return dict(project.connections), None
+
+
+def _declared_groups(files: dict[str, str]) -> list[str] | None:
+    """The push's own dst.yaml ``groups:``, which apply stores before any lens
+    compiles — None when the push carries no dst.yaml (or an unparseable one,
+    which ``_declared_connections`` reports): the stored list then holds."""
+    if "dst.yaml" not in files:
+        return None
+    try:
+        return list(parse_project_yaml(files["dst.yaml"]).groups)
+    except ValueError:
+        return None
 
 
 def _unselected_definitions(
@@ -541,6 +573,137 @@ def _unselected_stale_error(lens: str, assets: list[str]) -> str:
     )
 
 
+def _blueprint_paths(semantic_files: dict[str, str]) -> dict[str, str]:
+    """{blueprint table: the pushed path that authors it}."""
+    out: dict[str, str] = {}
+    for path, content in semantic_files.items():
+        try:
+            out.update({n: path for n in parse_blueprint_files({path: content})})
+        except ValueError:
+            continue
+    return out
+
+
+def _pushed_certified(files: dict[str, str]) -> dict[str, list[str]]:
+    """{pushed lens: the SQL of the certified answers its file carries} — only
+    for lenses whose push carries certified_answers.yaml."""
+    out: dict[str, list[str]] = {}
+    for lens, tree in split_by_lens(files).items():
+        try:
+            source = load_lens_source(tree)
+        except (ValueError, KeyError):
+            continue
+        if source.certified_answers is not None:
+            out[lens] = [str(a.get("sql") or "") for a in source.certified_answers if a.get("sql")]
+    return out
+
+
+def _check_tables(
+    session: Session,
+    files: dict[str, str],
+    *,
+    incoming_entities: dict[str, SharedEntity],
+    incoming_relationships: dict[str, SharedRelationship],
+    incoming_blueprints: dict[str, TableBlueprint],
+    incoming_configs: dict[str, LensConfig],
+    incoming_profiles: dict[str, list[TableProfile]],
+    incoming_connections: dict[str, ConnectionDecl] | None,
+    introduced: set[str],
+) -> blueprint_checks.Findings:
+    """``introduced``: the blueprints this push adds or changes — only their
+    failures are errors; a stored one the warehouse moved under warns."""
+    project = blueprint_checks.gather(
+        session,
+        incoming_entities=incoming_entities,
+        incoming_relationships=incoming_relationships,
+        incoming_blueprints=incoming_blueprints,
+        incoming_configs=incoming_configs,
+        incoming_certified=_pushed_certified(files),
+        incoming_profiles=incoming_profiles,
+        incoming_connections={n: d.type for n, d in (incoming_connections or {}).items()},
+    )
+    return blueprint_checks.run(session, project, introduced=introduced)
+
+
+def _blueprint_rows(
+    session: Session,
+    files: dict[str, str],
+    semantic_files: dict[str, str],
+    *,
+    incoming_entities: dict[str, SharedEntity],
+    incoming_relationships: dict[str, SharedRelationship],
+    incoming_blueprints: dict[str, TableBlueprint],
+    incoming_configs: dict[str, LensConfig],
+    incoming_profiles: dict[str, list[TableProfile]],
+    incoming_connections: dict[str, ConnectionDecl] | None,
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """The plan rows for table blueprints. An error marks the blueprint's own
+    file row invalid (apply aborts on it, so plan must exit 1); warnings and
+    hints ride their own rows; the coverage line closes the section. Every row
+    carries a `path`, so a client that predates them still prints a line."""
+    stored = semantic_store.asset_hashes(session)
+    findings = _check_tables(
+        session,
+        files,
+        incoming_entities=incoming_entities,
+        incoming_relationships=incoming_relationships,
+        incoming_blueprints=incoming_blueprints,
+        incoming_configs=incoming_configs,
+        incoming_profiles=incoming_profiles,
+        incoming_connections=incoming_connections,
+        introduced={
+            name
+            for name, blueprint in incoming_blueprints.items()
+            if stored.get(f"blueprint/{name}") != shared_blueprint_hash(blueprint)
+        },
+    )
+    paths = _blueprint_paths(semantic_files)
+    out: list[dict[str, object]] = []
+    for name, errors in sorted(findings.errors.items()):
+        path = paths.get(name) or f"{TABLE_DIR}/{table_slug(name)}.yaml"
+        error = "; ".join(errors)
+        row = next(
+            (r for r in rows if r.get("scope") == "semantic" and r.get("path") == path), None
+        )
+        if row is not None:
+            row.update({"status": "invalid", "diff": "", "error": error})
+        else:
+            out.append({"scope": "semantic", "path": path, "status": "invalid", "error": error})
+    out += [
+        {
+            "scope": "semantic",
+            "path": paths.get(name) or f"{TABLE_DIR}/{table_slug(name)}.yaml",
+            "status": "warning",
+            "warning": w,
+        }
+        for name, w in zip(
+            [n for n in sorted(findings.drifted)],
+            [w for w in findings.warnings if w.startswith("DRIFT: ")],
+            strict=True,
+        )
+    ]
+    out += [
+        {"scope": "semantic", "path": TABLE_DIR, "status": "warning", "warning": w}
+        for w in findings.warnings
+        if not w.startswith("DRIFT: ")
+    ]
+    out += [
+        {"scope": "semantic", "path": TABLE_DIR, "status": "hint", "hint": h}
+        for h in findings.hints
+    ]
+    out.append(
+        {
+            "scope": "semantic",
+            "path": TABLE_DIR,
+            "status": "coverage",
+            "coverage": {"covered": findings.covered, "in_scope": findings.in_scope},
+            "note": findings.coverage_line(),
+        }
+    )
+    return out
+
+
 @router.post("/plan")
 def plan_project(
     body: ProjectFiles,
@@ -583,6 +746,7 @@ def plan_project(
     incoming_entities: dict[str, SharedEntity] = {}
     incoming_definitions: dict[str, Definition] = {}
     incoming_relationships: dict[str, SharedRelationship] = {}
+    incoming_blueprints: dict[str, TableBlueprint] = {}
     semantic_ok = not semantic_errors
     try:
         # Cross-file checks (one name, two files) only once every file parses.
@@ -590,6 +754,7 @@ def plan_project(
             incoming_entities, incoming_definitions, incoming_relationships = parse_semantic_files(
                 incoming_semantic
             )
+            incoming_blueprints = parse_blueprint_files(incoming_semantic)
     except ValueError as exc:
         semantic_ok = False
         out.append({"scope": "semantic", "status": "invalid", "error": str(exc)})
@@ -602,6 +767,7 @@ def plan_project(
             {f"entity/{n}" for n in incoming_entities}
             | {f"definition/{t}" for t in incoming_definitions}
             | {f"relationship/{n}" for n in incoming_relationships}
+            | {f"blueprint/{n}" for n in incoming_blueprints}
         )
         db_keys = semantic_store.asset_hashes(session)
         for key in plan_engine.semantic_orphans(db_keys, incoming_keys):
@@ -615,7 +781,11 @@ def plan_project(
             )
 
     effective = _effective_hashes(
-        session, incoming_entities, incoming_definitions, incoming_relationships
+        session,
+        incoming_entities,
+        incoming_definitions,
+        incoming_relationships,
+        incoming_blueprints,
     )
     stale = _stale_map(session, effective, incoming_relationships)
     certified_stale = _certified_stale(session, effective)
@@ -628,6 +798,7 @@ def plan_project(
     # layered in because apply lands them BEFORE any lens compiles.
     incoming = split_by_lens(body.files)
     incoming_connections, project_error = _declared_connections(body.files)
+    incoming_groups = _declared_groups(body.files)
     # Probe artifacts the push carries layer in like its connections do:
     # apply lands them before any lens compiles, and an `expose:` grant
     # resolves against them.
@@ -654,6 +825,8 @@ def plan_project(
                     asset_hashes=effective,
                     incoming_profiles=pushed_profiles,
                     warnings_out=expose_warnings,
+                    incoming_blueprints=incoming_blueprints,
+                    incoming_groups=incoming_groups,
                 )
             exposes, expose_notes = apply_engine.expose_plan_notes(
                 session, source.config, incoming=pushed_profiles
@@ -702,6 +875,8 @@ def plan_project(
         asset_hashes=effective,
         incoming_connections=incoming_connections or None,
         skip=set(incoming),
+        incoming_blueprints=incoming_blueprints,
+        incoming_groups=incoming_groups,
     )
     for lens in sorted(set(stale) - set(incoming)):
         errors = broken_recompiles.get(lens, [])
@@ -829,6 +1004,41 @@ def plan_project(
                 "scope": "semantic",
                 "status": "hint",
                 "hint": "shared definitions selected by no lens: " + ", ".join(unselected),
+            }
+        )
+    # Table blueprints: the checks apply re-runs, with the coverage line. Only
+    # once the semantic files parse — a broken file already names its error.
+    if semantic_ok:
+        out += _blueprint_rows(
+            session,
+            body.files,
+            incoming_semantic,
+            incoming_entities=incoming_entities,
+            incoming_relationships=incoming_relationships,
+            incoming_blueprints=incoming_blueprints,
+            incoming_configs=incoming_configs,
+            incoming_profiles=pushed_profiles,
+            incoming_connections=incoming_connections,
+            rows=out,
+        )
+    # A Cube-backed project: the overlay against Cube's own /v1/meta, per lens,
+    # with the keys-read table. Cube unreachable is one provider_down error;
+    # the file rows above were still checked.
+    if cube_plan.is_cube_backed(body.files):
+        out += cube_plan.check(body.files).rows()
+    # The lane each lens of the push will serve on, and what decided it.
+    if incoming_configs:
+        backed = cube_plan.backed_lenses(body.files)
+        out.append(
+            {
+                "scope": "serving",
+                "lanes": {
+                    name: {
+                        "lane": lanes.lane(config, cube_backed=name in backed),
+                        "why": lanes.why(config, cube_backed=name in backed),
+                    }
+                    for name, config in sorted(incoming_configs.items())
+                },
             }
         )
     # A clean plan is not a clean bill of health. Name the gates apply will run
@@ -1025,6 +1235,10 @@ def _apply(
                 {"scope": "demo", "applied": demo_applied, "warnings": demo_warnings, "errors": []}
             )
         # The probe settings serving reads (profile age against max_age).
+        # The caller groups a `hide` entry may except: stored before any lens
+        # compiles, so every compile below checks the names against them.
+        if groups_applied := caller_groups.apply(session, project.groups):
+            out.append({"scope": "groups", "applied": groups_applied, "warnings": [], "errors": []})
         probe_applied, probe_warnings = probe_settings.apply(session, project.probe)
         if probe_applied:
             out.append(
@@ -1053,7 +1267,14 @@ def _apply(
                 "errors": [],
             }
         )
+    # The latest `dst monitor` run, summarised for /ready's data_quality block.
+    dq_applied, dq_warnings = monitor_status.apply(session, body.files)
+    if dq_applied or dq_warnings:
+        out.append(
+            {"scope": "data_quality", "applied": dq_applied, "warnings": dq_warnings, "errors": []}
+        )
     semantic_files = split_semantic(body.files)
+    landed_blueprints: set[str] = set()
     if semantic_files:
         try:
             applied, semantic_warnings = apply_engine.apply_semantic_assets(session, semantic_files)
@@ -1065,6 +1286,61 @@ def _apply(
         out.append(
             {"scope": "semantic", "applied": applied, "warnings": semantic_warnings, "errors": []}
         )
+        # "created blueprint/<table>" / "updated blueprint/<table>": the ones
+        # this push introduces, whose failures abort.
+        landed_blueprints = {a.split("blueprint/", 1)[1] for a in applied if " blueprint/" in a}
+    # Table blueprints: plan's checks, re-run against what this apply landed
+    # (connections, profiles, shared assets — all staged on this session). A
+    # false declaration aborts the apply; a missing blueprint never does.
+    if selection is None or selection.scope in ("all", "semantic"):
+        configs: dict[str, LensConfig] = {}
+        for lens_name, tree in split_by_lens(body.files).items():
+            try:
+                configs[lens_name] = load_lens_source(tree).config
+            except (ValueError, KeyError):
+                continue  # the lens row reports it
+        findings = _check_tables(
+            session,
+            body.files,
+            incoming_entities={},
+            incoming_relationships={},
+            incoming_blueprints={},
+            incoming_configs=configs,
+            incoming_profiles=pushed_profiles,
+            incoming_connections=None,
+            introduced=landed_blueprints,
+        )
+        tables_row: dict[str, object] = {
+            "scope": "tables",
+            "applied": [findings.coverage_line()],
+            "warnings": list(findings.warnings),
+            "errors": [e for _name, errors in sorted(findings.errors.items()) for e in errors],
+        }
+        if tables_row["errors"]:
+            tables_row["action"] = "rejected"
+            out.append(tables_row)
+            return _abort(session, out)
+        out.append(tables_row)
+    # A Cube-backed project: the same checks plan ran, against Cube as it is
+    # now; an error refuses the apply, and every lens it serves is stamped
+    # with the model_version its views compile to.
+    cube_check: cube_plan.CubeCheck | None = None
+    if cube_plan.is_cube_backed(body.files):
+        cube_check = cube_plan.check(body.files)
+        cube_row: dict[str, object] = {
+            "scope": "cube",
+            "applied": [
+                f"{lens}: model {m.model_version[:12]}, overlay {m.overlay_version[:12]}"
+                for lens, m in sorted(cube_check.models.items())
+            ],
+            "warnings": [i.message for i in cube_check.issues if i.severity == "warning"],
+            "errors": [i.message for i in cube_check.errors],
+        }
+        if cube_check.errors:
+            cube_row["action"] = "rejected"
+            out.append(cube_row)
+            return _abort(session, out)
+        out.append(cube_row)
     rejected: set[str] = set()
     incoming_trees = split_by_lens(body.files)
     if only is not None:
@@ -1154,6 +1430,26 @@ def _apply(
             if lens in published
             and not apply_engine.reads_landed_table(published[lens], landed_tables)
         }
+    # Identical files over a Cube model (or overlay) that moved: restamp. A
+    # stamped lens the push no longer serves through Cube (no overlay, or the
+    # overlay and its lens.yaml no longer name it) republishes without the
+    # stamp, so it serves typed again; a stale stamp would keep it on Cube.
+    stamped = {
+        name: bundle.semantic_model.cube
+        for name, _dn, _desc, bundle in store.list_published(session)
+    }
+    models = cube_check.models if cube_check is not None else {}
+    cube_moved: set[str] = set()
+    for lens in set(models) | {name for name in incoming_trees if stamped.get(name)}:
+        stamp, model = stamped.get(lens), models.get(lens)
+        if model is None or stamp is None:
+            cube_moved.add(lens)
+        elif (stamp.model_version, stamp.overlay_version) != (
+            model.model_version,
+            model.overlay_version,
+        ):
+            cube_moved.add(lens)
+    unchanged -= cube_moved
     if only is not None:
         # The lenses not selected: unchanged by decree, whatever their files
         # say — the refusals above guarantee none of them is stale.
@@ -1186,8 +1482,14 @@ def _apply(
             gate_override=gate_override,
             allow_cases=allow_cases,
             incoming_profiles=pushed_profiles,
+            cube_stamp=cube_check.stamp(lens) if cube_check is not None else None,
         )
-        if result.action == "updated" and lens in same_files and not result.errors:
+        if (
+            result.action == "updated"
+            and lens in same_files
+            and lens not in cube_moved
+            and not result.errors
+        ):
             result.action = "unchanged"
         out.append(_lens_row(result))
         if progress:

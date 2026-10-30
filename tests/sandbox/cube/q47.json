@@ -1,0 +1,2194 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"budget_vs_actual.month\"], \"limit\": 1, \"order\": [[\"budget_vs_actual.month\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "budget_vs_actual__month": "budget_vs_actual.month"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', CAST(\"budget_vs_actual\".month || '-01' AS DATE)::timestamptz) \"budget_vs_actual__month\"\n    FROM\n      (WITH h AS (SELECT month, entity, round(sum(revenue_eur), 2) AS a1, round(sum(revenue_refund_date_eur), 2) AS a2\n           FROM (WITH ord AS (SELECT order_month_local AS month, sum(net_of_vat_eur) AS v, sum(refunds_eur) AS r FROM intermediate.int_orders_enriched GROUP BY 1),\n           ref AS (SELECT strftime(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Helsinki', '%Y-%m') AS month, sum(amount_eur) AS r\n                   FROM staging.stg_shopify__refunds GROUP BY 1)\n           SELECT month, entity, revenue_stream, revenue_eur, revenue_eur AS revenue_refund_date_eur FROM intermediate.int_revenue_by_entity_month\n           WHERE revenue_stream NOT IN ('Intercompany', 'Webshop')\n           UNION ALL\n           SELECT coalesce(ord.month, ref.month), 'Nordlund Verkkokauppa', 'Webshop', round(coalesce(ord.v, 0) - coalesce(ord.r, 0) / 1.255, 2),\n                  round(coalesce(ord.v, 0) - coalesce(ref.r, 0) / 1.255, 2)\n           FROM ord FULL JOIN ref USING (month)) GROUP BY 1, 2)\nSELECT b.month, b.entity, b.line_item, b.budget_eur,\n       CASE WHEN b.entity = 'Nordlund Verkkokauppa' THEN h.a1 ELSE b.actual_eur END AS actual_eur,\n       CASE WHEN b.entity = 'Nordlund Verkkokauppa' THEN h.a2 ELSE b.actual_eur END AS actual_refund_date_eur\nFROM marts_finance.mart_budget_vs_actual_monthly b LEFT JOIN h USING (month, entity)\nWHERE b.month <= '2026-08') AS \"budget_vs_actual\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"group_revenue_handbook_monthly.month\"], \"limit\": 1, \"order\": [[\"group_revenue_handbook_monthly.month\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "group_revenue_handbook_monthly__month": "group_revenue_handbook_monthly.month"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', CAST(\"group_revenue_handbook_monthly\".month || '-01' AS DATE)::timestamptz) \"group_revenue_handbook_monthly__month\"\n    FROM\n      (WITH ord AS (SELECT order_month_local AS month, sum(net_of_vat_eur) AS v, sum(refunds_eur) AS r FROM intermediate.int_orders_enriched GROUP BY 1),\nref AS (SELECT strftime(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Helsinki', '%Y-%m') AS month, sum(amount_eur) AS r\n        FROM staging.stg_shopify__refunds GROUP BY 1)\nSELECT month, entity, revenue_stream, revenue_eur, revenue_eur AS revenue_refund_date_eur FROM intermediate.int_revenue_by_entity_month\nWHERE revenue_stream NOT IN ('Intercompany', 'Webshop')\nUNION ALL\nSELECT coalesce(ord.month, ref.month), 'Nordlund Verkkokauppa', 'Webshop', round(coalesce(ord.v, 0) - coalesce(ord.r, 0) / 1.255, 2),\n       round(coalesce(ord.v, 0) - coalesce(ref.r, 0) / 1.255, 2)\nFROM ord FULL JOIN ref USING (month)) AS \"group_revenue_handbook_monthly\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_orders.created_at_local\"], \"limit\": 1, \"order\": [[\"webshop_orders.created_at_local\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_orders__created_at_local": "webshop_orders.created_at_local"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"webshop_orders\".created_at_local::timestamptz) \"webshop_orders__created_at_local\"\n    FROM\n      intermediate.int_orders_enriched AS \"webshop_orders\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_orders.created_at_utc\"], \"limit\": 1, \"order\": [[\"webshop_orders.created_at_utc\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_orders__created_at_utc": "webshop_orders.created_at_utc"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"webshop_orders\".created_at_utc::timestamptz) \"webshop_orders__created_at_utc\"\n    FROM\n      intermediate.int_orders_enriched AS \"webshop_orders\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_orders.order_month_local\"], \"limit\": 1, \"order\": [[\"webshop_orders.order_month_local\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_orders__order_month_local": "webshop_orders.order_month_local"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', CAST(\"webshop_orders\".order_month_local || '-01' AS DATE)::timestamptz) \"webshop_orders__order_month_local\"\n    FROM\n      intermediate.int_orders_enriched AS \"webshop_orders\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_orders.order_month_utc\"], \"limit\": 1, \"order\": [[\"webshop_orders.order_month_utc\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_orders__order_month_utc": "webshop_orders.order_month_utc"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', CAST(\"webshop_orders\".order_month_utc || '-01' AS DATE)::timestamptz) \"webshop_orders__order_month_utc\"\n    FROM\n      intermediate.int_orders_enriched AS \"webshop_orders\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_products.category\"], \"limit\": 1, \"measures\": [\"webshop_order_lines.line_refund_rate\"], \"order\": [[\"webshop_order_lines.line_refund_rate\", \"desc\"]], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"webshop_orders.created_at_local\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_order_lines__line_refund_rate": "webshop_order_lines.line_refund_rate",
+      "webshop_products__category": "webshop_products.category"
+     },
+     "sql": [
+      "SELECT\n      \"webshop_products\".category \"webshop_products__category\", sum(\"webshop_order_lines\".refund_allocated_eur) / NULLIF(sum(\"webshop_order_lines\".line_total_eur), 0) \"webshop_order_lines__line_refund_rate\"\n    FROM\n      (SELECT l.*, coalesce(o.refunds_eur, 0) * l.line_total_eur / nullif(sum(l.line_total_eur) OVER (PARTITION BY l.order_id), 0) AS refund_allocated_eur\nFROM (SELECT * FROM (SELECT * FROM raw_shopify.order_line QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id, line_number ORDER BY _fivetran_synced DESC) = 1) AS webshop_order_lines\nWHERE NOT _fivetran_deleted) AS l LEFT JOIN intermediate.int_orders_enriched AS o ON o.order_id = l.order_id) AS \"webshop_order_lines\"\nLEFT JOIN (SELECT * FROM (SELECT * FROM raw_shopify.product QUALIFY ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY _fivetran_synced DESC) = 1) AS webshop_products\nWHERE NOT _fivetran_deleted) AS \"webshop_products\" ON \"webshop_order_lines\".product_id = \"webshop_products\".product_id\nLEFT JOIN intermediate.int_orders_enriched AS \"webshop_orders\" ON \"webshop_order_lines\".order_id = \"webshop_orders\".order_id  WHERE (\"webshop_orders\".created_at_local >= ?::timestamptz AND \"webshop_orders\".created_at_local <= ?::timestamptz) GROUP BY 1 ORDER BY 2 DESC LIMIT 1",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_products.category\"], \"limit\": 51, \"measures\": [\"webshop_order_lines.line_refund_rate\"], \"order\": [[\"webshop_order_lines.line_refund_rate\", \"desc\"]], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"webshop_orders.created_at_local\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_order_lines__line_refund_rate": "webshop_order_lines.line_refund_rate",
+      "webshop_products__category": "webshop_products.category"
+     },
+     "sql": [
+      "SELECT\n      \"webshop_products\".category \"webshop_products__category\", sum(\"webshop_order_lines\".refund_allocated_eur) / NULLIF(sum(\"webshop_order_lines\".line_total_eur), 0) \"webshop_order_lines__line_refund_rate\"\n    FROM\n      (SELECT l.*, coalesce(o.refunds_eur, 0) * l.line_total_eur / nullif(sum(l.line_total_eur) OVER (PARTITION BY l.order_id), 0) AS refund_allocated_eur\nFROM (SELECT * FROM (SELECT * FROM raw_shopify.order_line QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id, line_number ORDER BY _fivetran_synced DESC) = 1) AS webshop_order_lines\nWHERE NOT _fivetran_deleted) AS l LEFT JOIN intermediate.int_orders_enriched AS o ON o.order_id = l.order_id) AS \"webshop_order_lines\"\nLEFT JOIN (SELECT * FROM (SELECT * FROM raw_shopify.product QUALIFY ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY _fivetran_synced DESC) = 1) AS webshop_products\nWHERE NOT _fivetran_deleted) AS \"webshop_products\" ON \"webshop_order_lines\".product_id = \"webshop_products\".product_id\nLEFT JOIN intermediate.int_orders_enriched AS \"webshop_orders\" ON \"webshop_order_lines\".order_id = \"webshop_orders\".order_id  WHERE (\"webshop_orders\".created_at_local >= ?::timestamptz AND \"webshop_orders\".created_at_local <= ?::timestamptz) GROUP BY 1 ORDER BY 2 DESC LIMIT 51",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"webshop_revenue_events.event_at\"], \"limit\": 1, \"order\": [[\"webshop_revenue_events.event_at\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "webshop_revenue_events__event_at": "webshop_revenue_events.event_at"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"webshop_revenue_events\".event_at::timestamptz) \"webshop_revenue_events__event_at\"\n    FROM\n      (SELECT 'order' AS kind, o.order_id, o.channel, o.created_at_local AS event_at, o.net_of_vat_eur AS amount_ex_vat_eur\nFROM intermediate.int_orders_enriched o\nUNION ALL\nSELECT 'refund', r.order_id, o.channel, r.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Helsinki',\n       - round(r.amount_eur / 1.255, 2)\nFROM staging.stg_shopify__refunds r LEFT JOIN intermediate.int_orders_enriched o USING (order_id)) AS \"webshop_revenue_events\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "Board budget (approved December 2025, fixed, set at the planning rate 10.80 EUR/SEK) vs actual revenue by entity and month. Actuals are at the monthly average rate, so Bergström's variance carries an FX component. The budget is not the target - targets live in revenue_vs_target. The actual is the finance-handbook revenue (group_revenue_handbook_monthly) - the webshop line is ex-VAT, Helsinki time and net of refunds - netted against their own orders' month in actual_vs_budget_eur, in the month issued in actual_refund_date_eur (overlay ambiguous webshop_refund_basis); the mart's own webshop actual (GL account 3040, UTC, refunds not netted) is not served.",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "budget_vs_actual.month",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "month (text YYYY-MM cast to a date)",
+      "suggestFilterValues": true,
+      "title": "budget vs actual month (text YYYY-MM cast to a date)",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "company",
+         "business"
+        ],
+        "dictionary": [
+         "Bergström Rör AB",
+         "Nordlund LVI Oy",
+         "Nordlund Verkkokauppa"
+        ]
+       }
+      },
+      "name": "budget_vs_actual.entity",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Entity",
+      "suggestFilterValues": true,
+      "title": "budget vs actual Entity",
+      "type": "string"
+     },
+     {
+      "description": "always Revenue",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "dictionary": [
+         "Revenue"
+        ]
+       }
+      },
+      "name": "budget_vs_actual.line_item",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Line Item",
+      "suggestFilterValues": true,
+      "title": "budget vs actual Line Item",
+      "type": "string"
+     },
+     {
+      "description": "board budget, planning FX 10.80",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "budget_vs_actual.budget_eur_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "budget_eur (the column)",
+      "suggestFilterValues": true,
+      "title": "budget vs actual budget_eur (the column)",
+      "type": "number"
+     },
+     {
+      "description": "actual revenue, average FX (handbook basis; webshop refunds netted against their orders' month)",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "budget_vs_actual.actual_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Actual Eur",
+      "suggestFilterValues": true,
+      "title": "budget vs actual Actual Eur",
+      "type": "number"
+     },
+     {
+      "description": "actual revenue, average FX (handbook basis; webshop refunds netted in the month issued)",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "budget_vs_actual.actual_refund_date_eur_value",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Actual Refund Date Eur Value",
+      "suggestFilterValues": true,
+      "title": "budget vs actual Actual Refund Date Eur Value",
+      "type": "number"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "budget",
+         "budgeted revenue"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "budget_vs_actual.budget_eur",
+      "public": true,
+      "shortTitle": "board budget",
+      "title": "budget vs actual board budget",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "handbook revenue by entity and month (ex-VAT, average FX; the webshop net of the refunds on the month's orders); actual_refund_date_eur nets webshop refunds in the month issued (ambiguous webshop_refund_basis)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "currency": "EUR"
+       }
+      },
+      "name": "budget_vs_actual.actual_vs_budget_eur",
+      "public": true,
+      "shortTitle": "actual revenue (budget basis), webshop refunds netted against their orders' month",
+      "title": "budget vs actual actual revenue (budget basis), webshop refunds netted against their orders' month",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "as actual_vs_budget_eur, except that the webshop line nets the refunds issued in the month (refund date, Helsinki); the other entities are identical",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "currency": "EUR"
+       }
+      },
+      "name": "budget_vs_actual.actual_refund_date_eur",
+      "public": true,
+      "shortTitle": "actual revenue (budget basis), webshop refunds netted by refund date",
+      "title": "budget vs actual actual revenue (budget basis), webshop refunds netted by refund date",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "variance to budget",
+         "over or under budget"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "budget_vs_actual.budget_variance_eur",
+      "public": true,
+      "shortTitle": "budget variance, webshop refunds netted against their orders' month",
+      "title": "budget vs actual budget variance, webshop refunds netted against their orders' month",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "currency": "EUR"
+       }
+      },
+      "name": "budget_vs_actual.budget_variance_refund_date_eur",
+      "public": true,
+      "shortTitle": "budget variance, webshop refunds netted by refund date",
+      "title": "budget vs actual budget variance, webshop refunds netted by refund date",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "budget attainment"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "budget_vs_actual.attainment_vs_budget",
+      "public": true,
+      "shortTitle": "attainment vs budget, webshop refunds netted against their orders' month",
+      "title": "budget vs actual attainment vs budget, webshop refunds netted against their orders' month",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "better": "higher"
+       }
+      },
+      "name": "budget_vs_actual.attainment_vs_budget_refund_date",
+      "public": true,
+      "shortTitle": "attainment vs budget, webshop refunds netted by refund date",
+      "title": "budget vs actual attainment vs budget, webshop refunds netted by refund date",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per month and entity, 2026 only",
+      "key": [
+       "month",
+       "entity"
+      ],
+      "population": "months with actuals loaded, January to August 2026; later months carry a budget and no actual",
+      "system": "dbt (board budget)"
+     }
+    },
+    "name": "budget_vs_actual",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "budget vs actual",
+    "type": "cube"
+   },
+   {
+    "description": "Group revenue per entity, revenue stream and month in EUR, ex-VAT, as the group finance handbook recognises it (world/notes/08-finance-handbook.md). Contracting and service contracts on invoice from the Netvisor GL (NETVISOR journal only), Bergström Rör on invoice from the Fortnox export at the monthly average EUR/SEK rate, the webshop on the order in Helsinki time, net of VAT AND net of refunds (refunds ex-VAT) - netted against their own orders' month in revenue_eur, in the month they were issued in revenue_refund_date_eur (the handbook does not say which; overlay ambiguous webshop_refund_basis). Intercompany is eliminated. This is the carrier of group revenue and of revenue by entity / stream; the GL-booked webshop line (UTC month, refunds not netted) is group_revenue_monthly.",
+    "dimensions": [
+     {
+      "description": "calendar month, YYYY-MM (the webshop's in Helsinki time)",
+      "isVisible": true,
+      "name": "group_revenue_handbook_monthly.month",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "month (text YYYY-MM cast to a date)",
+      "suggestFilterValues": true,
+      "title": "group revenue (finance handbook) month (text YYYY-MM cast to a date)",
+      "type": "time"
+     },
+     {
+      "description": "the operating company the revenue belongs to",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "company",
+         "business",
+         "operating company",
+         "legal entity"
+        ],
+        "dictionary": [
+         "Nordlund LVI Oy",
+         "Nordlund Verkkokauppa",
+         "Bergström Rör AB"
+        ]
+       }
+      },
+      "name": "group_revenue_handbook_monthly.entity",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Entity",
+      "suggestFilterValues": true,
+      "title": "group revenue (finance handbook) Entity",
+      "type": "string"
+     },
+     {
+      "description": "Contracting, Service contracts or Webshop",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "stream",
+         "revenue line",
+         "line of business"
+        ],
+        "dictionary": [
+         "Contracting",
+         "Service contracts",
+         "Webshop"
+        ]
+       }
+      },
+      "name": "group_revenue_handbook_monthly.revenue_stream",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Revenue Stream",
+      "suggestFilterValues": true,
+      "title": "group revenue (finance handbook) Revenue Stream",
+      "type": "string"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "revenue in EUR ex-VAT by month as revenue_eur, except that the webshop line nets the refunds issued in the month (refund date, Helsinki) instead of the refunds on the month's orders; the other streams are identical",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "group revenue with refunds by refund date"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "group_revenue_handbook_monthly.revenue_refund_date_eur",
+      "public": true,
+      "shortTitle": "group revenue, webshop refunds netted by refund date",
+      "title": "group revenue (finance handbook) group revenue, webshop refunds netted by refund date",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "revenue in EUR ex-VAT by month, per the finance handbook (webshop net of refunds, Helsinki time; Bergström at the monthly average rate); summing across entities gives group revenue (intercompany already out). The webshop line nets refunds against their own orders' month; revenue_refund_date_eur nets them in the month issued (the ambiguous webshop_refund_basis)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "revenue",
+         "group revenue",
+         "net revenue",
+         "revenue ex-VAT",
+         "revenue by business",
+         "revenue by entity",
+         "sales revenue",
+         "turnover"
+        ],
+        "better": "higher",
+        "currency": "EUR"
+       }
+      },
+      "name": "group_revenue_handbook_monthly.revenue_eur",
+      "public": true,
+      "shortTitle": "group revenue, webshop refunds netted against their orders' month",
+      "title": "group revenue (finance handbook) group revenue, webshop refunds netted against their orders' month",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per entity, revenue stream and month (YYYY-MM)",
+      "key": [
+       "month",
+       "entity",
+       "revenue_stream"
+      ],
+      "population": "group revenue only - the three operating entities' external sales; intercompany sales (Nordlund LVI to Bergström) are excluded",
+      "system": "dbt (Netvisor GL + Fortnox + Shopify)"
+     }
+    },
+    "name": "group_revenue_handbook_monthly",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "group revenue (finance handbook)",
+    "type": "cube"
+   },
+   {
+    "description": "Webshop order lines with SKU, quantity, unit price (incl. VAT) and unit cost, read from the Shopify landing table because the staging model keeps re-synced duplicate versions (ticket DATA-188, open). Rows repeat once per Fivetran sync of a line (82,454 rows for 77,788 lines); deleted lines are filtered out and every money metric sums ONE value per distinct line, so the duplicates never inflate a figure; counts of orders use count distinct. Product revenue is ex-VAT (line_revenue_ex_vat_eur); line_revenue_eur is the gross line total incl. VAT. Periods are Helsinki time, filter on webshop_orders.created_at_local.",
+    "dimensions": [
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_order_lines.order_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Order ID",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Order ID",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "product"
+        ]
+       }
+      },
+      "name": "webshop_order_lines.product_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Product ID",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Product ID",
+      "type": "number"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "product code",
+         "article"
+        ]
+       }
+      },
+      "name": "webshop_order_lines.sku",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Sku",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Sku",
+      "type": "string"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_order_lines.quantity",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Quantity",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Quantity",
+      "type": "number"
+     },
+     {
+      "description": "incl. VAT",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_order_lines.unit_price_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Unit Price Eur",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Unit Price Eur",
+      "type": "number"
+     },
+     {
+      "description": "quantity x unit price, incl. VAT",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_order_lines.line_total_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Line Total Eur",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Line Total Eur",
+      "type": "number"
+     },
+     {
+      "description": "purchase cost per unit",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_order_lines.unit_cost_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Unit Cost Eur",
+      "suggestFilterValues": true,
+      "title": "webshop order lines Unit Cost Eur",
+      "type": "number"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "line totals ex-VAT (line_total_eur / 1.255, Finnish VAT 25.5 %), one value per distinct line - the revenue figure by product, SKU or category",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "product revenue",
+         "product sales",
+         "sales by product",
+         "revenue by product",
+         "sales by category",
+         "revenue by category"
+        ],
+        "better": "higher",
+        "clock": "webshop_orders.created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_order_lines.line_revenue_ex_vat_eur",
+      "public": true,
+      "shortTitle": "product revenue",
+      "title": "webshop order lines product revenue",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "line totals INCLUDING VAT, one value per distinct line - not revenue (revenue is ex-VAT, line_revenue_ex_vat_eur); use only when incl. VAT / gross is asked for",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "gross product sales",
+         "product sales incl VAT"
+        ],
+        "clock": "webshop_orders.created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_order_lines.line_revenue_eur",
+      "public": true,
+      "shortTitle": "product sales incl. VAT (gross line totals)",
+      "title": "webshop order lines product sales incl. VAT (gross line totals)",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "the order's refunds (incl. VAT, Shopify order_refund) spread over its lines by each line's share of the order total - Shopify refunds carry no line or product, so this is an allocation, not a per-item record; by order date (the refund belongs to the order), one value per distinct line",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "refunds by product",
+         "refunds by category",
+         "refund amount by product",
+         "returns by product"
+        ],
+        "better": "lower",
+        "clock": "webshop_orders.created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_order_lines.line_refunds_allocated_eur",
+      "public": true,
+      "shortTitle": "refunds by product (allocated, incl. VAT)",
+      "title": "webshop order lines refunds by product (allocated, incl. VAT)",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "allocated refunds over gross line totals (both incl. VAT) for orders placed in the window - the refund / return rate by product, SKU or category",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "refund rate by category",
+         "return rate by category",
+         "refund rate by product",
+         "return rate by product"
+        ],
+        "better": "lower",
+        "clock": "webshop_orders.created_at_local"
+       }
+      },
+      "name": "webshop_order_lines.line_refund_rate",
+      "public": true,
+      "shortTitle": "refund rate by product (allocated)",
+      "title": "webshop order lines refund rate by product (allocated)",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "product revenue ex-VAT minus the allocated refunds ex-VAT (/1.255) - product revenue on the finance handbook's net-of-refunds basis",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "product revenue net of refunds",
+         "category revenue net of refunds"
+        ],
+        "clock": "webshop_orders.created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_order_lines.line_revenue_net_of_refunds_ex_vat_eur",
+      "public": true,
+      "shortTitle": "product revenue net of refunds (allocated, ex-VAT)",
+      "title": "webshop order lines product revenue net of refunds (allocated, ex-VAT)",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "quantity sold",
+         "pieces sold"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "webshop_order_lines.units_sold",
+      "public": true,
+      "shortTitle": "units sold",
+      "title": "webshop order lines units sold",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "cost of goods",
+         "COGS"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_order_lines.line_cost_eur",
+      "public": true,
+      "shortTitle": "product cost",
+      "title": "webshop order lines product cost",
+      "type": "number"
+     },
+     {
+      "aggType": "countDistinct",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "orders with product"
+        ]
+       }
+      },
+      "name": "webshop_order_lines.orders_with_product",
+      "public": true,
+      "shortTitle": "orders containing the product",
+      "title": "webshop order lines orders containing the product",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per order line per sync version (duplicates per line are superseded syncs)",
+      "key": [
+       "order_id",
+       "line_number"
+      ],
+      "population": "lines of paid webshop orders, every sync version kept; deleted lines excluded; line_total_eur is incl. VAT like the order total; product revenue (line_revenue_ex_vat_eur) is ex-VAT",
+      "system": "Shopify"
+     }
+    },
+    "name": "webshop_order_lines",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "webshop order lines",
+    "type": "cube"
+   },
+   {
+    "description": "One row per webshop (Shopify) order with every money reading on it: gross_eur is the order total INCLUDING 25.5 % VAT (what Shopify and fct_orders call total), refunds_eur the refunds later issued against the order, fees_eur the Stripe card fee, net_of_refunds_eur = gross - refunds, net_of_vat_eur the ex-VAT value (the revenue basis). created_at_utc is UTC; created_at_local and order_month_local are Finnish time, which moves a few late-evening orders to the next day. A webshop day, month or quarter is Helsinki time: filter calendar periods on created_at_local (the meta.dst.clock of every measure), never on created_at_utc. channel is b2c_card (consumers paying by card) or b2b_invoice (installers and businesses paying by invoice).",
+    "dimensions": [
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_orders.order_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Order ID",
+      "suggestFilterValues": true,
+      "title": "webshop orders Order ID",
+      "type": "number"
+     },
+     {
+      "description": "order instant in UTC - not the webshop calendar; a webshop day/month/quarter is Helsinki time (created_at_local); use only when UTC is asked for",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "clock": {
+         "meaning": "order placed",
+         "timezone": "UTC"
+        }
+       }
+      },
+      "name": "webshop_orders.created_at_utc",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Created at Utc",
+      "suggestFilterValues": true,
+      "title": "webshop orders Created at Utc",
+      "type": "time"
+     },
+     {
+      "description": "order time in Finnish time (Europe/Helsinki) - the webshop calendar (\"August\" means Helsinki time); the time dimension for every webshop period",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "clock": {
+         "meaning": "order placed, Finnish time",
+         "timezone": "Europe/Helsinki"
+        }
+       }
+      },
+      "name": "webshop_orders.created_at_local",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Created at Local",
+      "suggestFilterValues": true,
+      "title": "webshop orders Created at Local",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "name": "webshop_orders.order_month_utc",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "order month utc (text YYYY-MM cast to a date)",
+      "suggestFilterValues": true,
+      "title": "webshop orders order month utc (text YYYY-MM cast to a date)",
+      "type": "time"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "local month",
+         "Finnish month"
+        ]
+       }
+      },
+      "name": "webshop_orders.order_month_local",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "order month local (text YYYY-MM cast to a date)",
+      "suggestFilterValues": true,
+      "title": "webshop orders order month local (text YYYY-MM cast to a date)",
+      "type": "time"
+     },
+     {
+      "description": "b2c_card or b2b_invoice",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "payment channel",
+         "customer type",
+         "order channel"
+        ],
+        "dictionary": [
+         "b2c_card",
+         "b2b_invoice"
+        ],
+        "value_aliases": [
+         {
+          "alias": "card",
+          "value": "b2c_card"
+         },
+         {
+          "alias": "card customers",
+          "value": "b2c_card"
+         },
+         {
+          "alias": "consumers",
+          "value": "b2c_card"
+         },
+         {
+          "alias": "households",
+          "value": "b2c_card"
+         },
+         {
+          "alias": "b2c",
+          "value": "b2c_card"
+         },
+         {
+          "alias": "invoice",
+          "value": "b2b_invoice"
+         },
+         {
+          "alias": "invoice customers",
+          "value": "b2b_invoice"
+         },
+         {
+          "alias": "installers",
+          "value": "b2b_invoice"
+         },
+         {
+          "alias": "installer customers",
+          "value": "b2b_invoice"
+         },
+         {
+          "alias": "business customers",
+          "value": "b2b_invoice"
+         },
+         {
+          "alias": "b2b",
+          "value": "b2b_invoice"
+         }
+        ]
+       }
+      },
+      "name": "webshop_orders.channel",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Channel",
+      "suggestFilterValues": true,
+      "title": "webshop orders Channel",
+      "type": "string"
+     },
+     {
+      "description": "order total incl. VAT",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_orders.gross_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Gross Eur",
+      "suggestFilterValues": true,
+      "title": "webshop orders Gross Eur",
+      "type": "number"
+     },
+     {
+      "description": "refunds issued against the order",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_orders.refunds_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Refunds Eur",
+      "suggestFilterValues": true,
+      "title": "webshop orders Refunds Eur",
+      "type": "number"
+     },
+     {
+      "description": "Stripe fee on the card charge; 0 for invoice orders",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_orders.fees_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Fees Eur",
+      "suggestFilterValues": true,
+      "title": "webshop orders Fees Eur",
+      "type": "number"
+     },
+     {
+      "description": "gross minus refunds, still incl. VAT",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_orders.net_of_refunds_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Net of Refunds Eur",
+      "suggestFilterValues": true,
+      "title": "webshop orders Net of Refunds Eur",
+      "type": "number"
+     },
+     {
+      "description": "ex-VAT order value - the revenue basis",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_orders.net_of_vat_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Net of Vat Eur",
+      "suggestFilterValues": true,
+      "title": "webshop orders Net of Vat Eur",
+      "type": "number"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "webshop revenue net of refunds, refunds netted against their own orders - order value ex-VAT minus the refunds issued against those orders (refunds ex-VAT, /1.255), by order date in Helsinki time (created_at_local), whenever the refund was issued; one reading of the ambiguous webshop_refund_basis (the other, refunds netted in the period they are issued, is webshop_revenue_events.webshop_revenue_refund_date_eur)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "webshop sales",
+         "webshop net revenue",
+         "webshop revenue ex-VAT",
+         "webshop revenue net of refunds",
+         "online revenue",
+         "online sales"
+        ],
+        "better": "higher",
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.webshop_revenue_net_eur",
+      "public": true,
+      "shortTitle": "webshop revenue net of refunds, refunds netted against their orders",
+      "title": "webshop orders webshop revenue net of refunds, refunds netted against their orders",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "order value ex-VAT by order date (Helsinki time), refunds NOT netted - not the finance revenue figure (that is webshop_revenue_net_eur); use only when \"before refunds\" is asked for",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "order value ex-VAT before refunds",
+         "webshop sales before refunds"
+        ],
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.webshop_revenue_eur",
+      "public": true,
+      "shortTitle": "webshop order value ex-VAT, before refunds",
+      "title": "webshop orders webshop order value ex-VAT, before refunds",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "order totals including VAT, before refunds",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "gross sales",
+         "order totals incl VAT",
+         "gross merchandise value",
+         "GMV"
+        ],
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.webshop_gross_eur",
+      "public": true,
+      "shortTitle": "webshop gross order value",
+      "title": "webshop orders webshop gross order value",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "refunds attributed to orders placed in the window (by order date, not refund date)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "refunded amount",
+         "money refunded"
+        ],
+        "better": "lower",
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.webshop_refunds_eur",
+      "public": true,
+      "shortTitle": "webshop refunds",
+      "title": "webshop orders webshop refunds",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "gross order value minus refunds, still including VAT",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "net of refunds",
+         "sales after refunds"
+        ],
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.webshop_net_of_refunds_eur",
+      "public": true,
+      "shortTitle": "webshop sales net of refunds",
+      "title": "webshop orders webshop sales net of refunds",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "Stripe fees",
+         "card fees",
+         "payment processing fees",
+         "processor fees"
+        ],
+        "better": "lower",
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.stripe_fees_eur",
+      "public": true,
+      "shortTitle": "card payment fees",
+      "title": "webshop orders card payment fees",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "orders",
+         "number of orders",
+         "order volume"
+        ],
+        "better": "higher",
+        "clock": "created_at_local"
+       }
+      },
+      "name": "webshop_orders.order_count",
+      "public": true,
+      "shortTitle": "webshop orders",
+      "title": "webshop orders webshop orders",
+      "type": "number"
+     },
+     {
+      "aggType": "avg",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "average order value ex-VAT per order (net_of_vat_eur) - the AOV / basket size figure, on the same ex-VAT basis as webshop revenue",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "AOV",
+         "basket size",
+         "average basket",
+         "average basket size",
+         "average order value ex-VAT"
+        ],
+        "better": "higher",
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.average_order_value_ex_vat_eur",
+      "public": true,
+      "shortTitle": "average order value",
+      "title": "webshop orders average order value",
+      "type": "number"
+     },
+     {
+      "aggType": "avg",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "average gross order total INCLUDING VAT per order - not the AOV figure (that is average_order_value_ex_vat_eur); use only when incl. VAT is asked for",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "average order total incl VAT",
+         "gross AOV"
+        ],
+        "clock": "created_at_local",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_orders.average_order_value_eur",
+      "public": true,
+      "shortTitle": "average gross order total (incl. VAT)",
+      "title": "webshop orders average gross order total (incl. VAT)",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "refunded amount over gross order value for orders placed in the window",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "return rate by value",
+         "share refunded"
+        ],
+        "better": "lower",
+        "clock": "created_at_local"
+       }
+      },
+      "name": "webshop_orders.refund_rate",
+      "public": true,
+      "shortTitle": "refund rate",
+      "title": "webshop orders refund rate",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "consumer orders",
+         "b2c orders"
+        ],
+        "clock": "created_at_local"
+       }
+      },
+      "name": "webshop_orders.card_orders",
+      "public": true,
+      "shortTitle": "card orders",
+      "title": "webshop orders card orders",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "installer orders",
+         "business orders",
+         "b2b orders"
+        ],
+        "clock": "created_at_local"
+       }
+      },
+      "name": "webshop_orders.invoice_orders",
+      "public": true,
+      "shortTitle": "invoice orders",
+      "title": "webshop orders invoice orders",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "clock": "created_at_local"
+       }
+      },
+      "name": "webshop_orders.card_share_of_orders",
+      "public": true,
+      "shortTitle": "share of orders paid by card",
+      "title": "webshop orders share of orders paid by card",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per order",
+      "key": [
+       "order_id"
+      ],
+      "population": "paid webshop orders since the May 2025 launch; consumers and installers alike",
+      "system": "dbt (Shopify + Stripe)"
+     }
+    },
+    "name": "webshop_orders",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "webshop orders",
+    "type": "cube"
+   },
+   {
+    "description": "The webshop product catalogue (Shopify), with category, list price and unit cost. The raw table keeps one row per Fivetran sync version: 132 rows for 125 products, 7 products with a superseded earlier version and 2 deleted. Category and SKU never change between versions, so a category breakdown is safe; a count of products must count distinct product_id.",
+    "dimensions": [
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_products.product_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Product ID",
+      "suggestFilterValues": true,
+      "title": "webshop products Product ID",
+      "type": "number"
+     },
+     {
+      "isVisible": true,
+      "name": "webshop_products.sku",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Sku",
+      "suggestFilterValues": true,
+      "title": "webshop products Sku",
+      "type": "string"
+     },
+     {
+      "description": "product name",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "product name",
+         "product title"
+        ],
+        "label_of": "product_id"
+       }
+      },
+      "name": "webshop_products.title",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Title",
+      "suggestFilterValues": true,
+      "title": "webshop products Title",
+      "type": "string"
+     },
+     {
+      "description": "Valves, Tools & consumables, Drain & sewer parts, PEX pipe & fittings, Thermostats & controls, Radiators, Water heaters, Circulation pumps",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "product category",
+         "product group"
+        ],
+        "dictionary": [
+         "Valves",
+         "Tools & consumables",
+         "Drain & sewer parts",
+         "PEX pipe & fittings",
+         "Thermostats & controls",
+         "Radiators",
+         "Water heaters",
+         "Circulation pumps"
+        ],
+        "value_aliases": [
+         {
+          "alias": "valves",
+          "value": "Valves"
+         },
+         {
+          "alias": "radiator valves",
+          "value": "Valves"
+         },
+         {
+          "alias": "tools",
+          "value": "Tools & consumables"
+         },
+         {
+          "alias": "consumables",
+          "value": "Tools & consumables"
+         },
+         {
+          "alias": "drain parts",
+          "value": "Drain & sewer parts"
+         },
+         {
+          "alias": "sewer parts",
+          "value": "Drain & sewer parts"
+         },
+         {
+          "alias": "pex",
+          "value": "PEX pipe & fittings"
+         },
+         {
+          "alias": "pipe",
+          "value": "PEX pipe & fittings"
+         },
+         {
+          "alias": "fittings",
+          "value": "PEX pipe & fittings"
+         },
+         {
+          "alias": "thermostats",
+          "value": "Thermostats & controls"
+         },
+         {
+          "alias": "controls",
+          "value": "Thermostats & controls"
+         },
+         {
+          "alias": "radiators",
+          "value": "Radiators"
+         },
+         {
+          "alias": "water heaters",
+          "value": "Water heaters"
+         },
+         {
+          "alias": "heaters",
+          "value": "Water heaters"
+         },
+         {
+          "alias": "pumps",
+          "value": "Circulation pumps"
+         },
+         {
+          "alias": "circulation pumps",
+          "value": "Circulation pumps"
+         }
+        ]
+       }
+      },
+      "name": "webshop_products.category",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Category",
+      "suggestFilterValues": true,
+      "title": "webshop products Category",
+      "type": "string"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_products.unit_cost_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Unit Cost Eur",
+      "suggestFilterValues": true,
+      "title": "webshop products Unit Cost Eur",
+      "type": "number"
+     },
+     {
+      "description": "list price incl. VAT",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_products.price_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Price Eur",
+      "suggestFilterValues": true,
+      "title": "webshop products Price Eur",
+      "type": "number"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "active product"
+        ]
+       }
+      },
+      "name": "webshop_products.active",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Active",
+      "suggestFilterValues": true,
+      "title": "webshop products Active",
+      "type": "boolean"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "countDistinct",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "number of products",
+         "catalogue size",
+         "SKUs listed"
+        ]
+       }
+      },
+      "name": "webshop_products.product_count",
+      "public": true,
+      "shortTitle": "products",
+      "title": "webshop products products",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per product per sync version (superseded versions kept)",
+      "key": [
+       "product_id"
+      ],
+      "population": "every product ever listed, latest and superseded sync versions; filter on active for the live range",
+      "system": "Shopify"
+     }
+    },
+    "name": "webshop_products",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "webshop products",
+    "type": "cube"
+   },
+   {
+    "description": "Webshop revenue as a stream of events in Helsinki time - every paid order (+ its ex-VAT value, on the order date) and every refund (- its ex-VAT amount, on the REFUND date, Shopify order_refund) - so a period's sum nets the refunds ISSUED in it, whichever period the order was in. The other reading of \"webshop revenue net of refunds\" nets the refunds against their own orders' period (webshop_orders.webshop_revenue_net_eur); the finance handbook says webshop revenue is net of refunds and that a refund is its own row, not which period it is netted in, so the term is ambiguous (overlay ambiguous webshop_refund_basis). Refund amounts include VAT (/1.255 here).",
+    "dimensions": [
+     {
+      "description": "order or refund",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "dictionary": [
+         "order",
+         "refund"
+        ]
+       }
+      },
+      "name": "webshop_revenue_events.kind",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Kind",
+      "suggestFilterValues": true,
+      "title": "webshop revenue events (refunds by refund date) Kind",
+      "type": "string"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "webshop_revenue_events.order_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Order ID",
+      "suggestFilterValues": true,
+      "title": "webshop revenue events (refunds by refund date) Order ID",
+      "type": "number"
+     },
+     {
+      "description": "Helsinki time - the order date for an order, the refund date for a refund; the time dimension for every period here",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "clock": {
+         "meaning": "order paid or refund issued",
+         "timezone": "Europe/Helsinki"
+        }
+       }
+      },
+      "name": "webshop_revenue_events.event_at",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Event at",
+      "suggestFilterValues": true,
+      "title": "webshop revenue events (refunds by refund date) Event at",
+      "type": "time"
+     },
+     {
+      "description": "b2c_card or b2b_invoice (a refund carries its order's channel)",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "payment channel",
+         "order channel"
+        ],
+        "dictionary": [
+         "b2c_card",
+         "b2b_invoice"
+        ]
+       }
+      },
+      "name": "webshop_revenue_events.channel",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Channel",
+      "suggestFilterValues": true,
+      "title": "webshop revenue events (refunds by refund date) Channel",
+      "type": "string"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "order value ex-VAT of the orders placed in the window minus the refunds (ex-VAT) ISSUED in the window, Helsinki time - one reading of webshop revenue net of refunds (the other is webshop_orders.webshop_revenue_net_eur, refunds netted against their own orders)",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "webshop revenue net of refunds issued in the period",
+         "webshop revenue by refund date"
+        ],
+        "clock": "event_at",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_revenue_events.webshop_revenue_refund_date_eur",
+      "public": true,
+      "shortTitle": "webshop revenue, refunds netted by refund date",
+      "title": "webshop revenue events (refunds by refund date) webshop revenue, refunds netted by refund date",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "refunds issued in the window (by refund date, Helsinki time), ex-VAT, as a positive amount",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "refunds issued ex-VAT",
+         "refunds by refund date ex-VAT"
+        ],
+        "better": "lower",
+        "clock": "event_at",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_revenue_events.refunds_issued_ex_vat_eur",
+      "public": true,
+      "shortTitle": "refunds issued, ex-VAT",
+      "title": "webshop revenue events (refunds by refund date) refunds issued, ex-VAT",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "the orders' ex-VAT value by order date (Helsinki), before refunds - equals webshop_orders.webshop_revenue_eur",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "clock": "event_at",
+        "currency": "EUR"
+       }
+      },
+      "name": "webshop_revenue_events.order_value_ex_vat_eur",
+      "public": true,
+      "shortTitle": "order value ex-VAT, before refunds",
+      "title": "webshop revenue events (refunds by refund date) order value ex-VAT, before refunds",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per order or refund event",
+      "key": [
+       "kind",
+       "order_id",
+       "event_at"
+      ],
+      "population": "paid webshop orders and the refunds issued against them, since the May 2025 launch",
+      "system": "dbt (Shopify)"
+     }
+    },
+    "name": "webshop_revenue_events",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "webshop revenue events (refunds by refund date)",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "budget_vs_actual": {
+   "time_dimensions": {}
+  },
+  "group_revenue_handbook_monthly": {
+   "time_dimensions": {}
+  },
+  "webshop_order_lines": {
+   "time_dimensions": {}
+  },
+  "webshop_orders": {
+   "time_dimensions": {
+    "created_at_local": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2026-09-01"
+    },
+    "created_at_utc": {
+     "data_end": "2026-08-31",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-31"
+    },
+    "order_month_local": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2026-09-01"
+    },
+    "order_month_utc": {
+     "data_end": "2026-08-01",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-01"
+    }
+   }
+  },
+  "webshop_products": {
+   "time_dimensions": {}
+  },
+  "webshop_revenue_events": {
+   "time_dimensions": {
+    "event_at": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2026-09-01"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "dimensions": [
+    "webshop_products.category"
+   ],
+   "limit": 1,
+   "measures": [
+    "webshop_order_lines.line_refund_rate"
+   ],
+   "order": {
+    "webshop_order_lines.line_refund_rate": "desc"
+   },
+   "timeDimensions": [
+    {
+     "dateRange": [
+      "2026-01-01",
+      "2026-08-31"
+     ],
+     "dimension": "webshop_orders.created_at_local"
+    }
+   ]
+  }
+ ],
+ "question": "which webshop category has the highest refund rate this year"
+}

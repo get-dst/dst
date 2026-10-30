@@ -1,0 +1,48 @@
+name: crm_leads
+description: >-
+  Leads as the sales team logs them in the CRM (Pipedrive), latest version, deleted dropped.
+  Status is Won / Lost / Disqualified - there is no "open" status; a lead that has no quote yet is
+  the open one. Source is the channel the lead came in on (Phone, Web form, Referral, Property
+  manager, Campaign, Trade show, Existing customer).
+grain: one row per CRM lead
+use_cases:
+  - "Use when a question asks about sales or CRM leads, leads by source or segment, or lead volume as sales counts it."
+  - "Avoid for: marketing leads and MQLs (marketing lens); partner leads (partners lens); app sign-ups (product lens)"
+common_questions:
+  - how many CRM leads came in during August 2026 by source
+  - which lead source converts best into won quotes
+source: {connection: warehouse, table: staging.stg_pipedrive__leads}
+default_time_field: created_date
+primary_key: [lead_id]
+population: leads logged in the Finnish CRM only; one of four lead populations in the group
+fields:
+  - {name: lead_id, type: string}
+  - {name: customer_id, type: string}
+  - {name: segment, type: string}
+  - {name: source, type: string, description: "Phone, Web form, Referral, Property manager, Campaign, Trade show, Existing customer"}
+  - {name: owner_rep_id, type: string}
+  - {name: status, type: string, description: "Won, Lost, Disqualified"}
+  - {name: created_date, type: date}
+  - {name: lost_reason, type: string, description: "free text on lost leads"}
+dimensions:
+  - {name: source, aliases: [lead source, channel]}
+  - {name: segment, aliases: [customer segment]}
+  - {name: status, aliases: [lead status]}
+  - {name: owner_rep_id, aliases: [owner, rep, sales rep]}
+metrics:
+  - name: crm_lead_count
+    agg: count
+    label: CRM leads
+    aliases: [sales leads, leads logged, new CRM leads]
+  - name: crm_leads_won
+    agg: count
+    filters: ["crm_leads.status = 'Won'"]
+    label: CRM leads won
+  - name: crm_lead_win_rate
+    type: ratio
+    numerator: crm_leads_won
+    denominator: crm_lead_count
+    label: lead-to-won rate
+    aliases: [lead conversion rate]
+    format: percent
+    better: higher

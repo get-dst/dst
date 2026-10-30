@@ -7,7 +7,7 @@ org, with the blast radius (run counts) and who/where each variant runs.
 Pipeline (``mine_drift`` is the pure entry point — no DB, no network):
 
 1. **Fingerprint** each statement with sqlglot: the literal-free canonical shape
-   (reusing the distiller's ``normalize_sql_shape``), the primary aggregate
+   (``normalize_sql_shape``), the primary aggregate
    (SUM/COUNT/AVG/MIN/MAX over a measure-ish expression), source tables, the
    literal-free filter shape, and the time grain (DATE_TRUNC unit). Statements
    without an aggregate, or that don't parse, are skipped — not guessed at.
@@ -56,8 +56,25 @@ from sqlglot import exp
 from services.connectors.tagging import is_dst_query, query_context
 from services.contracts.protocols import CacheableBlock, Connector, LLMProvider, Message
 from services.contracts.query_history import QueryRecord
-from services.evals.distill import normalize_sql_shape
 from services.observability import usage as ai_usage
+
+
+def normalize_sql_shape(sql: str, dialect: str) -> str | None:
+    """The canonical, literal-free shape of a statement — the cluster key.
+
+    Parse + regenerate via sqlglot with every literal replaced by a placeholder,
+    so ``WHERE n > 1`` and ``where n > 5`` share a shape. ``None`` = unparseable
+    (the row is skipped, not guessed at).
+    """
+
+    def _strip(node: exp.Expression) -> exp.Expression:
+        return exp.Placeholder() if isinstance(node, exp.Literal) else node
+
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+        return tree.transform(_strip).sql(dialect=dialect)
+    except Exception:
+        return None
 
 
 class DriftVariant(BaseModel):

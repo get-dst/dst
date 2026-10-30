@@ -1,0 +1,346 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"crm_leads.created_date\"], \"limit\": 1, \"order\": [[\"crm_leads.created_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "crm_leads__created_date": "crm_leads.created_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"crm_leads\".created_date::timestamptz) \"crm_leads__created_date\"\n    FROM\n      staging.stg_pipedrive__leads AS \"crm_leads\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"filters\": [{\"member\": \"crm_leads.segment\", \"operator\": \"equals\", \"values\": [\"Housing companies\"]}], \"measures\": [\"crm_leads.crm_lead_count\"], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"crm_leads.created_date\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "crm_leads__crm_lead_count": "crm_leads.crm_lead_count"
+     },
+     "sql": [
+      "SELECT\n      count(\"crm_leads\".lead_id) \"crm_leads__crm_lead_count\"\n    FROM\n      staging.stg_pipedrive__leads AS \"crm_leads\"  WHERE (\"crm_leads\".created_date >= ?::timestamptz AND \"crm_leads\".created_date <= ?::timestamptz) AND (\"crm_leads\".segment = ?) LIMIT 10000",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z",
+       "Housing companies"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "Leads as the sales team logs them in the CRM (Pipedrive), latest version, deleted dropped. Status is Won / Lost / Disqualified - there is no \"open\" status; a lead that has no quote yet is the open one. Source is the channel the lead came in on (Phone, Web form, Referral, Property manager, Campaign, Trade show, Existing customer).",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "crm_leads.lead_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Lead ID",
+      "suggestFilterValues": true,
+      "title": "crm leads Lead ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "crm_leads.customer_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer ID",
+      "suggestFilterValues": true,
+      "title": "crm leads Customer ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "customer segment"
+        ],
+        "dictionary": [
+         "Households",
+         "Housing companies",
+         "Commercial & public"
+        ]
+       }
+      },
+      "name": "crm_leads.segment",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Segment",
+      "suggestFilterValues": true,
+      "title": "crm leads Segment",
+      "type": "string"
+     },
+     {
+      "description": "Phone, Web form, Referral, Property manager, Campaign, Trade show, Existing customer",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "lead source",
+         "channel"
+        ],
+        "dictionary": [
+         "Phone",
+         "Referral",
+         "Campaign",
+         "Property manager",
+         "Trade show",
+         "Web form",
+         "Existing customer"
+        ]
+       }
+      },
+      "name": "crm_leads.source",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Source",
+      "suggestFilterValues": true,
+      "title": "crm leads Source",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "owner",
+         "rep",
+         "sales rep"
+        ],
+        "dictionary": [
+         "R117",
+         "R105",
+         "R115",
+         "R111",
+         "R108",
+         "R106",
+         "R107",
+         "R112",
+         "R119",
+         "R109",
+         "R114",
+         "R116",
+         "R120",
+         "R113",
+         "R104",
+         "R118",
+         "R110"
+        ]
+       }
+      },
+      "name": "crm_leads.owner_rep_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Owner Rep ID",
+      "suggestFilterValues": true,
+      "title": "crm leads Owner Rep ID",
+      "type": "string"
+     },
+     {
+      "description": "Won, Lost, Disqualified",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "lead status"
+        ],
+        "dictionary": [
+         "Won",
+         "Disqualified",
+         "Lost"
+        ]
+       }
+      },
+      "name": "crm_leads.status",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Status",
+      "suggestFilterValues": true,
+      "title": "crm leads Status",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "crm_leads.created_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Created Date",
+      "suggestFilterValues": true,
+      "title": "crm leads Created Date",
+      "type": "time"
+     },
+     {
+      "description": "free text on lost leads",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "dictionary": [
+         "Quote lost",
+         "Disqualified (no survey)",
+         "Lost to competitor",
+         "Quote expired",
+         "No need",
+         "Not reached"
+        ]
+       }
+      },
+      "name": "crm_leads.lost_reason",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Lost Reason",
+      "suggestFilterValues": true,
+      "title": "crm leads Lost Reason",
+      "type": "string"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "sales leads",
+         "leads logged",
+         "new CRM leads"
+        ]
+       }
+      },
+      "name": "crm_leads.crm_lead_count",
+      "public": true,
+      "shortTitle": "CRM leads",
+      "title": "crm leads CRM leads",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "crm_leads.crm_leads_won",
+      "public": true,
+      "shortTitle": "CRM leads won",
+      "title": "crm leads CRM leads won",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "lead conversion rate"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "crm_leads.crm_lead_win_rate",
+      "public": true,
+      "shortTitle": "lead-to-won rate",
+      "title": "crm leads lead-to-won rate",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per CRM lead",
+      "key": [
+       "lead_id"
+      ],
+      "population": "leads logged in the Finnish CRM only; one of four lead populations in the group",
+      "system": "Pipedrive CRM"
+     }
+    },
+    "name": "crm_leads",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "crm leads",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "crm_leads": {
+   "time_dimensions": {
+    "created_date": {
+     "data_end": "2026-08-21",
+     "future_rows": 0,
+     "kind": "event",
+     "max": "2026-08-21"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "filters": [
+    {
+     "member": "crm_leads.segment",
+     "operator": "equals",
+     "values": [
+      "Housing companies"
+     ]
+    }
+   ],
+   "measures": [
+    "crm_leads.crm_lead_count"
+   ],
+   "timeDimensions": [
+    {
+     "dateRange": [
+      "2026-01-01",
+      "2026-08-31"
+     ],
+     "dimension": "crm_leads.created_date"
+    }
+   ]
+  }
+ ],
+ "question": "how many leads came from housing companies year to date"
+}

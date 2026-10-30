@@ -1,0 +1,65 @@
+name: webshop_order_lines
+description: >-
+  Webshop order lines with SKU, quantity, unit price (incl. VAT) and unit cost, read from the
+  Shopify landing table because the staging model keeps re-synced duplicate versions (ticket
+  the known defect, open). Rows repeat once per Fivetran sync of a line (82,454 rows for 77,788 lines);
+  deleted lines are filtered out and every money metric sums ONE value per distinct line, so the
+  duplicates never inflate a figure; counts of orders use count distinct.
+grain: one row per order line per sync version (duplicates per line are superseded syncs)
+use_cases:
+  - "Use when a question asks about products, SKUs, categories, best sellers, quantities sold, product revenue or product margin."
+  - "Avoid for: order-level revenue, AOV, refunds and fees (webshop_orders)"
+common_questions:
+  - top 10 webshop products by revenue in August 2026
+  - best-selling product category in Q3 2026
+  - gross margin by product category for the last 3 months
+source: {connection: warehouse, table: raw_shopify.order_line}
+primary_key: [order_id, line_number]
+population: lines of paid webshop orders, every sync version kept; deleted lines excluded; line revenue is incl. VAT like the order total
+population_filter: "NOT webshop_order_lines._fivetran_deleted"
+fields:
+  - {name: order_id, type: integer}
+  - {name: line_number, type: integer}
+  - {name: product_id, type: integer}
+  - {name: sku, type: string}
+  - {name: quantity, type: integer}
+  - {name: unit_price_eur, type: number, description: "incl. VAT"}
+  - {name: line_total_eur, type: number, description: "quantity x unit price, incl. VAT"}
+  - {name: unit_cost_eur, type: number, description: "purchase cost per unit"}
+  - {name: _fivetran_synced, type: timestamp, description: "sync version stamp"}
+  - {name: _fivetran_deleted, type: boolean, description: "delete flag, meaningful on the latest version only"}
+dimensions:
+  - {name: sku, aliases: [product code, article]}
+  - {name: product_id, aliases: [product]}
+internal: [line_number, _fivetran_synced, _fivetran_deleted]
+metrics:
+  - name: line_revenue_eur
+    agg: sum_distinct_on
+    expr: webshop_order_lines.line_total_eur
+    distinct_on: [webshop_order_lines.order_id, webshop_order_lines.line_number]
+    label: product revenue
+    aliases: [product sales, sales by product, revenue by product, sales by category, revenue by category]
+    description: line totals incl. VAT, one value per distinct line
+    format: currency
+    currency: EUR
+    better: higher
+  - name: units_sold
+    agg: sum_distinct_on
+    expr: webshop_order_lines.quantity
+    distinct_on: [webshop_order_lines.order_id, webshop_order_lines.line_number]
+    label: units sold
+    aliases: [quantity sold, pieces sold]
+    better: higher
+  - name: line_cost_eur
+    agg: sum_distinct_on
+    expr: webshop_order_lines.quantity * webshop_order_lines.unit_cost_eur
+    distinct_on: [webshop_order_lines.order_id, webshop_order_lines.line_number]
+    label: product cost
+    aliases: [cost of goods, COGS]
+    format: currency
+    currency: EUR
+  - name: orders_with_product
+    agg: count_distinct
+    expr: webshop_order_lines.order_id
+    label: orders containing the product
+    aliases: [orders with product]

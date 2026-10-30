@@ -54,9 +54,38 @@ services:
       DST_DAILY_REQUEST_CAP: ${DST_DAILY_REQUEST_CAP:-2000}
       # The warehouse token, read by `dst demo --secret-env MOTHERDUCK_TOKEN`.
       MOTHERDUCK_TOKEN: ${MOTHERDUCK_TOKEN:?set MOTHERDUCK_TOKEN}
+      # The Cube sidecar below, when the demo runs with COMPOSE_PROFILES=cube.
+      DST_CUBE_URL: ${DST_CUBE_URL:-}
+      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}
     depends_on:
       db:
         condition: service_healthy
+      cube:
+        condition: service_healthy
+        required: false
+
+  # Cube Core over the same MotherDuck database (tag pinned in ../cube.version).
+  cube:
+    profiles: ["cube"]
+    image: cubejs/cube:${CUBE_TAG:-v1.6.75}
+    restart: unless-stopped
+    environment:
+      CUBEJS_DEV_MODE: "false"
+      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}  # Cube refuses to start without one
+      CUBEJS_DB_TYPE: duckdb
+      CUBEJS_DB_DUCKDB_DATABASE_PATH: ${CUBEJS_DB_DUCKDB_DATABASE_PATH:-md:}
+      CUBEJS_DB_DUCKDB_MOTHERDUCK_TOKEN: ${MOTHERDUCK_TOKEN}
+      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory
+      CUBEJS_SCHEDULED_REFRESH_DEFAULT: "false"
+      CUBEJS_LOG_LEVEL: warn
+    volumes:
+      - ${DST_CUBE_MODEL:-./cube/model}:/cube/conf/model:ro  # the project's cube/model
+      - ../cube/cube.js:/cube/conf/cube.js:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/readyz',r=>process.exit(r.statusCode==200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
   caddy:
     image: caddy:2

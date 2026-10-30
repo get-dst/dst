@@ -1,0 +1,556 @@
+{
+ "compiled": {
+  "{\"dimensions\": [\"quotes.decided_date\"], \"limit\": 1, \"order\": [[\"quotes.decided_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "quotes__decided_date": "quotes.decided_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"quotes\".decided_date::timestamptz) \"quotes__decided_date\"\n    FROM\n      staging.stg_pipedrive__quotes AS \"quotes\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"quotes.segment\"], \"measures\": [\"quotes.quote_win_rate\"], \"timeDimensions\": [{\"dateRange\": [\"2026-01-01\", \"2026-08-31\"], \"dimension\": \"quotes.decided_date\"}]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "quotes__quote_win_rate": "quotes.quote_win_rate",
+      "quotes__segment": "quotes.segment"
+     },
+     "sql": [
+      "SELECT\n      \"quotes\".segment \"quotes__segment\", count(CASE WHEN (\"quotes\".status = 'Won') THEN \"quotes\".quote_id END) / NULLIF(count(CASE WHEN (\"quotes\".status IN ('Won', 'Lost', 'Expired')) THEN \"quotes\".quote_id END), 0) \"quotes__quote_win_rate\"\n    FROM\n      staging.stg_pipedrive__quotes AS \"quotes\"  WHERE (\"quotes\".decided_date >= ?::timestamptz AND \"quotes\".decided_date <= ?::timestamptz) GROUP BY 1 ORDER BY 2 DESC LIMIT 10000",
+      [
+       "2026-01-01T00:00:00.000Z",
+       "2026-08-31T23:59:59.999Z"
+      ]
+     ]
+    }
+   },
+   "status": 200
+  },
+  "{\"dimensions\": [\"quotes.sent_date\"], \"limit\": 1, \"order\": [[\"quotes.sent_date\", \"desc\"]]}": {
+   "body": {
+    "sql": {
+     "aliasNameToMember": {
+      "quotes__sent_date": "quotes.sent_date"
+     },
+     "sql": [
+      "SELECT\n      timezone('UTC', \"quotes\".sent_date::timestamptz) \"quotes__sent_date\"\n    FROM\n      staging.stg_pipedrive__quotes AS \"quotes\"  GROUP BY 1 ORDER BY 1 DESC LIMIT 1",
+      []
+     ]
+    }
+   },
+   "status": 200
+  }
+ },
+ "meta": {
+  "cubes": [
+   {
+    "description": "Quotes sent to customers (Pipedrive calls these \"deals\"; the real closed-won deals are bookings). Latest Fivetran version per quote, deleted dropped. Every quote has a decision: Won, Lost or Expired, dated decided_date. Win rate = won / decided, by decision date unless the question says \"sent\".",
+    "dimensions": [
+     {
+      "isVisible": true,
+      "name": "quotes.quote_id",
+      "primaryKey": true,
+      "public": true,
+      "shortTitle": "Quote ID",
+      "suggestFilterValues": true,
+      "title": "quotes Quote ID",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "quotes.customer_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Customer ID",
+      "suggestFilterValues": true,
+      "title": "quotes Customer ID",
+      "type": "string"
+     },
+     {
+      "description": "Compass rep id",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "rep",
+         "sales rep",
+         "salesperson"
+        ],
+        "dictionary": [
+         "R117",
+         "R105",
+         "R115",
+         "R108",
+         "R111",
+         "R107",
+         "R112",
+         "R119",
+         "R106",
+         "R109",
+         "R113",
+         "R120",
+         "R104",
+         "R116",
+         "R110",
+         "R114",
+         "R118"
+        ]
+       }
+      },
+      "name": "quotes.rep_id",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Rep ID",
+      "suggestFilterValues": true,
+      "title": "quotes Rep ID",
+      "type": "string"
+     },
+     {
+      "description": "Households, Housing companies, Commercial & public",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "customer segment"
+        ],
+        "dictionary": [
+         "Households",
+         "Housing companies",
+         "Commercial & public"
+        ],
+        "value_aliases": [
+         {
+          "alias": "household",
+          "value": "Households"
+         },
+         {
+          "alias": "households",
+          "value": "Households"
+         },
+         {
+          "alias": "consumers",
+          "value": "Households"
+         },
+         {
+          "alias": "private customers",
+          "value": "Households"
+         },
+         {
+          "alias": "housing company",
+          "value": "Housing companies"
+         },
+         {
+          "alias": "housing companies",
+          "value": "Housing companies"
+         },
+         {
+          "alias": "taloyhtiö",
+          "value": "Housing companies"
+         },
+         {
+          "alias": "brf",
+          "value": "Housing companies"
+         },
+         {
+          "alias": "commercial",
+          "value": "Commercial & public"
+         },
+         {
+          "alias": "public",
+          "value": "Commercial & public"
+         },
+         {
+          "alias": "commercial and public",
+          "value": "Commercial & public"
+         },
+         {
+          "alias": "b2b",
+          "value": "Commercial & public"
+         }
+        ]
+       }
+      },
+      "name": "quotes.segment",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Segment",
+      "suggestFilterValues": true,
+      "title": "quotes Segment",
+      "type": "string"
+     },
+     {
+      "description": "service line",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "service line",
+         "job type",
+         "service type"
+        ],
+        "dictionary": [
+         "Domestic water pipe renovation",
+         "Bathroom renovation",
+         "Emergency & rapid service",
+         "Drain & sewer renovation",
+         "Maintenance contract",
+         "Heating system"
+        ]
+       }
+      },
+      "name": "quotes.service",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Service",
+      "suggestFilterValues": true,
+      "title": "quotes Service",
+      "type": "string"
+     },
+     {
+      "isVisible": true,
+      "name": "quotes.sent_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Sent Date",
+      "suggestFilterValues": true,
+      "title": "quotes Sent Date",
+      "type": "time"
+     },
+     {
+      "description": "Won, Lost, Expired",
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "quote status",
+         "outcome"
+        ],
+        "dictionary": [
+         "Won",
+         "Lost",
+         "Expired"
+        ]
+       }
+      },
+      "name": "quotes.status",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Status",
+      "suggestFilterValues": true,
+      "title": "quotes Status",
+      "type": "string"
+     },
+     {
+      "description": "quoted amount ex-VAT",
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "quotes.quote_value_eur",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Quote Value Eur",
+      "suggestFilterValues": true,
+      "title": "quotes Quote Value Eur",
+      "type": "number"
+     },
+     {
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "name": "quotes.term_months",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Term Months",
+      "suggestFilterValues": true,
+      "title": "quotes Term Months",
+      "type": "number"
+     },
+     {
+      "description": "when the quote was won, lost or expired",
+      "isVisible": true,
+      "name": "quotes.decided_date",
+      "primaryKey": false,
+      "public": true,
+      "shortTitle": "Decided Date",
+      "suggestFilterValues": true,
+      "title": "quotes Decided Date",
+      "type": "time"
+     }
+    ],
+    "folders": [],
+    "hierarchies": [],
+    "isVisible": true,
+    "measures": [
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "quotes sent",
+         "number of quotes"
+        ]
+       }
+      },
+      "name": "quotes.quote_count",
+      "public": true,
+      "shortTitle": "quotes",
+      "title": "quotes quotes",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "quotes won",
+         "wins"
+        ],
+        "clock": "decided_date"
+       }
+      },
+      "name": "quotes.quotes_won",
+      "public": true,
+      "shortTitle": "won quotes",
+      "title": "quotes won quotes",
+      "type": "number"
+     },
+     {
+      "aggType": "count",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "formatDescription": {
+       "name": "number",
+       "specifier": ",.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "clock": "decided_date"
+       }
+      },
+      "name": "quotes.quotes_decided",
+      "public": true,
+      "shortTitle": "decided quotes",
+      "title": "quotes decided quotes",
+      "type": "number"
+     },
+     {
+      "aggType": "number",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "description": "won quotes over decided quotes (won + lost + expired), by decision date",
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "percent",
+      "formatDescription": {
+       "name": "percent",
+       "specifier": ".2~%"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "win rate",
+         "hit rate",
+         "conversion of quotes"
+        ],
+        "better": "higher"
+       }
+      },
+      "name": "quotes.quote_win_rate",
+      "public": true,
+      "shortTitle": "quote win rate",
+      "title": "quotes quote win rate",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "quote value",
+         "pipeline value"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "quotes.quoted_value_eur",
+      "public": true,
+      "shortTitle": "quoted value",
+      "title": "quotes quoted value",
+      "type": "number"
+     },
+     {
+      "aggType": "sum",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "won pipeline value",
+         "value of won quotes"
+        ],
+        "clock": "decided_date",
+        "currency": "EUR"
+       }
+      },
+      "name": "quotes.won_quote_value_eur",
+      "public": true,
+      "shortTitle": "won quote value",
+      "title": "quotes won quote value",
+      "type": "number"
+     },
+     {
+      "aggType": "avg",
+      "cumulative": false,
+      "cumulativeTotal": false,
+      "drillMembers": [],
+      "drillMembersGrouped": {
+       "dimensions": [],
+       "measures": []
+      },
+      "format": "currency",
+      "formatDescription": {
+       "name": "currency",
+       "specifier": "$,.2~f"
+      },
+      "isVisible": true,
+      "meta": {
+       "dst": {
+        "aliases": [
+         "average quote size"
+        ],
+        "currency": "EUR"
+       }
+      },
+      "name": "quotes.average_quote_value_eur",
+      "public": true,
+      "shortTitle": "average quote value",
+      "title": "quotes average quote value",
+      "type": "number"
+     }
+    ],
+    "meta": {
+     "dst": {
+      "grain": "one row per quote",
+      "key": [
+       "quote_id"
+      ],
+      "population": "Nordlund LVI Oy quotes from the CRM (Finland); every row carries a final status, there is no open quote status in this table",
+      "system": "Pipedrive CRM"
+     }
+    },
+    "name": "quotes",
+    "nestedFolders": [],
+    "public": true,
+    "segments": [],
+    "title": "quotes",
+    "type": "cube"
+   }
+  ]
+ },
+ "probe": {
+  "quotes": {
+   "time_dimensions": {
+    "decided_date": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2026-10-05"
+    },
+    "sent_date": {
+     "data_end": "2026-08-31",
+     "future_rows": 1,
+     "kind": "event",
+     "max": "2026-09-01"
+    }
+   }
+  }
+ },
+ "queries": [
+  {
+   "dimensions": [
+    "quotes.segment"
+   ],
+   "measures": [
+    "quotes.quote_win_rate"
+   ],
+   "timeDimensions": [
+    {
+     "dateRange": [
+      "2026-01-01",
+      "2026-08-31"
+     ],
+     "dimension": "quotes.decided_date"
+    }
+   ]
+  }
+ ],
+ "question": "what's our win rate by segment year to date"
+}

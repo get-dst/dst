@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 from services.api.surface import UncoveredCluster
-from services.benchmark.contamination import normalize
+from services.evals.contamination import normalize
 from services.probe.drift import DriftFinding
 from services.probe.drift import _tokens as _semantic_tokens
 from services.router import CoverageProfile

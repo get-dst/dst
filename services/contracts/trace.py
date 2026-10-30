@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from services.contracts.cube_query import Binding
+from services.contracts.failure_modes import FailureMode
 from services.contracts.resolution import Resolution
 from services.contracts.response import Citation, ClarificationRequest
 from services.contracts.verification import VerificationReport
@@ -68,7 +70,17 @@ class TraceLog(BaseModel):
     # The clarification a non-answer asked for (kind + the slot it named), so
     # "which columns keep clarifying for want of a dictionary" is a query.
     clarification: ClarificationRequest | None = None
+    # The failure mode of a non-answer, or the one that capped a served
+    # answer (contracts/failure_modes.py); None on a clean answer and on rows
+    # written before the field existed. What observe counts by.
+    mode: FailureMode | None = None
     # The caller's one-sentence purpose ("building a forecasting app"), as sent.
     # Self-reported prose, kept only when the lens sets `logging.log_purpose`;
     # None otherwise, so the column measures what agents actually send.
     purpose: str | None = None
+    # The Cube lane's ask: the queries as served (Cube's wire shape), the word
+    # ledger that bound the question to them, and which serving core and lane
+    # answered ("cube:frontier", "cube:structured"). None on other cores.
+    cube_query: list[dict[str, object]] | None = None
+    ledger: list[Binding] | None = None
+    serving: str | None = None

@@ -1,13 +1,12 @@
 /**
- * Reviews — the self-healing loop, rebuilt as queue → detail → patch rail.
+ * Reviews — the self-healing loop, as queue → detail → ruling.
  *
  * Queue (/reviews): every flagged answer as a clickable row — question, lens,
  * caller, state, age, and a Δ chip when a correction is attached.
  *
  * Detail (/reviews/:id): the story of one answer top-to-bottom (question → SQL →
  * answer → verification → AI judge) on the left, and beside it the human's act —
- * the VERDICT card (rule + attach the correction) on top, the primary decision,
- * with the patch loop (draft → apply → publish) below it as the consequence.
+ * the VERDICT card (rule + attach the correction), the primary decision.
  *
  * UI only — all data flows through the existing hooks in ../api/reviews.
  */
@@ -17,15 +16,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCertifyRequest } from '../api/certify'
 import { useRequestDetail, useRequests, type RequestTrace } from '../api/observe'
 import {
-  useApprovePatch,
-  useDraftPatch,
-  useLensPatches,
-  useRejectPatch,
   useReviewQueue,
   useRuleReview,
   type CorrectionDelta,
-  type PatchApproval,
-  type PatchCandidate,
   type ReviewTicket,
 } from '../api/reviews'
 import { Button } from '../components/ui/Button'
@@ -196,29 +189,6 @@ function DiffBlock({
         ))}
       </div>
     </div>
-  )
-}
-
-/** A server-rendered unified diff (the proposed file change), rendered like the
- *  lens version history's — the file loop looks the same wherever it shows up. */
-function UnifiedDiff({ diff }: { diff: string }) {
-  return (
-    <pre className="overflow-x-auto rounded-md border border-border bg-surface px-2.5 py-2 font-mono text-[11px] leading-[1.7]">
-      {diff.split('\n').map((line, i) => (
-        <div
-          key={i}
-          className={
-            line.startsWith('+') && !line.startsWith('+++')
-              ? 'text-green'
-              : line.startsWith('-') && !line.startsWith('---')
-                ? 'text-red'
-                : 'text-muted'
-          }
-        >
-          {line || ' '}
-        </div>
-      ))}
-    </pre>
   )
 }
 
@@ -478,7 +448,6 @@ export function ReviewDetail({
   const queue = useReviewQueue()
   const ticket = queue.data?.find((t) => t.ticket_id === ticketId)
   const trace = useRequestDetail(ticket?.request_id ?? null)
-  const patches = useLensPatches(ticket?.lens ?? '')
 
   if (queue.isLoading) {
     return (
@@ -514,8 +483,6 @@ export function ReviewDetail({
       />
     )
   }
-
-  const ticketPatches = (patches.data ?? []).filter((p) => p.ticket_id === ticket.ticket_id)
 
   return (
     <div>
@@ -572,17 +539,9 @@ export function ReviewDetail({
           )}
         </div>
 
-        {/* The action rail: the human ruling is the act; the patch loop is its
-            consequence — so the loop only appears once a correction exists to drive it. */}
+        {/* The human ruling is the act. */}
         <div className="space-y-4 lg:sticky lg:top-6">
           <VerdictCard ticket={ticket} />
-          {(ticket.correction || ticketPatches.length > 0) && (
-            <ActionRail
-              ticket={ticket}
-              ticketPatches={ticketPatches}
-              patchesLoading={patches.isLoading}
-            />
-          )}
         </div>
       </div>
     </div>
@@ -870,297 +829,6 @@ function CorrectionCard({
             </div>
           </div>
         )}
-      </div>
-    </div>
-  )
-}
-
-// ─── the action rail: Correction → Patch → Applied → Publish ─────────────────
-
-type StepStatus = 'done' | 'active' | 'todo'
-
-function RailStep({
-  status,
-  title,
-  last = false,
-  children,
-}: {
-  status: StepStatus
-  title: string
-  last?: boolean
-  children?: ReactNode
-}) {
-  return (
-    <div className="relative flex gap-3">
-      {!last && (
-        <span aria-hidden="true" className="absolute bottom-1 left-[9px] top-[22px] w-px bg-border" />
-      )}
-      <span
-        className={[
-          'mt-px flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border',
-          status === 'done'
-            ? 'border-green/40 bg-green-bg text-green'
-            : status === 'active'
-              ? 'border-accent bg-accent-fg text-accent'
-              : 'border-border bg-surface-2 text-muted-2',
-        ].join(' ')}
-      >
-        {status === 'done' ? (
-          <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-            <path
-              d="M1.5 5l2.5 2.5 5-5"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        ) : (
-          <span className="h-[5px] w-[5px] rounded-full bg-current" aria-hidden="true" />
-        )}
-      </span>
-      <div className={['min-w-0 flex-1', last ? '' : 'pb-5'].join(' ')}>
-        <p
-          className={[
-            'text-[12px] font-semibold leading-[19px]',
-            status === 'todo' ? 'text-muted-2' : 'text-text',
-          ].join(' ')}
-        >
-          {title}
-        </p>
-        {children && <div className="mt-1.5">{children}</div>}
-      </div>
-    </div>
-  )
-}
-
-function KV({ k, v }: { k: string; v: string }) {
-  return (
-    <p className="flex gap-2 font-mono text-[11px] leading-relaxed">
-      <span className="w-[76px] shrink-0 text-muted-2">{k}</span>
-      <span className="min-w-0 break-words text-text">{v}</span>
-    </p>
-  )
-}
-
-function ActionRail({
-  ticket,
-  ticketPatches,
-  patchesLoading,
-}: {
-  ticket: ReviewTicket
-  ticketPatches: PatchCandidate[]
-  patchesLoading: boolean
-}) {
-  const qc = useQueryClient()
-  const draft = useDraftPatch()
-  const approve = useApprovePatch()
-  const dismiss = useRejectPatch()
-  // The fresh approval result — what landed, the eval case, and the proposed file
-  // to commit — lives only in the approve response, so keep it for the last steps.
-  const [approval, setApproval] = useState<PatchApproval | null>(null)
-
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ['patches', ticket.lens] })
-    qc.invalidateQueries({ queryKey: ['reviews'] })
-  }
-
-  const hasCorrection = !!ticket.correction
-  const candidate = ticketPatches.find((p) => p.status === 'candidate')
-  const approvedPatch = ticketPatches.find((p) => p.status === 'approved')
-  const shown = candidate ?? approvedPatch ?? ticketPatches[ticketPatches.length - 1]
-  const isApplied = !!approvedPatch || !!approval
-
-  const onDraft = () => draft.mutate(ticket.ticket_id, { onSuccess: refresh })
-  const onApprove = (id: string) =>
-    approve.mutate(id, {
-      onSuccess: (r) => {
-        setApproval(r)
-        refresh()
-      },
-    })
-  const onDismiss = (id: string) => dismiss.mutate(id, { onSuccess: refresh })
-
-  return (
-    <div
-      className="rounded-lg border border-border bg-surface"
-      style={{ boxShadow: 'var(--shadow-card)' }}
-    >
-      <div className="flex items-center justify-between border-b border-border bg-surface-2 px-4 py-2.5">
-        <SectionLabel>The loop</SectionLabel>
-        <span className="font-mono text-[10px] text-muted-2">correction → patch → ruling</span>
-      </div>
-
-      <div className="px-4 py-4">
-        {/* 1 · Correction */}
-        <RailStep status={hasCorrection ? 'done' : 'active'} title="Correction">
-          {ticket.correction ? (
-            <p className="text-[11px] leading-relaxed text-muted">
-              <span className="font-mono text-accent-dark">Δ {ticket.correction.kind}</span>
-              {' — '}
-              {ticket.correction.note}
-            </p>
-          ) : ticket.state === 'needs_human' ? (
-            <p className="text-[11px] leading-relaxed text-muted">
-              Attach what&apos;s wrong in your ruling above — that delta is what the patch is
-              drafted from.
-            </p>
-          ) : (
-            <p className="text-[11px] leading-relaxed text-muted-2">
-              No correction recorded — nothing to draft.
-            </p>
-          )}
-        </RailStep>
-
-        {/* 2 · Patch */}
-        <RailStep
-          status={shown ? (candidate ? 'active' : 'done') : hasCorrection ? 'active' : 'todo'}
-          title="Patch"
-        >
-          {patchesLoading ? (
-            <Skeleton className="h-8 w-full" />
-          ) : shown ? (
-            <div className="space-y-2">
-              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                <Badge variant="warning">{shown.kind}</Badge>
-                <code
-                  className="min-w-0 truncate font-mono text-[11px] text-muted"
-                  title={shown.target}
-                >
-                  {shown.target}
-                </code>
-                <span className="font-mono text-[10px] text-muted-2">→ {shown.owner}</span>
-              </div>
-              <DiffBlock before={shown.diff_before} after={shown.diff_after} wrap />
-              {shown.status === 'candidate' && (
-                <div className="flex items-center gap-2 pt-0.5">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={approve.isPending || dismiss.isPending}
-                    onClick={() => onApprove(shown.id)}
-                  >
-                    {approve.isPending ? <Busy label="Applying" /> : 'Apply'}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={approve.isPending || dismiss.isPending}
-                    onClick={() => onDismiss(shown.id)}
-                    className="text-muted hover:bg-red-bg hover:text-red focus-visible:ring-red/50"
-                  >
-                    {dismiss.isPending ? 'Dismissing…' : 'Dismiss'}
-                  </Button>
-                </div>
-              )}
-              {shown.status === 'rejected' && (
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[11px] text-muted">dismissed</span>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={draft.isPending}
-                    onClick={onDraft}
-                  >
-                    {draft.isPending ? <Busy label="Drafting" /> : 'Draft again'}
-                  </Button>
-                </div>
-              )}
-              {approve.isError && (
-                <p className="text-[11px] text-red">{(approve.error as Error).message}</p>
-              )}
-              {dismiss.isError && (
-                <p className="text-[11px] text-red">{(dismiss.error as Error).message}</p>
-              )}
-              {draft.isError && (
-                <p className="text-[11px] text-red">{(draft.error as Error).message}</p>
-              )}
-            </div>
-          ) : hasCorrection ? (
-            <div>
-              <Button variant="primary" size="sm" disabled={draft.isPending} onClick={onDraft}>
-                {draft.isPending ? <Busy label="Drafting" /> : 'Draft patch'}
-              </Button>
-              <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
-                dst turns the correction into the smallest concrete fix, routed to where it
-                belongs — a definition, a lens instruction, or a certified answer.
-              </p>
-              {draft.isError && (
-                <p className="mt-1 text-[11px] text-red">{(draft.error as Error).message}</p>
-              )}
-            </div>
-          ) : (
-            <p className="text-[11px] leading-relaxed text-muted-2">Waits on a correction.</p>
-          )}
-        </RailStep>
-
-        {/* 3 · Ruling */}
-        <RailStep status={isApplied ? 'done' : candidate ? 'active' : 'todo'} title="Ruling">
-          {isApplied ? (
-            <div className="space-y-0.5">
-              {approvedPatch && !approval && (
-                <>
-                  <KV k="kind" v={approvedPatch.kind} />
-                  <KV k="target" v={approvedPatch.target} />
-                </>
-              )}
-              {approval &&
-                Object.entries(approval.applied).map(([k, v]) => (
-                  <KV key={k} k={k.replace(/_/g, ' ')} v={String(v)} />
-                ))}
-              {approval?.eval_case_id && <KV k="eval case" v={approval.eval_case_id} />}
-              {approval && <KV k="live" v={approval.live ? 'yes' : 'not yet'} />}
-            </div>
-          ) : (
-            <p className="text-[11px] leading-relaxed text-muted-2">
-              Approving records the ruling and files an eval case. Server-side state (a certified
-              answer) lands here; anything your files author comes back as a file to commit.
-            </p>
-          )}
-        </RailStep>
-
-        {/* 4 · Land it — files author, so the ruling lands through the repo */}
-        <RailStep status={isApplied ? 'active' : 'todo'} title="Land it" last>
-          {approval?.proposed_file ? (
-            <div className="space-y-1.5">
-              <p className="text-[11px] leading-relaxed text-muted">
-                Not live yet. Write this file, commit it, then run{' '}
-                <code className="font-mono text-accent-dark">dst apply</code>.
-              </p>
-              <p className="font-mono text-[11px] text-muted-2">{approval.proposed_file.path}</p>
-              <UnifiedDiff diff={approval.proposed_file.diff} />
-            </div>
-          ) : isApplied ? (
-            <div>
-              <p className="text-[11px] leading-relaxed text-muted">
-                {approval?.next_step ?? 'The ruling is recorded on this lens.'}
-              </p>
-              <Link
-                to={`/lenses/${encodeURIComponent(ticket.lens)}`}
-                className={[
-                  'mt-1.5 inline-flex items-center gap-1 rounded text-[12px] font-medium text-accent-dark',
-                  'hover:underline outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                ].join(' ')}
-              >
-                Open <span className="font-mono">{ticket.lens}</span>
-                <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                  <path
-                    d="M2.5 6h7M6.5 3l3 3-3 3"
-                    stroke="currentColor"
-                    strokeWidth="1.25"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </Link>
-            </div>
-          ) : (
-            <p className="text-[11px] leading-relaxed text-muted-2">
-              A fix your files author lands the file way: commit the proposed file, then{' '}
-              <code className="font-mono">dst apply</code>.
-            </p>
-          )}
-        </RailStep>
       </div>
     </div>
   )

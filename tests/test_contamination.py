@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.benchmark.contamination import (
+from services.evals.contamination import (
     ContaminationError,
     assert_held_out,
     find_leaked,

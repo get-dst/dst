@@ -12,9 +12,11 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 import sqlglot
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from sqlglot import expressions as exp
 
+from services.config import settings
+from services.contracts.failure_modes import HINT_MODES, FailureMode
 from services.contracts.semantic_model import (
     Definition,
     Entity,
@@ -27,6 +29,7 @@ from services.definitions.standards import OrgStandard
 from services.lenses.store import LensBundle
 from services.llm import registry
 from services.runtime import ambiguity, sql_guard
+from services.serve import lanes
 
 if TYPE_CHECKING:
     from services.contracts.profile import TableProfile
@@ -43,6 +46,14 @@ class Issue(BaseModel):
     # class of repeats can collapse to one counted line without losing anything
     # (``collapse_warnings``); leave it None and the message always prints whole.
     subject: str | None = None
+
+    # The serve-time failure mode this finding prevents
+    # (contracts/failure_modes.py::HINT_MODES), so a scorecard by mode names
+    # the plan line that fixes it. None for a hygiene or structural finding.
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mode(self) -> FailureMode | None:
+        return HINT_MODES.get(self.code)
 
 
 class ProbeResult(BaseModel):
@@ -744,18 +755,72 @@ def _check_bundle(
     # uniformly unable to answer (a keyless CI apply is a real workflow), and
     # /ready already says so; the silent case is the one where providers ARE
     # configured and this lens is the odd one out.
+    # A lens that serves typed answers only (``untyped_fallback`` off) and
+    # pins no model needs the typed-decision provider and nothing else: typed
+    # serving writes no SQL by a chat model, so a chat tier is demanded only
+    # by the lanes that use one. With that provider configured the gap is a
+    # warning naming which door still needs the chat tier, never a block.
     model_ref = bundle.config.model.model_ref()
     detail = registry.unservable_detail(model_ref)
     if detail is not None:
+        typed_only = (
+            not bundle.config.untyped_fallback
+            and not model_ref
+            and settings.typed_serving != "off"
+            and registry.typed_provider_configured()
+        )
+        # A lens served through Cube answers a driver (every MCP caller) with
+        # no model call: the agent writes the Cube query. Only the HTTP
+        # question door without a driver reads with a chat model.
+        cube_served = (
+            lanes.lane(bundle.config, cube_backed=bundle.semantic_model.cube is not None) == "cube"
+        )
+        if cube_served:
+            issues.append(
+                Issue(
+                    severity="warning",
+                    code="lens_model_unservable",
+                    message=(
+                        "this lens serves through Cube and no chat model is configured "
+                        f"({detail}): an agent in driver mode (MCP) is served with no model "
+                        "call; the HTTP question door without a driver answers 503 until a "
+                        "chat model is configured"
+                    ),
+                )
+            )
+        elif typed_only:
+            issues.append(
+                Issue(
+                    severity="warning",
+                    code="lens_model_unservable",
+                    message=(
+                        "this lens decides typed answers on its typed-decision provider "
+                        f"and no chat model is configured ({detail}): the metrics door "
+                        "serves its rows, the question door declines with 503 until a "
+                        "chat model is configured"
+                    ),
+                )
+            )
+        else:
+            issues.append(
+                Issue(
+                    severity="warning" if not registry.specs() else "error",
+                    code="lens_model_unservable",
+                    message=f"this lens cannot answer here: {detail}",
+                )
+            )
+
+    if not sm.entities and sm.cube_views:
         issues.append(
             Issue(
-                severity="warning" if not registry.specs() else "error",
-                code="lens_model_unservable",
-                message=f"this lens cannot answer here: {detail}",
+                severity="warning",
+                code="no_entities",
+                message="lens serves only Cube views ("
+                + ", ".join(sm.cube_views)
+                + "); no serving lane reads them yet, so it answers nothing until one does",
             )
         )
-
-    if not sm.entities:
+    elif not sm.entities:
         issues.append(Issue(severity="error", code="no_entities", message="lens has no entities"))
 
     for e in sm.entities:

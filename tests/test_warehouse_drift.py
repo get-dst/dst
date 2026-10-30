@@ -617,7 +617,7 @@ def test_plan_gives_up_on_a_warehouse_that_hangs(
         return []
 
     monkeypatch.setattr("services.lenses.profiler_catalog.catalog_profiles", hang)
-    monkeypatch.setattr("services.cli.main.PLAN_WAREHOUSE_TIMEOUT", 0.2)
+    monkeypatch.setattr("services.cli.project.PLAN_WAREHOUSE_TIMEOUT", 0.2)
 
     started = time.monotonic()
     assert _plan(monkeypatch, planned, "--json") == 0

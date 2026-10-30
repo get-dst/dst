@@ -1,0 +1,59 @@
+cubes:
+- name: order_lines
+  title: order lines
+  description: Products on each order; the order discount repeats on every line of its order.
+  sql_table: bakery.order_lines
+  meta:
+    dst:
+      grain: one row per order line
+      key:
+      - order_id
+      - line_number
+  joins:
+  - name: orders
+    relationship: many_to_one
+    sql: '{CUBE}.order_id = {orders}.order_id'
+  dimensions:
+  - name: order_id
+    sql: '{CUBE}.order_id'
+    type: number
+    primary_key: true
+    public: true
+  - name: line_number
+    sql: '{CUBE}.line_number'
+    type: number
+    primary_key: true
+    public: true
+  - name: product
+    sql: '{CUBE}.product'
+    type: string
+    meta:
+      dst:
+        aliases:
+        - item
+        dictionary:
+        - cinnamon bun
+        - coffee
+        - rye loaf
+        - sourdough
+  - name: qty
+    sql: '{CUBE}.qty'
+    type: number
+  - name: line_total_eur
+    sql: '{CUBE}.line_total_eur'
+    type: number
+  - name: order_discount_eur
+    sql: '{CUBE}.order_discount_eur'
+    type: number
+  measures:
+  - name: units_sold
+    title: units sold
+    type: sum
+    sql: '{CUBE}.qty'
+  - name: product_revenue
+    title: product revenue
+    type: sum
+    sql: '{CUBE}.line_total_eur'
+    meta:
+      dst:
+        currency: EUR

@@ -62,7 +62,6 @@ VERBS = [
     ["sql", "SELECT 1", "--connection", "wh", "--token", "dstadm_t"],
     ["introspect", "--connection", "wh", "--token", "dstadm_t"],
     ["reviews", "--token", "dstadm_t"],
-    ["patches", "list", "--lens", "sales", "--token", "dstadm_t"],
     ["keys", "list", "--token", "dstadm_t"],
     ["lens", "rm", "sales", "--yes", "--token", "dstadm_t"],
     ["semantic", "rm", "definition", "value", "--token", "dstadm_t"],
@@ -99,7 +98,7 @@ def test_a_failure_to_another_host_is_not_blamed_on_the_server(monkeypatch, caps
     """In-process verbs reach model providers over httpx too. Only a failure to
     the URL this command resolved gets the "is a dst running?" advice — the
     rest are reported as what they are."""
-    from services.cli.main import _unreachable_exit
+    from services.cli._common import _unreachable_exit
 
     args = argparse.Namespace(url="http://localhost:9999", url_source="--url")
     exc = httpx.ConnectError(

@@ -16,7 +16,7 @@ no longer matches the (current + incoming) asset hashes, recompiled on apply.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -345,12 +345,19 @@ def _canonical_semantic(path: str, content: str) -> tuple[str, str]:
     folders are organization, the asset name is identity) still match their DB
     counterpart, which always renders flat. Unparseable content passes through
     raw (apply rejects it with the real error)."""
-    from services.semantic.files import parse_semantic_files, render_semantic_files
+    from services.semantic.files import (
+        parse_blueprint_files,
+        parse_semantic_files,
+        render_semantic_files,
+    )
 
     try:
         entities, definitions, relationships = parse_semantic_files({path: content})
         rendered = render_semantic_files(
-            list(entities.values()), list(definitions.values()), list(relationships.values())
+            list(entities.values()),
+            list(definitions.values()),
+            list(relationships.values()),
+            list(parse_blueprint_files({path: content}).values()),
         )
         return next(iter(rendered.items()), (path, content))
     except Exception:
@@ -398,6 +405,7 @@ def stale_asset_keys(
     assets: dict[str, str],
     effective_hashes: dict[str, str],
     relationship_pairs: dict[str, tuple[str, str]],
+    tables: Iterable[str] = (),
 ) -> list[str]:
     """The asset keys that make one compiled provenance stale: every consumed
     asset whose effective hash moved (deletion included — an absent asset reads
@@ -406,7 +414,14 @@ def stale_asset_keys(
     brand-new relationship never appears in any provenance, no lens is flagged,
     and the published layer keeps refusing a join the project files declare —
     plan/apply reporting success the whole time. ``relationship_pairs`` maps the
-    effective ``relationship/<name>`` keys to their (left, right) endpoints."""
+    effective ``relationship/<name>`` keys to their (left, right) endpoints.
+
+    ``tables`` are the tables the lens reads (its compiled sources): a table
+    blueprint that exists NOW on one of them but was absent at compile is the
+    blueprint twin of the new-relationship clause — the lens has to recompile
+    to inherit it."""
+    from services.project.lineage import same_table
+
     changed = [
         key for key, digest in sorted(assets.items()) if effective_hashes.get(key, "") != digest
     ]
@@ -416,6 +431,15 @@ def stale_asset_keys(
         for key, (left, right) in relationship_pairs.items()
         if key not in assets and left in selected and right in selected
     )
+    read = list(tables)
+    changed += sorted(
+        key
+        for key, digest in effective_hashes.items()
+        if key.startswith("blueprint/")
+        and key not in assets
+        and digest
+        and any(same_table(key.removeprefix("blueprint/"), t) for t in read)
+    )
     return changed
 
 
@@ -423,14 +447,17 @@ def stale_lenses(
     provenances: dict[str, dict[str, str]],
     effective_hashes: dict[str, str],
     relationship_pairs: dict[str, tuple[str, str]],
+    tables: Mapping[str, Iterable[str]] | None = None,
 ) -> dict[str, list[str]]:
     """{lens: changed asset keys} for every published lens whose compiled
     provenance no longer matches ``effective_hashes`` (current DB hashes with the
     push's incoming assets layered on). Lenses absent from a push still appear —
-    apply recompiles them."""
+    apply recompiles them. ``tables``: lens -> the tables it reads."""
     out: dict[str, list[str]] = {}
     for lens, assets in provenances.items():
-        changed = stale_asset_keys(assets, effective_hashes, relationship_pairs)
+        changed = stale_asset_keys(
+            assets, effective_hashes, relationship_pairs, (tables or {}).get(lens, ())
+        )
         if changed:
             out[lens] = changed
     return out
@@ -507,15 +534,16 @@ class Selection:
 def _file_keys(path: str, content: str) -> set[str]:
     """``kind/name`` keys one semantic file defines (relationships included)."""
     from services.project.loader import asset_key
-    from services.semantic.files import parse_semantic_files
+    from services.semantic.files import parse_blueprint_files, parse_semantic_files
 
     try:
         entities, definitions, relationships = parse_semantic_files({path: content})
+        blueprints = parse_blueprint_files({path: content})
     except Exception:  # noqa: BLE001 — an unparseable file keys by the loader's rule
         found = asset_key(path, content)
         if found is None:
             return set()
-        kind = {"entities": "entity", "definitions": "definition"}.get(
+        kind = {"entities": "entity", "definitions": "definition", "tables": "blueprint"}.get(
             found[0].rsplit("/", 1)[-1], "relationship"
         )
         return {f"{kind}/{found[1]}"}
@@ -526,6 +554,7 @@ def _file_keys(path: str, content: str) -> set[str]:
             f"relationship/{n}|{r.left}|{r.right}"  # endpoints ride for the filter
             for n, r in relationships.items()
         }
+        | {f"blueprint/{n}" for n in blueprints}
     )
 
 
@@ -630,6 +659,19 @@ def _lens_selects(tree: dict[str, str]) -> tuple[set[str], set[str]]:
     return {e.name for e in config.select.entities}, set(config.select.definitions)
 
 
+def _lens_expose_patterns(tree: dict[str, str]) -> list[str]:
+    """The table patterns one pushed lens.yaml's `expose:` grants name."""
+    import yaml as _yaml
+
+    from services.contracts.lens_config import LensConfig
+
+    try:
+        config = LensConfig.model_validate(_yaml.safe_load(tree.get("lens.yaml", "")) or {})
+    except Exception:  # noqa: BLE001 — apply reports the real error on the lens row
+        return []
+    return [t for grant in config.expose for t in grant.tables]
+
+
 def resolve_selection(
     files: dict[str, str],
     selectors: list[str],
@@ -672,7 +714,10 @@ def resolve_selection(
     trees = split_by_lens(files)
     keys_by_file = {p: _file_keys(p, c) for p, c in semantic.items()}
     assets = {
-        k for keys in keys_by_file.values() for k in keys if not k.startswith("relationship/")
+        k
+        for keys in keys_by_file.values()
+        for k in keys
+        if not k.startswith(("relationship/", "blueprint/"))
     }
     selects = {lens: _lens_selects(tree) for lens, tree in trees.items()}
     nodes = {f"lens/{n}" for n in trees} | assets
@@ -714,7 +759,7 @@ def resolve_selection(
                 for p in plan_semantic(db_semantic, semantic)
                 if p.status != "unchanged"
                 for k in keys_by_file.get(p.path, set())
-                if not k.startswith("relationship/")
+                if not k.startswith(("relationship/", "blueprint/"))
             }
             picked |= {
                 f"lens/{p.lens}" for p in plan_lenses(db_trees, trees) if p.status != "unchanged"
@@ -765,11 +810,40 @@ def resolve_selection(
             + (f"; no entity reads {', '.join(sorted(unread))}" if unread else "")
         )
 
+    # A blueprint is a fact about a table, selected by nothing: it rides when
+    # the selection reaches the table — an entity on it, a `table/` selector
+    # naming it, or a selected lens whose `expose:` grant matches it.
+    if any(k.startswith("blueprint/") for keys in keys_by_file.values() for k in keys):
+        tables = tables or _semantic_facts(semantic)[0]
+    reached_tables = [tables[e] for e in chosen_entities if e in tables]
+    table_patterns = [
+        m.group(1)
+        for s in selectors
+        if (m := re.fullmatch(r"\+?table/([^+\s]+)\+?", s.strip())) is not None
+    ]
+    grants = [pattern for lens in lenses for pattern in _lens_expose_patterns(trees.get(lens, {}))]
+
+    def keep_blueprint(table: str) -> bool:
+        from services.project.lineage import same_table
+
+        return (
+            not selectors
+            or any(same_table(table, t) for t in reached_tables)
+            or any(fnmatch.fnmatchcase(table.lower(), p.lower()) for p in grants)
+            or any(
+                fnmatch.fnmatchcase(table.lower(), p.lower()) or same_table(table, p)
+                for p in table_patterns
+            )
+        )
+
     def keep_semantic(path: str) -> bool:
         for key in keys_by_file.get(path, set()):
             if key.startswith("relationship/"):
                 _name, left, right = key.split("|")
                 if {left, right} <= chosen_entities:
+                    return True
+            elif key.startswith("blueprint/"):
+                if keep_blueprint(key.removeprefix("blueprint/")):
                     return True
             elif key in picked:
                 return True

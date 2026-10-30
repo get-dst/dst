@@ -68,7 +68,9 @@ Backend (`services/`):
 - `governance/` — audit log, policy, caller directory, rate limits, drift watch.
 - `observability/` — serving KPIs, cost tracking, structured logs.
 - `auth/` — API keys, scopes, OAuth/OIDC, local sessions.
-- `cli/` — the `dst` command; `style.py` is the single ANSI/formatting seam.
+- `cli/` — the `dst` command: `main.py` is the parser registry, one module per command
+  (or command family) holds its handlers and parser, `_common.py` the helpers several
+  share; `style.py` is the single ANSI/formatting seam.
 - `mcp/` — the MCP server. Tools must stay `async def`: under the remote
   transport they share the API's event loop, and a blocking tool deadlocks it
   (a regression test pins this).

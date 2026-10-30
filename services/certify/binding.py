@@ -275,3 +275,45 @@ def render_question(question: str, binding: dict[str, object]) -> str:
         return str(binding.get(m.group(1), m.group(0)))
 
     return _PLACEHOLDER.sub(_sub, question)
+
+
+def render_query(query: object, specs: dict[str, SlotSpec], binding: dict[str, object]) -> object:
+    """A template's Cube query (JSON) with validated values written in, never
+    spliced text: a string that is exactly ``{slot}`` becomes the value (a
+    ``date_range`` the inclusive ``[first day, last day]`` a ``dateRange``
+    takes, a ``number`` a number); ``{slot.start}`` / ``{slot.end}`` the
+    range's first and last day; a placeholder inside a longer string the
+    canonical text. Raises ValueError on a value that does not validate or a
+    placeholder no slot declares."""
+    canonical, errors = validate_binding(specs, dict(binding))
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    def value(name: str, part: str | None) -> object:
+        spec = specs.get(name)
+        if spec is None:
+            raise ValueError(f"undeclared placeholder '{name}'")
+        raw = canonical[name]
+        if spec.type == "date_range":
+            start, end = _date_range(raw)  # type: ignore[misc]  # validated above
+            last = (end - datetime.timedelta(days=1)).isoformat()
+            if part is None:
+                return [start.isoformat(), last]
+            return start.isoformat() if part == "start" else last
+        if spec.type == "number":
+            return int(raw) if re.fullmatch(r"-?\d+", raw) else float(raw)
+        return raw
+
+    def walk(node: object) -> object:
+        if isinstance(node, dict):
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if isinstance(node, str):
+            whole = _PLACEHOLDER.fullmatch(node)
+            if whole:
+                return value(whole.group(1), whole.group(2))
+            return _PLACEHOLDER.sub(lambda m: str(value(m.group(1), m.group(2))), node)
+        return node
+
+    return walk(query)

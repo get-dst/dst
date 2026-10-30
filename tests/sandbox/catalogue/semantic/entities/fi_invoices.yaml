@@ -1,0 +1,64 @@
+name: fi_invoices
+description: >-
+  Every Nordlund LVI Oy invoice: contracting invoices (Netvisor sales module) and maintenance-contract
+  invoices (Netvisor service module), with the ex-VAT amount, the current outstanding balance and the
+  customer. The Netvisor sales-invoice sync last landed invoices dated 2026-06-05, so contracting
+  revenue here stops in June 2026 while service-contract invoices run to August.
+grain: one row per invoice
+use_cases:
+  - "Use when a question asks about invoices, invoiced amounts per customer, overdue invoices, who owes money, days to pay, or revenue by service line."
+  - "Avoid for: group or Bergström revenue (group_revenue_monthly, bergstrom_invoices); month-end receivables snapshots (ar_aging_monthly)"
+common_questions:
+  - list invoices more than 60 days overdue
+  - which customers owe the most
+  - revenue by service line year to date
+source: {connection: warehouse, table: marts.fct_invoices}
+default_time_field: issue_date
+primary_key: [invoice_id]
+population: Nordlund LVI Oy invoices only (Finland); Bergström invoices live in bergstrom_invoices
+fields:
+  - {name: invoice_id, type: string}
+  - {name: customer_id, type: string, description: "CRM customer id (Cxxx)"}
+  - {name: issue_date, type: date}
+  - {name: due_date, type: date}
+  - {name: net_amount_eur, type: number, description: "ex-VAT - the revenue basis"}
+  - {name: gross_amount_eur, type: number, description: "incl. VAT 25.5 %"}
+  - {name: outstanding_eur, type: number, description: "still unpaid today; 0 when paid"}
+  - {name: revenue_stream, type: string, description: "Contracting or Service contract"}
+  - {name: service, type: string, description: "service line (Bathroom renovation, Heating system, Maintenance contract, ...)"}
+dimensions:
+  - {name: revenue_stream, aliases: [stream]}
+  - {name: service, aliases: [service line, job type, service type]}
+  - {name: customer_id, aliases: [customer]}
+metrics:
+  - name: invoiced_net_eur
+    agg: sum
+    expr: fi_invoices.net_amount_eur
+    label: invoiced revenue
+    aliases: [invoiced amount, invoiced ex-VAT, Finnish revenue, LVI revenue]
+    format: currency
+    currency: EUR
+  - name: invoiced_gross_eur
+    agg: sum
+    expr: fi_invoices.gross_amount_eur
+    label: invoiced gross
+    aliases: [invoiced incl VAT]
+    format: currency
+    currency: EUR
+  - name: outstanding_eur
+    agg: sum
+    expr: fi_invoices.outstanding_eur
+    label: outstanding
+    aliases: [owed, unpaid amount, open balance]
+    description: unpaid balance today across the asked invoices
+    format: currency
+    currency: EUR
+  - name: invoice_count
+    agg: count
+    label: invoices
+    aliases: [number of invoices]
+  - name: overdue_invoice_count
+    agg: count
+    filters: ["fi_invoices.outstanding_eur > 0", "fi_invoices.due_date < CURRENT_DATE"]
+    label: overdue invoices
+    description: invoices with an unpaid balance whose due date has passed

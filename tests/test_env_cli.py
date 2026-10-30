@@ -67,7 +67,7 @@ def env_name() -> Iterator[str]:
 
 @needs_db
 def test_env_new_creates_org_and_token(env_name: str, capsys: pytest.CaptureFixture[str]) -> None:
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     assert _env(_args("new", env_name)) == 0
     out = capsys.readouterr().out
@@ -90,7 +90,7 @@ def test_env_new_creates_org_and_token(env_name: str, capsys: pytest.CaptureFixt
 
 @needs_db
 def test_env_new_is_idempotent(env_name: str, capsys: pytest.CaptureFixture[str]) -> None:
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     assert _env(_args("new", env_name)) == 0
     assert _env(_args("new", env_name)) == 0
@@ -110,7 +110,7 @@ def test_env_new_is_idempotent(env_name: str, capsys: pytest.CaptureFixture[str]
 def test_env_new_never_touches_dotenv(
     env_name: str, tmp_path: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     dotenv = tmp_path / ".env"  # type: ignore[operator]
@@ -123,7 +123,7 @@ def test_env_new_never_touches_dotenv(
 
 @needs_db
 def test_env_ls_lists_and_counts(env_name: str, capsys: pytest.CaptureFixture[str]) -> None:
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     assert _env(_args("new", env_name)) == 0
     capsys.readouterr()
@@ -137,7 +137,7 @@ def test_env_ls_lists_and_counts(env_name: str, capsys: pytest.CaptureFixture[st
 def test_env_rm_requires_yes_and_exact_name(
     env_name: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     assert _env(_args("new", env_name)) == 0
     assert _env(_args("rm", env_name)) == 1  # no --yes
@@ -148,7 +148,7 @@ def test_env_rm_requires_yes_and_exact_name(
 
 @needs_db
 def test_env_rm_cascades_org_content(env_name: str) -> None:
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     assert _env(_args("new", env_name)) == 0
     oid = _org_id(env_name)
@@ -175,7 +175,7 @@ def test_env_rm_cascades_org_content(env_name: str) -> None:
 def test_env_rm_works_without_bypassrls(env_name: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """The managed-PG shape: `env rm` through a role with SUPERUSER and
     BYPASSRLS stripped — the cascade must still empty FORCE-RLS tables."""
-    from services.cli import main as cli_main
+    from services.cli import env as cli_main
 
     url = make_url(settings.database_admin_url)
     role = f"env_probe_{url.database}"[:63]
@@ -218,7 +218,7 @@ def test_env_new_records_name_and_rm_forgets_it(
     import json as _json
     from pathlib import Path
 
-    from services.cli.main import _env
+    from services.cli.env import _env
 
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     assert _env(_args("new", env_name)) == 0
@@ -237,7 +237,8 @@ def test_project_org_resolves_env_name_as_org(
     the local no-secret path."""
     import argparse as _ap
 
-    from services.cli.main import _env, _project_org
+    from services.cli._common import _project_org
+    from services.cli.env import _env
 
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     monkeypatch.delenv("DST_ADMIN_TOKEN", raising=False)

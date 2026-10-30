@@ -17,14 +17,16 @@ here is a fact the lenses already declare, applied exactly:
    (lens.yaml ``sources``) goes only to the lenses declaring it; when none
    the caller may use does, it is uncovered for that reason.
 6. ``metric_name_owner`` — a question naming a metric (its name or label)
-   that one candidate alone declares belongs to that candidate, ahead of
-   similarity: the lens that declares the figure is the one that computes it.
-   Aliases are not read here: they widen the metric slot inside a lens, never
-   the questions a lens takes.
-7. ``shared_metric`` — a metric several candidates declare is theirs to split:
-   a declared name only one of them carries, or the only one that can split
-   over time when the question asks it, picks one; otherwise the question is
-   asked which lens, never answered by a silent pick.
+   that one candidate alone declares points at that candidate. A signal, not
+   a route: the router takes it only when that lens also covers the whole
+   question (``router.coverage``). Aliases are not read here: they widen the
+   metric slot inside a lens, never the questions a lens takes.
+7. ``shared_metric`` — a metric several of the top candidates declare is
+   theirs to split: a lens named after the asked thing, a declared name only
+   one of them carries, or the only one that can split over time when the
+   question asks it, picks one; otherwise the question is asked which lens,
+   never answered by a silent pick. The router hands it only the top-ranked
+   lenses that cover the question, never every lens the caller may use.
 """
 
 from __future__ import annotations
@@ -176,11 +178,29 @@ def shared_metric(
         owners = timed
         if len(owners) == 1:
             return owners[0].lens, None
-    named_owner = unique_name_owner(question, owners)
+    named_owner = named_lens(question, [p.lens for p in owners]) or unique_name_owner(
+        question, owners
+    )
     if named_owner is not None:
         return named_owner, None
     lenses = ", ".join(sorted(p.lens for p in owners))
     return None, f"several lenses measure {figure}: {lenses}. Name the lens to ask"
+
+
+def named_lens(question: str, lenses: Iterable[str]) -> str | None:
+    """The one lens named after what the question asks: its name, read as
+    words (singular or plural), said in the question. None when none or
+    several are."""
+    q = _phrase(question)
+    hits = []
+    for lens in lenses:
+        name = _phrase(lens)
+        forms = {name, f"{name}s"} | (
+            {name[:-1]} if name.endswith("s") and len(name) > 3 else set()
+        )
+        if name and any(_contains(q, f) for f in forms):
+            hits.append(lens)
+    return hits[0] if len(hits) == 1 else None
 
 
 def named_sources(question: str, known: Iterable[str]) -> list[str]:

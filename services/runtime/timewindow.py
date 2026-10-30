@@ -62,13 +62,38 @@ def _month_name(raw: str) -> str:
 # "from January to September 2026 inclusive", "between March and June 2026":
 # one span, first month's start to last month's END whatever the connector
 # word — "to" and "until" bind the last month whole, exactly like "through".
+# Without a year ("January to September", "between March and May") the span
+# takes a year stated elsewhere in the question, or else the most recent one
+# starting on or before the lens clock (``window_ranges``).
 _SPAN = re.compile(
     rf"\b(?:from\s+|(?P<between>between)\s+)?(?P<m1>{_MONTH_ANY})\.?\s*"
     rf"(?:through|thru|to|until|till|up to|-|–|—|(?(between)and|(?!)))\s*"
-    rf"(?P<m2>{_MONTH_ANY})\.?(?:\s+(?:inclusive|incl\.?))?\s+(?P<syear>(?:19|20)\d{{2}})"
+    rf"(?P<m2>{_MONTH_ANY})\.?(?:\s+(?:inclusive|incl\.?))?(?:\s+(?P<syear>(?:19|20)\d{{2}}))?"
     rf"(?:\s+(?:inclusive|incl\.?))?\b",
     re.IGNORECASE,
 )
+# "2021 to 2025", "from 2021 through 2025", "between 2021 and 2025",
+# "2021–2025": one window, the first year's start to the last year's end.
+_YEAR_SPAN = re.compile(
+    r"\b(?:from\s+|(?P<between>between)\s+)?(?P<y1>(?:19|20)\d{2})"
+    r"(?:\s*(?:through|thru|to|until|till|-|–|—)\s*|\s+(?(between)and|(?!))\s+)"
+    r"(?P<y2>(?:19|20)\d{2})(?![\w-])",
+    re.IGNORECASE,
+)
+
+
+def _spans(text: str) -> list[re.Match[str]]:
+    """The month spans of the text. One without a year opening on "may" is
+    read only after "from" or "between": "may - june" is the modal verb."""
+    return [
+        m
+        for m in _SPAN.finditer(text)
+        if m.group("syear")
+        or m.group("m1").lower() != "may"
+        or m.group(0).lower().startswith(("from", "between"))
+    ]
+
+
 _MONTH_WORD = re.compile(rf"\b(?P<month>{_MONTHS})\b", re.IGNORECASE)
 
 # ── days written in words ────────────────────────────────────────────────────
@@ -497,11 +522,17 @@ def temporal_terms(text: str) -> frozenset[str]:
     for span, term in _phrases(text):
         out.add(term)
         spanned.append(span)
-    for s in _SPAN.finditer(text):
+    for s in _spans(text):
         if any(a < s.end() and s.start() < b for a, b in spanned):
             continue
         out.add(f"span:{_month_name(s.group('m1'))}-{_month_name(s.group('m2'))}")
-        out.add(s.group("syear"))
+        if s.group("syear"):
+            out.add(s.group("syear"))
+        spanned.append(s.span())
+    for s in _YEAR_SPAN.finditer(text):
+        if any(a < s.end() and s.start() < b for a, b in spanned):
+            continue
+        out.add(f"years:{s.group('y1')}-{s.group('y2')}")
         spanned.append(s.span())
     for m in _TEMPORAL.finditer(text):
         if any(a <= m.start() < b for a, b in spanned):
@@ -579,11 +610,10 @@ def temporal_spans(text: str) -> list[tuple[int, int]]:
     the text, so a caller can blank them and judge what the question says
     besides its period."""
     spans = [span for span, _term in _phrases(text)]
-    spans += [
-        m.span()
-        for m in _SPAN.finditer(text)
-        if not any(a < m.end() and m.start() < b for a, b in spans)
-    ]
+    for found in (_spans(text), _YEAR_SPAN.finditer(text)):
+        spans += [
+            m.span() for m in found if not any(a < m.end() and m.start() < b for a, b in spans)
+        ]
     for m in _TEMPORAL.finditer(text):
         if not any(a <= m.start() < b for a, b in spans):
             spans.append(m.span())
@@ -626,12 +656,18 @@ def place_bare_month(text: str, today: date) -> str:
     return f"{text[:b]} {year}{text[b:]}"
 
 
-def unplaced_months(text: str, terms: frozenset[str]) -> list[str]:
+def unplaced_months(text: str, terms: frozenset[str], today: date | None = None) -> list[str]:
     """Month names the question states that no term carries — "January and
     August 2026" parses August 2026 and drops January; served as August alone
     that is a silently wrong period, so the caller of the window must ask.
-    A bare "may" is left alone (the modal verb)."""
+    A bare "may" is left alone (the modal verb). With ``today``, a month that
+    restates a window lying inside it is carried: "so far this month
+    (October)" asked in October names the window twice."""
     covered: set[str] = set()
+    if today is not None:
+        for first, last in window_ranges(terms, today):
+            if (first.year, first.month) == (last.year, last.month):
+                covered.add(_MONTH_BY_NUM[first.month])
     for t in terms:
         if t in _MONTH_NUM:
             covered.add(t)
@@ -651,6 +687,22 @@ def unplaced_months(text: str, terms: frozenset[str]) -> list[str]:
             continue
         out.append(name)
     return out
+
+
+# The present asked in words: "today", "now", "currently", "right now",
+# "at the moment", "as of today", "at present".
+_PRESENT = re.compile(
+    r"\b(?:today|now|currently|at\s+the\s+moment|at\s+present|as\s+of\s+today)\b", re.I
+)
+
+
+def asks_present(text: str) -> bool:
+    """Does the question ask about the present, and name no other period?
+    A level metric reads that as its latest snapshot: "today" before today's
+    snapshot is loaded is still the newest balance there is."""
+    if not _PRESENT.search(text):
+        return False
+    return temporal_terms(text) <= {"this day"}
 
 
 def temporal_mismatch(asked: str, approved: str) -> bool:
@@ -924,6 +976,23 @@ def window_ranges(terms: frozenset[str], today: date) -> list[tuple[date, date]]
         if bound := _EDGE_TERM.fullmatch(t):
             p0, p1 = _calendar_period(today, bound.group(2), bound.group(3))
             ranges.append((p0, p0) if bound.group(1) == "start" else (p1, p1))
+    for t in terms:
+        if t.startswith("years:"):
+            y1, _sep, y2 = t[6:].partition("-")
+            if int(y1) <= int(y2):
+                ranges.append((date(int(y1), 1, 1), date(int(y2), 12, 31)))
+    rel_year = any(_REL_TERM.fullmatch(t) and t.endswith(" year") for t in terms)
+    if not years and not rel_year:
+        # a span named without a year: the most recent one starting on or
+        # before the lens clock ("January to September" asked in October
+        # 2026 is 2026's, asked in March 2026 it is 2025's)
+        for t in span_terms:
+            first, last = t[5:].split("-", 1)
+            if first in _MONTH_NUM and last in _MONTH_NUM:
+                a, b = _MONTH_NUM[first], _MONTH_NUM[last]
+                if a <= b:  # backwards, it names no year to run into: unresolved
+                    y = today.year if a <= today.month else today.year - 1
+                    ranges.append((date(y, a, 1), _month_end(y, b)))
     for y in years:
         for m in months:
             ranges.append((date(y, m, 1), _month_end(y, m)))
@@ -940,10 +1009,11 @@ def window_ranges(terms: frozenset[str], today: date) -> list[tuple[date, date]]
         if rel_match is None:
             continue
         rel, n, grain = rel_match.group(1), rel_match.group(2), rel_match.group(3)
-        if n is None and grain == "year" and parts:
-            # "the third quarter of this year": the part, in that year
+        if n is None and grain == "year" and (parts or spans):
+            # "the third quarter of this year", "January to September last
+            # year": the part or the span, in that year
             y = _calendar_period(today, rel, grain)[0].year
-            ranges += [(date(y, a, 1), _month_end(y, b)) for a, b in parts]
+            ranges += [(date(y, a, 1), _month_end(y, b)) for a, b in [*parts, *spans]]
             continue
         if n is None:
             ranges.append(_calendar_period(today, rel, grain))

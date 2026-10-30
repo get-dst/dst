@@ -1,4 +1,4 @@
-.PHONY: install hooks up down lint fmt test dev migrate seed ci ci-clean ci-newest benchmark benchmark-selftest
+.PHONY: install hooks up down lint fmt test dev migrate seed ci ci-clean ci-newest
 
 install:        ## install backend deps into the uv venv
 	uv sync
@@ -32,13 +32,6 @@ fmt:            ## auto-format
 
 test:           ## run backend tests
 	uv run pytest
-
-DATA ?= ./data
-benchmark:      ## run the proving-ground benchmark (DATA=<generator csv root>; needs ANTHROPIC_API_KEY)
-	uv run python -m services.benchmark --data $(DATA)
-
-benchmark-selftest: ## offline harness self-test (no API key, scripted LLM)
-	uv run python -m services.benchmark --data $(DATA) --offline --no-dst --out /tmp/benchmark-selftest
 
 # The gate's own honesty clause. Without a database the suite degrades to
 # "skip what needs one and report the rest" (tests/conftest.py) — right for a

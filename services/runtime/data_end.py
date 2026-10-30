@@ -7,6 +7,10 @@ filters on says where the data ends; a window that begins after it is answered
 with that fact instead of the empty result. The read is live, so a stale
 profile cannot make the claim; any doubt (no window, no dated entity, a probe
 that fails) serves the result as before.
+
+A level metric asked for today, now or currently reads its latest snapshot,
+which is often yesterday's or older; the answer names that snapshot's day,
+read live by the same kind of ``MAX``.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from services.contracts.semantic_model import Entity, SemanticModel
 from services.contracts.warehouse import QueryResult
 from services.runtime import sql_guard, value_guard
 from services.runtime.identifiers import quote_ident, quote_table
-from services.runtime.timewindow import temporal_terms, window_ranges
+from services.runtime.timewindow import asks_present, temporal_terms, window_ranges
 
 
 def no_data(sql: str, dialect: str, result: QueryResult) -> bool:
@@ -117,3 +121,42 @@ def window_after_data(
                 f"{start.isoformat()}."
             )
     return None
+
+
+def latest_snapshot_line(
+    question: str, intent: QueryIntent | None, model: SemanticModel, connector: Connector
+) -> str | None:
+    """The level reading's disclosure naming the snapshot day a figure asked
+    for today, now or currently stands on; None for any other reading, or
+    when the day cannot be read."""
+    from services.runtime.resolution import LATEST_READING, level_reading
+
+    if intent is None or not asks_present(question):
+        return None
+    reading = level_reading(intent, model)
+    if reading is None or not reading[1].startswith(LATEST_READING):
+        return None
+    entity = next((e for e in model.entities if e.name == intent.entity), None)
+    if entity is None:
+        owners = [e for e in model.entities if {m.name for m in e.metrics} >= set(intent.metrics)]
+        entity = owners[0] if len(owners) == 1 else None
+    if entity is None:
+        return None
+    field = reading[0]
+    probe = (
+        f"SELECT MAX({quote_ident(field, model.dialect)}) "
+        f"FROM {quote_table(entity.source.table, model.dialect)}"
+    )
+    try:
+        got = connector.execute(probe, read_only=True, row_limit=1)
+    except Exception:  # noqa: BLE001 — the probe is evidence, never the serve
+        return None
+    newest = _day(got.rows[0][0]) if got.rows and got.rows[0] else None
+    if newest is None:
+        return None
+    names = ", ".join(f"`{m}`" for m in intent.metrics)
+    return (
+        f"Reading applied: {names} is a level (a snapshot), so the figure for the present "
+        f"is the latest snapshot in the data, {newest.isoformat()} on `{field}`, not a sum "
+        "over every snapshot."
+    )

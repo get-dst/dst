@@ -30,6 +30,8 @@ Top-level keys (`services/project/schema.py`):
 | `demo` | what a public demo's `/demo` page shows besides what dst derives itself; see [Demo page](#demo-page-demo) |
 | `probe` | how `dst probe` samples and how old its profile may get; see [Probe](#probe-probe) |
 | `lineage` | where the dbt or SQLMesh model DAG lives, for `table/X+` selection; see [Lineage](#lineage-lineage) |
+| `cube` | the Cube this project compiles governed asks through; see [Cube](#cube-cube) |
+| `groups` | the caller groups a `hide` entry may except, e.g. `[support, sales]`; plan and apply fail on an `except_groups` name not listed. Apply stores the list per org, and a pushed `dst.yaml` without it clears it. Declaring a group grants nothing: membership is set on the caller ([Security](../security.md#hidden-columns-and-group-exceptions)) |
 
 ### Provider fields (`providers.<name>`)
 
@@ -267,12 +269,17 @@ scheduled job, a deploy step); this section is how dst notices when it stops.
 |---|---|
 | `max_age` | how old the newest profile in scope may be before every surface says so. A duration: `7d` (the default), `48h`, `30m`; `0` turns the age rails off. Past it, an answer carries `PROFILE: last probed N days ago (max M) — run dst probe` in `degraded`, the freshness and date-coverage checks skip instead of failing on a stamp that only dates the last probe, the value guard consults no dictionary (a stale one cannot prove a new value absent), `dst observe` and `/ready` carry the oldest age and the stale connections, `dst plan` and `dst apply` warn when the pushed artifact is older than this, and `dst test --all` skips the lens and exits 4 |
 | `recent_partitions` | how much of each table the sampling pass reads on a refresh: the latest `n` partitions of a time-partitioned table, or the last `n` days of the entity's `default_time_field` for an unpartitioned one. Default 7; `0` reads whole tables. The catalog pass (every table, row counts, whole-table freshness and date span) is never narrowed. A table the stored artifact never read whole (the first probe of a connection, a table an earlier run did not sample) is read whole, so the dictionaries it proves complete are kept through every windowed refresh as the dated union; the artifact records the slice per table under `sample_window`. A refresh that leaves a dictionary partial which the previous probe held complete names it in a warning |
+| `cube.max_queries` | the most `/v1/load` queries one `dst probe --cube` or `dst monitor` run makes. Default 500. What the budget leaves unread is listed in the artifact and printed, never dropped silently |
+| `cube.max_values` | the most values read for one dimension's dictionary through Cube. Default 500; a dimension holding more is recorded incomplete |
 | `drift_tolerance` | how far a column's measured distribution may move between the drift baseline (`profiles/<connection>.json`) and the newest probe artifact before `dst drift` reports it as breaking. `time_shift` bounds a time column's median offset from the entity's `default_time_field` (default `1h`; `30m`, `1d`; `0` reports any move). `numeric_shift` bounds a numeric column's mean, relative to the baseline (default `0.2`, twenty percent; `0` reports any move). A complete dictionary losing a member is never within tolerance; a changed column comment is reported as comment only and never breaks |
 
 ```yaml
 probe:
   max_age: 7d
   recent_partitions: 7
+  cube:
+    max_queries: 500
+    max_values: 500
   drift_tolerance:
     time_shift: 1h
     numeric_shift: 0.2
@@ -302,6 +309,36 @@ The CLI reads the DAG and sends it with the selection; the server stores nothing
 that is configured but cannot be read (no `manifest.json` yet, no `models/`) is an error
 before any request, never a walk over an empty graph.
 
+### Cube (`cube`)
+
+The Cube (Cube Core, the sidecar or your own) whose model dst reads. dst reads the
+model only through Cube's REST API (`/cubejs-api/v1/meta`) and never parses the model
+files. Every call carries a security-context token: an HS256 JWT signed with
+`CUBEJS_API_SECRET`, holding `{dst: {org, caller, groups, lens, request_id}}` and valid
+for five minutes, so an `access_policy` in the model can read
+`security_context.dst.groups`. With the block declared and `cube/overlay.yaml` in the
+project, the lenses the overlay lists (or that name `views:`) serve through Cube unless
+their `serving:` says otherwise ([Lens serving](#lens-serving-and-views)). `dst cube
+status`, `dst doctor` and `/ready` report on it.
+
+| Key | What |
+|---|---|
+| `url` | Cube's base URL, e.g. `http://localhost:4000` |
+| `api_secret_env` | the env var holding `CUBEJS_API_SECRET`. Default `CUBEJS_API_SECRET`. Named, never inlined: an `api_secret` key is an error |
+| `meta_ttl` | seconds a fetched meta document is reused for the same caller groups before Cube is asked again. Default `300`; `0` asks every time |
+| `jwt_clock` | the clock each request's token is dated by. `wall` (default) is the real time even when dst's own clock is pinned to another day, as tests and replays pin it, so Cube never finds the token expired; `process` is the clock Python reports |
+| `plan_context.groups` | the caller groups plan and apply read the meta as. Empty, plan reads it as a caller in every group the overlay's `hide` entries except, so the members Cube withholds from everyone else are still checked; it also reads it as a caller in no group, to measure what Cube enforces |
+
+```yaml
+cube:
+  url: http://localhost:4000
+  api_secret_env: CUBEJS_API_SECRET
+  meta_ttl: 300
+```
+
+`DST_CUBE_URL`, `DST_CUBE_API_SECRET_ENV`, `DST_CUBE_META_TTL` and `DST_CUBE_JWT_CLOCK` override the block
+field by field.
+
 ## Entity rails (`semantic/entities/<name>.yaml`)
 
 The deterministic behaviour levers on an entity, enforced by the compiler and the
@@ -317,6 +354,36 @@ for the full mechanism table):
 | `filters:` (on a metric) | SQL predicates | Part of the metric's meaning; the filter guard rejects the metric computed without them |
 | `agg: sum_distinct_on` + `distinct_on:` (on a metric) | aggregate + list of SQL expressions | Sums one value per distinct key (a monthly quota on daily rows counted once per rep-month); plan rejects it without `distinct_on` |
 
+## Table blueprints (`semantic/tables/<table>.yaml`)
+
+Facts about one warehouse table, one file per table, project-wide
+([guide](../guides/project-files.md#table-blueprints-facts-about-a-table)). The
+scaffold's `semantic/README.md` carries the reference block rendered from the schema
+(`TableBlueprint` in `services/contracts/semantic_model.py`):
+
+| Key | Type | What it declares |
+|---|---|---|
+| `connection` | string | the `dst.yaml` connection the table lives on; one `dst.yaml` does not declare is a plan error |
+| `table` | string | the table as its connection names it (`dst introspect` prints it); the identity, one blueprint per table name |
+| `system` | string | the source system the table is loaded from, as the team names it. Plan never hints a join between tables of two different systems (case, spaces and punctuation ignored) |
+| `grain` | string | one line: what one row is. Inherited by an entity on the table that declares none, and rendered into both generation prompts |
+| `key` | list of columns | the columns one row is unique on. Plan and apply count it against the rows (probe or one live count) and fail on a duplicate; an entity with no `primary_key` inherits it when it reads every key column |
+| `versions.sync_column` | column | set when rows repeat once per sync of a record: the column that stamps the sync. Uniqueness is then checked on the key plus this column, and an answer's grain line counts the key without it |
+| `versions.latest_only` | list of columns | columns that hold on a record's latest version only, such as a delete flag |
+| `clocks.<column>.meaning` | string | what the timestamp records |
+| `clocks.<column>.timezone` | IANA zone | the zone the values are stored in; one no database knows is a parse error |
+| `joins[].to` | string | another table on the same connection |
+| `joins[].on` | SQL condition | columns qualified by the bare table names; type the key as `"on":` or `condition:` (a bare `on` is a YAML boolean) |
+| `joins[].cardinality` | `one` \| `many` | rows of `to` per row of this table |
+| `caveats` | list of strings | what a reader of the table must know, one sentence each; rendered into both prompts and shown by `describe_lens`. A column the lens hides reads `[withheld column]` there, and plan warns |
+
+An unknown key is a parse error naming the file. Two files for one table are an
+error naming both. A check that fails aborts apply only for a blueprint the push
+adds or changes; a stored one that stops holding is a `DRIFT:` warning. A live
+count runs on a billed warehouse only when its dry-run estimate is within the
+connection's `sample_bytes_budget`, and serving reuses it for `probe.max_age`
+(one hour when that is `0`).
+
 ## Lens serve-time contracts (`lenses/<name>/lens.yaml`)
 
 These lens keys declare contracts the server enforces at serve time; the
@@ -331,6 +398,20 @@ scaffold's reference block carries the full key list
 | `scope` (top level) | unset | whose figures the lens holds: `own` or `market`. Shown to the routing decider |
 | `model.answer_contract` | `strict` | the output-grid contract in every generation prompt: project exactly the asked quantities at the asked grain, full precision. `off` removes the block (a bare `off` is fine; YAML 1.1 parses it as a boolean and the loader coerces it back) |
 
+### Lens serving and views
+
+Which core answers a lens, and, for a lens served through Cube, the views it serves:
+
+| Key | Default | What it declares |
+|---|---|---|
+| `serving` (top level) | unset | `cube`: questions resolve to a Cube query over the lens's views, checked before and after execution, and run through the lens's connection. `typed`: the typed resolver over the entity model. Unset, a lens of a Cube-backed project serves `cube` and every other lens `typed`. A lens is Cube-backed when the push carries `cube/overlay.yaml` and either the overlay lists it under `lenses:` or its `lens.yaml` names `views:`; apply stamps it against Cube's model. Without the overlay no lens is Cube-backed, and a push without it clears the stamp. `DST_SERVING` overrides this key for every lens of an install |
+| `views` (top level) | `[]` | the Cube views this lens serves, in a project with `cube/overlay.yaml`; overrides the overlay's `lenses.<lens>.views`. Plan reads them from Cube's `/v1/meta` and apply stamps the `model_version` they compile to |
+
+`dst plan` prints the lane of every lens in the push on one line,
+`serving: <lens> → <lane> (<why>)`, where the reason is `DST_SERVING`, `lens serving:`,
+`Cube-backed` or `default`. `dst doctor` and `/ready` print it per published lens
+([Migrate to Cube](../guides/migrate-to-cube.md)).
+
 ### Tables without definitions (`expose`)
 
 A lens may read tables no entity file describes
@@ -341,13 +422,40 @@ stored profiles:
 | Key | Type | What it declares |
 |---|---|---|
 | `expose[].connection` | string | the dst.yaml connection whose profiled tables the patterns match; must be in the lens's `connections` |
-| `expose[].tables` | list of patterns | fnmatch-style on the table name as introspect names it: `schema.table` (`staging.*`, `analytics.dim_*`), `project.dataset.table` on BigQuery (`*.analytics.dim_*`); a pattern matching no profiled table fails apply, as does a bare name shared with a selected entity or with another exposed table |
+| `expose[].tables` | list of patterns | fnmatch-style on the table name as introspect names it: `schema.table` (`staging.*`, `analytics.dim_*`), `project.dataset.table` on BigQuery (`*.analytics.dim_*`); a pattern matching no profiled table fails apply; a table whose bare name a selected entity or another exposed table shares is exposed under its qualified name (`staging_orders`) |
 | `expose[].hide` | list of patterns | columns withheld, matched as `table.column` bare or qualified (`*.ssn`, `staging.customers.email`); a hidden column is out of scope |
 
 Each matched table compiles to an entity with the profile's columns and nothing
 else. Answers from it are disclosed `EXPOSED`, never typed, and never `declared`
 in the ledger; with `untyped_fallback: false` the `query` door cannot serve them
-(plan warns), while the `sql` tool reads them directly.
+(plan warns), while the `sql` tool reads them directly. Every answer that reads one
+also carries a `GRAIN` line per table, read from the table's
+[blueprint](#table-blueprints-semantictablestableyaml): rows against distinct key,
+or "could not verify" and why.
+
+## Cube overlay (`cube/overlay.yaml`)
+
+In a Cube-backed project, what dst reads that no member's `meta.dst` carries. The file
+`dst init --cube` scaffolds ends with a reference block of every field, and the
+`dst-cube-overlay` skill maps each one to what reads it. An unknown key is a parse
+error naming the file, the key path and the nearest valid key.
+
+| Key | What it holds |
+|---|---|
+| `version` | `1` |
+| `cubes.<cube>` | per cube: `default_time_dimension` (its clock), `use_cases` and `common_questions` (routing text), `caveats` and `member_caveats` (carried by every answer that reads the cube or member), `pinned_dimensions`, `clock_kind` (`event` or `schedule` per time dimension), `feed_axes` and `feed_measures` (what the monitor judges as feeds), `loaded_at` (the time dimension stamping each row's load, the monitor's evidence that a short month is a partial load), `entity_scope` (a one-company cube and its group-level counterparts) |
+| `lenses.<lens>` | per lens: `views`, and its policy over them: `owner`, `timezone`, `stale_after_days`, `scope`, `sources`, `not_for`, `not_computable`, `access`, `expose`, `eval_gate`, `auto_review`, `definitions` (the overlay definitions it reads, by term) |
+| `definitions` | prose definitions the model cannot carry as a segment: `metric`, `about` (a cube or member), `summary`, `aliases`, `status`, `audiences`, `file` |
+| `ambiguous` | ambiguous terms, the same fields plus `readings` (each `says`, `members`, `select_words`, `default: true`) and `default` |
+| `hide` | dimensions withheld from every caller outside the groups: `cube`, `dimension`, `except_groups` |
+| `scope` | the words that scope a figure to one company: `names`, `group_names`, `axes`, `word_axes` |
+
+An ambiguous term's `default` names one reading by its `says`. With it declared, that
+reading is served when the question names none, however far the others are, and the
+others are disclosed beside it (with their values when they compute). Without it, the
+caller is asked when the readings differ by more than 1 %; readings within 1 % serve the
+one marked `default: true`, else the one the query read. A `default` that names no reading, or disagrees with the
+reading marked `default: true`, is a parse error.
 
 ## Server environment
 
@@ -363,11 +471,13 @@ older installs. The interesting ones:
 | `DST_SECRET_KEY` | — | Fernet key(s) encrypting stored warehouse/context credentials, **comma-separated**: the first encrypts, all decrypt. `dst secret` mints one; `dst init` generates it into `.env`. To rotate, deploy `<new>,<old>`, run `dst rotate-key`, then drop `<old>`. Changing it without that sequence makes stored credentials unreadable; the server checks the key against an encrypted sentinel at startup and refuses to boot on a mismatch |
 | `DST_PROVIDERS` | `{}` | providers as JSON, same shape as the `dst.yaml` `providers` map; inline `api_key` is allowed *here* (env-only), never in files |
 | `DST_TYPED_SERVING` | `auto` | `auto`: typed serving whenever a typed-decision provider (`typesafe` or `openai-decisions`) resolves; `on`: typed serving on any decider (a voting chat model, five samples per decision); `off`: the one-shot intent emission ([Typed decisions](../concepts/typed-decisions.md)) |
+| `DST_SERVING` | unset | `typed` or `cube`: the serving core for every lens of the install, over each lens's own `serving:` and the Cube-backed default. Unset, each lens decides ([Lens serving](#lens-serving-and-views)) |
 | `DST_GATE_CONCURRENCY` | `16` | workers for the test lanes and the apply gate — the slot lane's wall time is the provider's round trips divided by this |
 | `DST_DEFAULT_PROVIDER` | first declared | bare-model-ref fallback |
 | `DST_LLM_DESCRIPTIONS` | `true` | the profiling chain's LLM description pass, which sends table/column names and sampled values to the configured provider to fill undocumented columns. `false` turns it off; profiling then stays entirely between dst and the warehouse. See [Security and data flow](../security.md) |
 | `DST_AI_PRICING` | `{}` | per-model pricing JSON, same shape as the file key |
 | `DST_PROJECT_FILE` | `dst.yaml` | the workspace config, relative to the server's cwd |
+| `DST_CUBE_URL` / `DST_CUBE_API_SECRET_ENV` / `DST_CUBE_META_TTL` / `DST_CUBE_JWT_CLOCK` | unset | the [Cube](#cube-cube) block's fields, set from the environment; each one set here wins over `dst.yaml` |
 | `DST_PLUGINS` | unset | entry-point plugins allowed to mount routes, comma-separated by name. Unset means every installed one mounts; set means exactly these, and an installed plugin outside the list is refused with a warning naming it. Either way every mount is logged and listed in `/ready`; see [Plugins](#plugins) |
 | `DST_SERVING_TIMEOUT_S` | `600` | bound on each per-request model/embedding call and each warehouse step (the dry run, the query, a value probe) while serving a query. Generous on purpose: the slowest legitimate generations run for minutes; it exists so a wedged provider (or an embedder cold start downloading model weights) surfaces as an error naming the stage instead of a request that never returns. A warehouse step past it answers 504 naming the step, and a DuckDB or MotherDuck statement past it is interrupted (on MotherDuck, one that does not stop within 5 s gives up its connection to a fresh one); later requests are unaffected. Each warehouse step logs its name, its connection and its seconds at INFO. `0` disables the bound |
 | `DST_APPLY_STEP_TIMEOUT_S` | `60` | deadline on each warehouse-touching step of `dst apply`: opening a declared connection, probing it, running a certified answer's or an eval case's SQL. Apply holds the org's apply lock and its transaction for the whole request, so a warehouse that accepts the connection and never answers would otherwise hold both until the process dies. Past the deadline the apply returns a 504 naming the step, rolls back, and the next apply proceeds. Each step logs its name and seconds at INFO. `0` disables the bound |
@@ -475,7 +585,7 @@ supported, not that dst does the federation for you.
 
 ## Client-side variables
 
-Read by the CLI and MCP clients, not the server (`services/cli/main.py`,
+Read by the CLI and MCP clients, not the server (`services/cli/_common.py`,
 `services/mcp/server.py`):
 
 | Var | Purpose |
@@ -486,4 +596,4 @@ Read by the CLI and MCP clients, not the server (`services/cli/main.py`,
 | `DST_API_KEY` | a caller key for the **stdio** MCP server only (`python -m services.mcp.server`); the remote transport reads the key from the request header |
 
 *(Keys and defaults verified against `services/config.py`,
-`services/project/schema.py`, and `services/cli/main.py`.)*
+`services/project/schema.py`, and `services/cli/_common.py`.)*

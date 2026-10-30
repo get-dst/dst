@@ -1,0 +1,10 @@
+{{- if and .Values.cube.enabled (not .Values.cube.external.url) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dst.fullname" . }}-cube-config
+  labels: {{- include "dst.labels" . | nindent 4 }}
+data:
+  cube.js: |
+{{ .Files.Get "files/cube.js" | indent 4 }}
+{{- end }}

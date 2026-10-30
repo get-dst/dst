@@ -38,6 +38,7 @@ from services.contracts.warehouse import (
     SchemaSnapshot,
     TableSchema,
 )
+from services.runtime.external_access import ensure_contained, refusal
 
 _PARTITION_STRATEGY = {"r": "range", "l": "list", "h": "hash"}
 
@@ -360,6 +361,8 @@ class PostgresConnector:
         )
 
     def dry_run(self, sql: str) -> DryRunResult:
+        if reason := refusal(sql, "postgres"):
+            return DryRunResult(valid=False, error=f"SQL refused: {reason}")
         con = self._connect()
         try:
             con.execute(f"EXPLAIN {sql}")
@@ -372,6 +375,7 @@ class PostgresConnector:
     def execute(
         self, sql: str, *, read_only: bool = True, row_limit: int | None = None
     ) -> QueryResult:
+        ensure_contained(sql, "postgres")
         con = self._connect()  # always read-only
         try:
             return _fetch(con, sql, row_limit)
@@ -450,6 +454,7 @@ class _PinnedPostgres:
     def execute(
         self, sql: str, *, read_only: bool = True, row_limit: int | None = None
     ) -> QueryResult:
+        ensure_contained(sql, "postgres")
         con = self._parent._connect()  # always read-only
         try:
             con.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")

@@ -1,11 +1,9 @@
-"""The flywheel's first two steps have a CLI.
+"""Filing a correction has a CLI.
 
-`dst reviews` lists and `dst patches approve` rules, but FILING a correction
-and DRAFTING its patch are otherwise REST-only, forcing callers to hand-roll
-raw HTTP to get from step 3 to step 4 of the loop. `dst correct` and
-`dst patches draft` close it, and draft PRINTS the drafted target and body
-because the loop requires reading the draft before approving. httpx is
-monkeypatched (the test_cli_governance pattern) — no server, no DB.
+`dst reviews` lists and `dst rule` rules, but FILING a correction was REST-only,
+forcing callers to hand-roll raw HTTP to get from a wrong answer to a ticket.
+`dst correct` closes it. httpx is monkeypatched (the test_cli_governance
+pattern) — no server, no DB.
 """
 
 from __future__ import annotations
@@ -59,23 +57,6 @@ def _ticket(**over: object) -> dict[str, object]:
     return t
 
 
-def _candidate(**over: object) -> dict[str, object]:
-    c: dict[str, object] = {
-        "id": "pc_1",
-        "ticket_id": "rev_1",
-        "lens": "customer_value",
-        "kind": "definition",
-        "target": "repeat_customer",
-        "owner": "lens-owner",
-        "diff_before": "A customer with more than one paid order.",
-        "diff_after": "A customer with more than one paid order in the last 12 months.",
-        "status": "candidate",
-        "rejection_note": None,
-    }
-    c.update(over)
-    return c
-
-
 # ── dst correct: flywheel step 3 ─────────────────────────────────────────
 
 _NOTE = (
@@ -127,8 +108,8 @@ def test_correct_files_the_delta_and_names_the_next_step(monkeypatch, capsys) ->
     out = capsys.readouterr().out
     assert "rev_1: correction filed (definition → repeat_customer) on req_9" in out
     assert "state=needs_human" in out
-    # The whole point of the verb: hand the agent step 4 instead of a REST recipe.
-    assert "next: dst patches draft rev_1" in out
+    # The whole point of the verb: hand the agent the next step instead of a REST recipe.
+    assert "next: dst rule rev_1 --verdict" in out
 
 
 def test_correct_reads_the_note_from_a_file(monkeypatch, capsys, tmp_path) -> None:
@@ -285,73 +266,6 @@ def test_correct_json_is_the_agent_surface(monkeypatch, capsys) -> None:
     assert json.loads(capsys.readouterr().out) == _ticket()
 
 
-# ── dst patches draft: flywheel step 4 ───────────────────────────────────
-
-
-def test_patches_draft_prints_the_target_and_the_body(monkeypatch, capsys) -> None:
-    """The loop requires INSPECTING the draft before approving: drafted bodies
-    can silently drop rulings outside the correction's scope, and a mistargeted
-    draft is only visible here."""
-    seen = _capture_post(monkeypatch, payload=_candidate())
-    argv = ["patches", "draft", "rev_1", "--token", "dstadm_t"]
-    assert _run_cli(monkeypatch, argv) == 0
-    assert seen["url"] == "http://localhost:8000/mgmt/reviews/rev_1/draft-patch"
-    assert seen["timeout"] == 180  # the drafter is an LLM call, not a 60s read
-    out = capsys.readouterr().out
-    assert "pc_1" in out and "candidate" in out and "definition" in out
-    assert "repeat_customer" in out
-    # both sides: what it is now, and what the draft would make it
-    assert "A customer with more than one paid order." in out
-    assert "A customer with more than one paid order in the last 12 months." in out
-    assert "dst patches approve pc_1" in out
-    assert "dst patches reject pc_1" in out
-
-
-def test_patches_draft_of_a_new_term_has_no_before_side(monkeypatch, capsys) -> None:
-    _capture_post(monkeypatch, payload=_candidate(diff_before=None, target="active_account"))
-    assert _run_cli(monkeypatch, ["patches", "draft", "rev_1", "--token", "dstadm_t"]) == 0
-    out = capsys.readouterr().out
-    assert "--- current" not in out
-    assert "--- drafted definition 'active_account' ---" in out
-
-
-def test_patches_draft_json_is_the_agent_surface(monkeypatch, capsys) -> None:
-    _capture_post(monkeypatch, payload=_candidate())
-    argv = ["patches", "draft", "rev_1", "--json", "--token", "dstadm_t"]
-    assert _run_cli(monkeypatch, argv) == 0
-    assert json.loads(capsys.readouterr().out) == _candidate()
-
-
-def test_patches_draft_without_an_id_names_the_ticket(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("no ticket, no request"))
-    assert _run_cli(monkeypatch, ["patches", "draft", "--token", "dstadm_t"]) == 1
-    assert "`dst patches draft` needs a review ticket id" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    ("status", "detail"),
-    [
-        (400, "ticket has no correction to draft a patch from"),
-        (404, "review 'rev_x' not found"),
-        (422, "no patch route applies to this correction"),
-    ],
-)
-def test_patches_draft_surfaces_the_server_error(monkeypatch, capsys, status, detail) -> None:
-    _capture_post(monkeypatch, status=status, payload={"detail": detail})
-    assert _run_cli(monkeypatch, ["patches", "draft", "rev_x", "--token", "dstadm_t"]) == 1
-    err = capsys.readouterr().err
-    assert detail in err
-    assert "Traceback" not in err
-
-
-def test_patches_approve_still_needs_a_patch_id(monkeypatch, capsys) -> None:
-    """The shared positional now carries two identities — approve/reject must
-    keep naming the one they take."""
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("no id, no request"))
-    assert _run_cli(monkeypatch, ["patches", "approve", "--token", "dstadm_t"]) == 1
-    assert "`dst patches approve` needs a patch id" in capsys.readouterr().err
-
-
 # ── the caller's door: filing and reading a correction with only a dst_ key ──
 #
 # The person who actually SEES a wrong answer usually holds a caller key and no
@@ -383,9 +297,9 @@ def test_correct_files_with_only_a_caller_key(monkeypatch, capsys) -> None:
     assert seen["headers"] == {"Authorization": "Bearer dst_peder"}
     out = capsys.readouterr().out
     assert "rev_1: correction filed (definition → active_customer) on req_9" in out
-    # The next step must be one HE can take. `patches draft` is an admin verb:
+    # The next step must be one HE can take. `rule` is an admin verb:
     # printing it here walks him straight back into the door that was shut.
-    assert "dst patches draft" not in out
+    assert "dst rule" not in out
     assert "dst reviews --key" in out and "rev_1" in out
 
 

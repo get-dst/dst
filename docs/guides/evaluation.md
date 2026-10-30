@@ -251,8 +251,7 @@ its first applies under `block`) is untouched.
 ## Scored three ways
 
 The suite on this page is pass/fail per case. Where dst measures answer
-quality more broadly — the benchmark harness, and Observe's per-lens
-columns — it scores three ways (**correct / wrong / declined**), with
+quality more broadly — Observe's per-lens columns — it scores three ways (**correct / wrong / declined**), with
 wrong-rate as a co-headline, because a wrong answer is worse than no
 answer. Declining is the *correct* response for a question whose data does not
 exist; a confident number there is a hallucination by construction.

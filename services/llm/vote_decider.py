@@ -34,7 +34,7 @@ from services.contracts.protocols import (
 )
 from services.observability import usage as ai_usage
 
-# Measured (scripts/decision_calibration.py, the routing calibration run of 2026-09-16:
+# Measured (the decision-calibration experiment, the routing calibration run of 2026-09-16:
 # deepseek-v4-flash over the 52-question held-out routing set): k=5 had the
 # lowest ECE (0.042, Brier 0.035) within 2pp of the best accuracy (96%); k=9
 # was no better calibrated (ECE 0.053) at nearly double the cost. Re-run the
@@ -100,9 +100,13 @@ class VoteDecider:
         lines = "\n".join(
             f"- {o.name}" + (f": {o.description}" if o.description else "") for o in options
         )
-        user = (
-            f"{context}\n\n" if context else ""
-        ) + f"Options:\n{lines}\n\nQuestion: {question}\nAnswer (option name{tail}):"
+        # The context rides the system block, which is cached: what is the
+        # same for every question (a routing catalogue, a slot's rules) is
+        # read from the provider's cache on every vote after the first that
+        # wrote it. The question and its options follow it.
+        if context:
+            system = f"{system}\n\n{context}"
+        user = f"Options:\n{lines}\n\nQuestion: {question}\nAnswer (option name{tail}):"
         return system, user
 
     def decide(

@@ -1,0 +1,30 @@
+name: order_lines
+description: Products on each order; the order discount repeats on every line of its order.
+grain: one row per order line
+source: {connection: warehouse, table: bakery.order_lines}
+primary_key: [order_id, line_number]
+fields:
+  - {name: order_id, type: integer}
+  - {name: line_number, type: integer}
+  - {name: product, type: string}
+  - {name: qty, type: integer}
+  - {name: line_total_eur, type: number}
+  - {name: order_discount_eur, type: number}
+dimensions:
+  - {name: product, aliases: [item]}
+metrics:
+  - name: units_sold
+    agg: sum
+    expr: order_lines.qty
+    label: units sold
+  - name: product_revenue
+    agg: sum
+    expr: order_lines.line_total_eur
+    label: product revenue
+    currency: EUR
+  - name: order_discount
+    agg: sum_distinct_on
+    expr: order_lines.order_discount_eur
+    distinct_on: [order_lines.order_id]
+    label: order discount
+    currency: EUR

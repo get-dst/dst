@@ -1,0 +1,97 @@
+name: work_orders
+description: >-
+  FieldFlow work orders from the latest FULL sync batch, with the full job cost: labour AND
+  materials. Margin = billed - (labour + materials), as a share of billed. The older core mart
+  fct_work_orders carries a labour-only margin on emergency callouts and is never served
+  here. Emergency callouts are priced on labour with materials re-billed; their true margin is
+  about 23 %, not the 53 % the labour-only figure shows.
+grain: one row per work order
+use_cases:
+  - "Use when a question asks about work orders, jobs, emergency callouts vs maintenance visits, job margin, billed amounts, labour or materials cost, or jobs by status, customer or region."
+  - "Avoid for: technician hours and utilisation (technician_utilisation_monthly); maintenance contracts (maintenance_contracts)"
+common_questions:
+  - emergency callout margin year to date
+  - how many emergency callouts in Pirkanmaa in August 2026
+  - billed amount by job type this quarter
+source: {connection: warehouse, table: intermediate.int_work_order_costs}
+default_time_field: completed_date
+primary_key: [work_order_id]
+population: Nordlund LVI work orders from FieldFlow batch B2026-08-31 (the last full sync); scheduled and in-progress jobs have no completed date
+fields:
+  - {name: work_order_id, type: string}
+  - {name: customer_id, type: string}
+  - {name: deal_id, type: string}
+  - {name: contract_id, type: string, description: "the maintenance contract a visit belongs to"}
+  - {name: wo_type, type: string, description: "Emergency callout or Maintenance visit"}
+  - {name: status, type: string, description: "Scheduled, In progress, Completed, Invoiced, Cancelled"}
+  - {name: scheduled_date, type: date}
+  - {name: completed_date, type: date}
+  - {name: completed_month, type: string}
+  - {name: hours_total, type: number}
+  - {name: labor_cost_eur, type: number}
+  - {name: materials_cost_eur, type: number}
+  - {name: billed_amount_eur, type: number}
+  - {name: margin_eur, type: number, description: "billed - labour - materials"}
+  - {name: margin_pct, type: number, description: "per-row margin - never average; use the ratio metric"}
+dimensions:
+  - {name: wo_type, aliases: [job type, work order type, type of job]}
+  - {name: status, aliases: [job status]}
+  - {name: customer_id, aliases: [customer]}
+internal: [deal_id, contract_id, completed_month]
+metrics:
+  - name: work_order_count
+    agg: count
+    label: work orders
+    aliases: [jobs, number of jobs, callouts, visits]
+  - name: emergency_callouts
+    agg: count
+    filters: ["work_orders.wo_type = 'Emergency callout'"]
+    label: emergency callouts
+    aliases: [emergencies, emergency jobs, unscheduled jobs]
+  - name: maintenance_visits
+    agg: count
+    filters: ["work_orders.wo_type = 'Maintenance visit'"]
+    label: maintenance visits
+    aliases: [planned maintenance visits, planned visits, scheduled maintenance]
+  - name: billed_eur
+    agg: sum
+    expr: work_orders.billed_amount_eur
+    label: billed amount
+    aliases: [work order billings, service billings, billed on work orders, service revenue from jobs]
+    format: currency
+    currency: EUR
+    better: higher
+  - name: labour_cost_eur
+    agg: sum
+    expr: work_orders.labor_cost_eur
+    label: labour cost
+    aliases: [labor cost]
+    format: currency
+    currency: EUR
+  - name: materials_cost_eur
+    agg: sum
+    expr: work_orders.materials_cost_eur
+    label: materials cost
+    format: currency
+    currency: EUR
+  - name: job_margin_eur
+    agg: sum
+    expr: work_orders.margin_eur
+    label: job margin
+    aliases: [margin amount, gross margin on jobs]
+    format: currency
+    currency: EUR
+  - name: job_margin_pct
+    type: ratio
+    numerator: job_margin_eur
+    denominator: billed_eur
+    label: job margin rate
+    aliases: [margin, margin percentage, margin on service work, work order margin, service margin]
+    description: (billed - labour - materials) / billed over the asked jobs, full cost
+    format: percent
+    better: higher
+  - name: hours_on_jobs
+    agg: sum
+    expr: work_orders.hours_total
+    label: hours on work orders
+    aliases: [job hours, hours worked on jobs]

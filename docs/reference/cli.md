@@ -1,11 +1,12 @@
 # CLI
 
-One entry point: `dst` (`services/cli/main.py`). Two kinds of command:
+One entry point: `dst` (`services/cli/main.py`, with one module per command beside it).
+Two kinds of command:
 
 - **In-process**: `init`, `dev`, `serve`, `migrate`, `doctor`, `bootstrap`, `secret`,
   `rotate-key`, `demo`, `prune-log`, `test`, `revoke-key`, `revoke-token`, `reindex`,
-  `calibrate-bands`, `probe`,
-  `drift`, `import`, `export osi`, `evals migrate` run directly against the configured
+  `calibrate-bands`, `probe`, `cube status`,
+  `drift`, `evals migrate` run directly against the configured
   database or the local files; no server, URL, or token needed. `introspect` joins them
   whenever `dst.yaml` declares the connection, and falls back to the server when it
   does not.
@@ -36,7 +37,15 @@ demo|duckdb|postgres|bigquery|snowflake|none`, `--duckdb-path` (with `--warehous
 duckdb`: your own `.duckdb` file), `--example`/`--no-example` (the bundled
 DuckDB example lens; default yes), `--db-port` (default 5432), `--api-port`
 (default 8000, written to `.env` as `DST_URL`), `--yes` (accept defaults, no
-prompts).
+prompts), `--cube` (a Cube-backed project, below).
+
+`--cube` adds the Cube-backed slots: `cube/model/` (empty, for the cubes and
+views), `cube/cube.js` (the sidecar's config), `cube/overlay.yaml`,
+`lenses/main/lens.yaml` with `views: []`, a `cube:` block in `dst.yaml`, a
+generated `CUBEJS_API_SECRET` in `.env`, the pinned Cube Core sidecar in
+`docker-compose.yml` behind the profile `cube` (`docker compose --profile cube
+up -d`), and the `.claude/skills/dst-cube-overlay/` skill: which file holds
+what, every `meta.dst` key with what in dst reads it, and the checks plan runs.
 
 The scaffolded `docker-compose.yml` carries a project `name:` of
 `dst-<name>-<8 hex chars of the absolute path>`, so two projects that share a
@@ -140,6 +149,47 @@ dst` naming `dst init . --skills-only`. It never affects the exit code: holding 
 older skill on purpose is legitimate, and this command's 1 means *not callable*, not
 *not current*.
 
+In a project with a [Cube](configuration.md#cube-cube) configured, doctor adds a `cube`
+row: `ok` with the URL and the model version, or `FAIL` when Cube does not answer or its
+meta cannot be read. With no Cube configured the row says `not configured`, which is not a
+failure.
+
+A `lanes` block follows: one line per published lens, `org/lens  lane (why)`, where the
+lane is `cube` or `typed` and the reason is `DST_SERVING`, `lens serving:`, `Cube-backed`
+or `default`. Under a `cube` lane a `!` line names each missing dependency and what it
+costs:
+
+```
+lanes
+  acme/orders   cube (Cube-backed)
+    ! cube not configured: every door on this lens answers 503 — set DST_CUBE_URL or `cube: {url: …}` in dst.yaml
+    ! monitor never run: the data-end and feed checks skip — `dst monitor`, then `dst apply`
+    ! no chat tier: the HTTP question door without a driver answers 503; MCP agents in driver mode are served with no model
+  acme/support  typed (default)
+```
+
+These are warnings, never failures: the exit code does not change.
+
+### `dst cube status`
+
+Checks whether the Cube that `dst.yaml` (or `DST_CUBE_URL`) points at is reachable, and
+reports what model it holds:
+
+```
+url           http://localhost:4000
+secret        set
+readyz        ok (version not stated)
+model_version 3f9c0e…
+members       4 view(s), 11 cube(s), 38 measure(s), 92 dimension(s), 6 segment(s)
+```
+
+`model_version` is the sha256 of Cube's meta in canonical form: members sorted, titles and
+descriptions left out. Relabelling a member does not change it. Changing a member, its
+type or its `meta` does. The meta is read as an operator with no groups, so a member
+withheld by group is not counted. A line `overlay  N meta.dst block(s) refused` appears
+when a `meta.dst` key falls outside the schema dst reads. Flags: `--dir` (default `.`),
+`--json`. Exit 0 when Cube answered and its meta parsed, 1 otherwise.
+
 ### `dst bootstrap`
 
 Create (or reuse) an org and its admin token, saved to `./.env` as `DST_ADMIN_TOKEN`
@@ -240,6 +290,13 @@ selection flags `--select`, `--lens` and `--scope` described below, which previe
 exactly what the same flags push on apply. With a selection, the first line of
 the plan names it (`selection: +lens/finance (scope: all) → lenses: finance;
 assets: entity/orders, …`) and everything after describes the selected push only.
+
+Every plan that carries a lens prints the lane each one will serve on, in one line:
+`serving: orders → cube (Cube-backed), support → typed (default)`. The reason is
+`DST_SERVING` (the server's environment decides for every lens), `lens serving:` (the
+lens's own key), `Cube-backed` (the push carries `cube/overlay.yaml`, and it lists the
+lens or the lens's `lens.yaml` names `views:`) or `default`. Under `--json` it is the row
+`{"scope": "serving", "lanes": {"orders": {"lane": "cube", "why": "Cube-backed"}}}`.
 
 #### Selecting part of the project
 
@@ -483,6 +540,19 @@ never deletes. The `drift` baseline lives in the same directory: the first
 probe records it (arming `drift`), and no later probe touches it, so the
 evidence drift compares against survives the nightly refresh.
 
+`--cube` reads through the project's Cube instead of a warehouse connection,
+for a project with `cube/overlay.yaml`. Every query is a `/v1/load` on a view
+member, as a caller would ask it: the value list of each dimension that
+declares `meta.dst.dictionary` (up to `probe.cube.max_values`, recorded as
+incomplete past that; a hidden dimension's values are never read), and the
+data end of each time dimension of the lens views, with whether rows are dated
+after the clock (`--as-of`, default yesterday). A time dimension whose latest
+dates are consecutive first-of-month days ends on its month's last day. One
+budget, `probe.cube.max_queries` in `dst.yaml` (default 500), covers the run;
+what it leaves unread is listed in the artifact and printed. The result is
+`profiles/cube.probe.json`. `dst plan` hints on a `dictionary: true` dimension
+it holds no values for.
+
 ### `dst drift`
 
 What has the warehouse done since you profiled it, and does the semantic layer
@@ -521,6 +591,142 @@ connection.
 
 [![dst drift: orders gained a column, cross-referenced to the entity that reads the table](../assets/term/drift.svg)](../assets/term/drift.svg)
 
+### `dst migrate-model`
+
+Writes the project's entity catalogue as a Cube model. Reads `semantic/`
+(entities, relationships, definitions, table blueprints), `lenses/` and the
+probe under `--dir`, and writes under `--out` (default `cube/`):
+`model/<entity>.yml` with one cube per entity, `model/views/<lens>.yml` with a
+scope view per lens plus one view per cube with in-lens joins, holding the
+dimensions of every cube its many-to-one and one-to-one joins reach, two hops
+or more (a Cube view resolves one join tree; a one-to-many join is left out,
+since it would fan out the measures), `overlay.yaml` with everything dst reads that no
+member's `meta.dst` carries (each lens's views and policy, each cube's clock
+and routing text, prose and ambiguous definitions, hide exceptions), and
+`MIGRATION.md`, which lists every item the Cube model does not carry as
+authored with the failure mode a question would meet there.
+
+What changes shape on the way: a population filter and a blueprint's
+`versions` (the latest sync per key) are baked into the cube's `sql`, and the
+cube's key becomes the blueprint key; a text `YYYY-MM` month becomes a `time`
+dimension cast to the month's first day; `internal` and hidden columns are
+`public: false`; ratio and derived metrics are `number` measures; a
+`sum_distinct_on` metric moves to a companion cube at the distinct grain,
+joined as its parent is wherever the join's columns are the distinct key; a
+definition with `sql` becomes a segment; a field named like a metric is
+renamed `<field>_value`, since a cube has one namespace. Certified answers stay
+where they are.
+
+What the monitor and the cube lane read is written to the overlay too. A
+cube's `feed_axes` are the dimensions that say which book or system a row came
+from: a key column that splits two or more blueprinted tables by the same
+values (an entity, a revenue stream), and a key column whose every value the
+blueprint's `system` names (`google_ads` in "Google Ads / Meta Ads exports").
+A date field the probe saw rows for after the day it ran gets a
+`clock_kind` on the evidence the monitor reads: `event` when its name,
+description or blueprint clock `meaning` says something happened (decided,
+paid, closed, created), `schedule` when it says something is due (due, end,
+planned, expires); a field that says neither is a schedule, and a cube's clock
+that says neither is left to the monitor. When most values of such a shared key column end in a legal form
+(Oy, AB, Ltd, GmbH), those values are the companies of `scope.names`, each
+named by itself and by its name without the legal form; the other words a
+question may use for one (a country, a system, `dictionary:<cube.dimension>`
+for its regions) are yours to add.
+
+Every view lists its members. A view with `includes: "*"` serves a cube's
+`public: false` members through the view, so an internal column, or one hidden
+from everyone, is in no view's list. A column hidden with `except_groups` is
+listed and withheld by the view's `access_policy`: every caller is granted the
+view without it, and each exception group is granted it too. Cube reads the
+groups from dst's token through `contextToGroups` in `cube/cube.js` (the
+sidecar's config ships it); a Cube without it grants a named group nothing, so
+the exception fails closed.
+
+The output is generated once and then authored. A re-run writes only files it
+wrote before and nobody has edited since (it keeps a sha256 per file in
+`.dst-migrate.json`), removes a generated file its source no longer produces,
+and never touches a file it did not write. A file edited since generation
+is kept as yours when its source has not changed since, and stops the run
+with exit 1, naming it, when the source has; `--force` overwrites it. The
+views follow the cubes as you edit them: a member you add to a cube is
+listed in every view that carries the cube, one you remove is dropped, and a
+cube you write by hand joins the lens that selects a cube its
+`meta.dst.sources` names.
+
+`--check` (alias `--dry-run`) writes nothing: it prints a unified diff of each
+file that would change (a new file as `(new, N lines)`) and exits 2 when
+something would change, 0 when the model on disk is current, and 1 when a
+generated file was edited by hand since (the same refusal as a run; `--force`
+lifts it). A real run also writes `cube/cube.js`, the sidecar's config, when
+it is absent, and never overwrites it. Both end with a `Next steps:`
+checklist, each step marked `[x]` when the project already shows it: a `cube:`
+block in `dst.yaml`, `CUBEJS_API_SECRET` in `.env`, a `cube` service in
+`docker-compose.yml`, starting it (`docker compose --profile cube up -d`, then
+`dst cube status`), reading `cube/MIGRATION.md`, `dst probe --cube`, `dst plan`,
+`dst apply`, `dst monitor` then `dst apply`, and `dst test`. The whole move,
+step by step: [Migrate to Cube](../guides/migrate-to-cube.md).
+
+Flags: `--dir` (default `.`), `--out` (default `cube/` under `--dir`),
+`--check`, `--force`.
+
+### `dst monitor`
+
+Data quality through Cube, for a project with `cube/overlay.yaml`. Runs the
+`dst probe --cube` pass, then judges what it read, one failure mode per
+finding:
+
+- `stale`: a cube's clock ends more than the lens's `stale_after_days` before
+  the clock (a month-grained clock is current through the last complete month);
+- `feed_stopped` (`data_gap`): one feed of a cube ends that long before while
+  its newest feed is current. A cube's feeds are the combinations of the
+  dimensions `overlay.yaml` declares under `cubes.<cube>.feed_axes`, the
+  columns that say which system a row came from;
+- `future_rows` (`data_gap`), on every time dimension: rows dated after the
+  clock on an event date. A date is an event (the day something happened) or
+  a schedule (the day something is due or ends, a renewal date) as
+  `cubes.<cube>.clock_kind` declares it, else as its name or description
+  says (decided, paid, closed, created read as events; due, end, planned,
+  expires as schedules). The rows after the clock on an event date are
+  clipped from every window, never counted. A date that neither declares nor
+  says its kind reads as a schedule when it has rows after the clock, and the
+  finding says so once. A schedule date is never clipped to the clock and is
+  not judged for staleness, feeds or partial periods;
+- `partial_period` (`data_gap`): per additive measure (sum, count,
+  count_distinct; never a level) on its clock, and per feed, the latest month
+  against the median of the six full months before it, pro-rated to the days
+  loaded. It is partial below 70% of that median and below every complete
+  month in the series' own history, so a series that dips like that every
+  quarter is never flagged. A series needs six judged months and a median of
+  at least 20 before it is judged at all. A month the same month a year
+  earlier dipped alike (scaled to this year's level) is a seasonal low and is
+  not flagged. Volume alone never decides a closed month: a month the rule
+  flags is a partial load only when the evidence says so. Where the cube
+  declares `loaded_at` (a sync or export time), the month is partial when its
+  rows were last loaded before it ended. Otherwise a month still open on the
+  clock is partial, and a closed one is partial when it has no rows on its
+  last seven days or its second half is loaded at under 70% of its first
+  half's daily rate. A month-grained clock has no day coverage, so there the
+  volume rule decides, and the finding says so. The finding names its
+  evidence. A feed is judged by the measures
+  `cubes.<cube>.feed_measures` names (a billed amount that lags rows that are
+  all there), else by its row counts, and a period they find partial is
+  partial for every measure of the cube on the same clock (`judged_by` names
+  the judge);
+- `unbound_value_new` / `unbound_value_vanished` (`unbound_value`): a
+  dictionary the model declares as a list that the warehouse no longer matches.
+
+A cube's clock is its overlay `default_time_dimension`, else a measure's
+`meta.dst.clock`; a cube with neither is not judged, never guessed. It writes
+`profiles/cube.probe.json`, `profiles/cube.freshness.json` (per clock its data
+end and feeds, per measure a partial month) and
+`lenses/<lens>/results/monitor-<date>.json` with the findings on that lens's
+cubes. Committed and applied, the freshness file becomes the `data_quality`
+block on `/ready`: per org, when the monitor ran, how old that is against
+`probe.max_age`, and its findings by mode. Flags: `--dir`, `--as-of DATE` (the
+last day data is expected through, default yesterday in UTC), `--json` (the
+summary). Exit 0 clean, 2 findings, 1 when Cube or the project could not be
+read, which makes it a scheduled job's gate.
+
 ### `dst sql <sql>`
 
 Run read-only SQL and see the **rows**: the governed version of opening a warehouse
@@ -551,13 +757,6 @@ would come back. Mirrored as the `sql` MCP tool.
 It complements `introspect --profile` rather than repeating it: per-column enum values,
 null rates and ranges come from the profile in one pass, so ask it for those. Reach here
 for rows, cross-column facts, and join checks a profile cannot see.
-
-### `dst import dbt`
-
-One-shot import: dbt artifacts → dst-owned `semantic/` files, with a coverage
-report. Never re-synced: the files are yours afterwards. Flags: `--target-dir` (the
-dbt `target/` dir holding `manifest.json` + `semantic_manifest.json`, required),
-`--connection` (the dst connection the tables live on, required), `--dir`.
 
 ## Ask and verify
 
@@ -640,7 +839,7 @@ data lane, `slots:<id>` on the slot lane, the case id on behavioral rows), and
 `certified_answer_id` wherever a certified answer is graded) plus the summary,
 `recorded` (org, lens, `run_id`) and `database`, for CI that wants the table rather
 than the exit code alone. `calibration_by_slot` gives the deciders' calibration per
-decision slot (metric, grain, lens, ...): n, accuracy, the unanimous bin's n and
+decision slot (shape, metric, dimension, grain): n, accuracy, the unanimous bin's n and
 accuracy, and ECE (null, with the status saying why, below 20 measured decisions).
 Every recorded row stores its generated value in `eval_result.actual_value`: the
 executed result as JSON on the data lane (the shape a `verified_value` has), the
@@ -761,6 +960,16 @@ Nothing lands until you review and `dst apply`. Flag: `--dir`.
 Mint a caller and their API key (shown once), or list callers. One key per **person**,
 never per tool.
 
+`--group <name>` (repeatable) sets the caller's groups, which a lens's `access.allow`
+and a `hide` entry's `except_groups` read; on an existing caller it replaces them
+(`PUT /mgmt/callers/{name}/groups` does the same). Only an admin credential sets
+groups. `dst keys list` prints each caller's groups.
+
+`--driver` marks the caller a driver: an agent that writes its own Cube queries and
+SQL. dst calls no model for that caller's requests to lenses served through Cube (see
+[driver mode](../guides/agents-mcp.md#driver-mode)). `PUT /mgmt/callers/{name}/driver`
+with `{"driver": true}` does the same, and `dst keys list` marks driver callers.
+
 [![dst keys create: the caller and their key, shown once](../assets/term/keys.svg)](../assets/term/keys.svg)
 
 ### `dst revoke-key --caller <name>`
@@ -796,10 +1005,9 @@ there is no caching window.
 ### `dst correct <request_id>`
 
 File a correction against a served answer: step 3 of the correction loop.
-Opens the review ticket `dst patches draft` drafts the fix
-from. Flags: `--kind definition|scope|number|freshness|other` (required; the drafter
-routes on it), `--target` (required; the term the correction is about, used verbatim;
-without it placement is vocabulary matching, which mistargets), `--note`/`--note-file`,
+Opens the review ticket the ruling is made on. Flags:
+`--kind definition|scope|number|freshness|other` (required), `--target` (required; the
+term the correction is about, used verbatim, so the fix lands on the right page), `--note`/`--note-file`,
 `--corrected-sql`, `--corrected-answer`, `--json`, `--timeout`, `--dir`,
 `--url`/`--token`, `--key`.
 
@@ -899,13 +1107,6 @@ authored answers can also carry `status: retired` in `certified_answers.yaml`; t
 verb is how you retire one that came from a review ruling, which no file owns. Flags:
 `--url`, `--token`.
 
-### `dst patches list --lens <name>` / `dst patches approve <id>`
-
-The self-healing loop's ruling from the repo: approving a definition/skill patch writes
-the server's **proposed file** into the working tree: review it with `git diff`, land
-it with `dst apply`; nothing is live until you do. Flags: `--status
-candidate|approved|rejected` (list), `--json`, `--dir`.
-
 ### `dst lens list`
 
 The deployed lenses, from the **server**: name, status, shape (entities/definitions),
@@ -925,14 +1126,16 @@ panel shows the same trail with diffs. `--json` for the raw rows.
 ### `dst lens rm <name>`
 
 Delete a lens on the server. Prints the cascade first (versions, certified answers,
-eval cases, context chunks, patch candidates; the request log and rulings survive as
+eval cases, context chunks; the request log and rulings survive as
 history) and asks; `--yes` for headless. File absence never deletes: this command is the
 only way.
 
-### `dst semantic rm entity|definition <name>`
+### `dst semantic rm entity|definition|relationship|blueprint <name>`
 
 Remove a shared semantic asset. The server refuses while any published lens still
-selects it, and names the lenses.
+selects it, and names the lenses. A blueprint is named by its table
+(`dst semantic rm blueprint crm.contacts`); no lens selects one, so removing it
+marks the lenses reading the table stale and the next apply recompiles them.
 
 ### `dst connection rm <name>`
 
@@ -986,5 +1189,5 @@ reads it within a minute, and plan, apply and `/ready` stop reporting the bands 
 uncalibrated. Run it again after changing the embedding model. Flags: `--dir`,
 `--dry-run` (report the fit, store nothing).
 
-*(Verified against `services/cli/main.py` and `services/cli/init.py`. Not every flag
+*(Verified against the command modules under `services/cli/`. Not every flag
 is listed here — `dst <command> --help` is the exhaustive one.)*

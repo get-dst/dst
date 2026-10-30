@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, text
 
 from services.api.reviews import _untraced_detail
 from services.app import app
-from services.cli import main as cli
+from services.cli import serve as cli
 from services.config import settings
 from services.contracts.trace import TraceLog
 from services.db import schema_state as schema

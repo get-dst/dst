@@ -63,6 +63,13 @@ _SAME_LAST_YEAR = re.compile(
     r"(?:last|a|the\s+previous|previous|the\s+prior|prior)\s+year\b",
     re.I,
 )
+# "vs a year earlier", "compared with a year ago", "than the year before":
+# the answer's own period, one year back.
+_YEAR_EARLIER = re.compile(
+    r"\b(?:vs\.?|versus|compared\s+(?:to|with)|than|against|from)\s+(?:the\s+same\s+\w+\s+)?"
+    r"(?:a|one|the)\s+year\s+(?:earlier|before|ago|prior)\b",
+    re.I,
+)
 # The words that make the period right after them the comparison window.
 _AGAINST = re.compile(
     r"\b(?:vs\.?|versus|compared\s+(?:to|with)|than|from|against)\s+(?:the\s+)?$", re.I
@@ -90,7 +97,7 @@ def stated_unit(question: str) -> str | None:
         return _UNIT_OF[m.group(1).lower()]
     if (m := _OVER.search(question)) and m.group(1).lower() == m.group(2).lower():
         return m.group(1).lower()
-    if _SAME_LAST_YEAR.search(question):
+    if _SAME_LAST_YEAR.search(question) or _YEAR_EARLIER.search(question):
         return "year"
     return None
 
@@ -100,13 +107,38 @@ def _outer_spans(text: str) -> list[tuple[int, int]]:
     return [s for s in spans if not any(o != s and o[0] <= s[0] and s[1] <= o[1] for o in spans)]
 
 
-def _range(text: str, today: date) -> tuple[date, date] | None:
-    ranges = timewindow.window_ranges(timewindow.temporal_terms(text), today)
+def _range(text: str, today: date, *, levels: bool = False) -> tuple[date, date] | None:
+    """The one range a phrase names. ``levels``: a level metric reads "the end
+    of August" as August's last snapshot, so the phrase is the month."""
+    terms = timewindow.temporal_terms(text)
+    if levels:
+        terms = timewindow.edge_as_period(terms)[0]
+    ranges = timewindow.window_ranges(terms, today)
     return ranges[0] if len(ranges) == 1 else None
+
+
+def _whole_year(span: tuple[date, date]) -> bool:
+    a, b = span
+    return (a.month, a.day, b.month, b.day) == (1, 1, 12, 31) and a.year == b.year
 
 
 def _blank(text: str, a: int, b: int) -> str:
     return text[:a] + " " * (b - a) + text[b:]
+
+
+_YEAR_RANGE = re.compile(r"years:(?P<y1>\d{4})-(?P<y2>\d{4})")
+_ADVERB = re.compile(r"\b(yearly|annual|annually|quarterly|monthly|weekly|daily)\b", re.I)
+_ADVERB_UNIT = {"yearly": "year", "annual": "year", "annually": "year", "quarterly": "quarter"}
+_ADVERB_UNIT |= {"monthly": "month", "weekly": "week", "daily": "day"}
+
+
+def _adverb_unit(question: str, metric_words: set[str]) -> str | None:
+    """The unit "yearly growth" names, unless the word is the metric's own
+    ("monthly recurring revenue")."""
+    for m in _ADVERB.finditer(question):
+        if m.group(1).lower() not in metric_words:
+            return _ADVERB_UNIT[m.group(1).lower()]
+    return None
 
 
 def net_new_unmet(question: str, metric_words: set[str]) -> bool:
@@ -125,17 +157,27 @@ class Reading:
     text: str
     unit: str | None
     against: tuple[date, date] | None = None
+    # "<a month> vs last year", "<a month> vs 2025": the answer's own period
+    # in that year, never the whole year beside one month.
+    against_year: int | None = None
 
 
 def read(
-    question: str, metric_words: set[str], naming: set[str], today: date
+    question: str,
+    metric_words: set[str],
+    naming: set[str],
+    today: date,
+    *,
+    levels: bool = False,
 ) -> Reading | ClarificationRequest | None:
     """The comparison the question asks for, a clarification when it asks one
     it does not place, or None when it asks none. ``metric_words``: the
     chosen metrics' own words — a metric named for a change (`member_change`)
     is the change, and its period an ordinary window. ``naming``: words of
     fields, dimensions and stored values; a change word among them is a name
-    ("plan changes" over a `plan_change` field), not a comparison."""
+    ("plan changes" over a `plan_change` field), not a comparison.
+    ``levels``: the metrics are levels, which read a period's edge as the
+    period's first or last snapshot, on both sides of the comparison."""
     unit = stated_unit(question)
     changes = [
         (m.group("g") or m.group("h") or m.group("n") or m.group("e")).lower()
@@ -147,8 +189,9 @@ def read(
         or any(w not in naming | metric_words for w in changes)
     )
     text = question
-    if same := _SAME_LAST_YEAR.search(text):
-        text = _blank(text, *same.span())
+    for said in (_SAME_LAST_YEAR, _YEAR_EARLIER):
+        if same := said.search(text):
+            text = _blank(text, *same.span())
     spans = [s for s in _outer_spans(text) if _range(text[s[0] : s[1]], today) is not None]
     marked = [s for s in spans if _AGAINST.search(text[: s[0]])]
     if not worded and not marked and not (len(spans) == 2 and _COMPARING.search(question)):
@@ -157,16 +200,37 @@ def read(
         # The metric is the change itself (`net_member_change`): its period is
         # an ordinary window.
         return None
+    if unit is None:
+        # "growth per year", "yearly growth", "how did it grow each year": a
+        # change per calendar unit is that unit's series, each bucket against
+        # the one before, never one comparison of the window's two ends.
+        unit = timewindow.breakdown_unit(question) or _adverb_unit(question, metric_words)
+    if len(spans) == 1 and unit is None and not marked:
+        # "from 2021 to 2025" with a change and no unit: 2025 against 2021.
+        a, b = spans[0]
+        terms = timewindow.temporal_terms(text[a:b])
+        if len(terms) == 1 and (years := _YEAR_RANGE.fullmatch(next(iter(terms)))):
+            y1, y2 = int(years.group("y1")), int(years.group("y2"))
+            if y1 < y2:
+                kept = f"in {y2}".ljust(b - a)
+                return Reading(
+                    text=text[:a] + kept + text[b:],
+                    unit=None,
+                    against=(date(y1, 1, 1), date(y1, 12, 31)),
+                )
     if len(spans) == 2:
         # A change runs from the earlier period to the later, whichever is
         # written first; two phrases naming one period ("last month vs the
         # previous month") compare it with the period before it.
         first, second = spans
-        ra = _range(text[first[0] : first[1]], today)
-        rb = _range(text[second[0] : second[1]], today)
+        ra = _range(text[first[0] : first[1]], today, levels=levels)
+        rb = _range(text[second[0] : second[1]], today, levels=levels)
         assert ra is not None and rb is not None
         other = first if ra[0] < rb[0] or (ra == rb and first in marked) else second
-        against = None if ra == rb else _range(text[other[0] : other[1]], today)
+        against = None if ra == rb else _range(text[other[0] : other[1]], today, levels=levels)
+        own = rb if other == first else ra
+        if against is not None and _whole_year(against) and not _whole_year(own):
+            return Reading(text=_blank(text, *other), unit=unit, against_year=against[0].year)
         return Reading(text=_blank(text, *other), unit=unit, against=against)
     if len(spans) == 1 and marked:
         phrase = text[spans[0][0] : spans[0][1]].strip()
@@ -262,8 +326,13 @@ def target(
     if reading.against is not None:
         a, b = reading.against
         return f"{a.isoformat()}/{b.isoformat()}", grain
+    if reading.against_year is not None:
+        years = window.start.year - reading.against_year
+        a = add_months(window.start, -12 * years)
+        b = add_months(window.end, -12 * years) - timedelta(days=1)
+        return f"{a.isoformat()}/{b.isoformat()}", grain
     unit = reading.unit
-    if unit == "year":
+    if unit == "year" and not (window.month_aligned() and window.months() > 12):
         return "previous_year", grain
     calendar = to_date or _calendar_unit(window)
     if unit is not None and unit != calendar:

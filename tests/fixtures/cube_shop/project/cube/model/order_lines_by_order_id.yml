@@ -1,0 +1,60 @@
+cubes:
+- name: order_lines_by_order_id
+  title: order lines by order id
+  description: order_lines collapsed to one row per order_id so that sum_distinct_on measures sum one value per
+    key.
+  sql: |-
+    SELECT order_id, ANY_VALUE(line_number) AS line_number, ANY_VALUE(product) AS product, ANY_VALUE(qty) AS qty, ANY_VALUE(line_total_eur) AS line_total_eur, ANY_VALUE(order_discount_eur) AS order_discount_eur, MAX(order_discount_eur) AS _order_discount
+    FROM bakery.order_lines
+    GROUP BY order_id
+  meta:
+    dst:
+      grain: one row per order_id
+      key:
+      - order_id
+      population: null
+      sources:
+      - order_lines
+  joins:
+  - name: orders
+    relationship: many_to_one
+    sql: '{CUBE}.order_id = {orders}.order_id'
+  dimensions:
+  - name: order_id
+    sql: '{CUBE}.order_id'
+    type: number
+    primary_key: true
+    public: true
+  - name: line_number
+    sql: '{CUBE}.line_number'
+    type: number
+    public: true
+  - name: product
+    sql: '{CUBE}.product'
+    type: string
+    meta:
+      dst:
+        aliases:
+        - item
+        dictionary:
+        - cinnamon bun
+        - coffee
+        - rye loaf
+        - sourdough
+  - name: qty
+    sql: '{CUBE}.qty'
+    type: number
+  - name: line_total_eur
+    sql: '{CUBE}.line_total_eur'
+    type: number
+  - name: order_discount_eur
+    sql: '{CUBE}.order_discount_eur'
+    type: number
+  measures:
+  - name: order_discount
+    title: order discount
+    type: sum
+    sql: '{CUBE}._order_discount'
+    meta:
+      dst:
+        currency: EUR

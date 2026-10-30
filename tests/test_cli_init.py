@@ -599,3 +599,42 @@ def test_compose_project_name_is_salted_with_the_path(tmp_path: Path) -> None:
     assert all(re.fullmatch(r"dst-kuura-[0-9a-f]{8}", n) for n in names), names
     assert names[0] != names[1]
     assert names[0] == compose_project_name("kuura", a)
+
+
+def test_init_cube_scaffolds_the_cube_backed_slots(tmp_path: Path) -> None:
+    """`--cube`: the model dir, the sidecar config, the overlay, a lens over
+    views, the pinned sidecar behind the compose profile `cube`, and the
+    overlay skill naming every closed meta.dst key with its reader."""
+    import yaml
+
+    from services.cli.init import CUBE_TAG, agent_files
+    from services.contracts.lens_config import LensConfig
+    from services.contracts.lens_model import KEY_READERS, parse_overlay
+    from services.project.schema import parse_project_yaml
+
+    root = _init(tmp_path, cube=True, warehouse="none", example=False)
+    deploy = Path(__file__).resolve().parents[1] / "deploy"
+    assert (root / "cube" / "model").is_dir()
+    assert (root / "cube" / "cube.js").read_text() == (deploy / "cube" / "cube.js").read_text()
+    assert CUBE_TAG == (deploy / "cube.version").read_text().strip()
+    overlay = parse_overlay((root / "cube" / "overlay.yaml").read_text())
+    assert list(overlay.lenses) == ["main"]
+    lens = LensConfig.model_validate(yaml.safe_load((root / "lenses/main/lens.yaml").read_text()))
+    assert lens.views == []
+    project = parse_project_yaml((root / "dst.yaml").read_text())
+    assert project.cube is not None and project.cube.api_secret_env == "CUBEJS_API_SECRET"
+    assert re.search(r"^CUBEJS_API_SECRET=\S{32,}$", (root / ".env").read_text(), re.M)
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text())
+    sidecar = compose["services"]["cube"]
+    assert sidecar["profiles"] == ["cube"] and sidecar["image"] == f"cubejs/cube:{CUBE_TAG}"
+    assert "./cube/model:/cube/conf/model:ro" in sidecar["volumes"]
+    skill = (root / ".claude/skills/dst-cube-overlay/SKILL.md").read_text()
+    for readers in KEY_READERS.values():
+        for key in readers:
+            assert f"`{key}`" in skill, key
+    assert "access_policy" in skill and "contextToGroups" in skill
+    assert _non_ascii(root) == []
+    # the overlay skill rides only a Cube-backed project
+    plain = _init(tmp_path / "plain", warehouse="none", example=False)
+    assert not (plain / ".claude/skills/dst-cube-overlay").exists()
+    assert all("dst-cube-overlay" not in str(p) for p, _ in agent_files(plain, "p", 8000))

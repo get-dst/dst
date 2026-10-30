@@ -1,0 +1,46 @@
+name: webshop
+display_name: Webshop
+description: Webshop orders, revenue (ex-VAT, gross, net of refunds), AOV, refunds, card vs invoice customers, products and categories, Stripe fees and payouts, abandoned checkouts - for the webshop, marketing and product teams.
+owner: webshop
+timezone: Europe/Helsinki
+stale_after_days: 3
+connections: [warehouse]
+select:
+  entities:
+    - webshop_orders
+    - webshop_order_lines
+    - webshop_products
+    - webshop_refunds
+    - abandoned_checkouts
+    - stripe_payouts
+  definitions: [webshop_order, webshop_revenue, gross, net_revenue, refund, aov, stripe_fees, product_category]
+sources: [Shopify, Stripe, the webshop]
+scope: own
+untyped_fallback: true
+not_for:
+  - ask: ad spend
+    sibling: marketing
+  - ask: cost per order
+    sibling: marketing
+  - ask: group revenue
+    sibling: group_finance
+  - ask: app orders
+    sibling: pro_app
+not_computable:
+  - measure: webshop revenue by region
+    aliases: [orders by region, region of webshop customers, webshop sales by region, which region buys most online, region, regions, by region, per region, which region, maakunta]
+    reason: "webshop orders carry no address or region - only a hashed email and the payment channel"
+  - measure: stock-outs
+    aliases: [stock outs, out of stock, inventory, stock levels, availability]
+    reason: "the warehouse holds no inventory or stock data for the webshop"
+  - measure: customers with a maintenance contract in the webshop
+    aliases: [webshop spend of contract customers, maintenance contract customers in the webshop, do contract customers spend more online, maintenance contract, have a maintenance contract, contract customers]
+    reason: "webshop orders identify the shopper by a hashed email only; there is no link from a shopper to a CRM customer or a maintenance contract"
+  - measure: ad-attributed orders
+    aliases: [orders from ads, which campaign drove the spike, campaign that drove sales]
+    reason: "no campaign-to-order attribution exists; ad figures are in the marketing lens as spend, clicks and platform-claimed conversions"
+access:
+  allow:
+    - group: everyone
+eval_gate: block
+auto_review: unverified

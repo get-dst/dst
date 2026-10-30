@@ -1,0 +1,1952 @@
+{
+ "{\"dimensions\": [\"sales_lens.order_lines_by_order_id_product\"], \"limit\": 501, \"order\": [[\"sales_lens.order_lines_by_order_id_product\", \"asc\"]]}": [
+  {
+   "sales_lens.order_lines_by_order_id_product": "cinnamon bun"
+  },
+  {
+   "sales_lens.order_lines_by_order_id_product": "coffee"
+  },
+  {
+   "sales_lens.order_lines_by_order_id_product": "rye loaf"
+  },
+  {
+   "sales_lens.order_lines_by_order_id_product": "sourdough"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.order_lines_product\"], \"limit\": 501, \"order\": [[\"sales_lens.order_lines_product\", \"asc\"]]}": [
+  {
+   "sales_lens.order_lines_product": "cinnamon bun"
+  },
+  {
+   "sales_lens.order_lines_product": "coffee"
+  },
+  {
+   "sales_lens.order_lines_product": "rye loaf"
+  },
+  {
+   "sales_lens.order_lines_product": "sourdough"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"limit\": 101}": [
+  {
+   "sales_lens.orders_channel": "counter"
+  },
+  {
+   "sales_lens.orders_channel": "web"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"limit\": 501, \"order\": [[\"sales_lens.orders_channel\", \"asc\"]]}": [
+  {
+   "sales_lens.orders_channel": "counter"
+  },
+  {
+   "sales_lens.orders_channel": "web"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"measures\": [\"sales_lens.orders_discount_total\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "17.17",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "41.61",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "16.21",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "32.39",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "8.97",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "44.980000000000004",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "34.51",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "15.010000000000002",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "44.3",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "12.100000000000001",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "12.049999999999999",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "29.290000000000003",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "14.09",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "37.51",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "7.919999999999999",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "34.199999999999996",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "8.11",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "38.349999999999994",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "11.24",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "37.5",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "33.89",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "14.980000000000002",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "41.5",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "15.27",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "34.800000000000004",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "10.399999999999999",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "37.48",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "10.79",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "13.280000000000001",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "49.31",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "12.080000000000002",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "23.97",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "14.84",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "43.78",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "14.32",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "30.58",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "36.14",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_discount_total": "20.31",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "34.379999999999995",
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_discount_total": "2.41",
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"measures\": [\"sales_lens.orders_order_count\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "56",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "168",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "60",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "180",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "185",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "60",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "180",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "60",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "179",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "180",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "60",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "61",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "56",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "168",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "60",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "180",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "185",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "60",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "180",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_order_count": "62",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_order_count": "14",
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"measures\": [\"sales_lens.orders_revenue\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1748.6999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_revenue": "555.2"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1588.6999999999996"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_revenue": "558.1"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1754.3999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_revenue": "572.0000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_revenue": "581.4"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1621.6999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1865.6"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_revenue": "534.8"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1600.1"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_revenue": "552.0000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_revenue": "662.8999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1770.3000000000002"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_revenue": "561.4"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1807.6999999999996"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_revenue": "533.9000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1602.4999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_revenue": "579.3000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1630.6"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1655.0000000000002"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_revenue": "544.3000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1642.5"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_revenue": "610.8"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_revenue": "531.1"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1657.5"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_revenue": "501.20000000000005"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1514.0999999999997"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_revenue": "600.3"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1683.3999999999996"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1535.4"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_revenue": "558.9"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_revenue": "650.0999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1798.5"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1741.6"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_revenue": "594.7"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_revenue": "585.8"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1663.5000000000002"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1538.2999999999997"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_revenue": "174.79999999999998"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"measures\": [\"sales_lens.orders_shipped_revenue\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_shipped_on\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "633.3"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "654.3000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "613.6"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "658.7"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "652.4"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "599.6"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "683.0999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "589.3"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "618.6"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "621.1"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "597.5000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "662"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "600.5000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "579.2"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "661.5"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "598.5"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "713.7"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "669.8000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "614"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_shipped_on": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "21.5"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_shipped_on": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_channel\"], \"measures\": [\"sales_lens.orders_tips_eur\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "93.98999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "26.110000000000003"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "28.509999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "80.98"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "31.42"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "88.29999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "29.21"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "84.74999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "28.830000000000002"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "93.92999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "87.51999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "27.27"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "31.080000000000005"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "86.63"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "89.50000000000001"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "27.900000000000006"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "28.320000000000004"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "88.43"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "87.69999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "31.700000000000003"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "92.68"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "27.480000000000004"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "103.31"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "31.000000000000004"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "93.87"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "31.71"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "24.560000000000002"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "85.84"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "97.33999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "27.18"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "82.23"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "31.869999999999997"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "95.04999999999998"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "32.79"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "30.47"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "88.86000000000003"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "96.10999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "web",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "28.4"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "98.42999999999999"
+  },
+  {
+   "sales_lens.orders_channel": "counter",
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "6.6"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.orders_status\"], \"limit\": 501, \"order\": [[\"sales_lens.orders_status\", \"asc\"]]}": [
+  {
+   "sales_lens.orders_status": "open"
+  },
+  {
+   "sales_lens.orders_status": "paid"
+  },
+  {
+   "sales_lens.orders_status": "refunded"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.stores_legacy_code\"], \"limit\": 501, \"order\": [[\"sales_lens.stores_legacy_code\", \"asc\"]]}": [
+  {
+   "sales_lens.stores_legacy_code": "H1"
+  },
+  {
+   "sales_lens.stores_legacy_code": "M3"
+  },
+  {
+   "sales_lens.stores_legacy_code": "O2"
+  },
+  {
+   "sales_lens.stores_legacy_code": "P4"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.stores_region\"], \"limit\": 501, \"order\": [[\"sales_lens.stores_region\", \"asc\"]]}": [
+  {
+   "sales_lens.stores_region": "Coast"
+  },
+  {
+   "sales_lens.stores_region": "North"
+  },
+  {
+   "sales_lens.stores_region": "South"
+  }
+ ],
+ "{\"dimensions\": [\"sales_lens.stores_store_name\"], \"limit\": 501, \"order\": [[\"sales_lens.stores_store_name\", \"asc\"]]}": [
+  {
+   "sales_lens.stores_store_name": "Harbour"
+  },
+  {
+   "sales_lens.stores_store_name": "Mill Hill"
+  },
+  {
+   "sales_lens.stores_store_name": "Old Town"
+  },
+  {
+   "sales_lens.stores_store_name": "Pier Road"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.orders__synced\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.orders__synced\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.orders__synced\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 3, \"order\": [[\"sales_lens.orders__synced\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.orders__synced\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.orders__synced": "2026-09-14T00:00:00.000",
+   "sales_lens.orders__synced.day": "2026-09-14T00:00:00.000"
+  },
+  {
+   "sales_lens.orders__synced": "2026-09-13T00:00:00.000",
+   "sales_lens.orders__synced.day": "2026-09-13T00:00:00.000"
+  },
+  {
+   "sales_lens.orders__synced": "2026-09-11T00:00:00.000",
+   "sales_lens.orders__synced.day": "2026-09-11T00:00:00.000"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_ordered_at\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}, {\"member\": \"sales_lens.orders_channel\", \"operator\": \"equals\", \"values\": [\"counter\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_ordered_at\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}, {\"member\": \"sales_lens.orders_channel\", \"operator\": \"equals\", \"values\": [\"web\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_ordered_at\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_ordered_at\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}, {\"member\": \"sales_lens.orders_channel\", \"operator\": \"equals\", \"values\": [\"counter\"]}], \"limit\": 3, \"order\": [[\"sales_lens.orders_ordered_at\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.orders_ordered_at": "2026-09-14T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-09-14T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-09-13T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-09-13T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-09-12T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-09-12T00:00:00.000"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_ordered_at\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}, {\"member\": \"sales_lens.orders_channel\", \"operator\": \"equals\", \"values\": [\"web\"]}], \"limit\": 3, \"order\": [[\"sales_lens.orders_ordered_at\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.orders_ordered_at": "2026-07-31T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-07-31T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-07-30T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-07-30T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-07-29T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-07-29T00:00:00.000"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_ordered_at\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 3, \"order\": [[\"sales_lens.orders_ordered_at\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.orders_ordered_at": "2026-09-14T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-09-14T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-09-13T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-09-13T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-09-12T00:00:00.000",
+   "sales_lens.orders_ordered_at.day": "2026-09-12T00:00:00.000"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_shipped_on\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_shipped_on\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.orders_shipped_on\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 3, \"order\": [[\"sales_lens.orders_shipped_on\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.orders_shipped_on\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.orders_shipped_on": "2026-09-14T00:00:00.000",
+   "sales_lens.orders_shipped_on.day": "2026-09-14T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-09-13T00:00:00.000",
+   "sales_lens.orders_shipped_on.day": "2026-09-13T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-09-12T00:00:00.000",
+   "sales_lens.orders_shipped_on.day": "2026-09-12T00:00:00.000"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.stock_monthly_month\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.stock_monthly_month\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.stock_monthly_month\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 3, \"order\": [[\"sales_lens.stock_monthly_month\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.stock_monthly_month\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.stock_monthly_month": "2026-08-01T00:00:00.000",
+   "sales_lens.stock_monthly_month.day": "2026-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.stock_monthly_month": "2026-07-01T00:00:00.000",
+   "sales_lens.stock_monthly_month.day": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.stock_monthly_month": "2026-06-01T00:00:00.000",
+   "sales_lens.stock_monthly_month.day": "2026-06-01T00:00:00.000"
+  }
+ ],
+ "{\"filters\": [{\"member\": \"sales_lens.stores_opened_on\", \"operator\": \"afterDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 1, \"timeDimensions\": [{\"dimension\": \"sales_lens.stores_opened_on\", \"granularity\": \"day\"}]}": [],
+ "{\"filters\": [{\"member\": \"sales_lens.stores_opened_on\", \"operator\": \"beforeOrOnDate\", \"values\": [\"2026-09-14T23:59:59.999\"]}], \"limit\": 3, \"order\": [[\"sales_lens.stores_opened_on\", \"desc\"]], \"timeDimensions\": [{\"dimension\": \"sales_lens.stores_opened_on\", \"granularity\": \"day\"}]}": [
+  {
+   "sales_lens.stores_opened_on": "2022-09-01T00:00:00.000",
+   "sales_lens.stores_opened_on.day": "2022-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.stores_opened_on": "2021-06-01T00:00:00.000",
+   "sales_lens.stores_opened_on.day": "2021-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.stores_opened_on": "2020-02-01T00:00:00.000",
+   "sales_lens.stores_opened_on.day": "2020-02-01T00:00:00.000"
+  }
+ ],
+ "{\"measures\": [\"sales_lens.orders_discount_total\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_discount_total": "58.78",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "48.6",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "53.94999999999999",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "49.519999999999996",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "56.400000000000006",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "41.34",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "51.59999999999999",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "42.12",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "46.46",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "48.74",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "48.870000000000005",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "56.77",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "45.2",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "48.269999999999996",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "62.59",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "36.05000000000001",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "58.61999999999999",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "44.89999999999999",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "56.45000000000001",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "34.379999999999995",
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_discount_total": "2.41",
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000"
+  }
+ ],
+ "{\"measures\": [\"sales_lens.orders_order_count\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "224",
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "240",
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "247",
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "240",
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "239",
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "240",
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "247",
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "224",
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "240",
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "247",
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "240",
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "248",
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "186",
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000"
+  },
+  {
+   "sales_lens.orders_order_count": "14",
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000"
+  }
+ ],
+ "{\"measures\": [\"sales_lens.orders_revenue\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2303.8999999999996"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2146.7999999999997"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2326.3999999999996"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2203.0999999999995"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2400.3999999999996"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2152.1000000000004"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2433.2"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2369.0999999999995"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2136.3999999999996"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2209.9"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2199.3"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2253.2999999999997"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2188.5999999999995"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2015.2999999999997"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2283.7"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2094.2999999999997"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2448.5999999999995"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2336.3"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_revenue": "2249.2999999999997"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_revenue": "1538.3"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_revenue": "174.79999999999998"
+  }
+ ],
+ "{\"measures\": [\"sales_lens.orders_shipped_revenue\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_shipped_on\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_shipped_on": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "633.3000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "654.3000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "613.5999999999998"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "658.7"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "652.4"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "599.6"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "683.1"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "589.3000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "618.6000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "621.1000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "597.5"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "662.0000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "600.5000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "579.1999999999999"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "661.4999999999999"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "598.5000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "713.7"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "669.7999999999998"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "614.0000000000001"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": "21.5"
+  },
+  {
+   "sales_lens.orders_shipped_on": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_on.month": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_shipped_revenue": null
+  }
+ ],
+ "{\"measures\": [\"sales_lens.orders_tips_eur\"], \"timeDimensions\": [{\"dateRange\": [\"2024-09-01\", \"2026-09-14T23:59:59.999\"], \"dimension\": \"sales_lens.orders_ordered_at\", \"granularity\": \"month\"}]}": [
+  {
+   "sales_lens.orders_ordered_at": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-01-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "120.10000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-02-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "109.49000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-03-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "119.72"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-04-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "113.96000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-05-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "122.76000000000002"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-06-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "114.78999999999999"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-07-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "117.71000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-08-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "117.4"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-09-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "116.75000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-10-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "119.4"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-11-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "120.16000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2025-12-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "134.31000000000003"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-01-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "125.58000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-02-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "110.39999999999999"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-03-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "124.51999999999998"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-04-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "114.1"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-05-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "127.84"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-06-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "119.33000000000001"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-07-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "124.50999999999999"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-08-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "98.42999999999999"
+  },
+  {
+   "sales_lens.orders_ordered_at": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_ordered_at.month": "2026-09-01T00:00:00.000",
+   "sales_lens.orders_tips_eur": "6.6"
+  }
+ ]
+}

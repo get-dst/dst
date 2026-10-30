@@ -20,7 +20,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, text
 
-from services.cli.main import _demo, _prune_log
+from services.cli.demo import _demo
+from services.cli.prune_log import _prune_log
 from services.config import settings
 from services.db.session import org_session
 from services.lenses import connection_store, store

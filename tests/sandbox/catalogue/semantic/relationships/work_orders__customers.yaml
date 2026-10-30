@@ -1,0 +1,5 @@
+left: work_orders
+right: customers
+"on": work_orders.customer_id = customers.customer_id
+type: left
+relationship: many_to_one

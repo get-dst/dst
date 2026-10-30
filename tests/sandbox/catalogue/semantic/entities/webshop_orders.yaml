@@ -1,0 +1,123 @@
+name: webshop_orders
+description: >-
+  One row per webshop (Shopify) order with every money reading on it: gross_eur is the order
+  total INCLUDING 25.5 % VAT (what Shopify and fct_orders call total), refunds_eur the refunds
+  later issued against the order, fees_eur the Stripe card fee, net_of_refunds_eur = gross -
+  refunds, net_of_vat_eur the ex-VAT value (the revenue basis). created_at_utc is UTC;
+  created_at_local and order_month_local are Finnish time, which moves a few late-evening orders
+  to the next day. channel is b2c_card (consumers paying by card) or b2b_invoice (installers and
+  businesses paying by invoice).
+grain: one row per order
+use_cases:
+  - "Use when a question asks about webshop orders, webshop revenue or sales, order counts, average order value, refunds as a share of sales, card vs invoice customers, or Stripe fees."
+  - "Avoid for: products, SKUs and categories (webshop_order_lines); ad spend (marketing lens); refunds by reason (webshop_refunds)"
+common_questions:
+  - webshop revenue in August 2026, ex-VAT
+  - how many webshop orders did we get in August 2026
+  - average order value this quarter, card vs invoice
+  - webshop refund rate for the last 3 months
+source: {connection: warehouse, table: intermediate.int_orders_enriched}
+default_time_field: created_at_utc
+primary_key: [order_id]
+population: paid webshop orders since the May 2025 launch; consumers and installers alike
+fields:
+  - {name: order_id, type: integer}
+  - {name: created_at_utc, type: timestamp, description: "order time in UTC"}
+  - {name: created_at_local, type: timestamp, description: "order time in Finnish time"}
+  - {name: order_month_utc, type: string}
+  - {name: order_month_local, type: string}
+  - {name: channel, type: string, description: "b2c_card or b2b_invoice"}
+  - {name: customer_email_hash, type: string, description: "hashed shopper email, join key only"}
+  - {name: financial_status, type: string, description: "always paid"}
+  - {name: gross_eur, type: number, description: "order total incl. VAT"}
+  - {name: refunds_eur, type: number, description: "refunds issued against the order"}
+  - {name: fees_eur, type: number, description: "Stripe fee on the card charge; 0 for invoice orders"}
+  - {name: net_of_refunds_eur, type: number, description: "gross minus refunds, still incl. VAT"}
+  - {name: net_of_vat_eur, type: number, description: "ex-VAT order value - the revenue basis"}
+dimensions:
+  - {name: channel, aliases: [payment channel, customer type, order channel]}
+  - {name: order_month_local, aliases: [local month, Finnish month]}
+hide: [customer_email_hash]
+internal: [financial_status]
+metrics:
+  - name: webshop_revenue_eur
+    agg: sum
+    expr: webshop_orders.net_of_vat_eur
+    label: webshop revenue
+    aliases: [webshop sales, webshop net revenue, webshop revenue ex-VAT, online revenue, online sales]
+    description: order value ex-VAT by order date (UTC) - the group's webshop revenue figure
+    format: currency
+    currency: EUR
+    better: higher
+  - name: webshop_gross_eur
+    agg: sum
+    expr: webshop_orders.gross_eur
+    label: webshop gross order value
+    aliases: [gross sales, order totals incl VAT, gross merchandise value, GMV]
+    description: order totals including VAT, before refunds
+    format: currency
+    currency: EUR
+  - name: webshop_refunds_eur
+    agg: sum
+    expr: webshop_orders.refunds_eur
+    label: webshop refunds
+    aliases: [refunded amount, money refunded]
+    description: refunds attributed to orders placed in the window (by order date, not refund date)
+    format: currency
+    currency: EUR
+    better: lower
+  - name: webshop_net_of_refunds_eur
+    agg: sum
+    expr: webshop_orders.net_of_refunds_eur
+    label: webshop sales net of refunds
+    aliases: [net of refunds, sales after refunds]
+    description: gross order value minus refunds, still including VAT
+    format: currency
+    currency: EUR
+  - name: stripe_fees_eur
+    agg: sum
+    expr: webshop_orders.fees_eur
+    label: card payment fees
+    aliases: [Stripe fees, card fees, payment processing fees, processor fees]
+    format: currency
+    currency: EUR
+    better: lower
+  - name: order_count
+    agg: count
+    label: webshop orders
+    aliases: [orders, number of orders, order volume]
+    better: higher
+  - name: average_order_value_eur
+    agg: avg
+    expr: webshop_orders.gross_eur
+    label: average order value
+    aliases: [AOV, basket size, average basket, average basket size]
+    description: average gross order total incl. VAT per order
+    format: currency
+    currency: EUR
+    better: higher
+  - name: refund_rate
+    type: ratio
+    numerator: webshop_refunds_eur
+    denominator: webshop_gross_eur
+    label: refund rate
+    aliases: [return rate by value, share refunded]
+    description: refunded amount over gross order value for orders placed in the window
+    format: percent
+    better: lower
+  - name: card_orders
+    agg: count
+    filters: ["webshop_orders.channel = 'b2c_card'"]
+    label: card orders
+    aliases: [consumer orders, b2c orders]
+  - name: invoice_orders
+    agg: count
+    filters: ["webshop_orders.channel = 'b2b_invoice'"]
+    label: invoice orders
+    aliases: [installer orders, business orders, b2b orders]
+  - name: card_share_of_orders
+    type: ratio
+    numerator: card_orders
+    denominator: order_count
+    label: share of orders paid by card
+    format: percent

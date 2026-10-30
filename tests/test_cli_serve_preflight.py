@@ -16,7 +16,7 @@ import socket
 
 import pytest
 
-from services.cli.main import _port_busy_message, _probe_socket
+from services.cli.serve import _port_busy_message, _probe_socket
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])

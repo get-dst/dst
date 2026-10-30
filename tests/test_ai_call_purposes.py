@@ -21,6 +21,8 @@ INHERITS = {
     "services/llm/retry.py::RetryingLLM.complete": "the retry wrapper around every client",
     "services/llm/vote_decider.py::VoteDecider.decide": "a vote is a call of the decision asked",
     "services/llm/openai_decisions.py::OpenAIDecisionsDecider.decide": "one decision as a batch",
+    "services/llm/decision_memo.py::Memoised.decide": "the wrapped decider's call, as asked",
+    "services/llm/decision_memo.py::Memoised._decide_many": "the wrapped batch, as asked",
     "services/router/decider.py::LlmDecider.decide_measured": (
         "a subclass's own decide(), a stub with no provider"
     ),

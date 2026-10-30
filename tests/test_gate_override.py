@@ -59,7 +59,7 @@ def test_the_cli_flag_takes_the_case_ids_it_covers(monkeypatch) -> None:
 
     import httpx
 
-    from services.cli import main as cli
+    from services.cli import project as cli
 
     class _Sent(Exception):
         def __init__(self, params: object) -> None:
@@ -104,6 +104,7 @@ def test_the_cli_flag_repeated_per_id_keeps_every_id(monkeypatch) -> None:
     import sys
 
     from services.cli import main as cli
+    from services.cli import project
 
     seen: list[list[str]] = []
 
@@ -111,7 +112,7 @@ def test_the_cli_flag_repeated_per_id_keeps_every_id(monkeypatch) -> None:
         seen.append(list(getattr(args, "allow_failing_cases", None) or []))
         return 0
 
-    monkeypatch.setattr(cli, "_apply", _capture)
+    monkeypatch.setattr(project, "_apply", _capture)
     for argv in (
         [
             "dst",

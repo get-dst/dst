@@ -110,11 +110,16 @@ def names_ask(question: str, ask: str) -> bool:
     return bool(words) and all(w in said for w in words)
 
 
+def not_for_hit(question: str, model: SemanticModel) -> NotForAsk | None:
+    """The first declared ask the question names every content word of, or None."""
+    return next((a for a in declared_asks(model) if names_ask(question, a.ask)), None)
+
+
 def not_for_refusal(question: str, model: SemanticModel) -> str | None:
     """The refusal for a question that names every content word of a declared
     ask, or None. First declared ask wins."""
-    for item in declared_asks(model):
-        if names_ask(question, item.ask):
-            reason = f"this lens does not answer {item.ask.strip()}"
-            return f"{reason}; ask {item.sibling.strip()}" if item.sibling.strip() else reason
-    return None
+    item = not_for_hit(question, model)
+    if item is None:
+        return None
+    reason = f"this lens does not answer {item.ask.strip()}"
+    return f"{reason}; ask {item.sibling.strip()}" if item.sibling.strip() else reason

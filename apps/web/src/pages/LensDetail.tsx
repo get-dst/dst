@@ -25,7 +25,7 @@ import {
   type RepoFile,
   type LensVersion,
 } from '../api/repo'
-import { useDistill, useReviewQueue, type ReviewTicket } from '../api/reviews'
+import { useReviewQueue, type ReviewTicket } from '../api/reviews'
 import { ReviewDetail } from './Reviews'
 import { API_BASE } from '../api/client'
 import {
@@ -1976,13 +1976,11 @@ function AccuracyTrend({ lens, runs }: { lens: string; runs: EvalRun[] }) {
 }
 
 /** The Evaluation tab body. Cases are read-only (authored in evals/cases.yaml);
- *  running the suite and distilling verified history stay — both are governing. */
+ *  running the suite stays — it is governing. */
 function EvalTab({ name }: { name: string }) {
-  const qc = useQueryClient()
   const invalidate = useInvalidateEvals(name)
   const cases = useEvalCases(name)
   const runs = useEvalRuns(name)
-  const distill = useDistill(name)
   const run = useRunEval(name)
 
   const allCases = cases.data ?? []
@@ -2018,37 +2016,8 @@ function EvalTab({ name }: { name: string }) {
             'Run health check'
           )}
         </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={distill.isPending}
-          onClick={() =>
-            distill.mutate(undefined, {
-              onSuccess: () => qc.invalidateQueries({ queryKey: ['patches', name] }),
-            })
-          }
-        >
-          {distill.isPending ? (
-            <span className="flex items-center gap-1.5">
-              <Spinner />
-              Distilling
-            </span>
-          ) : (
-            'Distill history'
-          )}
-        </Button>
         {run.isError && (
           <span className="text-[12px] text-red">{String(run.error)}</span>
-        )}
-        {distill.isError && (
-          <span className="text-[12px] text-red">{String(distill.error)}</span>
-        )}
-        {distill.isSuccess && (
-          <span className="text-[12px] text-muted">
-            {distill.data.length === 0
-              ? 'No new patterns in verified history.'
-              : `${distill.data.length} candidate${distill.data.length === 1 ? '' : 's'} drafted — review under Reviews.`}
-          </span>
         )}
       </div>
 

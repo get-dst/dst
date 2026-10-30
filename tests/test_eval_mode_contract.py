@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # because grepping for them is what let one drift in the first place.
 WRITERS = {
     "services/evals/service.py": "regression",
-    "services/cli/main.py": "test",
+    "services/cli/test.py": "test",
     "services/api/mgmt_evals.py": "health",
     "services/evals/runner.py": "behavioral",
 }

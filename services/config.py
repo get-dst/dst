@@ -256,6 +256,31 @@ class Settings(BaseSettings):
     # chat decider (slower: one vote round per slot); "off" = the JSON intent
     # emission. dst-owned default, a deployment switch, never per lens.
     typed_serving: Literal["auto", "on", "off"] = "auto"
+    # The serving core for every lens, overriding each lens's `serving:`:
+    # "cube" (questions resolve to Cube queries) or "typed". Unset = each lens's
+    # own setting. Running one install both ways is how the two cores are
+    # compared on the same questions.
+    serving: Literal["typed", "cube"] | None = None
+
+    # The Cube this install compiles governed asks through (the sidecar in
+    # deploy/, or your own): its REST base, e.g. http://cube:4000. Unset, and
+    # with no `cube:` in dst.yaml, Cube is not configured: nothing here
+    # serves through it yet, and `/ready`, `dst doctor` and `dst cube status`
+    # say so. The env wins field by field over dst.yaml's `cube:` block.
+    cube_url: str | None = None
+    # The env var holding CUBEJS_API_SECRET (the HS256 key dst signs each
+    # request's security-context token with). Named, never inlined: dst.yaml
+    # is committed. Unset = dst.yaml's `cube.api_secret_env`, else Cube's own
+    # name, CUBEJS_API_SECRET.
+    cube_api_secret_env: str | None = None
+    # Seconds a fetched /v1/meta is reused per caller context before Cube is
+    # asked again. None = dst.yaml's value, else 300.
+    cube_meta_ttl: int | None = None
+    # The clock each security-context token's iat/exp is read from: "wall"
+    # (the real time, even when this process's clock is pinned to another
+    # day, as tests and replays pin it; Cube checks expiry on its own clock)
+    # or "process" (the clock Python reports). None = dst.yaml's value, else wall.
+    cube_jwt_clock: Literal["wall", "process"] | None = None
 
     # LLM providers, JSON keyed by name (declaration order IS the tier/cost
     # preference — put the cheap provider first). BYOK: a provider is a name +
@@ -457,7 +482,7 @@ def adopt_project_env(dirs: Sequence[str | Path]) -> Callable[[], None]:
       * ``Settings`` — rebuilt IN PLACE from ``<dir>/.env`` (every module holds a
         reference to this one object), with the same precedence as before and as the
         HTTP verbs: process env wins, then ``<dir>/.env``, and never the cwd's (see
-        ``services/cli/main.py::_env_dirs`` — an explicit --dir must not borrow a
+        ``services/cli/_common.py::_env_dirs`` — an explicit --dir must not borrow a
         neighbouring project's credentials);
       * ``resolve_env_ref`` — the declared refs (a provider's ``api_key_env``, a
         connection's ``secret_env``), whose default search path becomes *dirs*.

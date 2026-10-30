@@ -242,7 +242,9 @@ def test_plan_right_after_apply_reports_zero_changes(org, monkeypatch) -> None: 
         return [
             (e.get("lens") or e.get("path"), e.get("status"))
             for e in plan
-            if e.get("status") not in (None, "unchanged", "hint")
+            # The table-blueprint rows (warnings, the coverage line) report
+            # standing facts, never a change.
+            if e.get("status") not in (None, "unchanged", "hint", "warning", "coverage")
         ]
 
     assert changes(_plan(headers, files).json()) == []

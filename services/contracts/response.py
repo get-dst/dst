@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
+from services.contracts.failure_modes import FailureMode, clarification_mode
 from services.contracts.resolution import Resolution
 from services.contracts.verification import VerificationReport
 
@@ -82,9 +83,22 @@ class ClarificationRequest(BaseModel):
     # use) that the generated SQL does not read — `term` names the table as the
     # question wrote it, `options` the tables the SQL read followed by the one
     # named; re-ask naming the table you mean.
+    # DEPRECATED: the older four-way vocabulary, kept populated for one
+    # release so a caller reading ``kind`` keeps working; ``mode`` is the
+    # name to read (contracts/failure_modes.py).
     kind: Literal["ambiguous_term", "unknown_value", "unresolved_slot", "named_table"] = (
         "ambiguous_term"
     )
+    # Which of the twenty failure modes this ask is: set by the construction
+    # site, else derived from ``kind`` and the slot, so every clarification
+    # carries exactly one (a stored row from before the field existed too).
+    mode: FailureMode | None = None
+
+    @model_validator(mode="after")
+    def _one_mode(self) -> ClarificationRequest:
+        if self.mode is None:
+            self.mode = clarification_mode(self.kind, self.term, self.options)
+        return self
 
 
 class Receipt(BaseModel):
@@ -112,6 +126,30 @@ class Receipt(BaseModel):
     # — whether the figure's MEANING was governed. Signed with the rest; absent
     # on receipts issued before the ledger existed, and those still verify.
     resolution_tag: str | None = None
+    # The columns this answer read by a group exception to the lens's `hide`
+    # ("entity.column (group support)"): shown to this caller, withheld from
+    # callers outside the group. Signed with the rest; absent when none was.
+    column_access: list[str] | None = None
+    # The mode that capped this answer's confidence (data_gap, stale,
+    # unverifiable), when one did: a cap never travels as a bare word. Signed
+    # with the rest; absent on a clean serve and on receipts issued before it.
+    mode: FailureMode | None = None
+    # A Cube-served answer pins the ask, the model and the rows as well as the
+    # SQL: the canonical Cube query's hash, the hash of the meta the lens
+    # reads, the hash of the rows served, and every check that ran with what
+    # it decided ("words:pass", "freshness:disclose"). Signed with the rest;
+    # absent on answers served any other way.
+    query_sha256: str | None = None
+    result_sha256: str | None = None
+    model_version: str | None = None
+    checks: list[str] | None = None
+    # The author's caveats on what the answer read (QueryResponse.caveats).
+    # Signed with the rest; absent when the answer read none.
+    caveats: list[str] | None = None
+    # What the checks disclosed about the figure (a partial period, a feed
+    # that ends inside the window): the facts the caller relays, signed with
+    # the rest; absent when nothing was disclosed.
+    disclosures: list[str] | None = None
     digest: str | None = None
 
 
@@ -195,6 +233,11 @@ class QueryResponse(BaseModel):
     # be answered instead of refusing it whole. Empty when the answer covers
     # the whole question. `degraded` carries the same fact as a line.
     declined: list[str] = Field(default_factory=list)
+    # What the author says a reader of this figure must know, from the cubes
+    # and members the answer read ("<cube or member>: <caveat>"): an allocated
+    # measure, a known duplicate. dst cannot check that the caller relays
+    # them, so the answer text leads with them and the receipt signs them.
+    caveats: list[str] = Field(default_factory=list)
     # Signed record of this serve (see Receipt) — present on data answers; a
     # refusal or clarification makes no data claim to attest.
     receipt: Receipt | None = None
@@ -205,7 +248,18 @@ class QueryResponse(BaseModel):
     # revenue": declared means the semantic model's revenue; inferred means the
     # model summed a column it chose.
     resolution: Resolution | None = None
+    # Why this is not a clean answer, in the twenty-name vocabulary
+    # (contracts/failure_modes.py): the mode behind a refusal or a
+    # clarification, or the one that capped a served answer's confidence.
+    # None on a clean answer. A clarification's mode is the clarification's.
+    mode: FailureMode | None = None
     request_id: str
+
+    @model_validator(mode="after")
+    def _mode_of_clarification(self) -> QueryResponse:
+        if self.mode is None and self.clarification is not None:
+            self.mode = self.clarification.mode
+        return self
 
     # Where the served figure came from, derived (never set) so the direct and
     # the routed envelope say the same thing: ``certified`` = an approved

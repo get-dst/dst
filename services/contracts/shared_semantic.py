@@ -22,6 +22,7 @@ from services.contracts.semantic_model import (
     Definition,
     Entity,
     StrList,
+    TableBlueprint,
     _restore_on_key,
 )
 
@@ -133,6 +134,7 @@ _ASSET_MODELS: dict[str, type[Authored]] = {
     "entity": SharedEntity,
     "definition": Definition,
     "relationship": SharedRelationship,
+    "blueprint": TableBlueprint,
 }
 
 

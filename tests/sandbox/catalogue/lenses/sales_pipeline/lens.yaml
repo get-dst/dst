@@ -1,0 +1,53 @@
+name: sales_pipeline
+display_name: Sales pipeline
+description: Quotes, win rates, CRM leads, bookings and deal sizes from Pipedrive and Compass - for RevOps and sales management. Finland only; Bergström has no pipeline data.
+owner: revops
+timezone: Europe/Helsinki
+stale_after_days: 3
+connections: [warehouse]
+select:
+  entities:
+    - quotes
+    - crm_leads
+    - bookings
+    - sales_funnel_monthly
+    - customers
+  definitions: [quote, win_rate, deal, bookings, segment, region, channel_group, attainment]
+expose:
+  - connection: warehouse
+    tables: ["raw_compass.attainment", "raw_compass.quotas", "raw_compass.reps"]
+sources: [Pipedrive, the CRM, Compass]
+scope: own
+untyped_fallback: true
+not_for:
+  - ask: marketing leads
+    sibling: marketing
+  - ask: MQLs
+    sibling: marketing
+  - ask: partner leads
+    sibling: partners
+  - ask: app sign-ups
+    sibling: pro_app
+  - ask: revenue
+    sibling: group_finance
+  - ask: partner bookings
+    sibling: partners
+not_computable:
+  - measure: open quotes
+    aliases: [quotes still open, outstanding quotes, pending quotes, quotes awaiting decision, still open, are still open, open quote, quotes open, undecided quotes]
+    reason: "every quote in the CRM carries a final status (Won, Lost, Expired); the warehouse holds no open-quote state"
+  - measure: lost reason on quotes
+    aliases: [why quotes were lost, price as the reason, lost to price]
+    reason: "quotes carry no lost reason; only CRM leads have a free-text lost_reason"
+  - measure: Bergström deal size
+    aliases: [Bergström quotes, Bergström win rate, Swedish deals, average deal size at Bergström]
+    reason: "Bergström Rör has no quote or deal data in the warehouse"
+  - measure: sales cycle length
+    aliases: [sales cycle, days to close, time to close, cycle time]
+    reason: "the CRM lead has a created date and the quote a sent and decided date, but no event links a lead's first contact to its signed deal; ask RevOps for the definition before computing one"
+access:
+  allow:
+    - group: sales
+    - group: everyone
+eval_gate: block
+auto_review: unverified

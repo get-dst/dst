@@ -4,13 +4,16 @@ A thin MCP server that proxies to the dst REST data plane with a caller's API ke
 Mirrors Omni's pickModel -> pickTopic -> getData:
 
   list_lenses       ->  the governed lenses this caller may use
-  describe_lens     ->  a lens's entities, fields, definitions, metric catalog, certified count
+  describe_lens     ->  a lens's entities, fields, definitions, metric catalog, certified
+                       count; exposed tables summarised, one in full with `table`
   metric_catalog    ->  the metric catalog alone, with the metric tree
   search_certified  ->  find human-approved question→SQL pairs (the deterministic path)
   run_certified     ->  run an approved answer with zero AI SQL generation
   query             ->  ask a governed question; returns a grounded, cited answer
   query_metrics     ->  name the metrics/dimensions directly; compiled, no generation
   query_metrics_batch -> up to 50 structured intents read at one moment
+  query_cube        ->  your own Cube query + word ledger, checked and run (no model)
+  values / data_end / grain -> the facts to check before you write one
 
 Every tool returns a structured envelope so agents can branch programmatically
 success is ``{"ok": true, ...payload}``; failure is ``{"ok": false,
@@ -97,7 +100,27 @@ is touched. Sending a definitional question through query/route_query runs gover
 against the warehouse to answer it — the wrong machine for a meaning. If lookup_definition
 returns nothing, the term is ungoverned: say so; never invent a definition.
 
-Operating loop:
+DRIVER MODE (lenses served through Cube) — you are the driver. On a Cube-backed lens
+{name} calls no model for you: you read the question and write the query, {name} checks
+it, runs it and signs the receipt. Lenses on the typed core work exactly as in the
+operating loop below. `no_model` in a route says which is which, per lens.
+a. route_query(question) returns the lenses covering it and why (the members and values
+   each word matched), never an answer. `choose: true` means several cover it equally:
+   pick one or ask the user. `refusal` is the answer: relay it. With no Cube lens covering
+   it, the typed lenses route it as usual and their answer is under `routed`; with no
+   Cube lens at all, route_query answers exactly as in the operating loop.
+b. A candidate with serving "cube": describe_lens(lens) (members, values, data ends,
+   not_computable, ambiguous terms, certified pairs), then query_cube(lens, query, ledger,
+   question). The ledger accounts for every content word of the question. A check that
+   stops the query returns `retry` with what to change: fix the query or ask the user,
+   then send it again. Never present a number from a non-answer.
+c. None covering: `explore_kit` lists the exposed tables you may read with sql. Before
+   any number: grain(table), data_end(lens, table), values(lens, table.column), every
+   word of the question carried by what you read, and an empty result read as "no rows",
+   not zero. Say plainly what the answer's `checks` could not verify.
+d. A candidate with serving "typed": ask it with query, as in the loop below.
+
+Operating loop (lenses on the typed core, where {name} reads the question):
 1. DEFAULT TO route_query(question) — let {name} choose the lens. Lens selection is the
    router's job, not yours: it scores the question against governed coverage you cannot
    see. Never pre-pick a lens because one "seems more suitable" — that swaps your guess
@@ -238,6 +261,10 @@ def _client(key: str, agent: str = "mcp") -> httpx.AsyncClient:
             # The acting client, carried to the REST data plane so the trace and audit
             # rows record "person X, through agent Y". get_caller reads it.
             "X-dst-Agent": agent,
+            # An MCP client is an agent doing its own reading: driver mode. On a
+            # lens served through Cube dst then calls no model and runs every
+            # check on what the agent submits; typed lenses are unaffected.
+            "X-DST-Driver": "1",
         },
         timeout=180.0,
     )
@@ -341,7 +368,12 @@ async def list_lenses(ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
 
 
 @mcp.tool()
-async def describe_lens(name: str, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
+async def describe_lens(
+    name: str,
+    ctx: Context,  # type: ignore[type-arg]
+    table: str = "",
+    view: str = "",
+) -> dict[str, Any]:
     """Describe a lens: its entities, typed fields, business definitions, sample
     questions, the size of its certified library, and its metric catalog — every
     metric with label, unit, grains, callable dimensions and depends_on, and every
@@ -353,11 +385,33 @@ async def describe_lens(name: str, ctx: Context) -> dict[str, Any]:  # type: ign
     is human-approved and served deterministically (no AI generation).
     `exposed_tables` are tables the lens reads WITHOUT definitions: answers from
     them are ungoverned (EXPOSED, UNTYPED), and the sql tool reads them directly.
+    Each is a one-line summary: grain, key, `versions` (rows repeat per sync: count
+    the latest version), rows, column count and `flags` (no blueprint, key fails,
+    key unverified, caveats, stale probe). Before you query an exposed table, call
+    describe_lens again with `table` set to it: that returns its columns, its
+    `blueprint` (grain, key, versions, clocks, joins, caveats), each check's verdict
+    and the probe's `facts` (distinct counts, value lists, ranges). The output is
+    size-bounded: `elided` says what was left out, and `elided_tables` names tables
+    whose summary did not fit (each can be described with `table`).
+
+    A lens that serves through Cube (`serving: "cube"`) describes itself for
+    query_cube, under 40 KB: each view summarised by its member names (a lens of
+    one view lists it in full when it fits), the lens's not_computable entries
+    and ambiguous terms with their readings, where its data ends and which
+    periods are partly loaded, and certified question → Cube query pairs. Call
+    it again with `view` to list that view in full: each member with title,
+    description, aliases, additivity, clock and clock_kind, observed values
+    (bounded) and data end.
 
     Args:
         name: the lens name from list_lenses.
+        table: one exposed table to describe in full, as exposed_tables names it
+            (bare or schema-qualified); empty for the whole lens.
+        view: for a Cube-backed lens, the view to list in full (default: none, or
+            the only view when it fits).
     """
-    payload, failure = await _request(ctx, "GET", f"/v1/lenses/{name}")
+    params = {k: v for k, v in (("table", table), ("view", view)) if v.strip()} or None
+    payload, failure = await _request(ctx, "GET", f"/v1/lenses/{name}", params=params)
     if failure is not None:
         return failure
     return {"ok": True, **payload}
@@ -698,7 +752,13 @@ async def sql(
     table and column checked against the lens's allow-list, row-capped, and
     logged to the audit trail with your caller name on it. `SELECT *` is refused
     — name the columns (describe_lens lists them). `truncated: true` means the
-    cap cut the result off, so do not read it as the whole story.
+    cap cut the result off, so do not read it as the whole story. `grain` holds a
+    line per exposed table read: its rows against distinct key, or "could not
+    verify" and why — relay it with any count or sum you draw from the rows.
+    `data_end` holds where each exposed table's dated columns end, and `checks`
+    every post-check as the signed `receipt` lists it: "exposed, could not verify
+    …" names a check that could not run. No rows is not a zero: the
+    empty_result check says so.
 
     The lens's refusals and hides hold here too: a column the lens hides is out
     of scope however it is named, and a statement that names a column a
@@ -725,6 +785,133 @@ async def sql(
 
 
 @mcp.tool()
+async def query_cube(
+    lens: str,
+    query: dict[str, Any],
+    ledger: list[dict[str, Any]],
+    ctx: Context,  # type: ignore[type-arg]
+    question: str = "",
+) -> dict[str, Any]:
+    """Run YOUR Cube query against a Cube-backed lens, with the word ledger for the
+    question it answers. dst calls no model: you read the question, dst checks
+    what you wrote, compiles it through Cube, runs the SQL through the lens's own
+    connection and returns rows, checks, mode and a signed receipt.
+
+    Before execution: members outside the lens's views, hidden from you or not
+    in the model; terms the lens declares not computable; ambiguous terms (both
+    readings run, and close ones are served with the other disclosed); every
+    content word of `question` carried by the ledger or the query; filters the
+    question did not ask for; filter values against the dictionaries; windows
+    against the lens clock (a "this month" in `question` is bound to its dates);
+    labels grouped without their key. After: data that ends before the window,
+    partly loaded periods, a level metric pinned to one snapshot, empty results,
+    empty buckets, ties at the limit, compare windows.
+
+    `caveats` lists what the lens's author says a reader of the figure must know
+    about what your query read (an allocated measure, a known duplicate): relay
+    every one beside the figure.
+
+    A query a check stops returns status 'clarification' or 'refused' with
+    `mode` and `retry: {check, mode, detail, change}` — change the query (or ask
+    the user) and send it again. Describe the lens first (describe_lens): member
+    names, values and data ends are there.
+
+    Args:
+        lens: a lens with serving "cube" (route_query candidates, describe_lens).
+        query: the Cube query, the /v1/load body: measures, dimensions, segments,
+            timeDimensions [{dimension, granularity, dateRange}], filters
+            [{member, operator, values}], order, limit. Absolute dates are safest.
+        ledger: one entry per content word of the question: {"word": "<as asked>",
+            "to": "member" | "filter" | "segment" | "period" | "none", "ref": "<the
+            member, filter value, segment or date range of your query that carries
+            it>"}. "none" when nothing carries the word: the answer then asks back.
+        question: the user's question as asked. Without it the word, unasked-filter
+            and period checks report UNTESTED on the receipt.
+    """
+    payload, failure = await _request(
+        ctx,
+        "POST",
+        f"/v1/lenses/{lens}/cube",
+        json_body={"query": query, "ledger": ledger, "question": question},
+    )
+    if failure is not None:
+        return failure
+    return {"ok": True, **payload}
+
+
+@mcp.tool()
+async def values(
+    lens: str,
+    member: str,
+    ctx: Context,  # type: ignore[type-arg]
+    prefix: str = "",
+) -> dict[str, Any]:
+    """The observed values of a member or column, so a filter uses a value that
+    exists. A Cube-backed lens reads the probe's dictionary of `view.member`; any
+    other lens the stored profile of an exposed `table.column`. `complete: false`
+    means the list is not every value: say so if you filter on one it lacks.
+
+    Args:
+        lens: the lens name.
+        member: `view.member` (Cube-backed lens) or `table.column` (exposed table).
+        prefix: only values starting with this (case-insensitive).
+    """
+    payload, failure = await _request(
+        ctx, "GET", f"/v1/lenses/{lens}/values", params={"member": member, "prefix": prefix}
+    )
+    if failure is not None:
+        return failure
+    return {"ok": True, **payload}
+
+
+@mcp.tool()
+async def data_end(
+    lens: str,
+    member: str,
+    ctx: Context,  # type: ignore[type-arg]
+) -> dict[str, Any]:
+    """Where the data behind a member ends, before you window a query on it. A
+    time dimension: its last loaded date and whether it is an event or a schedule
+    date; a measure: its clock, that clock's end, and a partly loaded period; a
+    cube: its feeds. An exposed `table` or `table.column`: the probe's maxima of its
+    dated columns. `clock_end` is the lens clock; `stale` says it is past the
+    lens's freshness bound.
+
+    Args:
+        lens: the lens name.
+        member: `view.member`, a cube name, or an exposed `table` / `table.column`.
+    """
+    payload, failure = await _request(
+        ctx, "GET", f"/v1/lenses/{lens}/data_end", params={"member": member}
+    )
+    if failure is not None:
+        return failure
+    return {"ok": True, **payload}
+
+
+@mcp.tool()
+async def grain(
+    table: str,
+    ctx: Context,  # type: ignore[type-arg]
+    lens: str = "",
+) -> dict[str, Any]:
+    """An exposed table's grain before you count its rows: the blueprint's grain,
+    key, versions (rows repeating per sync), clocks and caveats, each check's
+    verdict, the probe's facts, and `grain` lines — rows against distinct key, or
+    "could not verify" and why. Count the latest version when `versions` is set.
+
+    Args:
+        table: the exposed table, as explore_kit or describe_lens names it.
+        lens: the lens exposing it; empty to search every lens you may use.
+    """
+    params = {"table": table, **({"lens": lens} if lens.strip() else {})}
+    payload, failure = await _request(ctx, "GET", "/v1/grain", params=params)
+    if failure is not None:
+        return failure
+    return {"ok": True, **payload}
+
+
+@mcp.tool()
 async def route_query(
     question: str,
     ctx: Context,  # type: ignore[type-arg]
@@ -742,6 +929,19 @@ async def route_query(
     covering lens (running the same governed pipeline as query, stamping the answer with
     which lens answered + a routing score) or DECLINES — an honest "no governed lens
     covers this" rather than an ungoverned guess.
+
+    When lenses served through Cube are in your catalogue (driver mode: dst calls
+    no model for an agent on them) the router answers with coverage, never an
+    answer: {ok: true, driver: true, covered, candidates: [{lens, serving,
+    no_model, why, matched: [{word, targets}], uncovered}], choose, nearest,
+    refusal, explore_kit, no_model: {lens: bool}, routed}. A Cube candidate:
+    describe it and write the query with query_cube; a typed candidate: ask it
+    with query. `choose: true`: several cover it — pick one, or ask the user.
+    `refusal`: relay it. No Cube lens covering it: the typed lenses route it as
+    below and their answer is under `routed`; with no typed lens either,
+    `nearest` says which words each lens lacks and `explore_kit` lists the
+    exposed tables you may read with sql, and the checks to run first. With no
+    Cube lens in your catalogue nothing changes: the shapes below.
 
     On a route: {ok: true, covered: true, routed_to: {lens, score}, answer: {...}} —
     present answer.answer to the user and note it came from routed_to.lens.

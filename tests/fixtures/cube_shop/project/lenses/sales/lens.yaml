@@ -1,0 +1,24 @@
+name: sales
+display_name: Sales
+description: Orders, revenue and stock across the bakeries.
+owner: ops
+timezone: Europe/Helsinki
+stale_after_days: 3
+connections: [warehouse]
+select:
+  entities: [orders, order_lines, stores, stock_monthly]
+  definitions: [web_order, region, basket, margin]
+sources: [till, web shop]
+scope: own
+not_for:
+  - ask: wholesale revenue
+    sibling: wholesale
+not_computable:
+  - measure: customer lifetime value
+    aliases: [CLV]
+    reason: "no customer identity is held"
+access:
+  allow:
+    - group: everyone
+eval_gate: warn
+untyped_fallback: true

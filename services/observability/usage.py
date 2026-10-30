@@ -77,6 +77,31 @@ def purpose(name: Purpose) -> Iterator[None]:
         _PURPOSE.reset(token)
 
 
+# Driver mode: the caller is an agent, so dst calls no model for it. While set,
+# the registry resolves no provider (services/llm/registry.py) and a record
+# arriving anyway is a defect, raised rather than kept.
+_NO_MODELS: contextvars.ContextVar[bool] = contextvars.ContextVar("ai_no_models", default=False)
+
+
+class ModelCallInDriverMode(RuntimeError):
+    """A provider call completed while driver mode was on."""
+
+
+@contextmanager
+def no_models(on: bool = True) -> Iterator[None]:
+    """No provider call inside the block (when *on*): the driver agent does
+    the judgment, dst the checks."""
+    token = _NO_MODELS.set(on or _NO_MODELS.get())
+    try:
+        yield
+    finally:
+        _NO_MODELS.reset(token)
+
+
+def models_off() -> bool:
+    return _NO_MODELS.get()
+
+
 def active() -> bool:
     return bool(_CALLS.get())
 
@@ -127,6 +152,10 @@ def record(
     """One completed provider call. Kept when a collection is open. Priced
     with its prompt-cache tokens, through the endpoint its provider id names
     (``openai-decisions:gpt-6-luna`` is not priced as the chat model)."""
+    if _NO_MODELS.get():
+        raise ModelCallInDriverMode(
+            f"{provider}/{model} was called in driver mode, where dst calls no model"
+        )
     open_ = _CALLS.get()
     if not open_:
         return

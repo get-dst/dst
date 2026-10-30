@@ -1,0 +1,5 @@
+left: webshop_refunds
+right: webshop_orders
+"on": webshop_refunds.order_id = webshop_orders.order_id
+type: left
+relationship: many_to_one

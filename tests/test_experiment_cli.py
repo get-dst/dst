@@ -27,7 +27,7 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
 
 
 def test_parse_vary_yaml_scalars_and_errors() -> None:
-    from services.cli.main import _parse_vary
+    from services.cli.experiment import _parse_vary
 
     dims = _parse_vary(["model.temperature=0.0,0.7", "answer_mode=strict,balanced"])
     assert dims == [
@@ -40,7 +40,7 @@ def test_parse_vary_yaml_scalars_and_errors() -> None:
 
 
 def test_expand_variants_is_cartesian_in_order() -> None:
-    from services.cli.main import _expand_variants
+    from services.cli.experiment import _expand_variants
 
     variants = _expand_variants([("a", [1, 2]), ("b", ["x", "y"])])
     assert variants == [
@@ -52,7 +52,7 @@ def test_expand_variants_is_cartesian_in_order() -> None:
 
 
 def test_patch_lens_yaml_sets_nested_keys(tmp_path: Path) -> None:
-    from services.cli.main import _patch_lens_yaml
+    from services.cli.experiment import _patch_lens_yaml
 
     p = tmp_path / "lens.yaml"
     p.write_text("name: l\nmodel:\n  temperature: 0.0\n", encoding="utf-8")
@@ -116,7 +116,7 @@ def project(tmp_path: Path) -> Path:
 def test_experiment_measures_variants_and_removes_env(
     monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from services.cli import main as cli_main
+    from services.cli import experiment as cli_main
 
     fake = FakeVerbs()
     monkeypatch.setattr(cli_main, "_dst_run", fake)
@@ -172,7 +172,7 @@ def test_experiment_measures_variants_and_removes_env(
 def test_experiment_removes_env_even_when_a_variant_breaks(
     monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from services.cli import main as cli_main
+    from services.cli import experiment as cli_main
 
     calls: list[list[str]] = []
 
@@ -199,7 +199,7 @@ def test_experiment_removes_env_even_when_a_variant_breaks(
 def test_experiment_keep_skips_removal(
     monkeypatch: pytest.MonkeyPatch, project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from services.cli import main as cli_main
+    from services.cli import experiment as cli_main
 
     fake = FakeVerbs()
     monkeypatch.setattr(cli_main, "_dst_run", fake)

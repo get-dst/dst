@@ -1,0 +1,289 @@
+{
+ "connection": "warehouse",
+ "tables": [
+  {
+   "connection": "warehouse",
+   "table": "bakery.stores",
+   "columns": [
+    {
+     "name": "store_id",
+     "type": "INTEGER",
+     "distinct_count": 4,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "store_name",
+     "type": "VARCHAR",
+     "distinct_count": 4,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "Harbour",
+      "Mill Hill",
+      "Old Town",
+      "Pier Road"
+     ]
+    },
+    {
+     "name": "region",
+     "type": "VARCHAR",
+     "distinct_count": 3,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "Coast",
+      "North",
+      "South"
+     ]
+    },
+    {
+     "name": "opened_on",
+     "type": "DATE",
+     "distinct_count": 4,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "manager_email",
+     "type": "VARCHAR",
+     "distinct_count": 4,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "harbour@example.com",
+      "millhill@example.com",
+      "oldtown@example.com",
+      "pier@example.com"
+     ]
+    },
+    {
+     "name": "legacy_code",
+     "type": "VARCHAR",
+     "distinct_count": 4,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "H1",
+      "M3",
+      "O2",
+      "P4"
+     ]
+    }
+   ]
+  },
+  {
+   "connection": "warehouse",
+   "table": "bakery.orders_raw",
+   "columns": [
+    {
+     "name": "order_id",
+     "type": "INTEGER",
+     "distinct_count": 4816,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "store_id",
+     "type": "INTEGER",
+     "distinct_count": 4,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "channel",
+     "type": "VARCHAR",
+     "distinct_count": 2,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "counter",
+      "web"
+     ]
+    },
+    {
+     "name": "status",
+     "type": "VARCHAR",
+     "distinct_count": 3,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "open",
+      "paid",
+      "refunded"
+     ]
+    },
+    {
+     "name": "ordered_at",
+     "type": "TIMESTAMP",
+     "distinct_count": 3631,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "shipped_on",
+     "type": "DATE",
+     "distinct_count": 622,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "amount_eur",
+     "type": "DOUBLE",
+     "distinct_count": 54,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "discount_eur",
+     "type": "DOUBLE",
+     "distinct_count": 30,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "tips_eur",
+     "type": "DOUBLE",
+     "distinct_count": 101,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "_synced",
+     "type": "TIMESTAMP",
+     "distinct_count": 4321,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "is_test",
+     "type": "BOOLEAN",
+     "distinct_count": 2,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    }
+   ]
+  },
+  {
+   "connection": "warehouse",
+   "table": "bakery.order_lines",
+   "columns": [
+    {
+     "name": "order_id",
+     "type": "INTEGER",
+     "distinct_count": 4816,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "line_number",
+     "type": "INTEGER",
+     "distinct_count": 3,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "product",
+     "type": "VARCHAR",
+     "distinct_count": 4,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "cinnamon bun",
+      "coffee",
+      "rye loaf",
+      "sourdough"
+     ]
+    },
+    {
+     "name": "qty",
+     "type": "INTEGER",
+     "distinct_count": 1,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "line_total_eur",
+     "type": "DOUBLE",
+     "distinct_count": 4,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "order_discount_eur",
+     "type": "DOUBLE",
+     "distinct_count": 30,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    }
+   ]
+  },
+  {
+   "connection": "warehouse",
+   "table": "bakery.stock_monthly",
+   "columns": [
+    {
+     "name": "month",
+     "type": "VARCHAR",
+     "distinct_count": 20,
+     "is_low_cardinality": true,
+     "values_complete": true,
+     "top_values": [
+      "2025-01",
+      "2025-02",
+      "2025-03",
+      "2025-04",
+      "2025-05",
+      "2025-06",
+      "2025-07",
+      "2025-08",
+      "2025-09",
+      "2025-10",
+      "2025-11",
+      "2025-12",
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08"
+     ]
+    },
+    {
+     "name": "store_id",
+     "type": "INTEGER",
+     "distinct_count": 4,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    },
+    {
+     "name": "units_on_hand",
+     "type": "INTEGER",
+     "distinct_count": 52,
+     "is_low_cardinality": false,
+     "values_complete": false,
+     "top_values": []
+    }
+   ]
+  }
+ ]
+}

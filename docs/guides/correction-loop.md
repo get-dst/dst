@@ -10,8 +10,8 @@ The loop has four steps, and a person is in the middle of it:
 1. **Someone doubts an answer.** They flag it — or dst flags it itself.
 2. **dst opens a ticket** with everything needed to judge the answer: the
    question, the SQL, the rows, the answer, and how it was verified.
-3. **An AI does the paperwork, a person decides.** The AI compares, triages,
-   and drafts a fix. A human approves or rejects it. Nothing is ever applied
+3. **An AI does the paperwork, a person decides.** The AI compares and
+   triages. A human approves or rejects it. Nothing is ever applied
    without a person's approval.
 4. **The fix becomes a file and a test.** The file goes in your repo like any
    other change. The test re-runs every time you publish, so the same mistake
@@ -59,29 +59,20 @@ right; take a corrected query through the patch path below instead.
 
 ## A ruling becomes a fix in your files
 
-Once a ticket is ruled on, the AI drafts the actual fix — say, an amended
-definition. **The AI drafts; the human approves; there is no auto-merge.**
+Once a ticket is ruled on, the fix is written where it belongs. **A person
+approves; there is no auto-merge.**
 
-Where the fix lands depends on what kind of fix it is:
-
-- A **certified answer** is server-side state: on approval it takes effect
-  immediately.
+- A **certified answer** is server-side state: `dst rule --certify` promotes
+  it in the same act, and it takes effect immediately.
 - A **definition or instruction** lives in *your files*, and your files win on
-  every `dst apply`. So approval writes a proposed file into your working
-  tree — you review it like any code change (`git diff`), commit it, and
-  apply. Until then it is not live. (If dst wrote it straight into the server
-  instead, your next apply of the unchanged files would silently undo the
-  fix. That is why it goes through your repo.)
+  every `dst apply`. So the fix is a change in your working tree, written by
+  you or your AI from the ticket: an amended definition page, a sentence in
+  `lens.yaml` `instructions`. You review it like any code change
+  (`git diff`), commit it, and apply. Until then it is not live.
 
-[![dst patches draft: the AI-drafted amendment to the definition, with the instruction to check the changed ruling](../assets/term/patch_draft.svg)](../assets/term/patch_draft.svg)
-
-[![dst patches approve: the file written into the working tree, not live until commit and apply, and a candidate eval case filed](../assets/term/patch_approve.svg)](../assets/term/patch_approve.svg)
-
-A definition or instruction fix also becomes a **behavioral test case** —
-marked `candidate` until a person promotes it (`status: approved` in
-`evals/cases.yaml`), because a human approved the fix and a human approves the
-test too. Once promoted, it re-runs on every `dst apply`. A certified fix
-needs no case: the certified corpus already re-tests it.
+Add a **behavioral test case** for the corrected question to
+`evals/cases.yaml`, so it re-runs on every `dst apply`. A certified fix needs
+no case: the certified corpus already re-tests it.
 
 ## After the fix lands
 
@@ -90,9 +81,7 @@ same answer every time, cheaper and faster than generating it again. And
 because every fix carries a test that re-runs on every publish, a mistake you
 have caught cannot ship again unnoticed.
 
-Tickets are not the only thing that feeds this loop. dst can also mine the
-request log for recurring questions worth turning into definitions — an
-admin-triggered pass, not a standing one — and
+Tickets are not the only thing that feeds this loop:
 [bootstrapping from history](drift-audit.md) seeds your definitions before the
 loop even starts. Everything goes through the same discipline: a draft, a
 human approval, a file.

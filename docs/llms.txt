@@ -39,6 +39,7 @@
 - [CLI reference](https://www.dataservetool.com/reference/cli/)
 - [API reference](https://www.dataservetool.com/reference/api/)
 - [Configuration reference](https://www.dataservetool.com/reference/configuration/)
+- [Failure modes](https://www.dataservetool.com/reference/failure-modes/)
 - [FAQ](https://www.dataservetool.com/faq/)
 
 ## Elsewhere
