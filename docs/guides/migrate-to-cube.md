@@ -117,19 +117,26 @@ scaffolds:
   cube:
     profiles: ["cube"]
     image: cubejs/cube:v1.6.75
+    # List form on purpose: a bare entry is passed only when .env sets it; a
+    # mapping with ${VAR:-} would hand Cube an EMPTY CUBEJS_DB_BQ_LOCATION (or
+    # host, or path) and every query would fail while /readyz stays green.
     environment:
-      CUBEJS_DEV_MODE: "false"
-      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:?set in .env}
-      CUBEJS_DB_TYPE: ${CUBEJS_DB_TYPE:-duckdb}
-      CUBEJS_DB_HOST: ${CUBEJS_DB_HOST:-}
-      CUBEJS_DB_PORT: ${CUBEJS_DB_PORT:-}
-      CUBEJS_DB_NAME: ${CUBEJS_DB_NAME:-}
-      CUBEJS_DB_USER: ${CUBEJS_DB_USER:-}
-      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS:-}
+      - CUBEJS_DEV_MODE=false
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:?set in .env}
+      - CUBEJS_DB_TYPE=${CUBEJS_DB_TYPE:-duckdb}
+      - CUBEJS_DB_HOST
+      - CUBEJS_DB_PORT
+      - CUBEJS_DB_NAME
+      - CUBEJS_DB_USER
+      - CUBEJS_DB_PASS
+      # BigQuery: the service-account key as the container sees it (under /data)
+      - CUBEJS_DB_BQ_PROJECT_ID
+      - CUBEJS_DB_BQ_LOCATION
+      - CUBEJS_DB_BQ_KEY_FILE
       # a DuckDB file as the container sees it (under /data): opened read-only
-      DST_DUCKDB_PATH: ${DST_DUCKDB_PATH:-}
-      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory
-      CUBEJS_SCHEDULED_REFRESH_DEFAULT: "false"
+      - DST_DUCKDB_PATH
+      - CUBEJS_CACHE_AND_QUEUE_DRIVER=memory
+      - CUBEJS_SCHEDULED_REFRESH_DEFAULT=false
     ports:
       - "4000:4000"
     volumes:
@@ -152,6 +159,15 @@ Cube reads the warehouse itself, with Cube's own settings, which compose fills f
   open the same file beside it.
 - **Any other warehouse**: set `CUBEJS_DB_TYPE` and the `CUBEJS_DB_*` values Cube's
   driver for it reads, and leave `DST_DUCKDB_PATH` unset.
+- **BigQuery**: `dst init --warehouse bigquery --cube` writes `CUBEJS_DB_TYPE`,
+  `CUBEJS_DB_BQ_PROJECT_ID`, `CUBEJS_DB_BQ_KEY_FILE` and `CUBEJS_DB_BQ_LOCATION` into
+  `.env` (the location looked up from the dataset you name, else asked). Never leave a
+  variable in `.env` with an empty value: compose passes `CUBEJS_DB_BQ_LOCATION=` as an
+  empty location, and Cube's driver fails every query with it. Leave the line out instead.
+
+`dst cube status` runs one tiny query through Cube (`limit 1` on the smallest cube), so a
+Cube that compiles but cannot reach the warehouse reports `warehouse FAIL` here, before
+`dst probe` or the monitor meet it.
 
 Then start it and check that dst reaches it:
 

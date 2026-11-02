@@ -105,8 +105,10 @@ outbound connections: the warehouse connectors, the LLM/embedding providers
 above, the CLI and MCP clients talking to your own dst server, the `local`
 embedding provider fetching its model weights on first use
 (`services/context/local_embedder.py`), and two integrations that are inert
-until you configure them — OIDC discovery against your IdP
-(`services/auth/oidc.py`), and Clerk.
+until you configure them: your OIDC identity provider (discovery, its signing
+keys, its token endpoint during an MCP sign-in, and the users listing `dst keys
+sync-idp` reads; `services/auth/oidc.py`, `services/auth/oidc_login.py`), and
+Clerk.
 
 Clerk and the `/docs` API reference are the two exceptions to the no-CDN
 rule (the second is detailed under the served surface below). Clerk is opt-in: set a Clerk
@@ -174,6 +176,38 @@ register before they have any credential — is budgeted per source address,
 bounded in what one registration may store, and swept: a registration that
 never reaches an authorization request expires, while a client that has
 connected is kept (`services/auth/oauth.py`).
+
+**Signing in to MCP with your identity provider.** With `DST_OIDC_ISSUER` set,
+the MCP consent page offers one button, "Continue with `<issuer>`", in place of
+the credential field (`services/api/oauth.py`). The page still names the client
+and the host the authorization code will go to before the person leaves, so the
+consent-phishing warning holds on this path too. Pressing the button starts a
+standard authorization-code flow at the issuer with PKCE and a nonce
+(`services/auth/oidc_login.py`); the pending request rides a signed, httpOnly,
+`SameSite=Lax` cookie scoped to `/oauth/callback`, so a callback built from
+someone else's sign-in has no cookie to pair with and is refused. On return, the
+server redeems the code at the issuer's token endpoint and verifies the ID token
+in full: signature against the issuer's JWKS, issuer, audience
+(`DST_OIDC_AUDIENCE`, required), expiry, a subject, and the nonce the sign-in
+started with (`oidc.verify_id_token`). A token that fails any one of those grants
+nothing, and no step logs the issuer's code or tokens. The caller is then found
+by subject, or created on the first sign-in, and the client's own PKCE exchange
+mints the `dsto_` token as for a pasted key, with the shorter lifetime
+`DST_OIDC_TOKEN_DAYS` sets (30 by default): the identity provider decides who
+still works here, and a token should not outlive that answer by a year. When
+both an issuer and Clerk are configured, the issuer wins.
+
+Deprovisioning follows from the same binding. Every caller a sign-in created or
+claimed carries the subject it signed in with (`caller.idp_subject`), and
+`dst keys sync-idp`, or a scheduled `POST /mgmt/callers/sync-idp` with an admin
+token, reads the users listing at `DST_OIDC_USERS_URL` and revokes every key of
+each bound caller whose subject the listing no longer carries. The sync fails
+closed: a listing it cannot read, or one that lists nobody, revokes nothing and
+answers 503, because a sync that cannot see the identity provider must not act
+on its behalf. Callers an admin created by hand carry no subject and are never
+touched. The same column is the seam a SCIM provisioning endpoint would write to;
+dst does not implement SCIM today, so between syncs a leaver keeps access for
+at most the token lifetime above.
 
 Be clear about the limit of those budgets: they are counted **in process**. They
 apply per replica rather than across a fleet, and a restart forgets them. They
@@ -284,6 +318,29 @@ header or request field is read for it (`services/auth/deps.py`). An admin token
 belongs to no group, so it reads the column hidden like anyone else. Group names
 must be declared under `groups:` in `dst.yaml`; plan and apply fail on an
 undeclared one, and declaring a name grants nothing.
+
+An identity provider's groups reach dst only through a mapping declared beside
+the names:
+
+```yaml
+groups:
+  support:
+    idp: [cs-team, cs-leads]
+  finance:
+    idp: [fin]
+  ops:
+```
+
+A verified token carrying `cs-team` in its groups claim grants `support`; a
+group the mapping never names grants nothing, whatever it is called at the
+provider. The mapping applies on both doors: the dashboard, where the token is
+presented on each request, and MCP, where the sign-in writes the caller's
+groups. There it is refreshed on every sign-in under one rule
+(`caller_groups.refresh_idp_groups`): a dst group with an `idp:` mapping belongs
+to the identity provider, granted when the token carries one of its groups and
+dropped when it does not, and a group with no mapping (`ops` above) keeps
+whatever an admin set. So an admin can add a mapped group by hand, and the next
+sign-in takes it away again; the provider is the record for the groups it maps.
 
 The limits: a caller in the group sends the column's values to the model
 provider when an answer is composed from them, exactly as for any other column

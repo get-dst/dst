@@ -40,6 +40,7 @@ from services.contracts.shared_semantic import (
     SharedEntity,
     SharedRelationship,
     asset_content_hash,
+    role_alias,
 )
 from services.project.expose import resolve_expose
 from services.semantic.resolve import resolve_model
@@ -228,13 +229,25 @@ def compile_lens_model(
             continue
         if not picked:
             continue
+        right, on = rel.right, rel.on
+        if rel.role:
+            # A role joins the same entity once more under its own name: the
+            # compiled model carries a dimension-only copy of the right entity
+            # (persons as the payer of a booking → persons_payer), and the
+            # join addresses that copy, so two roles over one pair are two
+            # joins to the same table under two aliases.
+            base = next(e for e in entities if e.name == rel.right)
+            copy = _role_copy(base, rel.left, rel.role)
+            entities.append(copy)
+            right, on = copy.name, _readdress(on, rel.right, copy.name) or on
         joins.append(
             Join(
                 left=rel.left,
-                right=rel.right,
-                on=rel.on,
+                right=right,
+                on=on,
                 type=rel.type,
                 relationship=rel.relationship,
+                role=rel.role,
             )
         )
         consumed[f"relationship/{rel_name}"] = hashes.get(f"relationship/{rel_name}", "")
@@ -313,6 +326,33 @@ def compile_lens_model(
         raise CompileError("\n".join(resolve_errors))
     warnings.extend(resolve_warnings)
     return model, warnings
+
+
+def _readdress(expr: str | None, entity: str, alias: str) -> str | None:
+    """*expr* with every ``entity.column`` read from *alias* instead."""
+    return re.sub(rf"\b{re.escape(entity)}\.", f"{alias}.", expr) if expr else expr
+
+
+def _role_copy(base: Entity, left: str, role: str) -> Entity:
+    """The right entity of a role relationship as the lens addresses it in that
+    role: the same table and dimensions under the name ``<entity>_<role>``,
+    every expression re-addressed to it. No metrics (they are the shared
+    entity's, and a second owner would make each ambiguous) and no anchors
+    (a question the shared entity answers is not the role's)."""
+    alias = role_alias(base.name, role)
+    data = base.model_dump()
+    data.update(
+        name=alias,
+        description=f"{base.name} as the {role} of {left}"
+        + (f": {base.description}" if base.description else ""),
+        metrics=[],
+        use_cases=[],
+        common_questions=[],
+        population_filter=_readdress(base.population_filter, base.name, alias),
+    )
+    for d in data["dimensions"]:
+        d["expr"] = _readdress(d["expr"], base.name, alias)
+    return Entity.model_validate(data)
 
 
 def _withheld_by_table(
@@ -395,7 +435,7 @@ def _apply_hide(
     a hidden column is the column, and goes with it. Every error names the
     pattern and the fix: a pattern that withholds nothing is the same silent
     miss as an `expose:` hide that matches no column, a hidden column an
-    expression, key or filter still reads would come back through it, and a
+    expression or key still reads would come back through it, and a
     group entry naming a group dst.yaml does not declare is a typo that would
     lock its own group out — all three fail the compile rather than hide other
     than the author believes. ``group_columns`` are the columns hidden only by
@@ -432,12 +472,15 @@ def _apply_hide(
             if not passthrough_dimension(d)
         ),
         *((f"metric {m.name}", m.expr) for m in entity.metrics),
-        *((f"metric {m.name} filter", f) for m in entity.metrics for f in m.filters or []),
         ("primary_key", " ".join(entity.primary_key)),
         ("default_time_field", entity.default_time_field),
-        ("population_filter", entity.population_filter),
         ("pinned_dimensions", " ".join(entity.pinned_dimensions)),
     ]
+    # Not listed: `population_filter` and a metric's `filters`. Those are
+    # predicates the compiler writes into its own SQL, never a value a caller
+    # selects, groups by or filters on, so a hidden column may ride them
+    # (``SemanticModel.predicate_columns``): the guard admits the read on the
+    # compiled door only, in predicate position only.
     for label, text in readers:
         if not text:
             continue

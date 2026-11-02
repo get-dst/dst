@@ -238,13 +238,15 @@ def test_lenses_tied_on_coverage_go_to_the_decider_with_the_whole_catalogue() ->
 
 
 def test_a_lens_lacking_a_word_another_lens_stores_is_still_in_the_field() -> None:
-    decider = _Scripted("lending")
+    decider = _Scripted("members")
     d = _route("checkouts for students this year", decider)
-    # lending calls the figure 'checkouts' and stores no tier; members stores
-    # 'student' and calls it loans. Each lacks one word: no decline, the
-    # decider picks, and the lane's own word check judges the rest.
+    # lending calls the figure 'checkouts' (an alias) and stores no tier;
+    # members stores 'student' and calls it loans. Each lacks one word: no
+    # decline, and the alias only lending declares settles it with no model
+    # asked; the lane's own word check judges the rest.
     assert (d.covered, d.lens) == (True, "lending")
-    assert sorted(decider.calls[0][1]) == ["lending", "members"]
+    assert d.decided_by == "declared-name"
+    assert decider.calls == []
 
 
 def test_a_question_whose_words_only_an_excluded_lens_holds_is_declined() -> None:

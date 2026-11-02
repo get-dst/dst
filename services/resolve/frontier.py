@@ -24,6 +24,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
+from services.contracts.cube_meta import Dimension, Measure
 from services.contracts.cube_query import Binding, BindingKind, Candidate, CubeQuery
 from services.contracts.protocols import CacheableBlock, Message
 from services.cube.lens_view import CubeLensView
@@ -155,22 +156,120 @@ def _hidden(lens: CubeLensView, groups: list[str]) -> set[str]:
     }
 
 
+def _measure_entry(
+    lens: CubeLensView, name: str, m: Measure, meta: dict[str, Any]
+) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": name, "agg": m.aggType, "title": m.title}
+    if m.description:
+        d["description"] = m.description
+    if meta:
+        d["meta"] = meta
+    return d
+
+
+def _dimension_entry(
+    lens: CubeLensView, name: str, x: Dimension, meta: dict[str, Any]
+) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": name, "type": x.type}
+    if x.primaryKey:
+        d["pk"] = True
+    if x.description:
+        d["description"] = x.description
+    if meta:
+        d["meta"] = meta
+    values = lens.dictionary(name)
+    if values:
+        d["values"] = values[:DICTIONARY_SAMPLE]
+        if len(values) > DICTIONARY_SAMPLE:
+            d["values_total"] = len(values)
+    return d
+
+
+_REFS = ("clock", "as_of", "label_of")
+
+
+def _view_refs(lens: CubeLensView, meta: dict[str, Any], cube: str, view: str) -> dict[str, Any]:
+    """A cube member's ``meta`` as a view member reads it: ``dst.clock``,
+    ``dst.as_of`` and ``dst.label_of`` name cube dimensions, and the query
+    must name the view's member for each."""
+    dst = meta.get("dst")
+    if not isinstance(dst, dict) or lens.model is None:
+        return meta
+    out = {**meta, "dst": dict(dst)}
+    for key in _REFS:
+        ref = dst.get(key)
+        if not isinstance(ref, str) or not ref:
+            continue
+        base = ref if "." in ref else f"{cube}.{ref}"
+        named = lens.model.view_member_for(base, view)
+        if named:
+            out["dst"][key] = named
+    return out
+
+
+def prefixed_members(lens: CubeLensView) -> bool:
+    """Whether some view member of the lens carries its cube's name as a
+    prefix (``view.stores_region`` for ``stores.region``): the way
+    ``dst migrate-model`` names a joined cube's members."""
+    if lens.model is None:
+        return False
+    return any(
+        m.name.split(".", 1)[1] == f"{m.cube}_{m.member}" and m.member != m.name.split(".", 1)[1]
+        for m in lens.model.members
+    )
+
+
+def _view_meta(lens: CubeLensView, hidden: set[str]) -> list[dict[str, Any]]:
+    """A lens over views: each view with every member it serves named
+    exactly as the query must name it, the cubes behind them as context
+    (grain, population) with no members of their own."""
+    assert lens.model is not None
+    out: list[dict[str, Any]] = []
+    for v in lens.model.views:
+        measures, dims, segments = [], [], []
+        for lm in (m for m in lens.model.members if m.view == v.name):
+            if lm.name in hidden or lm.base in hidden:
+                continue
+            base = lens.member(lm.name)
+            meta = _view_refs(lens, base.meta if base is not None else {}, lm.cube, v.name)
+            if isinstance(base, Measure):
+                measures.append(_measure_entry(lens, lm.name, base, meta))
+            elif isinstance(base, Dimension):
+                dims.append(_dimension_entry(lens, lm.name, base, meta))
+            else:
+                segments.append({"name": lm.name, **({"meta": meta} if meta else {})})
+        out.append(
+            {
+                "view": v.name,
+                "description": v.description,
+                "meta": v.dst.model_dump(exclude_defaults=True) if v.dst else None,
+                "measures": measures,
+                "dimensions": dims,
+                "segments": segments,
+            }
+        )
+    for c in lens.model.cubes:
+        out.append(
+            {
+                "cube": c.name,
+                "description": c.description,
+                "meta": {"dst": c.dst.model_dump(exclude_defaults=True)} if c.dst else None,
+            }
+        )
+    return out
+
+
 def compact_meta(lens: CubeLensView, groups: list[str]) -> list[dict[str, Any]]:
     """One object per cube or view the lens may call: members with their
     aggregation, title, description, ``meta`` and observed values; members
-    hidden from this caller left out."""
+    hidden from this caller left out. A lens over views lists each view's
+    members by their exact names (``_view_meta``); a lens with no views
+    lists every cube Cube serves."""
     hidden = _hidden(lens, groups)
-    scoped: set[str] | None = None
-    if lens.views:
-        scoped = set(lens.views)
-        for v in lens.views:
-            cube = lens.doc.cube(v)
-            for name in cube.member_names() if cube else []:
-                scoped.add(lens.base(name).split(".")[0])
+    if lens.model is not None and lens.model.views:
+        return _view_meta(lens, hidden)
     out: list[dict[str, Any]] = []
     for c in lens.doc.cubes:
-        if scoped is not None and c.name not in scoped:
-            continue
         if c.is_view:
             out.append(
                 {
@@ -181,33 +280,12 @@ def compact_meta(lens: CubeLensView, groups: list[str]) -> list[dict[str, Any]]:
                 }
             )
             continue
-        measures = []
-        for m in c.measures:
-            if m.name in hidden:
-                continue
-            d: dict[str, Any] = {"name": m.name, "agg": m.aggType, "title": m.title}
-            if m.description:
-                d["description"] = m.description
-            if m.meta:
-                d["meta"] = m.meta
-            measures.append(d)
-        dims = []
-        for x in c.dimensions:
-            if x.name in hidden:
-                continue
-            d = {"name": x.name, "type": x.type}
-            if x.primaryKey:
-                d["pk"] = True
-            if x.description:
-                d["description"] = x.description
-            if x.meta:
-                d["meta"] = x.meta
-            values = lens.dictionary(x.name)
-            if values:
-                d["values"] = values[:DICTIONARY_SAMPLE]
-                if len(values) > DICTIONARY_SAMPLE:
-                    d["values_total"] = len(values)
-            dims.append(d)
+        measures = [
+            _measure_entry(lens, m.name, m, m.meta) for m in c.measures if m.name not in hidden
+        ]
+        dims = [
+            _dimension_entry(lens, x.name, x, x.meta) for x in c.dimensions if x.name not in hidden
+        ]
         out.append(
             {
                 "cube": c.name,
@@ -222,6 +300,22 @@ def compact_meta(lens: CubeLensView, groups: list[str]) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+CUBE_NAMING = """## The Cube model (one JSON object per cube or view; members are `cube.member`)
+Cubes joined to each other can be combined in one query (Cube joins them); cubes with no join
+path cannot."""
+
+VIEW_NAMING = """## The Cube model (one JSON object per view, then its cubes; members are
+`view.member`)
+Name every member EXACTLY as listed under its view: the listed name is the only one Cube
+knows. The members of one view can be combined in one query (Cube joins the cubes behind
+them); members of different views cannot. The cubes are listed for what they describe (grain,
+population); a query never names a cube member directly."""
+
+PREFIX_NOTE = """
+A joined cube's members carry the cube name as a prefix (`view.stores_region` is the region of
+the stores cube): write that prefixed name, never `view.region`."""
 
 
 def _overlay_for(lens: CubeLensView, groups: list[str]) -> dict[str, Any]:
@@ -257,6 +351,10 @@ def context(
     )
     loaded = lens.probe.clock_end
     zone = f" ({timezone})" if timezone else ""
+    scoped = lens.model is not None and bool(lens.model.views)
+    naming = (
+        (VIEW_NAMING + (PREFIX_NOTE if prefixed_members(lens) else "")) if scoped else CUBE_NAMING
+    )
     data_line = f"; the warehouse holds data up to {loaded}" if loaded else ""
     return f"""You turn a business question into Cube REST API query JSON for a semantic layer.
 You never write SQL.
@@ -266,9 +364,7 @@ other current date you may have been told{data_line}. Resolve every relative per
 quarter", "last 90 days", "year to date", "this week") to absolute ISO dates in
 timeDimensions.dateRange (inclusive start and end days). Weeks start on Monday.
 
-## The Cube model (one JSON object per cube or view; members are `cube.member`)
-Cubes joined to each other can be combined in one query (Cube joins them); cubes with no join
-path cannot. meta.dst is the semantic layer's own metadata: aliases (words people use), values
+{naming} meta.dst is the semantic layer's own metadata: aliases (words people use), values
 (the observed values of a dimension, use these exact strings in filters), value_aliases,
 additivity: level (a stock: the latest snapshot in the window is kept automatically when you send
 a dateRange without granularity), clock (the time dimension this measure must be filtered on),
@@ -291,7 +387,10 @@ Reply with ONE JSON object and nothing else (no prose, no code fence):
 A Cube query uses only: measures, dimensions, segments, filters [{{member, operator, values}}],
 timeDimensions [{{dimension, dateRange, granularity?}} or {{dimension, compareDateRange:
 [[start,end],[start,end]]}}], order, limit. Use only members listed above. Answer "cannot" when
-the question needs something the model does not hold. "clarify" only when one of these decides
+the question needs something the model does not hold. A share, a ratio or a per-day / per-week
+average: write the numerator query first and the denominator second (for a per-day average, the
+one total over the window); dst divides the parts itself and leads the answer with the figure.
+"clarify" only when one of these decides
 the number, naming it and the words of the question it is about:{_modes()}
 Any other doubt: answer with the reading you chose, said in the note.
 {LEDGER_RULES}

@@ -100,6 +100,16 @@ class CoverageProfile:
     # out: they widen what the metric slot reads inside the lens, never which
     # questions the lens takes.
     metric_names: list[str] = field(default_factory=list)
+    # What its metrics are also called (declared aliases): scored like a
+    # name, and a question phrased only in an alias one lens alone declares
+    # routes there; a name or label outranks an alias (``sibling.named_metrics``).
+    metric_aliases: list[str] = field(default_factory=list)
+    # The measures the lens declares it cannot compute, each surface (the
+    # measure and its aliases, as words) -> the lens its ``route_to`` names
+    # ("" when none). A question naming one routes to this lens, whose own
+    # door refuses it with the reason: the refusal is the governed answer,
+    # and a sibling scoring closer must not serve a different figure for it.
+    refuses: dict[str, str] = field(default_factory=dict)
     # The fields its figures split over time by (entity default, metric
     # overrides): the decider reads them, so a trend ask finds a trend lens.
     time_fields: list[str] = field(default_factory=list)
@@ -146,7 +156,9 @@ class RouteDecision:
     reason: str = ""
     # What actually made the call: "certified" (the question is a lens's
     # certified question), "declared-name" (it names a table, entity or metric
-    # only one of two candidates declares), "decider" (LLM coverage decision),
+    # only one of two candidates declares), "not_computable" (it names a
+    # measure a lens declares it cannot compute: that lens, or the one its
+    # entry routes to), "decider" (LLM coverage decision),
     # "cosine-verbatim" (the near-exact fast path), or "cosine" (no decider
     # configured — pure similarity, the weakest basis).
     decided_by: str = "cosine"

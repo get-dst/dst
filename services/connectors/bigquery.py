@@ -46,6 +46,15 @@ _API_TIMEOUT_S = 60.0
 _JOB_DEADLINE_S = 600.0
 
 
+def _column_type(field: bigquery.SchemaField) -> str:
+    """The column's type as the profiler reads it. BigQuery reports an array
+    column as its element type with mode REPEATED; a REPEATED STRING is an
+    ARRAY<STRING>, not a text column, and the sampler must know."""
+    if field.mode == "REPEATED":
+        return f"ARRAY<{field.field_type}>"
+    return str(field.field_type)
+
+
 class BigQueryConnector:
     kind = "bigquery"
 
@@ -110,6 +119,19 @@ class BigQueryConnector:
 
     _MAX_INTROSPECT_TABLES = 250
 
+    def dataset_location(self, dataset: str | None = None) -> str | None:
+        """The location (``EU``, ``US``, a region) of ``dataset`` (``dataset``
+        or ``project.dataset``; default the first pinned one), or None when
+        none is named: what Cube's BigQuery driver needs as
+        ``CUBEJS_DB_BQ_LOCATION``, read from the dataset itself."""
+        pin = dataset or self._dataset
+        if not pin:
+            return None
+        proj, _, ds = pin.rpartition(".")
+        ref = bigquery.DatasetReference(proj or self._project, ds)
+        location = self._client.get_dataset(ref, timeout=_API_TIMEOUT_S).location
+        return str(location) if location else None
+
     def _scope(self) -> tuple[list[bigquery.DatasetReference], str]:
         """The datasets this connection reads, and the label naming that scope.
 
@@ -142,7 +164,7 @@ class BigQueryConnector:
         cols = [
             ColumnSchema(
                 name=f.name,
-                type=f.field_type,
+                type=_column_type(f),
                 nullable=f.mode != "REQUIRED",
                 description=f.description,
             )
@@ -246,7 +268,7 @@ class BigQueryConnector:
                 cols = [
                     ColumnProfile(
                         name=f.name,
-                        type=f.field_type,
+                        type=_column_type(f),
                         nullable=f.mode != "REQUIRED",
                         description=f.description,
                         description_source="warehouse" if f.description else None,

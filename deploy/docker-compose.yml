@@ -63,24 +63,28 @@ services:
     profiles: ["cube"]
     image: cubejs/cube:${CUBE_TAG:-v1.6.75}
     restart: unless-stopped
+    # List form on purpose: a bare entry is passed only when it is set in the
+    # shell or .env. A mapping with `${VAR:-}` would hand Cube an EMPTY
+    # CUBEJS_DB_BQ_LOCATION (or host, or path), which its driver treats as a
+    # value, and every query fails while /readyz and the meta stay green.
     environment:
-      CUBEJS_DEV_MODE: "false"
-      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}  # Cube refuses to start without one
-      CUBEJS_DB_TYPE: ${CUBEJS_DB_TYPE:-duckdb}
-      CUBEJS_DB_HOST: ${CUBEJS_DB_HOST:-}
-      CUBEJS_DB_PORT: ${CUBEJS_DB_PORT:-}
-      CUBEJS_DB_NAME: ${CUBEJS_DB_NAME:-}
-      CUBEJS_DB_USER: ${CUBEJS_DB_USER:-}
-      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS:-}
+      - CUBEJS_DEV_MODE=false
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:-}  # Cube refuses to start without one
+      - CUBEJS_DB_TYPE=${CUBEJS_DB_TYPE:-duckdb}
+      - CUBEJS_DB_HOST
+      - CUBEJS_DB_PORT
+      - CUBEJS_DB_NAME
+      - CUBEJS_DB_USER
+      - CUBEJS_DB_PASS
       # BigQuery: the service-account key as the container sees it (under /data).
-      CUBEJS_DB_BQ_PROJECT_ID: ${CUBEJS_DB_BQ_PROJECT_ID:-}
-      CUBEJS_DB_BQ_LOCATION: ${CUBEJS_DB_BQ_LOCATION:-}
-      CUBEJS_DB_BQ_KEY_FILE: ${CUBEJS_DB_BQ_KEY_FILE:-}
+      - CUBEJS_DB_BQ_PROJECT_ID
+      - CUBEJS_DB_BQ_LOCATION
+      - CUBEJS_DB_BQ_KEY_FILE
       # A DuckDB file, as the container sees it: cube.js attaches it READ_ONLY.
-      DST_DUCKDB_PATH: ${DST_DUCKDB_PATH:-}
-      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory
-      CUBEJS_SCHEDULED_REFRESH_DEFAULT: "false"
-      CUBEJS_LOG_LEVEL: ${CUBEJS_LOG_LEVEL:-warn}
+      - DST_DUCKDB_PATH
+      - CUBEJS_CACHE_AND_QUEUE_DRIVER=memory
+      - CUBEJS_SCHEDULED_REFRESH_DEFAULT=false
+      - CUBEJS_LOG_LEVEL=${CUBEJS_LOG_LEVEL:-warn}
     volumes:
       - ${DST_CUBE_MODEL:-./cube/model}:/cube/conf/model:ro  # the project's cube/model
       - ./cube/cube.js:/cube/conf/cube.js:ro

@@ -578,3 +578,122 @@ def test_sensitive_columns_in_scope_warn_until_hidden_or_defined() -> None:
         "serves email " in warning
         and "birth_date" not in warning.split("serves")[1].split(" on")[0]
     )
+
+
+# ── role relationships: one pair joined once per role ────────────────────────
+
+BOOKINGS = SharedEntity.model_validate(
+    {
+        "name": "bookings",
+        "source": {"connection": "wh", "table": "ferry.bookings"},
+        "fields": [
+            {"name": "booking_id", "type": "string"},
+            {"name": "payer_id", "type": "string"},
+            {"name": "passenger_id", "type": "string"},
+            {"name": "fare_eur", "type": "number"},
+        ],
+        "metrics": [{"name": "fare_total", "agg": "sum", "expr": "bookings.fare_eur"}],
+    }
+)
+PERSONS = SharedEntity.model_validate(
+    {
+        "name": "persons",
+        "description": "Everyone who ever booked or sailed.",
+        "source": {"connection": "wh", "table": "ferry.persons"},
+        "fields": [{"name": "id", "type": "string"}, {"name": "city", "type": "string"}],
+        "dimensions": [{"name": "home_city", "expr": "UPPER(persons.city)"}],
+        "metrics": [{"name": "person_count", "agg": "count", "expr": "persons.id"}],
+    }
+)
+
+
+def _role(role: str) -> SharedRelationship:
+    return SharedRelationship.model_validate(
+        {
+            "left": "bookings",
+            "right": "persons",
+            "on": f"bookings.{role}_id = persons.id",
+            "relationship": "many_to_one",
+            "role": role,
+        }
+    )
+
+
+def test_two_roles_on_one_pair_parse_and_a_repeated_role_is_refused_by_name() -> None:
+    """A booking's payer and its passenger are both persons: two relationships
+    on the pair, one per role, are two joins — the same role twice is still
+    the competing claim, and the refusal names the role."""
+    files = render_semantic_files([], [], [_role("payer"), _role("passenger")])
+    assert set(files) == {
+        "semantic/relationships/bookings-persons-payer.yaml",
+        "semantic/relationships/bookings-persons-passenger.yaml",
+    }
+    _, _, relationships = parse_semantic_files(files)
+    assert {r.role for r in relationships.values()} == {"payer", "passenger"}
+    twice = {
+        **files,
+        "semantic/relationships/copy.yaml": files[
+            "semantic/relationships/bookings-persons-payer.yaml"
+        ],
+    }
+    with pytest.raises(
+        ValueError, match=r"as payer is declared in both .*one relationship per role"
+    ):
+        parse_semantic_files(twice)
+    with pytest.raises(ValueError, match="role 'the payer' must be a lowercase identifier"):
+        SharedRelationship(left="a", right="b", on="a.x = b.x", role="the payer")
+
+
+def test_a_role_relationship_compiles_to_an_aliased_copy_of_the_right_entity() -> None:
+    """The compiled model addresses each role by name: persons_payer and
+    persons_passenger are dimension-only copies of persons, each joined by
+    its own relationship with the ON clause re-addressed to the copy."""
+    rels = {r.name: r for r in (_role("payer"), _role("passenger"))}
+    model, warnings = _compile(
+        _config(entities=["bookings", "persons"]),
+        shared_entities={"bookings": BOOKINGS, "persons": PERSONS},
+        shared_relationships=rels,
+        asset_hashes={"relationship/bookings__persons__payer": "h9"},
+    )
+    assert warnings == []
+    assert [e.name for e in model.entities] == [
+        "bookings",
+        "persons",
+        "persons_passenger",
+        "persons_payer",
+    ]
+    payer = next(e for e in model.entities if e.name == "persons_payer")
+    assert payer.source.table == "ferry.persons"
+    assert payer.metrics == [] and payer.description.startswith("persons as the payer of bookings")
+    assert payer.dimensions[0].expr == "UPPER(persons_payer.city)"
+    assert [(j.right, j.on, j.role) for j in model.joins] == [
+        ("persons_passenger", "bookings.passenger_id = persons_passenger.id", "passenger"),
+        ("persons_payer", "bookings.payer_id = persons_payer.id", "payer"),
+    ]
+    assert model.shared_provenance.assets["relationship/bookings__persons__payer"] == "h9"
+
+
+def test_a_hidden_column_only_the_compiler_predicates_read_compiles() -> None:
+    """A `population_filter` and a metric's `filters` are predicates the
+    compiler owns: a hidden column may ride them. It leaves the fields and
+    the caller's allow-list all the same, and is named only as a predicate
+    column the compiled door may read."""
+    model, _ = _compile_patients(
+        hide=["email"],
+        population_filter="patients.email NOT LIKE '%@clinic.example'",
+        metrics=[
+            {
+                "name": "patient_count",
+                "agg": "count_distinct",
+                "expr": "patients.patient_id",
+                "filters": ["patients.email IS NOT NULL"],
+            }
+        ],
+    )
+    patients = model.entities[0]
+    assert "email" not in {f.name for f in patients.fields}
+    assert "email" not in model.allowed_columns()["staging.patients"]
+    assert model.predicate_columns() == {"staging.patients": {"email"}}
+    # a hidden column an expression, key or clock reads still fails
+    with pytest.raises(CompileError):
+        _compile_patients(hide=["patient_id"])

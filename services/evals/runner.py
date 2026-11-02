@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 from services.contracts.errors import ProviderError
 from services.contracts.eval import EvalCase, EvalResult, EvalRun
-from services.contracts.failure_modes import FailureMode
+from services.contracts.failure_modes import QUESTION_TYPE_NAMES, FailureMode
 from services.contracts.protocols import Connector, LLMProvider
 from services.observability import usage as ai_usage
 from services.reviews.judge import judge_trace
@@ -159,6 +159,10 @@ def run_behavioral(
         # The mode the response carried, whatever the expectation: a
         # clarification's or a refusal's name, None on a clean answer.
         mode: str | None = None
+        # Which path served it: 'explore' for an outside-lens answer (a read
+        # from an exposed table), None on a governed one; and whether it
+        # answered. `dst test` scores the explore path apart, right/honest/wrong.
+        path: dict[str, object] = {}
         for attempt in range(GATE_ATTEMPTS):
             try:
                 pr = serve(c.question)
@@ -172,6 +176,7 @@ def run_behavioral(
             t = pr.trace
             sql = t.sql
             mode = str(pr.response.mode) if pr.response.mode is not None else None
+            path = {"lane": t.lane, "answered": t.status == "ok"} if t.lane else {}
             actual = json.dumps({"status": t.status, "text": pr.response.answer or t.error})
             if t.status == "error":
                 ok, reason, grade = False, t.error, "errored"
@@ -192,6 +197,17 @@ def run_behavioral(
                     reason = f"clarified on '{clar.term}', expected term '{c.term}'"
                 else:
                     ok, reason = True, None
+            elif c.expect in QUESTION_TYPE_NAMES:
+                # A question type: the response carries that mode, whatever
+                # its status (a definition found or not found is still a
+                # definition answer; a SQL ask that served carries the SQL).
+                ok = mode == c.expect
+                reason = (
+                    None
+                    if ok
+                    else f"expected a {c.expect} answer, got status={t.status}"
+                    + (f" with mode {mode}" if mode else " with no mode")
+                )
             elif c.expect == "refuse":
                 ok = t.status in ("refused", "rejected") and pr.response.data is None
                 reason = (
@@ -218,6 +234,7 @@ def run_behavioral(
             question=c.question,
             passed=ok,
             grade=grade,
+            checks=path,
             actual_sql=sql,
             actual_value=actual,
             reason=reason,

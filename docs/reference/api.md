@@ -62,16 +62,16 @@ Caller keys (or an admin token). Routes in `services/api/query.py`,
 | `GET /v1/lenses/{name}/data_end?member=` | Where a time dimension, measure, cube, exposed table or column ends, with the lens clock and a partly loaded period |
 | `GET /v1/grain?table=&lens=` | An exposed table's blueprint, check verdicts, probe facts and rows against distinct key |
 | `GET /v1/lenses/{name}/catalog` | The metric catalog alone: `metrics`, `dimensions`, and `tree`, the metrics arranged by what each is computed from |
-| `POST /v1/lenses/{name}/query` | Ask: body `{"q": "..."}` → a governed answer |
+| `POST /v1/lenses/{name}/query` | Ask: body `{"q": "..."}` → a governed answer. A question that asks for no number (a meaning, a yes/no over the model, the SQL, a report, the caller's log) is answered first, running nothing, under its own `mode` ([Question types](../concepts/question-types.md)) |
 | `POST /v1/lenses/{name}/metrics` | Ask with a structured intent (metrics/dimensions/filters) instead of prose; same governance and receipts; `compare` adds a comparison window |
 | `POST /v1/lenses/{name}/metrics/batch` | Up to 50 structured intents in one request, read at one `data_as_of` (and one warehouse snapshot where the connector can hold one); results keyed by each intent's `id`, failures isolated |
 | `GET /v1/definitions` | Look a governed term up across every lens this key may use: the approved meaning verbatim, no SQL, no warehouse (`dst define`) |
-| `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key) where the lens's `hide` and `not_computable` refusals apply; row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose` |
+| `POST /v1/sql` | Guarded read-only SQL, against a connection (admin token) or within a lens's boundary (caller key) where the lens's `hide` and `not_computable` refusals apply; row-capped (`limit`, default 20, max 500) and logged; takes an optional `purpose` like the asking doors, kept on the lens-scoped row only when the lens sets `logging.log_purpose`, and an optional `question`, the question the read answers, kept on the row and certified with the SQL on approval. A lens-scoped read over an exposed table is logged as `lane: explore` |
 | `GET /v1/lenses/{name}/certified` | The lens's certified library; with `?q=` results are similarity-ranked (top 5, scored) |
 | `POST /v1/lenses/{name}/certified/{cert_id}/run` | Run an approved question→SQL pair exactly as certified; zero AI SQL generation |
 | `POST /v1/query` | Routed ask: dst picks the lens, or declines with an uncovered envelope; when the question names a table a lens exposes, `exposed_in` lists that lens and the reason says to ask it by name. For a driver with Cube-backed lenses in its catalogue: those lenses by coverage and why (`DriverRouteAnswer`) |
 | `POST /v1/verify-receipt` | Check an answer's signed receipt: signature + field-by-field cross-check against the logged trace |
-| `POST /v1/reviews` | Open a review ticket on a traced request (optionally with a correction delta); 201, and only against a request served to this caller (admins excepted) |
+| `POST /v1/reviews` | Open a review ticket on a traced request (optionally with a correction delta); 201, and only against a request served to this caller (admins excepted). On an outside-lens answer the ticket carries `explore`: the question, the SQL, the exposed tables read, every check and the answer's lines |
 | `GET /v1/reviews` | The tickets raised on this caller's own requests: the reporter's half of the queue |
 | `GET /v1/reviews/{ticket_id}` | Ticket status + tracking URL |
 | `POST /v1/chat/completions` | OpenAI-compatible: `model: "dst/<lens>"` selects the lens; `stream: true` returns a valid SSE stream, though composition is synchronous so it is one content delta then `[DONE]`; unknown fields ignored |
@@ -132,9 +132,20 @@ exactly as without driver mode. What changes:
   any caller, and `POST /v1/sql` never did.
 
 The `/v1/lenses/{name}/cube` response is the query response plus `retry` (`check`,
-`mode`, `detail`, `change`) on a non-answer. The `/v1/sql` response adds `data_end`
-(one line per exposed table read), `checks` and a signed `receipt` graded
-`unverified`; a check that could not run reads `exposed, could not verify …`.
+`mode`, `detail`, `change`) on a non-answer. The `/v1/sql` response adds `sql` (the
+statement as it ran), `grain` and `data_end` (one line per exposed table read),
+`clock` (one line per time column read: what it records per the table's blueprint),
+`checks`, `mode` and a signed `receipt` graded `unverified`. Beside `grain`,
+`data_end` and `empty_result`, `checks` carries `join` (rows after the statement's
+joins against its base table's rows; a join that multiplies rows is
+`join:disclose (wrong_grain)`), `clock` (`clock:pass` with the meaning, or that no
+clock is declared) and `reconcile` (the leading number beside a certified answer of
+the lens over the same tables and window, `pass` or `disclose (unverifiable)` with
+the delta). A check that could not run reads `exposed, could not verify …` or
+`<name>:skip (unverifiable): could not close: …`, and `mode` is the first
+disclosure's. The same three checks run on a `query` answer that reads an exposed
+table, as `JOIN:`, `CLOCK:` and `RECONCILE:` lines in `degraded` and as checks on its
+verification report.
 
 ### The metric catalog
 
@@ -321,7 +332,8 @@ PKCE S256 only, dynamic client registration, a server-rendered consent page.
 | `GET /.well-known/oauth-protected-resource/mcp` | Protected-resource metadata (RFC 9728); also served bare at `/.well-known/oauth-protected-resource` |
 | `GET /.well-known/oauth-authorization-server` | AS metadata |
 | `POST /oauth/register` | Dynamic client registration |
-| `GET /oauth/authorize` → `POST /oauth/authorize/complete` | Consent flow |
+| `GET /oauth/authorize` → `POST /oauth/authorize/complete` | Consent flow, authorized with a caller key or admin token |
+| `POST /oauth/authorize/idp` → `GET /oauth/callback` | Consent flow through the configured OIDC issuer ([Security](../security.md#the-served-surface)) |
 | `POST /oauth/token` | Code + PKCE → `dsto_` access token |
 
 ## Public demo mode
@@ -349,12 +361,12 @@ the rest is on `/docs`, and the [CLI](cli.md) wraps the ones you'd call by hand.
 |---|---|
 | `/mgmt/project` | export / plan / apply: the file-first deployment door |
 | `/mgmt/lenses` | drafts, publish, versions, repo + diffs, context, drift, sample queries |
-| `/mgmt/lenses/{lens}/certified` · `/evals` | the certified corpus and eval cases per lens |
+| `/mgmt/lenses/{lens}/certified` · `/evals` | the certified corpus and eval cases per lens; `POST …/certified/from-request/{request_id}` certifies a traced answer (an outside-lens one with a question is pinned to its tables' blueprints; with `cube_query` on a lens served through Cube it returns a `kind: cube` pair verified by row equality, 409 when the rows differ, 409 when the read carried no question) |
 | `/mgmt/lenses/{lens}/join-candidates` · `/profile` · `/profile-drift` | profiling |
 | `/mgmt/semantic` | shared entities/definitions + `GET /mgmt/semantic/introspect` |
 | `/mgmt/connections` | warehouse connections, catalog, per-connection profile, and the [drift-audit](../guides/drift-audit.md) endpoints |
-| `/mgmt/reviews` | queue and rulings |
-| `/mgmt/callers` · `/mgmt/users` | identities and keys; `PUT /mgmt/callers/{name}/driver` marks a caller a driver |
+| `/mgmt/reviews` | queue and rulings; `GET /mgmt/reviews/{ticket_id}/seed` is the slot map `dst seed-lens` scaffolds from (the exposed tables an outside-lens answer read, with fields and blueprint facts) |
+| `/mgmt/callers` · `/mgmt/users` | identities and keys; `PUT /mgmt/callers/{name}/driver` marks a caller a driver; `POST /mgmt/callers/sync-idp` revokes the callers the identity provider no longer lists |
 | `/mgmt/observe` | KPIs, requests, callers, evals, every lens's recent runs (`/mgmt/observe/runs?last=N`) |
 | `/mgmt/requests` | the request ledger export |
 | `/mgmt/standards` · `/mgmt/activation` · `/mgmt/surface` · `/mgmt/gap-map` | the rest of the cockpit |

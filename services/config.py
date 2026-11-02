@@ -366,6 +366,31 @@ class Settings(BaseSettings):
     # Display name for the org OIDC users share. All users of one issuer land in one
     # org (the self-host single-company case); per-claim multi-tenancy is a later add.
     oidc_org: str = "oidc"
+    # The browser sign-in the MCP consent step runs against the issuer
+    # (authorization code + PKCE). The client id registered at the IdP for dst;
+    # unset, the audience is used, which is the client id at every common IdP.
+    oidc_client_id: str | None = None
+    # Set when the IdP registered dst as a confidential client; a public PKCE
+    # client needs none. Sent to the token endpoint only, never logged.
+    oidc_client_secret: str | None = None
+    # The scopes the sign-in asks for. Okta puts the groups claim in the ID
+    # token only when `groups` is requested; Keycloak and Entra reject a scope
+    # they do not define, so the default stays at the three every IdP has.
+    oidc_scopes: str = "openid email profile"
+    # Lifetime of an MCP OAuth token minted after an IdP sign-in. Shorter than
+    # the credential-paste default on purpose: the IdP is the source of truth for
+    # who still works here, and a token outliving the sign-in by a month is the
+    # longest a leaver keeps access between `dst keys sync-idp` runs.
+    oidc_token_days: int = 30
+    # Deprovisioning: a URL that lists the IdP's current users as JSON (Okta
+    # `/api/v1/users?filter=status eq "ACTIVE"`, Keycloak
+    # `/admin/realms/<realm>/users?enabled=true`). `dst keys sync-idp` revokes
+    # every caller whose subject the listing no longer carries. Read with the
+    # bearer token below; `oidc_users_subject_field` names the field holding the
+    # subject (`id` at Okta and Keycloak: the same value the `sub` claim carries).
+    oidc_users_url: str | None = None
+    oidc_users_token: str | None = None
+    oidc_users_subject_field: str = "id"
 
     # Clerk dashboard auth (issuer is derived from the publishable key).
     clerk_secret_key: str | None = None

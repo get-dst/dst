@@ -106,12 +106,21 @@ def certified_bindings(sql: str, model: SemanticModel) -> dict[str, str]:
         for e in model.entities
         if (key := f"entity/{e.name}") in provenance and _matches(referenced, e.source.table)
     }
+    # A pair over an exposed table is pinned to that table's blueprint: the
+    # grain, key and clocks the answer was verified under are what a change
+    # to must re-test it (a review-promoted outside-lens answer has no
+    # entity definitions to be stale against; the blueprint is its contract).
+    for table, blueprint in model.blueprints.items():
+        key = f"blueprint/{blueprint.name}"
+        if key in provenance and _matches(referenced, table):
+            out[key] = provenance[key]
     # A query reading both sides of a compiled join rides that relationship: a
     # changed ON clause or cardinality is exactly what must re-test the answer
     # (the entity hashes no longer carry the join, so they can't flag it).
     for j in model.joins:
-        key = f"relationship/{relationship_name(j.left, j.right)}"
-        if key in provenance and {f"entity/{j.left}", f"entity/{j.right}"} <= out.keys():
+        right = j.right.removesuffix(f"_{j.role}") if j.role else j.right
+        key = f"relationship/{relationship_name(j.left, right, j.role)}"
+        if key in provenance and {f"entity/{j.left}", f"entity/{right}"} <= out.keys():
             out[key] = provenance[key]
     # The one comparison serving uses (imported here: sql_canon reads this module).
     from services.runtime import sql_canon

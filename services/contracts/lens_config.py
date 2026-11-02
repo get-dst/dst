@@ -265,13 +265,14 @@ class NotFor(Authored):
     """An ask this lens must not answer although its tables could produce a
     number for it: "door-scan attendance" on a lens that measures tickets
     sold, or booking-level refunds on a seat-level table. The figure would be
-    well-formed and wrong. Matched before any typing or generation on the
-    ask's own words (all of them, word for word), and refused naming the lens
-    that does answer it."""
+    well-formed and wrong. Matched before any typing or generation as a
+    phrase (the ask's content words, in order), the longest matching ask
+    first, and refused naming the lens that does answer it. A one-word ask
+    that sits inside one of the lens's own metrics never matches."""
 
     ask: str = Field(
-        description="the ask as people say it, e.g. 'door-scan attendance'; a question naming "
-        "every content word of it is refused",
+        description="the ask as people say it, e.g. 'door-scan attendance'; a question saying "
+        "it as a phrase is refused",
     )
     sibling: str = Field(
         default="",

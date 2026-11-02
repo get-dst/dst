@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from services.contracts.semantic_model import Entity, EntitySource, Field, SemanticModel
+from services.contracts.failure_modes import FailureMode
+from services.contracts.semantic_model import Entity, EntitySource, Field, Metric, SemanticModel
 from services.runtime import sql_guard
 
 
@@ -914,3 +915,80 @@ def test_a_written_qualifier_may_only_be_omitted(written: str, source: str, allo
     assert r.ok is allowed, r.reason
     if not allowed:
         assert r.reason == f"table '{written}' is out of lens scope"
+
+
+def _ferry_model() -> SemanticModel:
+    """A ferry line's crossings, where the booker's email is hidden and the
+    population filter reads it to drop the crew's own bookings."""
+    return SemanticModel(
+        lens="crossings",
+        dialect="duckdb",
+        entities=[
+            Entity(
+                name="crossings",
+                source=EntitySource(connection="harbour", table="ferry.crossings"),
+                fields=[
+                    Field(name="crossing_id", type="integer"),
+                    Field(name="route", type="string"),
+                    Field(name="fare_eur", type="number"),
+                    Field(name="booker_email", type="string"),
+                ],
+                hide=["booker_email"],
+                population_filter="crossings.booker_email NOT LIKE '%@ferry.example'",
+                metrics=[
+                    Metric(
+                        name="paid_fares",
+                        agg="sum",
+                        expr="crossings.fare_eur",
+                        filters=["crossings.booker_email IS NOT NULL"],
+                    )
+                ],
+            )
+        ],
+    )
+
+
+_PREDICATE_READS = [
+    "SELECT route, SUM(fare_eur) AS fares FROM ferry.crossings AS crossings"
+    " WHERE crossings.booker_email NOT LIKE '%@ferry.example' GROUP BY route",
+    "SELECT SUM(CASE WHEN crossings.booker_email IS NOT NULL THEN fare_eur END) AS paid"
+    " FROM ferry.crossings AS crossings",
+    "WITH latest AS (SELECT route, fare_eur FROM ferry.crossings AS crossings"
+    " WHERE booker_email NOT LIKE '%@ferry.example') SELECT route, SUM(fare_eur) FROM latest"
+    " GROUP BY route",
+]
+
+
+@pytest.mark.parametrize("sql", _PREDICATE_READS)
+def test_compiled_sql_may_read_a_hidden_column_in_a_predicate(sql: str) -> None:
+    assert sql_guard.check(sql, _ferry_model(), compiled=True).ok
+
+
+@pytest.mark.parametrize("sql", _PREDICATE_READS)
+def test_caller_sql_never_reads_the_hidden_column_even_in_a_predicate(sql: str) -> None:
+    # the open door refuses it as out of scope, before `hide` is even asked;
+    # the trusted door (a certified answer) skips the allow-list and names it
+    refused = sql_guard.check(sql, _ferry_model())
+    assert not refused.ok and refused.mode in (
+        FailureMode.scope_violation,
+        FailureMode.hidden_column,
+    )
+    trusted = sql_guard.check(sql, _ferry_model(), trust_tables=True)
+    assert not trusted.ok and trusted.mode is FailureMode.hidden_column
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT booker_email, SUM(fare_eur) FROM ferry.crossings AS crossings"
+        " WHERE booker_email NOT LIKE '%@ferry.example' GROUP BY booker_email",
+        "SELECT route, COUNT(DISTINCT booker_email) FROM ferry.crossings AS crossings"
+        " GROUP BY route",
+        "SELECT route FROM ferry.crossings AS crossings ORDER BY booker_email",
+        "SELECT (SELECT booker_email FROM ferry.crossings AS crossings LIMIT 1) AS e"
+        " FROM ferry.crossings AS crossings WHERE booker_email IS NOT NULL",
+    ],
+)
+def test_compiled_sql_still_never_serves_the_hidden_column(sql: str) -> None:
+    result = sql_guard.check(sql, _ferry_model(), compiled=True)
+    assert not result.ok and result.mode is FailureMode.hidden_column

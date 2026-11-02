@@ -461,6 +461,9 @@ _watch_modes()
 SANDBOX_FIXED = frozenset(
     {
         "test_apply_lands_a_lens_on_a_typed_decision_provider_alone",
+        # A ratio windows each operand on its own clock: a win rate by
+        # decision date no longer counts the quotes sent in the quarter.
+        "test_w1_win_rate_this_quarter_vs_last_is_not_the_sent_cohort_with_future_decisions",
         # The same questions replayed through the cube lane (tests/sandbox/_cube.py).
         "test_q25_on_the_cube_lane",
         "test_q41_on_the_cube_lane",

@@ -82,6 +82,7 @@ from services.runtime.compiler import (
     contradicted_literal,
     govern_literals,
     is_predicate,
+    metric_clock,
     metric_sql,
     prefer_weighted_ratio,
     reads_as_level,
@@ -670,8 +671,10 @@ def window_clock(question: str, entity: Entity, metrics: list[str]) -> str | Non
     counted by is asked too: the compiled figure would read the other date."""
     field_name = entity.default_time_field
     for m in entity.metrics:
-        if m.name in metrics and m.agg_time_field:
-            field_name = m.agg_time_field
+        # A ratio or derived metric is dated as its operands are: a window
+        # on it goes on their clock (each operand then takes its own).
+        if m.name in metrics and (clock := metric_clock(m, entity)) != entity.default_time_field:
+            field_name = clock
     clocks = entity_clocks(entity)
     if len(clocks) < 2:
         # A date the entity holds but declares as no clock, named by the
@@ -702,9 +705,7 @@ def window_clock(question: str, entity: Entity, metrics: list[str]) -> str | Non
             )
         )
     declared = {
-        clock
-        for m in entity.metrics
-        if m.name in metrics and (clock := m.agg_time_field or entity.default_time_field)
+        clock for m in entity.metrics if m.name in metrics and (clock := metric_clock(m, entity))
     }
     named = named_clocks(question, entity, metrics)
     if declared:
@@ -1856,9 +1857,19 @@ _SHAPE_WORDS = frozenset(
 _TIME_UNIT_STEMS = frozenset(_word_stem(u) for u in _TIME_UNITS)
 
 
+# Glossing words a question is wrapped in ("I want to know what X means
+# through Q3"): they name nothing in a layer, so coverage never counts them.
+_GLOSSING = frozenset(
+    """means mean meant meaning want wants wanted need needs needed would could should may might
+    where through send please explain explained exactly really wondering wonder know knows think
+    thinks looking look see check find based regarding""".split()
+)
+
+
 def _coverage_exempt(word: str) -> bool:
     return (
         word in _ORDINARY
+        or word in _GLOSSING
         or word in _FRAME_WORDS
         or word in _WINDOW_FRAME_WORDS
         or word in _PRESENT_WORDS
@@ -4857,10 +4868,15 @@ class TypedIntentGenerator:
     is ignored on purpose: the same question decides the same way."""
 
     def __init__(
-        self, resolver: TypedResolver, *, column_types: dict[str, dict[str, str]] | None = None
+        self,
+        resolver: TypedResolver,
+        *,
+        column_types: dict[str, dict[str, str]] | None = None,
+        creation_dated: set[str] | None = None,
     ) -> None:
         self._resolver = resolver
         self._column_types = column_types
+        self._creation_dated = creation_dated or set()
         self.model = "typed"
 
     def generate(
@@ -4909,6 +4925,7 @@ class TypedIntentGenerator:
                 semantic_model,
                 domains=self._resolver._domains_for(entity) if entity else self._resolver._domains,
                 column_types=self._column_types,
+                creation_dated=self._creation_dated,
             )
         except UnpinnedDimension as exc:
             # The reading is complete but sums kinds of record that do not add:

@@ -365,6 +365,87 @@ def test_feed_axes_schedule_dates_and_company_names_reach_the_overlay(tmp_path: 
     assert parse_overlay(Converter(root).files()["overlay.yaml"]).cubes["ads"].feed_axes
 
 
+def test_a_view_whose_cubes_share_no_member_name_is_written_unprefixed(tmp_path: Path) -> None:
+    """`prefix: true` exists so `month`/`entity`/the join key from two cubes
+    never collide; a view with nothing to collide lists its members bare,
+    so a query names `<view>.<member>` and the access policy names the
+    member. The fixture's joined views share their join key and keep the
+    prefix; a lens over one entity, or two joined on differently named
+    keys, does not."""
+    root = tmp_path / "venues"
+    _write(
+        root,
+        "semantic/entities/tickets.yaml",
+        """name: tickets
+source: {connection: wh, table: box.tickets}
+default_time_field: sold_on
+primary_key: [ticket_id]
+fields:
+  - {name: ticket_id, type: string}
+  - {name: venue_ref, type: string}
+  - {name: sold_on, type: date}
+  - {name: buyer_email, type: string}
+hide:
+  - {column: buyer_email, except_groups: [support]}
+metrics:
+  - {name: tickets_sold, agg: count}
+""",
+    )
+    _write(
+        root,
+        "semantic/entities/venues.yaml",
+        """name: venues
+source: {connection: wh, table: box.venues}
+primary_key: [id]
+fields:
+  - {name: id, type: string}
+  - {name: city, type: string}
+  - {name: owner_email, type: string}
+hide:
+  - {column: owner_email, except_groups: [ops]}
+metrics:
+  - {name: venue_count, agg: count}
+""",
+    )
+    _write(
+        root,
+        "semantic/relationships/tickets__venues.yaml",
+        "left: tickets\nright: venues\n'on': tickets.venue_ref = venues.id\ntype: left\n"
+        "relationship: many_to_one\n",
+    )
+    _write(
+        root,
+        "lenses/box/lens.yaml",
+        "name: box\nconnections: [wh]\nselect:\n  entities: [tickets, venues]\n",
+    )
+    _write(
+        root,
+        "lenses/solo/lens.yaml",
+        "name: solo\nconnections: [wh]\nselect:\n  entities: [venues]\n",
+    )
+    files = Converter(root).files()
+    box = {v["name"]: v for v in yaml.safe_load(files["model/views/box.yml"])["views"]}
+    for name in ("box_lens", "box_tickets"):
+        view = box[name]
+        assert all("prefix" not in c for c in view["cubes"]), name
+        assert view["access_policy"][0] == {
+            "group": "*",
+            "member_level": {"excludes": ["buyer_email", "owner_email"]},
+        }
+        assert {p["group"]: p["member_level"] for p in view["access_policy"]}["ops"] == {
+            "includes": "*",
+            "excludes": ["buyer_email"],
+        }
+    solo = yaml.safe_load(files["model/views/solo.yml"])["views"][0]
+    assert solo["cubes"] == [
+        {"join_path": "venues", "includes": ["id", "city", "owner_email", "venue_count"]}
+    ]
+    # The fixture's joined views share their join key: prefixed, as before.
+    sales = yaml.safe_load(Converter(PROJECT).files()["model/views/sales.yml"])["views"]
+    assert all(c["prefix"] is True for v in sales for c in v["cubes"])
+    assert "stores_manager_email" in sales[0]["access_policy"][0]["member_level"]["excludes"]
+
+
 def test_views_follow_the_cubes_as_authored(project: Path) -> None:
     assert _dst("--dir", str(project)).returncode == 0
     out = project / "cube"
@@ -423,3 +504,193 @@ def test_on_bigquery_a_date_or_datetime_clock_is_cast_to_a_timestamp(tmp_path: P
     assert sql("stock_monthly", "month") == "TIMESTAMP(CAST({CUBE}.month || '-01' AS DATE))"
     # the same project on DuckDB is written as before
     assert Converter(PROJECT).files() == _golden()
+
+
+def _ferry(root: Path) -> Path:
+    """Bookings with a payer and a passenger, both persons: one pair joined
+    once per role."""
+    _write(
+        root,
+        "semantic/entities/bookings.yaml",
+        """name: bookings
+source: {connection: wh, table: ferry.bookings}
+primary_key: [booking_id]
+fields:
+  - {name: booking_id, type: string}
+  - {name: payer_id, type: string}
+  - {name: passenger_id, type: string}
+  - {name: fare_eur, type: number}
+metrics:
+  - {name: fare_total, agg: sum, expr: bookings.fare_eur}
+""",
+    )
+    _write(
+        root,
+        "semantic/entities/persons.yaml",
+        """name: persons
+source: {connection: wh, table: ferry.persons}
+primary_key: [id]
+fields:
+  - {name: id, type: string}
+  - {name: city, type: string}
+metrics:
+  - {name: person_count, agg: count}
+""",
+    )
+    for role in ("payer", "passenger"):
+        _write(
+            root,
+            f"semantic/relationships/bookings__persons__{role}.yaml",
+            f'left: bookings\nright: persons\n"on": bookings.{role}_id = persons.id\n'
+            f"relationship: many_to_one\nrole: {role}\n",
+        )
+    _write(
+        root,
+        "lenses/sailings/lens.yaml",
+        "name: sailings\nconnections: [wh]\nselect:\n  entities: [bookings, persons]\n",
+    )
+    return root
+
+
+def test_a_role_relationship_writes_an_extends_cube_per_role(tmp_path: Path) -> None:
+    files = Converter(_ferry(tmp_path / "ferry")).files()
+    payer = yaml.safe_load(files["model/persons_payer.yml"])["cubes"][0]
+    assert payer["extends"] == "persons" and payer["meta"]["dst"]["role"] == "payer"
+    assert "dimensions" not in payer  # every member is inherited from persons
+    bookings = yaml.safe_load(files["model/bookings.yml"])["cubes"][0]
+    assert bookings["joins"] == [
+        {
+            "name": "persons_passenger",
+            "relationship": "many_to_one",
+            "sql": "{CUBE}.passenger_id = {persons_passenger}.id",
+        },
+        {
+            "name": "persons_payer",
+            "relationship": "many_to_one",
+            "sql": "{CUBE}.payer_id = {persons_payer}.id",
+        },
+    ]
+    views = yaml.safe_load(files["model/views/sailings.yml"])["views"]
+    scope = {c["join_path"]: c["includes"] for c in views[0]["cubes"]}
+    assert scope["persons_payer"] == ["id", "city"] == scope["persons_passenger"]
+    fact = {c["join_path"]: c["includes"] for c in views[1]["cubes"]}
+    assert set(fact) == {"bookings", "bookings.persons_payer", "bookings.persons_passenger"}
+    assert fact["bookings.persons_payer"] == ["id", "city"]
+    assert "persons_payer" in files["MIGRATION.md"] or "role copies" in files["MIGRATION.md"]
+
+
+def test_a_hidden_population_filter_column_never_arrives_as_a_public_dimension(
+    tmp_path: Path,
+) -> None:
+    """The population filter is baked into the cube's sql, and the hidden
+    column it reads is `public: false` (matched as the compile matches a
+    `hide` pattern), so no view lists it."""
+    root = tmp_path / "library"
+    _write(
+        root,
+        "semantic/entities/loans.yaml",
+        """name: loans
+source: {connection: wh, table: library.loans}
+default_time_field: loaned_on
+primary_key: [loan_id]
+population_filter: "loans.borrower_email NOT LIKE '%@library.example'"
+hide: ["*_email"]
+fields:
+  - {name: loan_id, type: integer}
+  - {name: loaned_on, type: date}
+  - {name: branch, type: string}
+  - {name: borrower_email, type: string}
+metrics:
+  - {name: loan_count, agg: count}
+""",
+    )
+    _write(
+        root,
+        "lenses/reading/lens.yaml",
+        "name: reading\nconnections: [wh]\nselect:\n  entities: [loans]\n",
+    )
+    files = Converter(root).files()
+    loans = yaml.safe_load(files["model/loans.yml"])["cubes"][0]
+    assert loans["sql"].endswith("WHERE borrower_email NOT LIKE '%@library.example'")
+    dims = {d["name"]: d for d in loans["dimensions"]}
+    assert dims["borrower_email"]["public"] is False
+    assert dims["borrower_email"]["meta"]["dst"]["hide"] == {"except_groups": []}
+    views = yaml.safe_load(files["model/views/reading.yml"])["views"]
+    listed = {m for v in views for c in v["cubes"] for m in c["includes"]}
+    assert "borrower_email" not in listed and "branch" in listed
+
+
+def test_meta_dst_carries_what_a_level_means_on_each_table_shape(tmp_path: Path) -> None:
+    """A level on a creation-dated table (a key unique per row) is marked so
+    the lane reads it whole when no period is asked; a ratio of flows never
+    carries `additivity: level`, whatever the entity file says."""
+    root = tmp_path / "fleet"
+    _write(
+        root,
+        "semantic/entities/rentals.yaml",
+        """name: rentals
+source: {connection: wh, table: fleet.rentals}
+default_time_field: started_at
+primary_key: [rental_id]
+fields:
+  - {name: rental_id, type: integer}
+  - {name: started_at, type: date}
+  - {name: returned_at, type: date}
+metrics:
+  - {name: rentals_started, agg: count}
+  - {name: rentals_returned, agg: count, expr: rentals.returned_at, agg_time_field: returned_at}
+  - {name: return_rate, type: ratio, numerator: rentals_returned,
+     denominator: rentals_started, additivity: level}
+  - {name: open_rentals, agg: count, filters: ["rentals.returned_at IS NULL"], additivity: level}
+""",
+    )
+    _write(
+        root,
+        "semantic/entities/fleet_snapshot.yaml",
+        """name: fleet_snapshot
+source: {connection: wh, table: fleet.fleet_snapshot}
+default_time_field: snapshot_date
+primary_key: [snapshot_date, bike_id]
+fields:
+  - {name: snapshot_date, type: date}
+  - {name: bike_id, type: integer}
+metrics:
+  - {name: bikes_in_fleet, agg: count_distinct, expr: fleet_snapshot.bike_id, additivity: level}
+""",
+    )
+    _write(
+        root,
+        "lenses/fleet/lens.yaml",
+        "name: fleet\nconnections: [wh]\nselect:\n  entities: [rentals, fleet_snapshot]\n",
+    )
+
+    def table(name: str, rows: int, cols: dict[str, int]) -> dict[str, object]:
+        return {
+            "table": name,
+            "profiled_at": "2026-09-01T06:00:00Z",
+            "row_count": rows,
+            "columns": [
+                {"name": c, "type": "INTEGER", "distinct_count": n, "distinct_is_exact": True}
+                for c, n in cols.items()
+            ],
+        }
+
+    probe = {
+        "tables": [
+            table("fleet.rentals", 6, {"rental_id": 6}),
+            table("fleet.fleet_snapshot", 30, {"snapshot_date": 10, "bike_id": 3}),
+        ]
+    }
+    _write(root, "profiles/warehouse.probe.json", json.dumps(probe))
+    files = Converter(root).files()
+    rentals = {
+        m["name"]: m for m in yaml.safe_load(files["model/rentals.yml"])["cubes"][0]["measures"]
+    }
+    assert rentals["open_rentals"]["meta"]["dst"] == {
+        "additivity": "level",
+        "snapshot_grain": "started_at",
+        "creation_dated": True,
+    }
+    assert "meta" not in rentals["return_rate"]
+    snapshot = yaml.safe_load(files["model/fleet_snapshot.yml"])["cubes"][0]["measures"][0]
+    assert snapshot["meta"]["dst"] == {"additivity": "level", "snapshot_grain": "snapshot_date"}

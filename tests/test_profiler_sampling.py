@@ -154,6 +154,88 @@ def test_stats_sql_exact_reads_the_whole_table_with_count_distinct() -> None:
     assert "SAMPLE" not in exact_top and 'FROM "orders"' in exact_top
 
 
+def test_bigquery_stats_sql_per_column_type() -> None:
+    """BigQuery accepts DISTINCT aggregates only over groupable types. NUMERIC
+    and STRING count as they are; a STRUCT/RECORD, ARRAY, JSON or GEOGRAPHY
+    column is counted through TO_JSON_STRING, in both the exact read
+    (COUNT(DISTINCT …)) and the sampled one (APPROX_COUNT_DISTINCT), and never
+    gets MIN/MAX/AVG. The profiler never emits JSON_VALUE: it is not defined
+    over a STRUCT."""
+    cols = [
+        ColumnSampleSpec(name="price", type="NUMERIC"),
+        ColumnSampleSpec(name="label", type="STRING"),
+        ColumnSampleSpec(name="nest", type="RECORD"),
+        ColumnSampleSpec(name="doc", type="JSON"),
+        ColumnSampleSpec(name="tags", type="ARRAY<STRING>"),
+        ColumnSampleSpec(name="amounts", type="ARRAY<NUMERIC>"),
+        ColumnSampleSpec(name="loc", type="GEOGRAPHY"),
+    ]
+    exact = stats_sql("p.d.t", cols, dialect="bigquery", max_rows=50, row_count=10, exact=True)
+    assert exact is not None
+    assert "COUNT(DISTINCT `price`) AS dc_0" in exact and "AVG(`price`)" in exact
+    assert "COUNT(DISTINCT `label`) AS dc_1" in exact
+    for i, name in ((2, "nest"), (3, "doc"), (4, "tags"), (5, "amounts"), (6, "loc")):
+        assert f"COUNT(`{name}`) AS nn_{i}" in exact
+        assert f"COUNT(DISTINCT TO_JSON_STRING(`{name}`)) AS dc_{i}" in exact
+        assert f"MIN(`{name}`)" not in exact and f"AVG(`{name}`)" not in exact
+    assert "JSON_VALUE" not in exact
+
+    sampled = stats_sql("p.d.t", cols, dialect="bigquery", max_rows=50, row_count=1000)
+    assert sampled is not None
+    assert "APPROX_COUNT_DISTINCT(`price`) AS dc_0" in sampled
+    assert "APPROX_COUNT_DISTINCT(`label`) AS dc_1" in sampled
+    assert "APPROX_COUNT_DISTINCT(TO_JSON_STRING(`nest`)) AS dc_2" in sampled
+    assert "APPROX_COUNT_DISTINCT(TO_JSON_STRING(`doc`)) AS dc_3" in sampled
+    assert "APPROX_COUNT_DISTINCT(TO_JSON_STRING(`tags`)) AS dc_4" in sampled
+    assert "DISTINCT `nest`" not in sampled and "DISTINCT `doc`" not in sampled
+
+    # the dictionary groups and orders by the same key: a STRUCT cannot be
+    # ordered, JSON and GEOGRAPHY cannot be grouped
+    top = top_values_sql(
+        "p.d.t",
+        "nest",
+        dialect="bigquery",
+        max_rows=50,
+        row_count=10,
+        limit=25,
+        column_type="RECORD",
+        exact=True,
+    )
+    assert "SELECT TO_JSON_STRING(`nest`) AS v, COUNT(*) AS n" in top
+    assert "WHERE `nest` IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1" in top
+    plain = top_values_sql(
+        "p.d.t",
+        "label",
+        dialect="bigquery",
+        max_rows=50,
+        row_count=10,
+        limit=25,
+        column_type="STRING",
+        exact=True,
+    )
+    assert "SELECT `label` AS v" in plain and "TO_JSON_STRING" not in plain
+
+    # the other dialects keep their plain column — the wrapper is BigQuery's
+    pg = stats_sql("t", cols[:3], dialect="postgres", max_rows=50, row_count=10, exact=True)
+    assert pg is not None and "TO_JSON_STRING" not in pg
+
+
+def test_bigquery_repeated_column_profiles_as_an_array() -> None:
+    """A REPEATED field reports its element type (STRING, NUMERIC, RECORD) with
+    mode REPEATED; the profile must carry the ARRAY, or the column is mistaken
+    for a scalar and gets aggregates BigQuery rejects."""
+    from services.connectors.bigquery import _column_type
+
+    def field(field_type: str, mode: str) -> Any:
+        return SimpleNamespace(field_type=field_type, mode=mode)
+
+    assert _column_type(field("STRING", "NULLABLE")) == "STRING"
+    assert _column_type(field("NUMERIC", "REQUIRED")) == "NUMERIC"
+    assert _column_type(field("STRING", "REPEATED")) == "ARRAY<STRING>"
+    assert _column_type(field("NUMERIC", "REPEATED")) == "ARRAY<NUMERIC>"
+    assert _column_type(field("RECORD", "REPEATED")) == "ARRAY<RECORD>"
+
+
 def test_counts_exactly_boundary() -> None:
     assert counts_exactly(EXACT_PROFILE_MAX_ROWS, EXACT_PROFILE_MAX_ROWS)  # at the threshold
     assert not counts_exactly(EXACT_PROFILE_MAX_ROWS + 1, EXACT_PROFILE_MAX_ROWS)

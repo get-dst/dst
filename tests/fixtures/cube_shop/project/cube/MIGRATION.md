@@ -68,6 +68,6 @@ Written by `dst migrate-model`. The model is generated once and then authored: a
 | Certified answers stay SQL pairs in `lenses/<lens>/certified_answers.yaml`. | not_expressible |
 | dst `fields` vs `dimensions`: both are Cube dimensions; the group-by hint is only the presence of `meta.dst.aliases`. | wrong_grain |
 | Composite primary keys: every key column carries `primary_key: true`. | wrong_grain |
-| View members are prefixed with the cube name (`prefix: true`) so `month`/`entity` from several cubes never collide. | not_declared |
+| View members are prefixed with the cube name (`prefix: true`, `<view>.<cube>_<member>`) only in a view where a member name occurs in two of its cubes (`month`, `entity`, the join key); a view whose cubes share no member name lists them bare (`<view>.<member>`). | not_declared |
 | A Cube view resolves one join tree: a lens becomes `<lens>_lens` (scope, direct includes) plus one `<lens>_<fact>` view per cube with in-lens joins (the fact + the dimensions of every cube its many_to_one / one_to_one joins reach, by the first path found). | not_expressible |
 | Primary keys are public (Cube hides them by default); an `internal` or hidden key stays `public: false`. | hidden_column |

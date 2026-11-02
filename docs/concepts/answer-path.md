@@ -22,8 +22,11 @@ The stages, in order:
    is asked: a lens whose `not_for` names the ask, or that the question reads
    closer to one of its `not_for` asks than to anything it covers, is not a
    candidate; a question that is one lens's certified question goes to that
-   lens; a question naming a source system some lens declares in `sources`
-   goes only to the lenses declaring it, and is uncovered, naming the system,
+   lens; a question naming a measure a lens declares `not_computable` (or
+   one of its aliases) goes to that lens, whose refusal is the answer, or to
+   the lens its entry routes to; a question naming a source system some lens
+   declares in `sources` goes only to the lenses declaring it, and is
+   uncovered, naming the system,
    when no lens the caller may use does.
 
    The remaining lenses are ranked by similarity, with a lens that declares a
@@ -50,7 +53,8 @@ The stages, in order:
    **explore scope** if it may use one: a lens that exposes tables and
    answers untyped serves it from those tables, described by their
    [blueprints](../guides/project-files.md#table-blueprints-facts-about-a-table), with the `EXPOSED` line on the
-   answer. Otherwise the question is declined, naming the closest lens and
+   answer, the join, clock and reconciliation checks beside its grain line, and
+   `lane: explore` on its request row. Otherwise the question is declined, naming the closest lens and
    the words it has nothing for. When the routed lens refuses because its
    data does not hold what was asked, the question goes to the next lens
    that covered it instead of ending there; a declared refusal (a

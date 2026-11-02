@@ -48,6 +48,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -224,8 +225,10 @@ BY_DESIGN: tuple[tuple[str, FailureMode], ...] = (
         FailureMode.wrong_grain,
     ),
     (
-        "View members are prefixed with the cube name (`prefix: true`) so `month`/`entity` "
-        "from several cubes never collide.",
+        "View members are prefixed with the cube name (`prefix: true`, `<view>.<cube>_<member>`) "
+        "only in a view where a member name occurs in two of its cubes (`month`, `entity`, the "
+        "join key); a view whose cubes share no member name lists them bare "
+        "(`<view>.<member>`).",
         FailureMode.not_declared,
     ),
     (
@@ -294,6 +297,11 @@ class Converter:
         self.shared_axes = self.key_axes()
         self.cubes: dict[str, Doc] = {}
         self.extra_cubes: dict[str, Doc] = {}
+        # One cube per role relationship, `extends:` its target: a booking's
+        # payer and passenger are both persons, and Cube joins a cube once, so
+        # each role is its own cube (<target>_<role>) joined by its own
+        # relationship and listed in the views under its own prefix.
+        self.role_cubes: dict[str, Doc] = {}
         self.overlay: Doc = {
             "version": 1,
             "cubes": {},
@@ -321,6 +329,21 @@ class Converter:
             elif f["name"].endswith("month") and not vals:
                 out.add(f["name"])
         return out
+
+    @staticmethod
+    def hidden_as(
+        hidden: dict[str, list[str] | None], name: str, table: str, col: str
+    ) -> str | None:
+        """The `hide` entry that withholds ``col`` — fnmatch on the bare name,
+        `entity.column` or `table.column`, as the compile matches it — or
+        None. A column the entity's population filter reads is withheld all
+        the same: the filter is baked into the cube's sql, the column never
+        arrives as a public dimension."""
+        forms = (col, f"{name}.{col}", f"{table}.{col}", f"{table.rsplit('.', 1)[-1]}.{col}")
+        for pattern in hidden:
+            if any(fnmatchcase(f.lower(), pattern.lower()) for f in forms):
+                return pattern
+        return None
 
     @staticmethod
     def hide_entries(e: Doc) -> dict[str, list[str] | None]:
@@ -504,11 +527,14 @@ class Converter:
         joins = []
         for r in self.relationships:
             if r["left"] == name and r["right"] in self.entities:
+                right = r["right"]
+                if role := r.get("role"):
+                    right = self.role_cube(r["right"], role, name)
                 joins.append(
                     {
-                        "name": r["right"],
+                        "name": right,
                         "relationship": r.get("relationship", "many_to_one"),
-                        "sql": cube_sql(r["on"], name, {r["right"]: r["right"]}),
+                        "sql": cube_sql(r["on"], name, {r["right"]: right}),
                     }
                 )
                 self.census["joins"] += 1
@@ -579,11 +605,11 @@ class Converter:
                 dim["public"] = False
                 dmeta["internal"] = True
                 self.census["internal (public false)"] += 1
-            if col in hidden:
+            if (entry := self.hidden_as(hidden, name, table, col)) is not None:
                 dim["public"] = False
-                dmeta["hide"] = {"except_groups": hidden[col] or []}
+                dmeta["hide"] = {"except_groups": hidden[entry] or []}
                 self.overlay["hide"].append(
-                    {"cube": name, "dimension": col, "except_groups": hidden[col] or []}
+                    {"cube": name, "dimension": col, "except_groups": hidden[entry] or []}
                 )
                 self.census["hide (public false)"] += 1
             if col in clocks:
@@ -598,7 +624,7 @@ class Converter:
                 and pc.get("values_complete")
                 and pc.get("top_values")
                 and len(pc["top_values"]) <= 40
-                and col not in hidden
+                and self.hidden_as(hidden, name, table, col) is None
             ):
                 dmeta["dictionary"] = list(pc["top_values"])  # the probe's complete value list
                 self.census["dimensions with a dictionary"] += 1
@@ -643,6 +669,8 @@ class Converter:
             self.census["cubes with feed axes"] += 1
         time_field = e.get("default_time_field")
         snapshot_grain = "month" if time_field in text_months else None
+        creation_dated = self.creation_dated(e)
+        by_metric = {m["name"]: m for m in e["metrics"]}
 
         measures: list[Doc] = []
         distinct_measures: list[tuple[Doc, list[str]]] = []
@@ -692,10 +720,28 @@ class Converter:
             for k in ("additivity", "window_reading", "better", "currency"):
                 if m.get(k):
                     mmeta[k] = m[k]
+            if mtype in ("ratio", "derived") and m.get("additivity") == "level":
+                # A ratio of flows reads as its operands do: the lane must
+                # never pin it to a snapshot the operands do not have.
+                operands = (
+                    [m["numerator"], m["denominator"]]
+                    if mtype == "ratio"
+                    else re.findall(r"\{(\w+)\}", str(m.get("expr") or ""))
+                )
+                if not any(by_metric.get(o, {}).get("additivity") == "level" for o in operands):
+                    del mmeta["additivity"]
+                    self.note(
+                        name,
+                        f"metric {m['name']} additivity=level on a ratio of flows",
+                        "DROPPED: each operand windows on its own clock; fix the entity file",
+                        FailureMode.wrong_grain,
+                    )
             if m.get("aliases"):
                 mmeta["aliases"] = list(m["aliases"])
-            if m.get("additivity") == "level":
+            if mmeta.get("additivity") == "level":
                 mmeta["snapshot_grain"] = snapshot_grain or time_field or "row"
+                if creation_dated:
+                    mmeta["creation_dated"] = True
             if m.get("agg_time_field"):
                 mmeta["clock"] = m["agg_time_field"]
                 self.census["measures with their own clock"] += 1
@@ -730,6 +776,22 @@ class Converter:
             self.make_distinct_cube(e, cube, distinct_measures)
         self.census["cubes"] += 1
         return cube
+
+    def creation_dated(self, e: Doc) -> bool:
+        """Does the probe show the entity's table holds one row per record
+        (a key column unique on its own), so a level on it has no snapshot
+        to pin when no period is asked? ``value_guard.is_creation_dated``."""
+        from services.contracts.profile import TableProfile
+        from services.runtime.value_guard import is_creation_dated
+
+        pr = self.probe.get(e["source"]["table"])
+        if not pr:
+            return False
+        try:
+            profile = TableProfile.model_validate({"connection": "", **pr})
+        except ValueError:
+            return False  # a hand-written profile with no counts says nothing
+        return is_creation_dated(list(e.get("primary_key") or []), profile)
 
     def make_distinct_cube(
         self, e: Doc, cube: Doc, distinct_measures: list[tuple[Doc, list[str]]]
@@ -828,6 +890,27 @@ class Converter:
             FailureMode.wrong_grain,
         )
 
+    def role_cube(self, target: str, role: str, left: str) -> str:
+        """The cube a role relationship joins: ``<target>_<role>``, extending
+        the target cube so it holds every member, under its own name."""
+        alias = f"{target}_{role}"
+        if alias not in self.role_cubes:
+            self.role_cubes[alias] = {
+                "name": alias,
+                "title": alias.replace("_", " "),
+                "description": f"{target} as the {role} of {left}.",
+                "extends": target,
+                "meta": {"dst": {"sources": [target], "role": role}},
+            }
+            self.census["cubes (role copies)"] += 1
+        return alias
+
+    def cube_for(self, name: str) -> Doc:
+        """The cube whose members ``name`` lists: a role copy's are its target's."""
+        if name in self.role_cubes:
+            return self.cubes[self.role_cubes[name]["extends"]]
+        return self.cubes.get(name) or self.extra_cubes[name]
+
     # ── lens → views ────────────────────────────────────────────────────
 
     def listed(
@@ -887,6 +970,27 @@ class Converter:
         return {"join_path": path, "includes": includes, "prefix": True}
 
     @staticmethod
+    def prefixed(
+        cubes: list[Doc], policy: dict[str, list[str]]
+    ) -> tuple[list[Doc], dict[str, list[str]]]:
+        """A view's cube entries keep ``prefix: true`` only where a member
+        name occurs in two of them (``month``, ``entity``, the join key):
+        then every member is ``<cube>_<member>``, and so is every policy
+        key. A view whose cubes share no member name lists them bare, so a
+        query names ``<view>.<member>`` and the policy names the member."""
+        seen = collections.Counter(m for c in cubes for m in c["includes"])
+        if any(n > 1 for n in seen.values()):
+            return cubes, policy
+        bare = [{k: v for k, v in c.items() if k != "prefix"} for c in cubes]
+        unprefixed: dict[str, list[str]] = {}
+        for c in cubes:
+            prefix = c["join_path"].rsplit(".", 1)[-1] + "_"
+            for key, groups in policy.items():
+                if key.startswith(prefix) and key[len(prefix) :] in c["includes"]:
+                    unprefixed[key[len(prefix) :]] = groups
+        return bare, unprefixed
+
+    @staticmethod
     def access_policy(policy: dict[str, list[str]]) -> list[Doc]:
         """Every caller reads the view but its excepted hidden members; each
         exception group reads those it is excepted for too."""
@@ -904,7 +1008,7 @@ class Converter:
         breadth first, through many_to_one / one_to_one joins only (a
         one_to_many join fans out the root's measures). A cube two paths
         reach is joined by the first."""
-        every = {**self.cubes, **self.extra_cubes}
+        every = {**self.cubes, **self.extra_cubes, **{a: self.cube_for(a) for a in self.role_cubes}}
         paths: list[str] = []
         seen = {root}
         queue = [(root, root)]
@@ -962,6 +1066,9 @@ class Converter:
             for extra, c in self.extra_cubes.items():
                 if c["meta"]["dst"]["sources"] == [ent]:
                     cubes.append(self.listed(c, extra, policy))
+            for alias, c in self.role_cubes.items():
+                if c["extends"] == ent:
+                    cubes.append(self.listed(self.cubes[ent], alias, policy, dims=True))
         # A cube written by hand joins the lens that selects a cube it is
         # built from (its meta.dst.sources): the lens's views cover it.
         for name, c in sorted(self.authored.items()):
@@ -973,6 +1080,7 @@ class Converter:
                 self.census["authored cubes in lens views"] += 1
         sources = list(lens.get("sources") or [])
         display = lens.get("display_name", lname)
+        cubes, policy = self.prefixed(cubes, policy)
         scope: Doc = {
             "name": f"{lname}_lens",
             "title": display,
@@ -984,6 +1092,7 @@ class Converter:
             scope["access_policy"] = self.access_policy(policy)
         views: list[Doc] = [scope]
         members = set(sel) & set(self.entities)
+        members |= {a for a, c in self.role_cubes.items() if c["extends"] in members}
         roots = [r["left"] for r in self.relationships if r["left"] in members]
         roots += [
             x for x, c in self.extra_cubes.items() if c["meta"]["dst"]["sources"][0] in members
@@ -997,7 +1106,8 @@ class Converter:
             vc = [self.listed(left_cube, left, policy)]
             rights = [path.rsplit(".", 1)[-1] for path in paths]
             for path, right in zip(paths, rights, strict=True):
-                vc.append(self.listed(self.cubes[right], path, policy, dims=True))
+                vc.append(self.listed(self.cube_for(right), path, policy, dims=True))
+            vc, policy = self.prefixed(vc, policy)
             view: Doc = {
                 "name": f"{lname}_{left}",
                 "title": f"{display}: {left} with its dimensions",
@@ -1049,7 +1159,7 @@ class Converter:
         out: dict[str, str] = {}
         for name, e in self.entities.items():
             self.cubes[name] = self.convert_entity(e)
-        for name, cube in {**self.cubes, **self.extra_cubes}.items():
+        for name, cube in {**self.cubes, **self.extra_cubes, **self.role_cubes}.items():
             out[f"model/{name}.yml"] = dump({"cubes": [cube]})
         for lname, lens in self.lenses.items():
             out[f"model/views/{lname}.yml"] = dump({"views": self.convert_lens(lname, lens)})

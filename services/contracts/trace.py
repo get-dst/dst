@@ -84,3 +84,8 @@ class TraceLog(BaseModel):
     cube_query: list[dict[str, object]] | None = None
     ledger: list[Binding] | None = None
     serving: str | None = None
+    # Which path served the row apart from the governed lanes: ``explore`` for
+    # an outside-lens read (the `sql` tool inside a lens, an answer that
+    # reads an exposed table). None on governed rows and on rows written
+    # before the column; observe and `dst test` count explore apart.
+    lane: str | None = None

@@ -214,7 +214,8 @@ def test_the_profile_carries_the_asks_the_lens_door_refuses() -> None:
     ("question", "refused"),
     [
         ("booking-level refunds last month", True),
-        ("refunds at the booking level last month", True),
+        # The ask is a phrase: its words in another order are not the ask.
+        ("refunds at the booking level last month", False),
         ("How many seats did we refund last month?", False),
         ("bookings lost to refunds", False),
     ],

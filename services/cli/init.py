@@ -164,6 +164,66 @@ def _google_key_check(path: Path) -> str | None:
         return str(exc).split("\n")[0][:160]
 
 
+def _bq_dataset_location(key: Path, dataset: str) -> str | None:
+    """The location of ``dataset`` read with the key, or None (said) when
+    BigQuery does not answer: never a guess written into .env."""
+    from services.connectors.bigquery import BigQueryConnector
+
+    try:
+        return BigQueryConnector(str(key), datasets=[dataset]).dataset_location(dataset)
+    except Exception as exc:  # noqa: BLE001 — any Google error: the user types it instead
+        print(f"warning: could not read the location of {dataset} ({exc})")
+        return None
+
+
+def _bq_cube_env(key: Path | None, interactive: bool) -> list[str]:
+    """The ``.env`` lines Cube's BigQuery driver reads, for ``--cube`` over
+    BigQuery. The location is read from the dataset the user names (through
+    the connector), else asked; a value that is not known is left OUT, never
+    written empty: compose passes ``CUBEJS_DB_BQ_LOCATION=`` as an empty
+    location and Cube fails every query on it."""
+    import json
+
+    lines = [
+        "",
+        "# Cube's BigQuery driver (the compose sidecar). The key file is read inside the",
+        "# container: copy it into cube/data/ (mounted read-only at /data).",
+        "CUBEJS_DB_TYPE=bigquery",
+    ]
+    project = ""
+    if key is not None:
+        try:
+            project = str(json.loads(key.read_text(encoding="utf-8")).get("project_id") or "")
+        except (OSError, ValueError):
+            project = ""
+        lines.append(f"CUBEJS_DB_BQ_KEY_FILE=/data/{key.name}")
+    else:
+        lines.append("# CUBEJS_DB_BQ_KEY_FILE=/data/<your-key>.json")
+    if project:
+        lines.append(f"CUBEJS_DB_BQ_PROJECT_ID={project}")
+    else:
+        lines.append("# CUBEJS_DB_BQ_PROJECT_ID=<the project the jobs run in>")
+    location = ""
+    if interactive:
+        dataset = _ask(
+            "BigQuery dataset the model reads (project.dataset or dataset; blank = skip)", ""
+        )
+        if dataset and key is not None:
+            location = _bq_dataset_location(key, dataset) or ""
+            if location:
+                print(f"  {dataset} is in {location}")
+        if not location:
+            location = _ask("BigQuery location of the datasets (EU, US or a region)", "")
+    if location:
+        lines.append(f"CUBEJS_DB_BQ_LOCATION={location}")
+    else:
+        lines.append(
+            "# CUBEJS_DB_BQ_LOCATION=EU   # set to EU, US or your region before `docker compose"
+            " --profile cube up`; never leave it empty"
+        )
+    return lines
+
+
 def _key_env(name: str) -> str:
     return "DST_API_KEY_" + name.upper().replace("-", "_")
 
@@ -370,6 +430,7 @@ def run_init(args: argparse.Namespace) -> int:
                 f"note: {duckdb_path} does not exist yet - dst opens it read-only "
                 "and never creates it; put the file there before `dst apply`"
             )
+    bq_key: Path | None = None
     if warehouse not in ("demo", "duckdb", "none"):
         env = _key_env(warehouse)
         cfg = {
@@ -394,6 +455,7 @@ def run_init(args: argparse.Namespace) -> int:
                 if not cred_path.is_file():
                     print(f"warning: {cred_path} not found - fix the {env} line in .env")
                 else:
+                    bq_key = cred_path
                     err = _google_key_check(cred_path)
                     if err is None:
                         print("  credentials verified with Google")
@@ -425,6 +487,7 @@ def run_init(args: argparse.Namespace) -> int:
         import secrets
 
         secret_values["CUBEJS_API_SECRET"] = secrets.token_urlsafe(32)
+    bq_env = _bq_cube_env(bq_key, interactive) if cube and warehouse == "bigquery" else []
     refs = reference_section(
         "Reference: every connection field (under connections.<name>)",
         ConnectionDecl,
@@ -449,6 +512,7 @@ def run_init(args: argparse.Namespace) -> int:
         "# one line per declared provider/connection secret; a value of @/path/to/file",
         "# loads that file's contents (e.g. a service-account JSON):",
     ] + [f"{e}={secret_values.get(e, '')}" for e in dict.fromkeys(secret_envs)]
+    env_lines += bq_env
     env_file = root / ".env"
     env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     # Admin token, Fernet key and provider keys all end up in here; a shared dev
@@ -549,7 +613,9 @@ def run_init(args: argparse.Namespace) -> int:
         + "```\n\nMetric fields (under metrics:):\n\n```yaml"
         + reference_section("Reference: metric fields", Metric)
         + "```\n\nRelationships (semantic/relationships/<left>__<right>.yaml - one\n"
-        "file per pair, `left` = the FK side; a lens gets the join when it\n"
+        "file per pair, or per `role:` when a pair joins more than once (a\n"
+        "booking's payer and its passenger, both persons), `left` = the FK\n"
+        "side; a lens gets the join when it\n"
         'selects both endpoints). Type the join condition key QUOTED - `"on":` -\n'
         "or spell it `condition:`: a bare `on:` is a YAML boolean, so the key\n"
         "loads as True and the join reads as if it had no condition at all\n"
@@ -1528,23 +1594,26 @@ def _cube_service() -> str:
         "  cube:\n"
         '    profiles: ["cube"]\n'
         f"    image: cubejs/cube:{CUBE_TAG}\n"
+        "    # List form on purpose: a bare entry is passed only when .env sets it; a\n"
+        "    # mapping with ${VAR:-} would hand Cube an EMPTY CUBEJS_DB_BQ_LOCATION (or\n"
+        "    # host, or path) and every query would fail while /readyz stays green.\n"
         "    environment:\n"
-        '      CUBEJS_DEV_MODE: "false"\n'
-        "      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:?set in .env}\n"
-        "      CUBEJS_DB_TYPE: ${CUBEJS_DB_TYPE:-duckdb}\n"
-        "      CUBEJS_DB_HOST: ${CUBEJS_DB_HOST:-}\n"
-        "      CUBEJS_DB_PORT: ${CUBEJS_DB_PORT:-}\n"
-        "      CUBEJS_DB_NAME: ${CUBEJS_DB_NAME:-}\n"
-        "      CUBEJS_DB_USER: ${CUBEJS_DB_USER:-}\n"
-        "      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS:-}\n"
+        "      - CUBEJS_DEV_MODE=false\n"
+        "      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:?set in .env}\n"
+        "      - CUBEJS_DB_TYPE=${CUBEJS_DB_TYPE:-duckdb}\n"
+        "      - CUBEJS_DB_HOST\n"
+        "      - CUBEJS_DB_PORT\n"
+        "      - CUBEJS_DB_NAME\n"
+        "      - CUBEJS_DB_USER\n"
+        "      - CUBEJS_DB_PASS\n"
         "      # BigQuery: the service-account key as the container sees it (under /data)\n"
-        "      CUBEJS_DB_BQ_PROJECT_ID: ${CUBEJS_DB_BQ_PROJECT_ID:-}\n"
-        "      CUBEJS_DB_BQ_LOCATION: ${CUBEJS_DB_BQ_LOCATION:-}\n"
-        "      CUBEJS_DB_BQ_KEY_FILE: ${CUBEJS_DB_BQ_KEY_FILE:-}\n"
+        "      - CUBEJS_DB_BQ_PROJECT_ID\n"
+        "      - CUBEJS_DB_BQ_LOCATION\n"
+        "      - CUBEJS_DB_BQ_KEY_FILE\n"
         "      # a DuckDB file as the container sees it (under /data): opened read-only\n"
-        "      DST_DUCKDB_PATH: ${DST_DUCKDB_PATH:-}\n"
-        "      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory\n"
-        '      CUBEJS_SCHEDULED_REFRESH_DEFAULT: "false"\n'
+        "      - DST_DUCKDB_PATH\n"
+        "      - CUBEJS_CACHE_AND_QUEUE_DRIVER=memory\n"
+        "      - CUBEJS_SCHEDULED_REFRESH_DEFAULT=false\n"
         "    ports:\n"
         '      - "4000:4000"\n'
         "    volumes:\n"

@@ -267,9 +267,12 @@ def test_a_demo_oauth_token_lives_as_long_as_a_demo_key(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(settings, "demo_org_id", str(uuid.uuid4()))
     monkeypatch.setattr(settings, "demo_key_days", 7)
-    assert _token_ttl() == timedelta(days=7)
+    assert _token_ttl({}) == timedelta(days=7)
     monkeypatch.setattr(settings, "demo_org_id", None)
-    assert _token_ttl() == oauth.OAUTH_TOKEN_TTL
+    assert _token_ttl({}) == oauth.OAUTH_TOKEN_TTL
+    # A grant from an identity-provider sign-in gets its own, shorter life.
+    monkeypatch.setattr(settings, "oidc_token_days", 30)
+    assert _token_ttl({"idp": "oidc"}) == timedelta(days=30)
 
 
 @needs_db

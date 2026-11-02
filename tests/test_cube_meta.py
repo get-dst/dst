@@ -223,7 +223,46 @@ def test_cube_status_prints_version_model_version_and_counts(
     assert "readyz        ok (version not stated)" in out
     assert f"model_version {version}" in out
     assert "members       1 view(s), 3 cube(s), 5 measure(s), 6 dimension(s), 2 segment(s)" in out
+    assert "warehouse     ok (one row from customers" in out
     assert fake_cube.claims and fake_cube.claims[0]["dst"]["groups"] == []
+    # The probe is the smallest query the model allows: one dimension of
+    # the cube with the fewest members, limit 1, as the operator.
+    load = [json.loads(r.content) for r in fake_cube.requests if r.url.path.endswith("/load")]
+    assert load == [{"query": {"dimensions": ["customers.country"], "limit": 1}}]
+
+
+def test_cube_status_fails_when_the_warehouse_does_not_answer_through_cube(
+    tmp_path: Path,
+    fake_cube: FakeCube,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The meta compiles with no warehouse call, so a driver that cannot
+    reach the warehouse (an empty BigQuery location, a dead host) kept
+    status, doctor and /ready green until the probe erred on every table.
+    One `limit 1` query through Cube shows it here."""
+    fake_cube.warehouse_error = "Error: connect ECONNREFUSED 10.0.0.9:443"
+    root = _cube_project(tmp_path)
+    assert _run_cli(monkeypatch, ["cube", "status", "--dir", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "model_version" in out
+    assert (
+        "warehouse     FAIL — Error: connect ECONNREFUSED 10.0.0.9:443 (limit 1 on customers)"
+        in out
+    )
+    assert "CUBEJS_DB_BQ_LOCATION" in out
+    assert _run_cli(monkeypatch, ["cube", "status", "--dir", str(root), "--json"]) == 1
+    body = json.loads(capsys.readouterr().out)
+    assert body["warehouse"] == {
+        "ok": False,
+        "cube": "customers",
+        "detail": "Error: connect ECONNREFUSED 10.0.0.9:443",
+        "provider": "warehouse",
+    }
+    from services.cli.cube import doctor_row
+
+    assert doctor_row(root) == 1
+    assert "warehouse Error: connect ECONNREFUSED" in capsys.readouterr().out
 
 
 def test_cube_status_json(
@@ -284,6 +323,10 @@ def test_ready_reports_cube_without_gating_on_it(
     status = _cube_status()
     assert isinstance(status, dict) and status["reachable"] is True
     assert status["model_version"] == MetaDoc.parse(META).model_version()
+    assert status["warehouse"]["ok"] is True and status["warehouse"]["cube"] == "customers"
+    fake_cube.warehouse_error = "Error: connect ECONNREFUSED 10.0.0.9:443"
+    status = _cube_status()
+    assert isinstance(status, dict) and status["warehouse"]["ok"] is False
 
 
 # ── live lane: a real Cube ────────────────────────────────────────────────

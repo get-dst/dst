@@ -49,6 +49,10 @@ class CubeLensView:
     # What the lens may call (its views' members, resolved to the cube members
     # behind them); None = no lens scope declared, every member Cube serves.
     model: LensModel | None = None
+    # The lens model apply stored, built from the meta as a caller in every
+    # exception group reads it: the one record of which view members exist
+    # when Cube's access policy has dropped some from this caller's meta.
+    full: LensModel | None = None
 
     def __post_init__(self) -> None:
         self._members: dict[str, Measure | Dimension | Segment] = {}
@@ -91,18 +95,22 @@ class CubeLensView:
     def withheld_rule(self, member: str) -> list[str] | None:
         """The hide rule on a view member Cube withheld from this caller's
         ``/v1/meta``. A view's access policy drops the member from the
-        caller's model altogether, so it cannot be resolved to its cube; a
-        view names it ``<cube>_<dimension>`` (prefixed) or by the dimension,
-        and the rule is found by that name: the ask is refused as hidden,
-        not as a member the model lacks."""
-        if self.declared(member):
+        caller's model altogether, so it cannot be resolved to its cube; the
+        model apply stored (``full``, read as a caller in every exception
+        group) says whether the view holds a member of that exact name and
+        which cube member it aliases. A name the stored model does not hold
+        either is a miss, never a withheld member: a joined cube's member
+        named without its prefix (``view.region`` for ``view.stores_region``)
+        is reported as undeclared, so the caller can spell it right."""
+        if self.declared(member) or self.full is None:
             return None
-        local = member.split(".")[1] if member.count(".") >= 1 else member
-        for key, groups in self.hidden_rules().items():
-            cube, _, dim = key.partition(".")
-            if local in (f"{cube}_{dim}", dim):
-                return groups
-        return None
+        parts = member.split(".")
+        if len(parts) > 2 and parts[-1] in _ALL_GRAINS:
+            member = ".".join(parts[:2])
+        held = next((m for m in self.full.members if m.name == member), None)
+        if held is None:
+            return None
+        return self.hidden_rules().get(held.base)
 
     # ── members ───────────────────────────────────────────────────────────
 
@@ -164,6 +172,12 @@ class CubeLensView:
             return g if g in GRAINS else "month"
         return None
 
+    def creation_dated(self, measure: str) -> bool:
+        """Is this level measure on a table of one row per record (no
+        snapshot to pin when no period is asked)?"""
+        m = self.measure(measure)
+        return bool(m and m.dst and m.dst.creation_dated)
+
     def label_key(self, dimension: str) -> str | None:
         d = self.dimension(dimension)
         if d and d.dst and d.dst.label_of:
@@ -191,6 +205,24 @@ class CubeLensView:
     def not_for(self, measure: str) -> list[str]:
         m = self.measure(measure)
         return list(m.dst.not_for) if m and m.dst else []
+
+    def measure_phrases(self) -> list[str]:
+        """What the lens's measures are called: each one's name, title and
+        ``meta.dst`` aliases (the measures of its views when it has a lens
+        scope, else every measure the model serves)."""
+        names = (
+            [m.base for m in self.model.members if m.kind == "measure"]
+            if self.model is not None and self.model.views
+            else [n for n, m in self._members.items() if isinstance(m, Measure)]
+        )
+        out: list[str] = []
+        for name in names:
+            m = self.measure(name)
+            if m is None:
+                continue
+            aliases = list(m.dst.aliases) if m.dst and hasattr(m.dst, "aliases") else []
+            out += [name.rsplit(".", 1)[-1], m.title or "", *aliases]
+        return [p for p in out if p.strip()]
 
     # ── words ─────────────────────────────────────────────────────────────
 
@@ -307,11 +339,13 @@ class CubeLensView:
         probe: CubeProbe | None = None,
         lens: str | None = None,
         views: list[str] | None = None,
+        full: LensModel | None = None,
     ) -> CubeLensView:
         """The view for one lens: its ``LensModel`` over the meta and the
-        overlay (``views`` from the lens config win over the overlay's)."""
+        overlay (``views`` from the lens config win over the overlay's), and
+        ``full`` the model apply stored (every view member, whoever asks)."""
         overlay = overlay or Overlay()
         model = LensModel.build(doc, overlay, lens, views=views or None) if lens else None
         if model is not None and not model.views and not model.unknown_views:
             model = None  # the lens declares no views: no lens scope to hold
-        return cls(doc=doc, overlay=overlay, probe=probe or CubeProbe(), model=model)
+        return cls(doc=doc, overlay=overlay, probe=probe or CubeProbe(), model=model, full=full)

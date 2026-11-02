@@ -23,6 +23,21 @@ profiles/<connection>.probe.json  committed warehouse profile (`dst probe`)
 profiles/<connection>.json        drift baseline (`dst drift --accept`, also written by `dst probe`)
 ```
 
+A pair of entities has one relationship — unless the pair is joined once per
+*role*. A booking has a payer and a passenger, both persons: two files, each with
+its own `role:`, and the lens addresses each role as `<right>_<role>`
+(`persons_payer.city`, `persons_passenger.city`), joining both in one query.
+The same role twice on one pair is refused at plan, by name.
+
+```yaml
+# semantic/relationships/bookings__persons__payer.yaml
+left: bookings
+right: persons
+"on": bookings.payer_id = persons.id
+relationship: many_to_one
+role: payer
+```
+
 Subfolders are organization only — the asset *name* is identity — so anything
 under `semantic/entities/**.yaml` loads. That is why `dst init --example`
 parks its demo assets in `semantic/entities/examples/`,
@@ -152,9 +167,12 @@ pinned_dimensions: ["currency"]
   of scope on every one of them. A pattern matches a field or a bare dimension
   (one with no `expr`), since either puts the column in the lens; the bare
   dimension is withheld with its column. Plan fails on a pattern that matches
-  neither, on a hidden column a computed dimension, metric, key or filter still
+  neither, on a hidden column a computed dimension, metric or key still
   reads, and on a certified answer whose SQL reads a hidden column: hiding less
-  than you believe is the silent miss this exists to stop. Plan also warns
+  than you believe is the silent miss this exists to stop. A `population_filter`
+  or a metric's `filters` may read a hidden column: those predicates run inside
+  the SQL dst compiles, and the column is still never selected, grouped by,
+  listed or readable through `sql`. Plan also warns
   `sensitive_columns` when an entity in scope carries a column named like
   personal data (`personal_id`, `ssn`, `email`, `phone`, `birth_date`,
   `date_of_birth`, `address`) with no `hide` on it and no definition `about`
@@ -202,7 +220,10 @@ dimensions:
 `not_computable` in `lens.yaml` names a measure the lens must refuse rather than
 approximate: `measure`, `aliases`, an optional `route_to` and `reason`. The
 `query` door refuses a question naming any of them, deterministically, and so
-does the `sql` door: a caller-written statement that names a column the entry
+does the `sql` door; when the caller names no lens, the router sends a question
+naming the measure or an alias to this lens (or to the one `route_to` names),
+so the refusal is the answer and no sibling serves a different figure under
+the asked name. The `sql` door: a caller-written statement that names a column the entry
 names (`birth_date` for an alias `birth date`, projected or filtered) is refused
 with the same sentence. With `row_level: true`, the listing itself is the
 measure: a statement that returns one row per entity key (a key column in its
@@ -232,11 +253,15 @@ not_for:
     sibling: location_movements
 ```
 
-A question that names every content word of an ask, each as a whole word
-(hyphens and underscores read as spaces, function words ignored), is refused
-before typing or generation: `this lens does not answer walk-in revenue; ask
-day_passes`. A question sharing one word with an ask ("member churn")
-is not that ask. On a lens with one entity, an `Avoid for:` line in the entity's
+A question that says an ask as a phrase (its content words in order and next
+to each other; hyphens and underscores read as spaces, function words
+ignored) is refused before typing or generation: `this lens does not answer
+walk-in revenue; ask day_passes`. A question sharing one word with an ask
+("member churn"), or scattering its words, is not that ask. When several asks
+match, the longest names the refusal. A one-word ask that sits inside one of
+the lens's own metrics (`rate` on a lens measuring `retention rate`) would
+refuse that metric, so it is never matched: `dst plan` keeps it, the doors
+and the router ignore it. On a lens with one entity, an `Avoid for:` line in the entity's
 `use_cases` is read the same way, with no sibling (`Avoid for: location-level
 churn; meeting-room revenue` declares two asks, a parenthetical is ignored).
 
@@ -377,6 +402,17 @@ metrics:
     expr: arr_snapshots.arr
     additivity: level
 ```
+
+A level belongs on a table that holds one row per record **per snapshot**. On a
+table that holds one row per record, dated by when it was created (an order, a
+rental, a deal), there is no snapshot to pin: the newest day holds a sliver of
+the rows, not the current state. When the probe shows the entity key is unique
+per row, a level on such a table asked with no period reads the whole table, a
+stated period reads the rows dated inside it, and `dst plan` warns
+`level_on_creation_date` so you can decide whether the metric is a flow after
+all. A ratio is dated as its operands are: each operand takes a stated period on
+its own time field, and `additivity: level` on a ratio of flows is a plan error
+(`level_on_flow_ratio`).
 
 A level metric needs a time field, and apply says so when there is none. A
 level and a flow cannot share one query (the window cannot both keep every row
@@ -736,6 +772,22 @@ What an exposed table is, on every rail:
   or no count possible, the line says `could not verify the grain of <table>` and
   why, and the answer is never `verified`. The `sql` tool returns the same lines in
   its `grain` field.
+- three more checks run on every answer that reads one, on `query` and the `sql` tool
+  alike, each a check on the verification report and a line in `degraded`: `JOIN:`,
+  the rows after the statement's joins against the rows of its base table (a join
+  that multiplies rows fails the check with both counts, mode `wrong_grain`);
+  `CLOCK:`, what each time column the statement reads records, from the blueprint's
+  `clocks`, or that no clock is declared for it; `RECONCILE:`, the leading number
+  beside a certified answer of the lens that reads the same tables over the same
+  window (the date literals both carry), with the delta when they differ. A check
+  that could not run says `could not close` and why. None of them lifts the grade.
+- the request log carries it as `lane: explore`. `dst observe` reports the lane's
+  count and cost apart from governed queries, and `dst test` scores behavioral
+  cases answered this way on their own `explore:` line, right, honest and wrong.
+- a review ticket on such an answer carries the question, the SQL, the tables read
+  and every check; approval certifies the pair, pinned to the tables' blueprints
+  (`dst rule --certify`), or scaffolds an entity per table and a lens over them as a
+  slot map (`dst seed-lens`). See [the correction loop](correction-loop.md).
 - `describe_lens` lists it under `exposed_tables`, apart from `entities`, with a note
   that answers from it are ungoverned. Each table is a summary: its grain, key,
   `versions`, row count, column count and `flags` (`no blueprint`, `key fails`,

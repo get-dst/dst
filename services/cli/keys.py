@@ -1,5 +1,5 @@
-"""Secrets and credentials: `dst secret`, `dst rotate-key`, `dst keys`, `dst revoke-key`,
-`dst revoke-token`."""
+"""Secrets and credentials: `dst secret`, `dst rotate-key`, `dst keys` (create, list,
+sync-idp), `dst revoke-key`, `dst revoke-token`."""
 
 from __future__ import annotations
 
@@ -128,6 +128,33 @@ def _keys(args: argparse.Namespace) -> int:
         )
         print(f"key (store it now — shown once): {key['key']}")
         return 0
+    if args.action == "sync-idp":
+        # The server reads the IdP (it holds the users-endpoint token); this
+        # verb only asks and prints. A 503 is the server refusing to revoke on a
+        # listing it could not trust — surfaced, never retried into a revoke.
+        r = httpx.post(
+            f"{url}/mgmt/callers/sync-idp",
+            headers=headers,
+            params={"dry_run": "true" if args.dry_run else "false"},
+            timeout=120,
+        )
+        if r.status_code == 503:
+            print(f"error: {r.json().get('detail')}", file=sys.stderr)
+            return 1
+        report = r.raise_for_status().json()
+        verb = "would revoke" if report.get("dry_run") else "revoked"
+        gone = report.get("revoked") or []
+        print(
+            f"identity provider lists {report.get('listed')} user(s); "
+            f"{report.get('callers')} caller(s) here are bound to it"
+        )
+        if gone:
+            print(f"{verb} {len(gone)} caller(s): {', '.join(gone)}")
+            if not report.get("dry_run"):
+                print(f"keys revoked: {report.get('keys_revoked')}")
+        else:
+            print("every bound caller is still listed — nothing to revoke")
+        return 0
     r = httpx.get(f"{url}/mgmt/callers", headers=headers, timeout=60)
     for c in r.raise_for_status().json():
         print(
@@ -135,6 +162,7 @@ def _keys(args: argparse.Namespace) -> int:
             "·",
             ", ".join(c.get("groups") or []) or "no groups",
             *(["· driver"] if c.get("driver") else []),
+            *(["· idp"] if c.get("idp") else []),
         )
     return 0
 
@@ -264,9 +292,17 @@ def register_rotate_key(sub: Any) -> None:
 
 
 def register_keys(sub: Any) -> None:
-    p = sub.add_parser("keys", help="create a caller + key, or list callers")
-    p.add_argument("action", choices=["create", "list"])
+    p = sub.add_parser(
+        "keys", help="create a caller + key, list callers, or sync callers with the IdP"
+    )
+    p.add_argument("action", choices=["create", "list", "sync-idp"])
     p.add_argument("--caller", help="caller name (required for create)")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="sync-idp: report the callers the identity provider no longer lists "
+        "without revoking their keys",
+    )
     p.add_argument(
         "--group",
         action="append",

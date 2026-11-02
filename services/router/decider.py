@@ -43,6 +43,7 @@ from services.router.sibling import (
     metric_name_owner,
     named_lens,
     named_metrics,
+    refusal_owner,
     shared_metric,
     unique_name_owner,
 )
@@ -608,7 +609,9 @@ def route_question(
     drop lenses whose ``not_for`` names the ask; route a certified question to its
     one owning lens; keep the lenses declaring every source system the question
     names (``known_sources``: every system a lens in the org declares, default
-    the candidates' own; none declaring it is uncovered, saying so). Then rank
+    the candidates' own; none declaring it is uncovered, saying so); route a
+    question naming a measure a lens declares not computable to that lens (or
+    where its entry routes it), whose refusal is the answer. Then rank
     the rest by similarity, a lens declaring a metric the question names first,
     and check whole-question coverage (``router.coverage``) on the top ``k``:
 
@@ -644,6 +647,26 @@ def route_question(
     profiles, uncovered = by_sources(question, profiles, known)
     if uncovered is not None:
         return RouteDecision(False, None, 0.0, [], uncovered, decided_by="declared-name")
+    # A measure some lens declares it cannot compute: that lens owns the
+    # refusal (its door says why), or hands the question to the lens its
+    # entry routes to. No fallbacks: a refusal by declaration is the answer.
+    owner = refusal_owner(question, profiles)
+    if owner is not None:
+        return RouteDecision(
+            True,
+            owner,
+            1.0,
+            [],
+            "routed (names a measure declared not computable)",
+            decided_by="not_computable",
+            chain=[
+                {
+                    "lens": owner,
+                    "result": "routed",
+                    "why": "names a measure a lens declares it cannot compute",
+                }
+            ],
+        )
     scoring = distinct_profiles(profiles)
     if scorer is not None:
         # A stored scorer was built over every accessible lens: keep its ranking

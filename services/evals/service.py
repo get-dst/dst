@@ -789,8 +789,29 @@ def lens_serve(
     raw-SQL generation the lens does not allow. It asks for no one, so every
     lens of the org counts as holding a table the question names."""
     from services.api.query import serve_lens_question, tables_held_elsewhere
+    from services.serve import question as question_step
+
+    cat = question_step.catalogue(lens, bundle)
 
     def serve(question: str) -> PipelineResult:
+        # The question-type step the door runs first, so a case pinned to a
+        # definition or a capability answer grades what a caller gets. The
+        # log is not read here (no caller); an admin case says so.
+        typed, answered = question_step.step(
+            question,
+            cat,
+            lens=lens,
+            request_id="eval",
+            org_id=str(org_id),
+            caller="eval",
+            model=resolved,
+            log_reader=False,
+        )
+        if answered is not None:
+            response, trace = answered
+            return PipelineResult(response=response, trace=trace)
+        if typed.type == "sql":
+            question = typed.subject
         result, _assembled = serve_lens_question(
             lens,
             question,
@@ -801,6 +822,8 @@ def lens_serve(
             resolved=resolved,
             tables_elsewhere=lambda: tables_held_elsewhere(None, exclude=lens, org_id=org_id),
         )
+        if typed.type == "sql":
+            question_step.as_sql_answer(typed, result.response, result.trace)
         return result
 
     return serve

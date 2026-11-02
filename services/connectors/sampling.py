@@ -55,6 +55,7 @@ from services.contracts.profile import (
     TableProfile,
     TableSampleSpec,
     TimeCoverage,
+    is_compound_type,
     is_numeric_type,
     is_temporal_type,
     is_text_type,
@@ -478,10 +479,11 @@ def stats_sql(
         numeric, temporal = is_numeric_type(col.type), is_temporal_type(col.type)
         if not col.distribution_only:
             selects.append(f"COUNT({qc}) AS nn_{i}")
+            key = _distinct_key(qc, col.type, dialect)
             if approx is not None:
-                selects.append(f"{approx}({qc}) AS dc_{i}")
+                selects.append(f"{approx}({key}) AS dc_{i}")
             else:
-                selects.append(f"COUNT(DISTINCT {qc}) AS dc_{i}")
+                selects.append(f"COUNT(DISTINCT {key}) AS dc_{i}")
             if col.shape_only:
                 continue
             if numeric or temporal:
@@ -510,6 +512,20 @@ def stats_sql(
         predicate=predicate,
     )
     return f"SELECT {', '.join(selects)} FROM {relation}"
+
+
+def _distinct_key(column: str, column_type: str, dialect: SamplingDialect) -> str:
+    """The expression a column's distinct count runs over. BigQuery allows
+    DISTINCT aggregates (exact or approximate) only over groupable types: a
+    STRUCT/RECORD, ARRAY, JSON or GEOGRAPHY column is counted through its
+    TO_JSON_STRING, a deterministic text key for every one of them."""
+    if dialect == "bigquery" and _bigquery_non_groupable(column_type):
+        return f"TO_JSON_STRING({column})"
+    return column
+
+
+def _bigquery_non_groupable(column_type: str) -> bool:
+    return is_compound_type(column_type) or column_type.strip().upper() in ("JSON", "GEOGRAPHY")
 
 
 def _epoch(expr: str, dialect: SamplingDialect) -> str:
@@ -552,7 +568,7 @@ _TEXT_CAST = {
 
 def top_values_batch_sql(
     table: str,
-    columns: list[tuple[int, str, int]],
+    columns: list[tuple[int, str, int, str]],
     *,
     dialect: SamplingDialect,
     max_rows: int,
@@ -563,7 +579,7 @@ def top_values_batch_sql(
 ) -> str:
     """Every column's value dictionary in ONE statement: the per-column top-k
     queries as UNION ALL members, each tagged with its column index and cast to
-    text so the members' types agree. ``columns``: (index, name, limit). Rows
+    text so the members' types agree. ``columns``: (index, name, limit, type). Rows
     come back ordered by column, then frequency, exactly as the single-column
     query orders them."""
     text = _TEXT_CAST[dialect]
@@ -576,12 +592,13 @@ def top_values_batch_sql(
             max_rows=max_rows,
             row_count=row_count,
             limit=limit,
+            column_type=column_type,
             exact=exact,
             is_view=is_view,
             predicate=predicate,
         )
         + f") AS t_{i}"
-        for i, name, limit in columns
+        for i, name, limit, column_type in columns
     ]
     return " UNION ALL ".join(members) + " ORDER BY c, n DESC, v"
 
@@ -627,6 +644,7 @@ def top_values_sql(
     max_rows: int,
     row_count: int | None,
     limit: int,
+    column_type: str = "",
     exact: bool = False,
     is_view: bool = False,
     predicate: str | None = None,
@@ -635,8 +653,11 @@ def top_values_sql(
 
     ``exact`` reads every row, so the list it returns is every value the column
     holds (up to ``limit``); otherwise it is the sample's values and the caller
-    must mark it incomplete."""
+    must mark it incomplete. A column BigQuery cannot group or order by
+    (STRUCT, ARRAY, JSON, GEOGRAPHY) is keyed through TO_JSON_STRING, like its
+    distinct count."""
     qc = _quote_name(column, dialect)
+    key = _distinct_key(qc, column_type, dialect)
     relation = _sampled_relation(
         table,
         qc,
@@ -648,7 +669,7 @@ def top_values_sql(
         predicate=predicate,
     )
     return (
-        f"SELECT {qc} AS v, COUNT(*) AS n FROM {relation} "
+        f"SELECT {key} AS v, COUNT(*) AS n FROM {relation} "
         f"WHERE {qc} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT {int(limit)}"
     )
 
@@ -979,7 +1000,7 @@ def _collect_top_values(
     list is ordered by frequency like any other. Only when counted: a sampled
     list that long could never be complete, and nothing would read it.
     """
-    wanted: list[tuple[int, str, int]] = []
+    wanted: list[tuple[int, str, int, str]] = []
     for i, (col_spec, col) in enumerate(zip(specs, columns, strict=True)):
         if col_spec.shape_only:
             continue
@@ -992,7 +1013,8 @@ def _collect_top_values(
         )
         if not (col.is_low_cardinality or matchable):
             continue
-        wanted.append((i, col_spec.name, max(limit, MATCH_DICTIONARY_MAX) if matchable else limit))
+        top = max(limit, MATCH_DICTIONARY_MAX) if matchable else limit
+        wanted.append((i, col_spec.name, top, col_spec.type))
     if not wanted:
         return
     # One statement for every dictionary of the table: on an engine that
@@ -1011,7 +1033,7 @@ def _collect_top_values(
         rows = run(sql).rows
     except SampleBudgetExceeded:
         return
-    values_by: dict[int, list[str]] = {i: [] for i, _, _ in wanted}
+    values_by: dict[int, list[str]] = {i: [] for i, *_ in wanted}
     for r in rows:
         c = _as_int(r[0])
         if c in values_by:

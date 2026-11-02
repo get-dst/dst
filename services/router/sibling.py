@@ -19,8 +19,13 @@ here is a fact the lenses already declare, applied exactly:
 6. ``metric_name_owner`` — a question naming a metric (its name or label)
    that one candidate alone declares points at that candidate. A signal, not
    a route: the router takes it only when that lens also covers the whole
-   question (``router.coverage``). Aliases are not read here: they widen the
-   metric slot inside a lens, never the questions a lens takes.
+   question (``router.coverage``). A declared alias counts only where no
+   candidate calls a metric by that phrase: a name or label outranks it.
+8. ``refusal_owner`` — a question naming a measure a lens declares it cannot
+   compute (``not_computable``, the measure or an alias) belongs to that
+   lens, whose door refuses it with the reason, or to the lens its entry
+   routes to. The refusal is the governed answer; a sibling similarity ranks
+   closer would serve a different figure under the asked name.
 7. ``shared_metric`` — a metric several of the top candidates declare is
    theirs to split: a lens named after the asked thing, a declared name only
    one of them carries, or the only one that can split over time when the
@@ -118,18 +123,63 @@ def _longest(declared: dict[str, set[str]]) -> dict[str, set[str]]:
     }
 
 
-def named_metrics(question: str, candidates: Iterable[CoverageProfile]) -> dict[str, set[str]]:
-    """Each metric phrase (name or label) the question names, the longest
-    reading only, mapped to the candidates declaring it. A phrase of
-    aggregation words alone names no figure."""
+def _named(question: str, candidates: Iterable[CoverageProfile], attr: str) -> dict[str, set[str]]:
     q = _phrase(question)
     declared: dict[str, set[str]] = {}
     for p in candidates:
-        for phrase in p.metric_names:
+        for phrase in getattr(p, attr):
             n = _phrase(phrase)
             if not set(n.split()) <= _AGG_WORDS and _contains(q, n):
                 declared.setdefault(n, set()).add(p.lens)
-    return _longest(declared)
+    return declared
+
+
+def named_metrics(question: str, candidates: Iterable[CoverageProfile]) -> dict[str, set[str]]:
+    """Each metric phrase the question names, the longest reading only,
+    mapped to the candidates declaring it. A phrase some candidate calls a
+    metric (name or label) is theirs; a phrase only declared as an alias is
+    its aliasers'. A phrase of aggregation words alone names no figure."""
+    candidates = list(candidates)
+    by_name = _named(question, candidates, "metric_names")
+    by_alias = _named(question, candidates, "metric_aliases")
+    return _longest({**by_alias, **by_name})
+
+
+def refusal_owner(question: str, candidates: Iterable[CoverageProfile]) -> str | None:
+    """The lens a question naming a not-computable measure belongs to: the
+    one its ``route_to`` names when that lens is a candidate, else the lens
+    declaring it (the first by name when several do). None when the question
+    names no such measure, or names it as a metric some candidate calls its
+    own (``named_metrics``: that lens computes it)."""
+    candidates = list(candidates)
+    q = _phrase(question)
+    hits: dict[str, set[str]] = {}
+    for p in candidates:
+        for surface in p.refuses:
+            n = _phrase(surface)
+            if n and _contains(q, n):
+                hits.setdefault(n, set()).add(p.lens)
+    if not hits:
+        return None
+    computed = {n for n, owners in named_metrics(question, candidates).items() if owners}
+    lenses = {p.lens for p in candidates}
+    for surface in sorted(_longest(hits), key=lambda n: (-len(n.split()), n)):
+        if any(_contains(c, surface) or _contains(surface, c) for c in computed):
+            continue
+        owners = sorted(hits[surface])
+        for owner in owners:
+            target = next(
+                (
+                    t
+                    for s, t in next(p for p in candidates if p.lens == owner).refuses.items()
+                    if _phrase(s) == surface
+                ),
+                "",
+            )
+            if target in lenses:
+                return target
+        return owners[0]
+    return None
 
 
 def metric_name_owner(question: str, candidates: Iterable[CoverageProfile]) -> str | None:

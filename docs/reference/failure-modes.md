@@ -2,7 +2,10 @@
 
 When dst does not return a clean answer, the response says why in one word. A
 refusal, a clarification and an answer whose confidence was capped each carry
-exactly one `mode`, chosen from the twenty names below. The same name appears on
+exactly one `mode`, chosen from the twenty names below. Six more names mark a
+question that asked for no number and was answered before any binding
+([Question types](../concepts/question-types.md)); they ride the same field and
+are counted apart. The same name appears on
 the response, the receipt, the request log, `dst test` and `dst observe`, so a
 count by mode reads as a list of work: each name points at the file or the
 component that fixes it.
@@ -56,7 +59,7 @@ known (`services/contracts/failure_modes.py`).
 | `uncovered_word` | A word of the question maps to nothing in the answer: not the metric, a filter, a dimension, the period or a definition. | metric `aliases`, `semantic/definitions/` |
 | `window_misbound` | The window was read correctly and applied to the wrong clock or the wrong column type. | dst; a text-typed clock on an entity |
 | `data_gap` | The window reaches past where the data runs; the gap is stated and confidence is capped. | `probe.max_age`, blueprint `clocks` |
-| `empty_result` | Zero rows or a NULL figure where rows should exist; served as a finding, never as `0`. | the filter value, or the dictionary |
+| `empty_result` | Zero rows or a NULL figure where rows should exist; served as a finding, never as `0`. On the Cube lane a zero from a filter value the dictionary holds, over a window every feed read is loaded through, is a measured 0: served with the window stated (`empty_result:disclose`); refused only when the value or the window cannot be verified. | the filter value, or the dictionary |
 | `wrong_grain` | The grouping, ranking or population is not the asked subject. | entity `additivity`, blueprint `grain` |
 | `partial_ask` | A question with several parts would be answered for fewer than all of them. | dst; certified answers covering the parts |
 | `scope_violation` | The SQL reads a table outside the lens or the caller's scope. | `expose:`, or ask the lens that holds it |
@@ -70,6 +73,22 @@ known (`services/contracts/failure_modes.py`).
 |---|---|---|
 | `stale` | The data or the layer is older than declared, or a table a reader depends on changed since the baseline. | `dst probe`, `dst drift --accept` |
 | `provider_down` | A provider the answer needs (typed decider, router decider, embedder, chat model, warehouse, Cube) is unavailable; the request names it. | provider configuration |
+
+## The six question types
+
+Decided before routing and before any binding (`services/resolve/question_type.py`).
+These are answers of their own kind, not refusals: `dst observe` prints them on a
+`question types:` line and `dst test` tallies them as `by_type`, both apart from the
+twenty above.
+
+| Mode | The question asked for | What comes back |
+|---|---|---|
+| `definition` | what a term means, how a figure is calculated, how two terms differ | the member's description, expression, filters, aliases and values, or the definitions page; `status: refused` when no lens defines it (never invented) |
+| `capability` | whether the data holds something, whether a question can be answered | yes with the member and the question to ask; no with what is declared; a `not_computable` entry quoted, as `refused` |
+| `sql_request` | the SQL behind a figure | the data question served as usual, the compiled SQL (and the Cube query) as the answer body |
+| `hand_off` | which report or place shows something | the project's `hand_off:` entries; `refused` when none is declared; "which lens holds X" names the lens and member |
+| `admin` | the caller's own earlier requests | the caller's rows from the request log, never another caller's |
+| `not_a_data_question` | nothing about data: an errand, a greeting, chit-chat | `status: refused`, naming the hand-off |
 
 ## Apply and providers
 

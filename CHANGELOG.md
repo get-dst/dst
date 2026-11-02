@@ -29,6 +29,199 @@ needs, and the unapplied list, then tells you to run `dst migrate`.
 
 Full upgrade, rollback and restore paths: **[docs/upgrading.md](docs/upgrading.md)**.
 
+## [0.15.1] — 2026-11-02
+
+Outside-lens answers are verified, reviewable and counted apart, beside the Cube-lane
+fixes below. Two migrations, 0077 (`caller.idp_subject`) and 0078 (`request_log.lane`);
+run `dst migrate` before serving.
+
+### Added
+
+- **Three checks before an outside-lens number.** An answer read from an exposed table,
+  through the `sql` tool or `query`, now carries beside its grain line: `join`, the rows
+  after the statement's joins against its base table's rows (a join that multiplies rows is
+  disclosed with both counts, mode `wrong_grain`); `clock`, what each time column read
+  records per the table's blueprint, or that no clock is declared; `reconcile`, the leading
+  number computed beside a certified answer of the lens over the same tables and window,
+  with the delta. Each is a line on the receipt; one that could not run says `could not
+  close` and why. The `sql` tool's response adds `sql`, `clock` and `mode`. Confidence is
+  capped as before.
+- **Outside-lens answers in the review queue.** The `sql` tool takes `question`; a review
+  ticket on such a request carries the question, the SQL, the tables read and every check.
+  `dst rule --certify` writes the pair pinned to the tables' blueprints; on a lens served
+  through Cube, `--cube-query` supplies the Cube query and the pair is certified as
+  `kind: cube` only on row equality, written to the lens's `certified_answers.yaml`.
+  `dst seed-lens <ticket>` scaffolds an entity per table read and a lens over them, slots
+  marked `TODO`, from `GET /mgmt/reviews/{id}/seed`. Certifying a read that carried no
+  question is refused.
+- **The explore lane.** Request rows served from an exposed table carry `lane: explore`.
+  `dst observe` reports the lane's count and cost on its own line and leaves it out of the
+  governed headline; `dst test` scores behavioral cases answered this way on an `explore:`
+  line (right, honest, wrong, AI cost), also under `explore` in `--json`.
+- Role relationships: a pair of entities can be joined once per role. A
+  relationship file may carry `role:` (`semantic/relationships/<left>__<right>__<role>.yaml`,
+  e.g. a booking's `payer` and its `passenger`, both persons). The compiled lens
+  addresses each role as `<right>_<role>` (`persons_payer.city` beside
+  `persons_passenger.city`), joins both roles in one query under distinct
+  aliases, and `dst migrate-model` writes an `extends:` cube per role
+  (`persons_payer` extending `persons`) that the views list. `dst plan` now
+  refuses a second relationship on a pair only when it repeats the same role,
+  and the refusal names the role.
+
+### Fixed
+
+- **A lens owns the refusal of what it declares it cannot compute.** A question naming a
+  `not_computable` measure or one of its aliases routes to the lens declaring it (or to the
+  lens its `route_to` names), on the typed and the Cube lane, so that lens's own refusal is
+  the answer. Before, the term was no routing anchor: a sibling scored closest and served a
+  different figure under the asked name. Routing now scores a metric's declared aliases
+  too, which closes the 0.15.0 known issue: a question phrased only in an alias one lens
+  alone declares routes to it; a name or label still outranks an alias.
+- **`not_for` matches the ask as a phrase.** A question is refused for an ask when it says
+  the ask's content words in order and next to each other (function words between them
+  ignored), not when it merely contains each of them somewhere; the longest matching ask
+  names the refusal. A one-word ask that sits inside one of the lens's own metrics (`rate`
+  on a lens measuring `retention rate`) refused that metric; it is now never matched, on
+  both lanes and in the router.
+- BigQuery profiling no longer fails on tables with STRUCT/RECORD, ARRAY (REPEATED),
+  JSON or GEOGRAPHY columns. The sampling statements ran `COUNT(DISTINCT col)` /
+  `APPROX_COUNT_DISTINCT(col)` and `GROUP BY col` over types BigQuery cannot group
+  ("Aggregate functions with DISTINCT cannot be used with arguments of type …"), and a
+  REPEATED column was read as its element type, so an `ARRAY<STRING>` or
+  `ARRAY<NUMERIC>` column was profiled as a scalar and given MIN/MAX/AVG too. These
+  columns are now typed `ARRAY<…>` by the connector, and their distinct count and value
+  dictionary are keyed on `TO_JSON_STRING(col)`; NUMERIC and STRING columns are unchanged.
+- `hide` can cover a column an entity's `population_filter` or a metric's `filters` reads. Plan
+  and apply used to refuse the model, so the column stayed public; now those compiler-owned
+  predicates run inside the SQL dst compiles while the column is never selected, grouped by,
+  listed, sampled or readable through `sql` (the guard admits the read on the compiled door
+  only, in predicate position only). `dst migrate-model` matches `hide` patterns as the compile
+  does and marks the column `public: false` in the cube beside the baked filter, so it never
+  arrives as a public dimension or in a view.
+- A ratio metric is dated as its operands are. "Returns in September over starts in
+  September" windows the numerator on its own `agg_time_field` (`returned_at`) and the
+  denominator on the entity clock (`started_at`); before, both sides took the window on
+  the entity clock, so a rate of two differently dated flows was served for the wrong
+  rows. The compiled metric path, the typed resolver's choice of clock and `compare`
+  all read the same rule. `dst plan` fails with `level_on_flow_ratio` when a ratio of
+  flows declares `additivity: level`: such a ratio reads as its operands do, and the
+  declaration could only pin it to the newest day.
+- A level metric on a creation-dated table reads the whole table when no period is
+  asked. One row per record, dated by when it was created, is no snapshot: its "latest
+  snapshot" was the sliver of rows created on the newest day, served as the current
+  stock. When the stored profile shows the entity key is unique per row, the compiled
+  path drops the latest-snapshot pin for a question with no period; a stated period
+  reads as before. `dst plan` warns `level_on_creation_date`, naming the metric.
+- Cube-backed lenses carry the same two facts in `meta.dst`: `dst migrate-model` never
+  writes `additivity: level` on a ratio of flows (the report says it dropped it), and
+  marks a level on a creation-dated table `creation_dated: true`, which the Cube lane
+  reads to skip its snapshot pin when no period is asked.
+
+- **Cube lane: view members are named exactly as the model lists them.** `dst
+  migrate-model` writes a joined view with `prefix: true`, so the meta names
+  `<view>.<cube>_<member>`; the frontier lane listed cube members and the model wrote
+  `<view>.<member>`, which Cube does not have, and every question over a joined
+  dimension failed. The prompt now lists each view's members verbatim, with the clock
+  named as the view names it and a note that a joined cube's members carry the cube name
+  as a prefix; the driver's describe note says the same. `migrate-model` keeps
+  `prefix: true` only in a view where a member name occurs in two of its cubes (`month`,
+  `entity`, the join key); a view with nothing to collide lists its members bare, and the
+  access policy names them bare.
+- **A miss is never reported as a hidden column.** An unknown `<view>.<member>` that
+  happened to share a hidden dimension's name was refused as "withheld". The hidden check
+  reports a member as withheld only when the lens model apply stored holds a member of
+  that exact name and the caller is outside its groups; any other unknown name is
+  `not_declared`, naming the member, so the caller can spell it right.
+- **A level measure with no period is read on its data-end day.** Asked without a period
+  word, a stock (headcount, active accounts) was read in a month bucket and the latest
+  bucket kept: the whole open month, so a `count_distinct` unioned every day's accounts
+  and a `sum` added every daily snapshot. It is now pinned to the one day the clock's
+  data ends, at day grain, one row per dimension, and the NOTE describes the SQL that
+  ran; when the probe records no data end, the level is read at day grain over every day
+  and the latest day kept, and the NOTE says that instead. A pin to a day that holds no
+  snapshot is refused (the probe is stale), never served as 0 rows.
+- **"today" on a level is the latest snapshot; on a flow with nothing loaded it is a
+  gap.** A window after the data end on a level reads the latest snapshot and says the
+  asked window holds none (`data_gap`, grade partial). A flow asked for a window nothing
+  is loaded for (today, with the data through yesterday) that came back with 0 rows is
+  refused as `data_gap` naming where the data ends, never served as a count of 0.
+- **A share, ratio or per-day average is computed from the parts.** The lane answered a
+  share as the numerator and the denominator, and a per-day average as the total plus
+  "divide by N". dst now divides deterministically over the served parts (the narrower
+  query is the numerator of a share; a per-day or per-week average is the total over the
+  days of the window that ran), leads the answer with the figure and shows the parts
+  beside it under `result` 1, 2 (the figure under 0). Parts over different windows are
+  not divided, and the answer says why.
+- **Cube-lane request rows carry `wh_bytes` and `wh_cost_usd`**, summed over every
+  statement the ask ran and priced by the connector's kind, as the typed lane stamps them.
+- **Cube's warehouse settings reach the sidecar only when set.** The compose files (and
+  the one `dst init --cube` scaffolds) passed an empty `CUBEJS_DB_BQ_LOCATION` when the
+  variable was unset, so Cube's BigQuery driver failed every query while `/readyz` and
+  the meta stayed green. The optional `CUBEJS_DB_*` entries are passed only when `.env`
+  sets them, the Helm chart skips an empty `cube.env` value, and `dst init --warehouse
+  bigquery --cube` writes the driver's variables into `.env` with the location read from
+  the dataset you name (asked otherwise), never an empty line.
+- **`dst cube status` queries the warehouse.** The meta compiles with no warehouse call,
+  so a dead driver showed only when the probe erred on every table. `dst cube status`,
+  `dst doctor` and `/ready`'s `cube` block now run one `limit 1` query on the smallest
+  cube and report the warehouse's answer; status exits 1 when it fails.
+- **A driver's question text no longer selects an ambiguous term's reading.** The select-word
+  check read the `question` an agent passed with its Cube query, so a rewritten question could
+  pick a reading the asker never named. `query_cube` takes `route_id`, the `request_id`
+  `route_query` returned: the select words are read from the question recorded there, never
+  from the free text. Without it no select word applies: the term's declared default is served
+  with the others disclosed, or, with no default and readings apart, the user is asked.
+- **A measured zero inside the loaded window is served.** `empty_result` refused every zero
+  or empty result behind a dictionary filter as nothing recorded. A zero from a filter whose
+  values the dictionary holds, over a window every feed the measures read is loaded through,
+  is served with the window stated (`empty_result:disclose`). The refusal stays for what
+  cannot be verified and says which: a value the dictionary lacks, no window asked, a measure
+  with no recorded data end, or a feed ending before the window does.
+- **A complete period still maturing is said so, and "partially loaded" only on load
+  evidence.** The partial-period disclosure said a period was not fully loaded whatever the
+  monitor's evidence. The overlay's cube block takes `matures_after` (measure → days after a
+  period ends before its values are final: jobs billed after completion, refunds still
+  arriving). A short month whose load evidence says complete is disclosed, within those days,
+  as "complete; values still maturing (<measure>)"; load evidence of a short load says
+  "partially loaded"; a month volume alone flagged states the ratio and claims nothing about
+  the load. The probe record carries `load_evidence` and `maturing`.
+- **Question-type rules are a table per language.** The rules were English regexes in code;
+  each rule is now a table of phrasings per language, and dst ships the English table. A
+  project adds a language by adding a table, never a branch.
+
+### Question types
+
+Every door decides what kind of thing was asked before any binding
+(`services/resolve/question_type.py`): `query | definition | capability | sql | locate |
+admin | not_a_data_question`. Only a query reaches the ledger and the warehouse. A
+definition ("what does SQO mean", "difference between A and B", "how is X calculated") is
+answered from the lens model: member descriptions, expressions, filters, aliases, dictionary
+values, the definitions pages; nothing runs. A capability ask ("do we have NPS", "is it
+possible to") gets a yes naming the member and the question to ask, or a no naming what is
+declared, with a `not_computable` entry quoted as written. A SQL ask serves the data question
+and returns the compiled SQL (and the Cube query) as the answer body. A "what report shows"
+ask cites the project's new `hand_off:` list in `dst.yaml` (`{name, kind, url | mcp}`); dst
+keeps no report inventory. "My last request" reads the caller's own request log, never
+another caller's. An errand or a greeting is refused as not a data question, naming the
+hand-off. The rules are deterministic; a model reads the open case only on the HTTP door
+with no driver, never for an agent in driver mode.
+
+Six new modes carry the types (`definition`, `capability`, `sql_request`, `hand_off`,
+`admin`, `not_a_data_question`). `dst observe` prints them on a `question types:` line and
+`dst test` tallies them as `by_type`, both apart from refusals and clarifications; eval
+cases accept `expect: <type>`.
+
+The word ledger has a stop-list of glossing words (`means`, `want`, `can`, `where`,
+`through`, `please`, ...) that name nothing in a model, so a polite sentence no longer stops
+the word check. Operator words (`average`, `rate`, `share`, `conversion`, `growth`, `drop`)
+bind as an operation over the measures the question names: the check passes when the query
+carries it (an average measure; a ratio measure or two measures composed; a comparison
+window or a growth measure) and otherwise asks, naming the lens's candidate measures. A share
+served as the plain total no longer passes.
+
+No migration.
+
+
 ## [0.15.0] — 2026-10-30
 
 Governed questions can now be served through Cube. A project with a `cube:` block in

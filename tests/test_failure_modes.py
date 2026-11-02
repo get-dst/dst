@@ -34,8 +34,8 @@ SERVICES = Path(__file__).resolve().parents[1] / "services"
 _NON_ANSWERS = {"refused", "rejected", "clarification"}
 
 
-def test_the_vocabulary_is_twenty_names() -> None:
-    assert len(FailureMode) == 20
+def test_the_vocabulary_is_twenty_names_and_six_question_types() -> None:
+    assert len(FailureMode) == 26  # twenty failure modes and six question types
     assert {str(m) for m in FailureMode} == {m.name for m in FailureMode}
 
 

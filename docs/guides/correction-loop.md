@@ -74,6 +74,27 @@ Add a **behavioral test case** for the corrected question to
 `evals/cases.yaml`, so it re-runs on every `dst apply`. A certified fix needs
 no case: the certified corpus already re-tests it.
 
+## An outside-lens answer becomes a lens
+
+An answer read from a table a lens [exposes without
+definitions](project-files.md#exposing-tables-that-have-no-definitions), through the
+`sql` tool with a `question` or through `query`, is eligible for review like any other.
+Its ticket carries what the reviewer rules on: the question, the SQL as it ran, the
+tables it read, and every check with what it decided (grain, data end, join
+conservation, clocks, reconciliation against a certified number). Approval has two
+outcomes:
+
+- `dst rule <ticket> --verdict approve --certify` writes a certified pair, pinned to
+  the blueprints of the tables it read, so a changed grain, key or clock re-tests it.
+  On a lens served through Cube, `--cube-query '<json>'` supplies the Cube query that
+  is the governed reading; dst certifies it only when its rows equal the answer's,
+  and the command writes the `kind: cube` pair to the lens's `certified_answers.yaml`.
+- `dst seed-lens <ticket>` scaffolds an entity file per table read and a lens over
+  them, with the question as a must-answer case. The files say where the definitions
+  go; the slots they cannot fill from the ticket are marked `TODO` for the author.
+
+Either way the next time the question is asked, it is a governed answer.
+
 ## After the fix lands
 
 The corrected question is served from its approved SQL from then on — the

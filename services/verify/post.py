@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
 from services.contracts.cube_probe import PartialPeriod
-from services.contracts.cube_query import CubeFilter, CubeQuery
+from services.contracts.cube_query import CubeFilter, CubeQuery, TimeDimension
 from services.contracts.failure_modes import FailureMode
 from services.cube.lens_view import GRAINS, CubeLensView
 from services.verify.base import Ask, Check, Rows, all_filters, equals_values, fnum, passed, windows
@@ -70,6 +71,11 @@ def data_gap(ask: Ask, q: CubeQuery) -> Check:
     notes: list[str] = []
     hard_all = True
     for m in q.measures:
+        if lens.level_grain(m):
+            # A stock is read at its latest snapshot in or before the window
+            # (``snapshot_split``), which says when that is: a window after
+            # the data end is not a gap in a level.
+            continue
         sts = streams_read(lens, q, m)
         if not sts:
             hard_all = False
@@ -160,12 +166,13 @@ def _partial_hits(lens: CubeLensView, q: CubeQuery, m: str) -> list[tuple[Partia
 
 
 def partial_period(ask: Ask, qs: list[CubeQuery]) -> Check:
-    """A window that includes a period the monitor found only partly loaded
-    is served and disclosed: which period, how complete, judged by which
-    measure, and — when the same measure is read over complete periods
-    beside it — that the comparison sets a partial period against complete
-    ones. dst owns the fact; how to frame a partial period is the caller's
-    judgment, so it never refuses."""
+    """A window that includes a period the monitor found short is served
+    and disclosed: which period, how complete, judged by which measure, what
+    the evidence says (partially loaded; complete with values still
+    maturing; or volume alone) and — when the same measure is read over
+    complete periods beside it — that the comparison sets it against
+    complete ones. dst owns the fact; how to frame the period is the
+    caller's judgment, so it never refuses."""
     name, mode = "partial_period", FailureMode.data_gap
     lens = ask.lens
     seen: dict[tuple[str, str, str], list[tuple[bool, PartialPeriod]]] = {}
@@ -180,12 +187,33 @@ def partial_period(ask: Ask, qs: list[CubeQuery]) -> Check:
         if not any(inc for inc, _ in hits):
             continue
         st = f" ({', '.join(f'{k}={v}' for k, v in p.values.items())})" if p.values else ""
-        notes.append(
-            f"data_gap: partial period - {m}{st} for {period} is loaded at "
+        ratio = (
             f"{p.partial_ratio:.0%} of its trailing {p.trailing_months}-month median, judged by "
-            f"{p.judged_by or m} ({p.value:,.0f} vs {p.trailing_median:,.0f}, loaded to "
-            f"{p.partial_through}{'; ' + p.evidence if p.evidence else ''}): a window that "
-            f"includes {period} understates it"
+            f"{p.judged_by or m} ({p.value:,.0f} vs {p.trailing_median:,.0f})"
+        )
+        # The wording follows the evidence: "partially loaded" only on load
+        # evidence; a complete period declared to mature says so; volume
+        # alone states the ratio and claims nothing about the load.
+        if p.maturing:
+            kind, body = (
+                "maturing",
+                f"is complete (loaded to {p.partial_through}) but its values are still "
+                f"maturing ({p.maturing}): at {ratio}",
+            )
+        elif p.load_evidence:
+            kind, body = (
+                "partial",
+                f"is partially loaded: at {ratio}, loaded to {p.partial_through}; {p.evidence}",
+            )
+        else:
+            kind, body = (
+                "partial",
+                f"is at {ratio}, loaded to {p.partial_through}"
+                + (f"; {p.evidence}" if p.evidence else ""),
+            )
+        notes.append(
+            f"data_gap: {kind} period - {m}{st} for {period} {body}: a window that includes "
+            f"{period} understates it"
             + (
                 f"; the comparison sets {period} against complete periods"
                 if any(not inc for inc, _ in hits)
@@ -200,29 +228,105 @@ def partial_period(ask: Ask, qs: list[CubeQuery]) -> Check:
 # ── empty_result ────────────────────────────────────────────────────────────
 
 
-def _dict_filters(lens: CubeLensView, q: CubeQuery) -> list[str]:
+def _dict_filters(lens: CubeLensView, q: CubeQuery) -> list[CubeFilter]:
     return [
-        f"{f.member} = {', '.join(f.values or [])}"
+        f
         for f in all_filters(q)
         if f.member and f.operator == "equals" and lens.dictionary(f.member) is not None
     ]
 
 
+def _unverified(ask: Ask, q: CubeQuery, filters: list[CubeFilter]) -> list[str]:
+    """Why a zero could not be told from nothing recorded: a filter value
+    the dictionary lacks, no window asked, a measure with no recorded data
+    end, or a window running past a feed's data end. Empty: a measured 0."""
+    lens = ask.lens
+    why: list[str] = []
+    for f in filters:
+        known = {str(v).lower() for v in lens.dictionary(f.member or "") or []}
+        bad = [v for v in f.values or [] if str(v).lower() not in known]
+        if bad:
+            why.append(f"{', '.join(bad)} is not a value of {f.member} the probe holds")
+    spans = [(s, e) for s, e in windows(q, lens) if s]
+    if not spans:
+        why.append("no window was asked, so a zero over all loaded data cannot be told apart")
+    for m in q.measures:
+        sts = streams_read(lens, q, m)
+        if not sts:
+            why.append(f"the probe records no data end for {m}")
+            continue
+        for label, end, _stopped in sts:
+            for _s, e in spans:
+                if end is None:
+                    why.append(f"{label} has no recorded data end")
+                elif end < e:
+                    why.append(f"{label} data ends {end}, before the window ends {e}")
+    return list(dict.fromkeys(why))
+
+
 def empty_result(ask: Ask, q: CubeQuery, rows: Rows) -> Check:
     """A query filtered on dictionary values whose every measure came back
-    empty or zero: nothing was recorded, which is not a measured 0."""
+    empty or zero. Over a window every feed read is loaded through, with
+    every filter value in its dictionary, that is a measured 0: served with
+    the window stated and disclosed. Otherwise nothing was recorded, which
+    is not a measured 0, and the query is refused saying what could not be
+    verified."""
     name, mode = "empty_result", FailureMode.empty_result
     filters = _dict_filters(ask.lens, q)
     if not filters or not q.measures:
         return passed(name, mode)
-    if all(all(fnum(r.get(m)) == 0 for m in q.measures if m in r) for r in rows):
+    if not all(all(fnum(r.get(m)) == 0 for m in q.measures if m in r) for r in rows):
+        return passed(name, mode)
+    shown = "; ".join(f"{f.member} = {', '.join(f.values or [])}" for f in filters)
+    why = _unverified(ask, q, filters)
+    if why:
         return Check(
             name,
             mode,
             "refuse",
-            f"no rows match {'; '.join(filters)} in the window - nothing was recorded, which is "
-            "not the same as a measured 0",
+            f"no rows match {shown} in the window - nothing was recorded, which is not the "
+            f"same as a measured 0 ({'; '.join(why)})",
         )
+    spans = ", ".join(f"{s}..{e}" for s, e in windows(q, ask.lens))
+    return Check(
+        name,
+        mode,
+        "disclose",
+        f"empty_result: a measured 0 - no rows match {shown} in {spans}; every feed read is "
+        "loaded through the window",
+    )
+
+
+# ── data_gap: a window nothing is loaded for came back empty ────────────────
+
+
+def unloaded_window(ask: Ask, q: CubeQuery, rows: Rows) -> Check:
+    """A flow read over a window that starts after every feed's data end
+    (``today`` with the data loaded through yesterday) and came back with no
+    rows, or none with a value: nothing was loaded for it, which is not a
+    measured 0, so it is refused naming where the data ends. A value in the
+    rows wins over the probe: the data is there, whatever it recorded."""
+    name, mode = "loaded", FailureMode.data_gap
+    lens = ask.lens
+    flows = [m for m in q.measures if not lens.level_grain(m)]
+    if not flows:
+        return passed(name, mode)
+    if any(fnum(r.get(m)) != 0 for r in rows for m in flows if r.get(m) not in (None, "")):
+        return passed(name, mode)
+    notes: list[str] = []
+    for m in flows:
+        sts = streams_read(lens, q, m)
+        if not sts:
+            continue
+        for start, end in windows(q, lens):
+            if start and all(e is None or e < start for _, e, _ in sts):
+                ends = "; ".join(f"{lbl} data ends {e}" for lbl, e, _ in sts)
+                notes.append(
+                    f"data_gap: nothing is loaded for {start}..{end} ({ends}); {m} came back "
+                    "empty there, which is not a measured 0"
+                )
+    if notes:
+        return Check(name, mode, "refuse", "; ".join(dict.fromkeys(notes)))
     return passed(name, mode)
 
 
@@ -309,45 +413,111 @@ def tie_at_limit(ask: Ask, q: CubeQuery, rows: Rows) -> Check:
 # ── wrong_grain: the level snapshot pin ─────────────────────────────────────
 
 
-def snapshot_split(
-    lens: CubeLensView, q: CubeQuery
-) -> list[tuple[CubeQuery, str | None, str | None]]:
-    """``[(query, pin, coarse grain)]``: a level measure (a stock: headcount,
-    a contract book) summed over a window counts each snapshot once per
-    period, so it is read at its snapshot grain on its own and reduced to the
-    latest snapshot per bucket (``snapshot_reduce``). Flow measures stay as
-    asked; a query already at or finer than the snapshot grain needs no pin."""
+@dataclass
+class Split:
+    """One query the lane runs for a level measure: ``pin`` the time column
+    the rows are reduced on (``<dim>.<grain>``), ``coarse`` the asked grain
+    when it was coarser than the snapshot grain, ``note`` what the SQL did
+    (the disclosure), ``mode`` the mode that note carries (``data_gap`` when
+    the asked window held no snapshot), ``day`` the one day the query was
+    pinned to (the clock's data end), after which an empty result is a
+    fault in the probe, not a figure."""
+
+    query: CubeQuery
+    pin: str | None = None
+    coarse: str | None = None
+    note: str = ""
+    mode: FailureMode = FailureMode.wrong_grain
+    day: str | None = None
+
+
+def snapshot_split(lens: CubeLensView, q: CubeQuery) -> list[Split]:
+    """A level measure (a stock: headcount, a contract book, accounts active
+    on a day) summed over a window counts each snapshot once per period, so
+    it is read on its own and reduced to the latest snapshot per bucket
+    (``snapshot_reduce``). With a window, at its snapshot grain within the
+    window. With NO window, pinned to the one day the clock's data ends
+    (the latest snapshot), at day grain: a month bucket would add or union
+    every snapshot of the open month. A window that starts after the data
+    end (``today``, with snapshots through yesterday) reads that latest
+    snapshot too and says so. Flow measures stay as asked; a query already
+    at or finer than the snapshot grain needs no pin."""
     lv = [m for m in q.measures if lens.level_grain(m)]
     if not lv:
-        return [(q, None, None)]
+        return [Split(q)]
     grain = lens.level_grain(lv[0]) or "month"
     tds = q.timeDimensions
+    if not tds and all(lens.creation_dated(m) for m in lv):
+        # One row per record: the table's newest day is no snapshot of it.
+        # With no period asked, every row is the current state.
+        return [Split(q)]
     coarse: str | None = None
+    windowed = bool(tds and (tds[0].dateRange or tds[0].compareDateRange))
     if tds:
         g = tds[0].granularity
         if g in GRAINS and GRAINS.index(g) <= GRAINS.index(grain):
-            return [(q, None, None)]
+            return [Split(q)]
         dim = tds[0].dimension
         coarse = g
     else:
+        clock = lens.clock(lv[0])
         dims = lens.time_dimensions(lens.cube_name(lv[0]))
-        if not dims:
-            return [(q, None, None)]
-        dim = next((d for d in dims if d.endswith((".month", ".snapshot_date"))), dims[0])
-    out: list[tuple[CubeQuery, str | None, str | None]] = []
+        if clock and clock in dims:
+            dim = clock
+        elif dims:
+            dim = next((d for d in dims if d.endswith((".month", ".snapshot_date"))), dims[0])
+        else:
+            return [Split(q)]
+    out: list[Split] = []
     flow = [m for m in q.measures if m not in lv]
     if flow:
-        out.append((q.model_copy(update={"measures": flow}), None, None))
+        out.append(Split(q.model_copy(update={"measures": flow})))
     q2 = q.model_copy(deep=True)
     q2.measures = lv
     q2.limit = None
-    if q2.timeDimensions:
+    facts = lens.time_facts(dim)
+    data_end = facts.data_end if facts else None
+    reads = ", ".join(lv)
+    per = f"per {', '.join(q.dimensions)}" if q.dimensions else "one row"
+    if windowed and not tds[0].compareDateRange:
+        rng = tds[0].dateRange
+        start = str(rng[0])[:10] if isinstance(rng, list) and rng else None
+        if start and data_end and start > data_end:
+            # The asked window holds no snapshot yet: the latest one is the
+            # figure, said as such (today on a level = the latest snapshot).
+            q2.timeDimensions = [
+                TimeDimension(dimension=dim, dateRange=[data_end, data_end], granularity="day")
+            ]
+            end = str(rng[-1])[:10] if isinstance(rng, list) else start
+            note = (
+                f"level: {start}..{end} holds no snapshot of {reads} yet ({dim} data ends "
+                f"{data_end}); the SQL reads {dim} on {data_end}, the latest snapshot, at day "
+                f"grain, {per}"
+            )
+            out.append(Split(q2, f"{dim}.day", None, note, FailureMode.data_gap, data_end))
+            return out
+    if windowed:
         q2.timeDimensions[0].granularity = grain  # type: ignore[assignment]
-    else:
-        from services.contracts.cube_query import TimeDimension
-
-        q2.timeDimensions = [TimeDimension(dimension=dim, granularity=grain)]  # type: ignore[arg-type]
-    out.append((q2, f"{dim}.{grain}", coarse))
+        note = f"level: read at {dim}.{grain} and kept to the latest snapshot per bucket"
+        out.append(Split(q2, f"{dim}.{grain}", coarse, note))
+        return out
+    if data_end:
+        q2.timeDimensions = [
+            TimeDimension(dimension=dim, dateRange=[data_end, data_end], granularity="day")
+        ]
+        note = (
+            f"level: no period asked, so the SQL reads {reads} on {data_end}, the latest loaded "
+            f"day of {dim}, at day grain ({per}); a bucket of the open month would add or union "
+            "every snapshot in it"
+        )
+        out.append(Split(q2, f"{dim}.day", None, note, FailureMode.wrong_grain, data_end))
+        return out
+    q2.timeDimensions = [TimeDimension(dimension=dim, granularity="day")]
+    note = (
+        f"level: no period asked and no data end recorded for {dim}, so the SQL reads {reads} "
+        f"at day grain over every day and the latest day is kept ({per})"
+    )
+    out.append(Split(q2, f"{dim}.day", None, note))
     return out
 
 
@@ -381,16 +551,12 @@ def snapshot_reduce(q: CubeQuery, rows: Rows, pin: str, coarse: str | None) -> R
 
 
 def snapshot_pin(ask: Ask, q: CubeQuery) -> Check:
-    """The level pin as a check: disclosed when it reshapes a query."""
+    """The level pin as a check: disclosed when it reshapes a query, saying
+    what the SQL that ran did."""
     name, mode = "snapshot_pin", FailureMode.wrong_grain
-    pins = [p for _, p, _ in snapshot_split(ask.lens, q) if p]
-    if pins:
-        return Check(
-            name,
-            mode,
-            "disclose",
-            f"level: read at {pins[0]} and kept to the latest snapshot per bucket",
-        )
+    pinned = [sp for sp in snapshot_split(ask.lens, q) if sp.pin]
+    if pinned:
+        return Check(name, pinned[0].mode, "disclose", pinned[0].note)
     return passed(name, mode)
 
 

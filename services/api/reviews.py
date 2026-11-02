@@ -16,7 +16,9 @@ from services.config import settings
 from services.contracts.correction import CorrectionDelta
 from services.db.session import org_session
 from services.governance.credentials import CallerIdentity
+from services.lenses import store as lens_store
 from services.reviews import service, store
+from services.runtime import sql_guard
 
 data_router = APIRouter(prefix="/v1/reviews", tags=["reviews"])
 mgmt_router = APIRouter(prefix="/mgmt/reviews", tags=["reviews"])
@@ -63,8 +65,48 @@ def _untraced_detail(request_id: str) -> str:
     )
 
 
-def _ticket_payload(ticket: store.Ticket) -> dict[str, object]:
-    return {**ticket.model_dump(), "url": _tracking_url(ticket.ticket_id)}
+def _ticket_payload(
+    ticket: store.Ticket, explore: dict[str, object] | None = None
+) -> dict[str, object]:
+    payload: dict[str, object] = {**ticket.model_dump(), "url": _tracking_url(ticket.ticket_id)}
+    if explore is not None:
+        payload["explore"] = explore
+    return payload
+
+
+def _lens_model(session: Session, lens: str) -> lens_store.LensBundle | None:
+    row = lens_store.get_lens(session, lens)
+    raw = (row or {}).get("published") or (row or {}).get("draft")
+    return lens_store.LensBundle.model_validate(raw) if raw is not None else None
+
+
+def _explore_detail(session: Session, trace: store.Trace) -> dict[str, object] | None:
+    """What a ticket on an outside-lens answer carries: the question asked,
+    the SQL that ran, the exposed tables it read, and every check with what
+    it decided. None for a governed answer."""
+    if trace.lane != "explore":
+        return None
+    bundle = _lens_model(session, trace.lens)
+    tables = sql_guard.exposed_tables(trace.sql, bundle.semantic_model) if bundle else []
+    raw = (trace.verification or {}).get("checks")
+    checks = [
+        str(c.get("reason") or f"{c.get('name')}:{c.get('status')}")
+        for c in (raw if isinstance(raw, list) else [])
+        if isinstance(c, dict)
+    ]
+    return {
+        "lane": "explore",
+        "question": trace.question,
+        "sql": trace.sql,
+        "tables": tables,
+        "checks": checks,
+        "lines": list(trace.degraded or []),
+    }
+
+
+def _ticket_with_detail(session: Session, ticket: store.Ticket) -> dict[str, object]:
+    trace = store.get_trace(session, ticket.request_id)
+    return _ticket_payload(ticket, _explore_detail(session, trace) if trace else None)
 
 
 def _own_or_403(caller: CallerIdentity, owner: str, detail: str) -> None:
@@ -112,7 +154,10 @@ def send_for_review(
         ticket = service.open_review(
             session, trace, llm, model=judge_model, correction=body.correction, origin="human"
         )
-    return _ticket_payload(ticket)
+        # A ticket on an outside-lens answer carries what the reviewer rules
+        # on: the question, the SQL, the tables read and every check.
+        explore = _explore_detail(session, trace)
+    return _ticket_payload(ticket, explore)
 
 
 @data_router.get("")
@@ -138,14 +183,14 @@ def get_review(ticket_id: str, caller: CallerIdentity = Depends(get_caller)) -> 
     it was raised on (or an admin)."""
     with org_session(caller.org_id) as session:
         ticket = store.get_ticket(session, ticket_id)
-    if ticket is None:
-        raise HTTPException(status_code=404, detail=f"review '{ticket_id}' not found")
-    _own_or_403(
-        caller,
-        ticket.caller,
-        f"review '{ticket_id}' belongs to a different caller than '{caller.name}'",
-    )
-    return _ticket_payload(ticket)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail=f"review '{ticket_id}' not found")
+        _own_or_403(
+            caller,
+            ticket.caller,
+            f"review '{ticket_id}' belongs to a different caller than '{caller.name}'",
+        )
+        return _ticket_with_detail(session, ticket)
 
 
 @mgmt_router.get("")
@@ -177,4 +222,61 @@ def rule_review(
         raise HTTPException(status_code=404, detail=f"review '{ticket_id}' not found")
     ticket = store.get_ticket(session, ticket_id)
     assert ticket is not None
-    return _ticket_payload(ticket)
+    return _ticket_with_detail(session, ticket)
+
+
+@mgmt_router.get("/{ticket_id}/seed")
+def seed_for_review(
+    ticket_id: str, session: Session = Depends(get_app_session)
+) -> dict[str, object]:
+    """The slot map `dst reviews seed-lens` scaffolds from: for an outside-lens
+    answer, the exposed tables its SQL read with their fields and blueprint
+    facts, beside the question and the SQL. The entity and lens files the CLI
+    writes from this say WHERE the definitions go; the author's agent fills
+    them. 409 on a ticket whose answer was governed: it has a lens already."""
+    ticket = store.get_ticket(session, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"review '{ticket_id}' not found")
+    trace = store.get_trace(session, ticket.request_id)
+    if trace is None or trace.lane != "explore":
+        raise HTTPException(
+            status_code=409,
+            detail=f"review '{ticket_id}' is not on an outside-lens answer; seed-lens "
+            "scaffolds a lens over the exposed tables such an answer read",
+        )
+    bundle = _lens_model(session, trace.lens)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail=f"lens '{trace.lens}' not found")
+    model = bundle.semantic_model
+    tables: list[dict[str, object]] = []
+    for table in sql_guard.exposed_tables(trace.sql, model):
+        entity = next((e for e in model.entities if e.source.table == table), None)
+        if entity is None:
+            continue
+        blueprint = model.blueprints.get(table)
+        tables.append(
+            {
+                "table": table,
+                "connection": entity.source.connection,
+                "entity": entity.name,
+                "description": entity.description,
+                "grain": blueprint.grain if blueprint else entity.grain,
+                "key": list(blueprint.key) if blueprint and blueprint.key else [],
+                "fields": [
+                    {"name": f.name, "type": str(f.type), "description": f.description}
+                    for f in entity.fields
+                ],
+                "clocks": {
+                    c: {"meaning": clock.meaning, "timezone": clock.timezone}
+                    for c, clock in (blueprint.clocks if blueprint else {}).items()
+                },
+                "caveats": list(blueprint.caveats) if blueprint else [],
+            }
+        )
+    return {
+        "ticket_id": ticket_id,
+        "lens": trace.lens,
+        "question": trace.question,
+        "sql": trace.sql,
+        "tables": tables,
+    }

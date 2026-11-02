@@ -44,7 +44,9 @@ class EvalCase(BaseModel):
     certified answers are the regression suite; ``dst evals migrate`` converts,
     and the health runner still uses the SQL as its judge oracle until then);
     a BEHAVIORAL case carries
-    ``expect: clarify | refuse | answer`` (+ optional ``term``) and is scored
+    ``expect: clarify | refuse | answer`` (+ optional ``term``), or one of the
+    question types (``definition | capability | sql_request | hand_off | admin |
+    not_a_data_question``: the response must carry that mode), and is scored
     on response SHAPE by ``run_behavioral``. ``answer`` pins the
     opposite failure: a question the lens MUST answer with data — the
     regression where a lens starts refusing answerable questions was
@@ -58,7 +60,20 @@ class EvalCase(BaseModel):
     question: str
     expected_sql: str | None = None
     expected_answer: str | None = None
-    expect: Literal["clarify", "refuse", "answer"] | None = None
+    expect: (
+        Literal[
+            "clarify",
+            "refuse",
+            "answer",
+            "definition",
+            "capability",
+            "sql_request",
+            "hand_off",
+            "admin",
+            "not_a_data_question",
+        ]
+        | None
+    ) = None
     term: str | None = None
     snapshot_ref: str | None = None
     source: Literal["certified", "sample_query", "harvested", "authored"]

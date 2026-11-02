@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from services.contracts.cube_meta import MetaDoc
 from services.contracts.cube_probe import CubeProbe
 from services.contracts.cube_query import Binding, CubeQuery
 from services.contracts.failure_modes import FailureMode
@@ -121,6 +122,34 @@ def test_ambiguous_metric_asks_when_the_readings_differ() -> None:
     # A question that names the reading is served as asked.
     named = ask("revenue by order date in August", [query], run=_readings_run(1.0, 9.0))
     assert pre.ambiguous_metric(named, [query]).outcome == "pass"
+
+
+def test_a_driver_s_select_word_is_read_from_the_recorded_question_only() -> None:
+    """In driver mode the question text comes from the agent, so a select
+    word in it never picks a reading: the reading is selected only by the
+    question the route recorded, and with none recorded the default reading
+    is served and the others disclosed."""
+    view = fake.view(ambiguous=_refund_term(BY_REFUND))
+    query = q(measures=["orders.revenue_net"], timeDimensions=[AUG])
+    run = _readings_run(1.0, 9.0)
+    free = ask("revenue by order date in August", [query], view=view, run=run)
+    free.driver, free.recorded = True, None
+    c = pre.ambiguous_metric(free, [query])
+    assert (c.outcome, c.mode) == ("disclose", FailureMode.ambiguous_metric)
+    assert "declared default reading" in c.detail
+    rewritten = ask("revenue by order date in August", [query], view=view, run=run)
+    rewritten.driver, rewritten.recorded = True, "webshop revenue in August"
+    assert pre.ambiguous_metric(rewritten, [query]).outcome == "disclose"
+    recorded = ask("webshop revenue", [query], view=view, run=run)
+    recorded.driver, recorded.recorded = True, "revenue by order date in August"
+    assert pre.ambiguous_metric(recorded, [query]).outcome == "pass"
+    # Not in driver mode the question is the asker's own: it selects.
+    assert (
+        pre.ambiguous_metric(
+            ask("revenue by order date", [query], view=view, run=run), [query]
+        ).outcome
+        == "pass"
+    )
 
 
 def _refund_term(default: str | None = None) -> list[dict[str, Any]]:
@@ -609,16 +638,100 @@ def test_partial_period_discloses_a_comparison_against_a_partial_month() -> None
     view = CubeLensView.build(fake.doc(), overlay=fake.view().overlay, probe=CubeProbe(**probe))
     told = post.partial_period(ask("orders in August", [aug], view=view), [aug])
     assert "no rows on the period's last 7 days" in told.detail
+    assert "partially loaded" not in told.detail  # judged on volume alone: no load claim
+
+
+def test_partial_period_says_partially_loaded_only_on_load_evidence_and_maturing_as_complete() -> (
+    None
+):
+    """The wording follows the monitor's evidence: load evidence says
+    partially loaded; a complete period whose declared measure is still
+    maturing says complete, values still maturing, and names the measure."""
+    import copy
+
+    aug = q(measures=["orders.count"], timeDimensions=[AUG])
+    probe = copy.deepcopy(fake.PROBE)
+    part = probe["measures"]["orders.count"]["partial"]
+    part["evidence"] = "last loaded 2026-08-20, before the period ends 2026-08-31"
+    part["load_evidence"] = True
+    view = CubeLensView.build(fake.doc(), overlay=fake.view().overlay, probe=CubeProbe(**probe))
+    loaded = post.partial_period(ask("orders in August", [aug], view=view), [aug])
+    assert "partially loaded" in loaded.detail and "last loaded 2026-08-20" in loaded.detail
+    assert "maturing" not in loaded.detail
+    part["evidence"] = (
+        "complete; values still maturing (orders.count: final 30 days after the period ends)"
+    )
+    part["load_evidence"] = False
+    part["maturing"] = "orders.count"
+    view = CubeLensView.build(fake.doc(), overlay=fake.view().overlay, probe=CubeProbe(**probe))
+    maturing = post.partial_period(ask("orders in August", [aug], view=view), [aug])
+    assert (maturing.outcome, maturing.mode) == ("disclose", FailureMode.data_gap)
+    assert "is complete" in maturing.detail and "still maturing (orders.count" in maturing.detail
+    assert "partially loaded" not in maturing.detail and "maturing period" in maturing.detail
 
 
 def test_empty_result_says_nothing_was_recorded_instead_of_zero() -> None:
+    """With no window asked, a zero over all loaded data cannot be told
+    from nothing recorded: refused, saying why."""
     query = q(
         measures=["orders.count"],
         filters=[{"member": "orders.status", "operator": "equals", "values": ["Open"]}],
     )
     c = post.empty_result(ask("open orders", [query]), query, [{"orders.count": 0}])
     assert (c.outcome, c.mode) == ("refuse", FailureMode.empty_result)
+    assert "no window" in c.detail
     assert post.empty_result(ask("x", [query]), query, [{"orders.count": 3}]).outcome == "pass"
+
+
+def test_empty_result_serves_a_measured_zero_inside_the_loaded_window() -> None:
+    """A zero from a filter on a value the dictionary holds, over a window
+    every feed read is loaded through, is a real zero: served with the
+    window stated and disclosed, not refused."""
+    open_aug = q(
+        measures=["orders.count"],
+        filters=[
+            {"member": "orders.status", "operator": "equals", "values": ["Open"]},
+            {"member": "orders.company", "operator": "equals", "values": ["South AB"]},
+        ],
+        timeDimensions=[AUG],
+    )
+    c = post.empty_result(
+        ask("open South orders in August", [open_aug]), open_aug, [{"orders.count": 0}]
+    )
+    assert (c.outcome, c.mode) == ("disclose", FailureMode.empty_result)
+    assert "measured 0" in c.detail and "2026-08-01..2026-08-31" in c.detail
+    assert "orders.status = Open" in c.detail and "orders.company = South AB" in c.detail
+    assert not c.stops
+    # Read over every feed, one of which stopped in June: the August zero
+    # of the stopped feed is not measured, so the whole is refused.
+    both = open_aug.model_copy(update={"filters": open_aug.filters[:1]})
+    c = post.empty_result(ask("x", [both]), both, [{"orders.count": 0}])
+    assert (c.outcome, c.mode) == ("refuse", FailureMode.empty_result)
+    assert "North Oy" in c.detail and "2026-06-05" in c.detail
+    # No rows at all is the same zero.
+    assert post.empty_result(ask("x", [open_aug]), open_aug, []).outcome == "disclose"
+    # A value the dictionary does not hold: unverifiable, refused.
+    unknown = open_aug.model_copy(deep=True)
+    unknown.filters[0].values = ["Shipped"]
+    c = post.empty_result(ask("x", [unknown]), unknown, [])
+    assert (c.outcome, c.mode) == ("refuse", FailureMode.empty_result)
+    assert "Shipped" in c.detail
+    # A window running past a feed's data end: unverifiable, refused.
+    north = q(
+        measures=["orders.count"],
+        filters=[{"member": "orders.company", "operator": "equals", "values": ["North Oy"]}],
+        timeDimensions=[AUG],
+    )
+    c = post.empty_result(ask("x", [north]), north, [{"orders.count": 0}])
+    assert (c.outcome, c.mode) == ("refuse", FailureMode.empty_result)
+    assert "2026-06-05" in c.detail
+    # A measure the probe records no data end for: unverifiable, refused.
+    nofacts = q(
+        measures=["north_invoices.invoiced"],
+        filters=[{"member": "orders.status", "operator": "equals", "values": ["Open"]}],
+        timeDimensions=[AUG],
+    )
+    assert post.empty_result(ask("x", [nofacts]), nofacts, []).outcome == "refuse"
 
 
 def test_null_bucket_is_never_ranked_first() -> None:
@@ -673,7 +786,7 @@ def test_snapshot_pin_reads_a_level_at_its_grain_and_keeps_the_latest() -> None:
     )
     parts = post.snapshot_split(v, query)
     assert len(parts) == 1
-    pinned, pin, coarse = parts[0]
+    pinned, pin, coarse = parts[0].query, parts[0].pin, parts[0].coarse
     assert pin == "staff.month.month" and pinned.timeDimensions[0].granularity == "month"
     rows = [
         {"staff.company": "North Oy", "staff.month.month": f"2026-0{m}-01", "staff.headcount": h}
@@ -682,6 +795,96 @@ def test_snapshot_pin_reads_a_level_at_its_grain_and_keeps_the_latest() -> None:
     assert post.snapshot_reduce(pinned, rows, pin, coarse) == [rows[-1]]
     c = post.snapshot_pin(ask("headcount at the end of Q2", [query]), query)
     assert (c.outcome, c.mode) == ("disclose", FailureMode.wrong_grain)
+
+
+def test_a_level_with_no_period_is_pinned_to_its_data_end_day_never_a_month_bucket() -> None:
+    """No period word: the stock is read on the one day the clock's data
+    ends, at day grain, one row per dimension; the note says exactly that.
+    A month bucket would union the open month's accounts (count_distinct)
+    or add its daily snapshots (sum)."""
+    v = fake.view()
+    for measure in ("staff_daily.active_accounts", "staff_daily.headcount"):
+        query = q(measures=[measure], dimensions=["staff_daily.company"])
+        (part,) = post.snapshot_split(v, query)
+        td = part.query.timeDimensions[0]
+        assert (td.dimension, td.granularity, td.dateRange) == (
+            "staff_daily.day",
+            "day",
+            ["2026-08-29", "2026-08-29"],
+        )
+        assert part.pin == "staff_daily.day.day" and part.day == "2026-08-29"
+        assert "on 2026-08-29" in part.note and "day grain" in part.note
+        assert "per staff_daily.company" in part.note
+        c = post.snapshot_pin(ask("active accounts by company", [query]), query)
+        assert (c.outcome, c.mode) == ("disclose", FailureMode.wrong_grain)
+        assert c.detail == part.note
+    # No data end recorded for the clock: day grain over every day, the
+    # latest kept, and the note says so instead of claiming a pinned day.
+    bare = fake.view(probe={"cubes": {}, "measures": {}})
+    query = q(measures=["staff_daily.headcount"])
+    (part,) = post.snapshot_split(bare, query)
+    td = part.query.timeDimensions[0]
+    assert (td.granularity, td.dateRange, part.day) == ("day", None, None)
+    assert "no data end recorded" in part.note
+    rows = [
+        {"staff_daily.day.day": f"2026-08-{d:02d}", "staff_daily.headcount": d} for d in (1, 2, 3)
+    ]
+    assert post.snapshot_reduce(part.query, rows, part.pin or "", None) == [rows[-1]]
+
+
+def test_today_on_a_level_is_the_latest_snapshot_said_as_a_gap() -> None:
+    """A window after the data end (today, snapshots through yesterday)
+    reads the latest snapshot at day grain and says the asked window holds
+    none, under data_gap, so the answer is partial, never 0 rows."""
+    query = q(
+        measures=["staff_daily.headcount"],
+        timeDimensions=[
+            {"dimension": "staff_daily.day", "dateRange": ["2026-09-01", "2026-09-01"]}
+        ],
+    )
+    (part,) = post.snapshot_split(fake.view(), query)
+    assert part.query.timeDimensions[0].dateRange == ["2026-08-29", "2026-08-29"]
+    assert part.mode == FailureMode.data_gap and part.day == "2026-08-29"
+    assert "holds no snapshot" in part.note and "latest snapshot" in part.note
+    # The freshness check leaves a level alone: the pin is its disclosure.
+    assert post.data_gap(ask("headcount today", [query]), query).outcome == "pass"
+    # A window inside the data is read at the snapshot grain as before.
+    inside = q(
+        measures=["staff_daily.headcount"],
+        timeDimensions=[
+            {"dimension": "staff_daily.day", "dateRange": ["2026-08-01", "2026-08-15"]}
+        ],
+    )
+    (part,) = post.snapshot_split(fake.view(), inside)
+    assert part.query.timeDimensions[0].granularity == "month" and part.day is None
+
+
+def test_unloaded_window_refuses_an_empty_result_for_a_window_after_the_data_end() -> None:
+    """A flow asked for today with the data loaded through yesterday came
+    back with 0 rows (or a count of 0): nothing is loaded for the window,
+    which is refused naming where the data ends, never served as a zero."""
+    query = q(
+        measures=["orders.count"],
+        timeDimensions=[
+            {"dimension": "orders.ordered_at", "dateRange": ["2026-09-01", "2026-09-01"]}
+        ],
+    )
+    a = ask("orders today", [query])
+    for rows in ([], [{"orders.count": 0}], [{"orders.count": None}]):
+        c = post.unloaded_window(a, query, rows)
+        assert (c.outcome, c.mode) == ("refuse", FailureMode.data_gap), rows
+        assert "nothing is loaded for 2026-09-01..2026-09-01" in c.detail
+        assert "data ends 2026-08-31" in c.detail and "not a measured 0" in c.detail
+    # A value in the rows wins over the probe; a window inside the data is
+    # a measured zero when empty.
+    assert post.unloaded_window(a, query, [{"orders.count": 2}]).outcome == "pass"
+    past = q(
+        measures=["orders.count"],
+        timeDimensions=[
+            {"dimension": "orders.ordered_at", "dateRange": ["2026-08-30", "2026-08-30"]}
+        ],
+    )
+    assert post.unloaded_window(ask("orders", [past]), past, []).outcome == "pass"
 
 
 def test_compare_pivot_sets_each_window_side_by_side() -> None:
@@ -766,22 +969,69 @@ def test_hidden_column_refuses_a_member_a_view_re_exposes() -> None:
 
 def test_hidden_column_refuses_a_member_cube_withheld_from_the_caller_s_meta() -> None:
     """A view's access policy drops the member from the caller's /v1/meta
-    altogether; asked by its view name it is refused as hidden, not as a
-    member the model does not hold."""
-    from services.contracts.cube_meta import MetaDoc
+    altogether. The model apply stored (read as a caller in every exception
+    group) says the view holds it, so asked by its view name it is refused
+    as hidden; a name that model does not hold either is a miss, never a
+    withheld member, and reports as undeclared."""
+    from services.contracts.lens_model import LensModel
     from services.cube.lens_view import CubeLensView
 
+    stored = fake.meta_payload()
+    stored["cubes"].append(
+        {
+            "name": "people",
+            "type": "view",
+            "measures": [],
+            "dimensions": [
+                {"name": "people.staff_salary", "type": "string", "aliasMember": "staff.salary"}
+            ],
+            "segments": [],
+        }
+    )
+    full = LensModel.build(MetaDoc.parse(stored), fake.view().overlay, "shop", views=["people"])
     meta = fake.meta_payload()
     meta["cubes"].append(
         {"name": "people", "type": "view", "measures": [], "dimensions": [], "segments": []}
     )
-    view = CubeLensView(doc=MetaDoc.parse(meta), overlay=fake.view().overlay)
-    for member in ("people.staff_salary", "people.salary"):
-        query = q(dimensions=[member])
-        c = pre.hidden_column(ask("salaries", [query], view=view), [query])
-        assert (c.outcome, c.mode) == ("refuse", FailureMode.hidden_column)
-        granted = pre.hidden_column(ask("salaries", [query], view=view, groups=["hr"]), [query])
-        assert granted.outcome == "pass"
-    query = q(dimensions=["people.bonus"])
-    assert pre.hidden_column(ask("bonus", [query], view=view), [query]).outcome == "pass"
-    assert pre.not_declared(ask("bonus", [query], view=view), [query]).outcome == "refuse"
+    view = CubeLensView(doc=MetaDoc.parse(meta), overlay=fake.view().overlay, full=full)
+    query = q(dimensions=["people.staff_salary"])
+    c = pre.hidden_column(ask("salaries", [query], view=view), [query])
+    assert (c.outcome, c.mode) == ("refuse", FailureMode.hidden_column)
+    granted = pre.hidden_column(ask("salaries", [query], view=view, groups=["hr"]), [query])
+    assert granted.outcome == "pass"
+    for miss in ("people.salary", "people.bonus"):
+        query = q(dimensions=[miss])
+        assert pre.hidden_column(ask("salaries", [query], view=view), [query]).outcome == "pass"
+        assert pre.not_declared(ask("salaries", [query], view=view), [query]).outcome == "refuse"
+    # No stored model (a lens apply never stamped): nothing says the member
+    # exists, so nothing is reported hidden.
+    bare = CubeLensView(doc=MetaDoc.parse(meta), overlay=fake.view().overlay)
+    query = q(dimensions=["people.staff_salary"])
+    assert pre.hidden_column(ask("salaries", [query], view=bare), [query]).outcome == "pass"
+
+
+def test_a_joined_member_named_without_its_prefix_is_a_miss_not_a_hidden_column() -> None:
+    """migrate-model writes joined views with `prefix: true`, so the meta
+    names `sales_orders.stores_region`; `sales_orders.region` is a miss and
+    says so, and `sales_orders.manager_email` (a hidden dimension named
+    without its prefix) is a miss too, not a withheld member."""
+    from services.contracts.lens_model import LensModel, parse_overlay
+    from services.cube.lens_view import CubeLensView
+    from tests import cube_shop
+
+    overlay = parse_overlay(cube_shop.project_files()["cube/overlay.yaml"])
+    full = LensModel.build(cube_shop.meta(), overlay, "sales", views=["sales_orders"])
+    public = MetaDoc.parse(cube_shop.public_meta_payload())
+    view = CubeLensView.build(
+        public, overlay=overlay, lens="sales", views=["sales_orders"], full=full
+    )
+    assert not view.declared("sales_orders.stores_manager_email")
+    withheld = q(dimensions=["sales_orders.stores_manager_email"])
+    c = pre.hidden_column(ask("emails", [withheld], view=view, lens="sales"), [withheld])
+    assert (c.outcome, c.mode) == ("refuse", FailureMode.hidden_column)
+    for miss in ("sales_orders.region", "sales_orders.manager_email"):
+        query = q(dimensions=[miss])
+        a = ask("by region", [query], view=view, lens="sales")
+        assert pre.hidden_column(a, [query]).outcome == "pass"
+        c = pre.not_declared(a, [query])
+        assert c.outcome == "refuse" and miss in c.detail

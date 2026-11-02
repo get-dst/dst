@@ -38,10 +38,11 @@ def _sql(args: argparse.Namespace) -> int:
     # must not silently downgrade an admin's connection probe.
     url, headers = _client(args, caller_key_ok=bool(args.lens or args.key))
     scope = {"connection": args.connection} if args.connection else {"lens": args.lens}
+    question = {"question": args.question} if getattr(args, "question", None) else {}
     r = httpx.post(
         f"{url}/v1/sql",
         headers={**headers, "X-Dst-Agent": CLI_AGENT},
-        json={"sql": args.sql, "limit": args.limit, **scope},
+        json={"sql": args.sql, "limit": args.limit, **scope, **question},
         timeout=args.timeout,
     )
     if r.status_code == 404 and args.connection and _declared_connection(args)[0]:
@@ -76,6 +77,17 @@ def _sql(args: argparse.Namespace) -> int:
         print(_table(d["columns"], d["rows"]))
     tail = f"({d['row_count']} rows"
     print(tail + "; capped — raise --limit for more)" if d["truncated"] else tail + ")")
+    # An outside-lens read says what it could and could not verify, every
+    # line, beside the rows: the number is only as good as these.
+    for line in [*d.get("grain", []), *d.get("data_end", []), *d.get("clock", [])]:
+        print(f"  {line}")
+    for check in d.get("checks", []):
+        if check.split(":", 1)[0] in ("join", "reconcile") or "could not close" in check:
+            print(f"  {check}")
+    if d.get("request_id") and args.lens:
+        print(
+            f"  request {d['request_id']} — `dst correct {d['request_id']} …` sends it for review"
+        )
     return 0
 
 
@@ -93,6 +105,12 @@ def register(sub: Any) -> None:
         "--lens", help="probe within a lens's allow-list (works with a dst_ caller key)"
     )
     p.add_argument("--limit", type=int, default=20, help="rows to return (default 20, max 500)")
+    p.add_argument(
+        "--question",
+        help="the question this read answers, when it answers one: kept on the request "
+        "log and on any review of it, and the question side of the pair an approval "
+        "certifies (--lens only)",
+    )
     p.add_argument("--json", action="store_true", help="columns + rows as an object")
     p.add_argument("--timeout", type=int, default=120)
     p.add_argument(

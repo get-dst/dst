@@ -330,6 +330,7 @@ class IntentSQLGenerator:
         domains: dict[str, list[str]] | None = None,
         entity_domains: dict[str, dict[str, list[str]]] | None = None,
         column_types: dict[str, dict[str, str]] | None = None,
+        creation_dated: set[str] | None = None,
     ) -> None:
         self._llm = llm
         self.model = model  # public: the pipeline reads it to attribute cost per call
@@ -341,6 +342,7 @@ class IntentSQLGenerator:
         self._domains = domains or {}
         self._entity_domains = entity_domains or {}
         self._column_types = column_types
+        self._creation_dated = creation_dated or set()
 
     def generate(
         self,
@@ -397,6 +399,7 @@ class IntentSQLGenerator:
                     semantic_model,
                     domains={**self._domains, **self._entity_domains.get(owner, {})},
                     column_types=self._column_types,
+                    creation_dated=self._creation_dated,
                 )
                 error = None
                 break
@@ -439,6 +442,7 @@ class IntentSQLGenerator:
                                 **self._entity_domains.get(pinned.entity or sole, {}),
                             },
                             column_types=self._column_types,
+                            creation_dated=self._creation_dated,
                         ),
                         definition_used=intent_term(pinned),
                         intent=pinned,

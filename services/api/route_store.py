@@ -11,6 +11,7 @@ list-window / latest-window.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -83,6 +84,20 @@ def record(
         },
     ).first()
     return _row_to_decision(row)
+
+
+def by_id(session: Session, decision_id: str) -> RoutingDecision | None:
+    """One recorded route of the session's org by its id; None for an id
+    that is not one (a handle generated when the row could not be written)
+    or one another org holds."""
+    try:
+        uuid.UUID(decision_id)
+    except ValueError:
+        return None
+    row = session.execute(
+        text(f"SELECT {_COLS} FROM routing_decision WHERE id = :i"), {"i": decision_id}
+    ).first()
+    return _row_to_decision(row) if row is not None else None
 
 
 def amend(

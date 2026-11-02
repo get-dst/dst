@@ -1793,7 +1793,7 @@ def test_compiled_metric_serve_passes_definition_applied() -> None:
     check confirmed the answer". Compiled from a governed metric IS the
     confirmation: the check passes on the metric and says so."""
     sm = SemanticModel(
-        lens="customer_success",
+        lens="retention_team",
         dialect="duckdb",
         definitions=[
             Definition(

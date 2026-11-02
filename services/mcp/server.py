@@ -111,7 +111,8 @@ a. route_query(question) returns the lenses covering it and why (the members and
    Cube lens at all, route_query answers exactly as in the operating loop.
 b. A candidate with serving "cube": describe_lens(lens) (members, values, data ends,
    not_computable, ambiguous terms, certified pairs), then query_cube(lens, query, ledger,
-   question). The ledger accounts for every content word of the question. A check that
+   question, route_id=the route's request_id). The ledger accounts for every content word
+   of the question; the route_id is what names an ambiguous term's reading. A check that
    stops the query returns `retry` with what to change: fix the query or ask the user,
    then send it again. Never present a number from a non-answer.
 c. None covering: `explore_kit` lists the exposed tables you may read with sql. Before
@@ -739,6 +740,7 @@ async def sql(
     ctx: Context,  # type: ignore[type-arg]
     limit: int = 20,
     purpose: str = "",
+    question: str = "",
 ) -> dict[str, Any]:
     """Run your OWN read-only SQL inside a lens's scope, and get the rows back.
 
@@ -760,6 +762,19 @@ async def sql(
     …" names a check that could not run. No rows is not a zero: the
     empty_result check says so.
 
+    Before you state a NUMBER from an exposed table, read the rest of `checks`:
+    `join` (rows after the statement's joins against its base table — a join that
+    multiplies rows inflates every count and sum), `clock` (what each time column
+    you read records, or that no clock is declared for it), `reconcile` (the
+    number beside a certified answer over the same tables and window, with the
+    delta). A check that reads "could not close" could not run: say so with the
+    number. `sql` is the statement as it ran: show it with the number.
+
+    When the read ANSWERS a user's question, pass `question`: the request log then
+    keeps the question beside the SQL, `send_for_review(request_id)` opens a ticket
+    carrying the SQL, the tables, the checks and the question, and an approval
+    certifies the pair — or seeds a lens over the tables you read.
+
     The lens's refusals and hides hold here too: a column the lens hides is out
     of scope however it is named, and a statement that names a column a
     `not_computable` entry covers, or lists rows per entity key where the entry
@@ -772,12 +787,20 @@ async def sql(
         limit: rows to return (default 20, max 500).
         purpose: one sentence on what the user is trying to accomplish, when you
             know it. Optional; it never changes what the SQL may read.
+        question: the user's question this read answers, as asked, when it
+            answers one. Optional; a look at five rows has none.
     """
     payload, failure = await _request(
         ctx,
         "POST",
         "/v1/sql",
-        json_body={"lens": lens, "sql": sql, "limit": limit, **_purpose(purpose)},
+        json_body={
+            "lens": lens,
+            "sql": sql,
+            "limit": limit,
+            **_purpose(purpose),
+            **({"question": question} if question.strip() else {}),
+        },
     )
     if failure is not None:
         return failure
@@ -791,6 +814,7 @@ async def query_cube(
     ledger: list[dict[str, Any]],
     ctx: Context,  # type: ignore[type-arg]
     question: str = "",
+    route_id: str = "",
 ) -> dict[str, Any]:
     """Run YOUR Cube query against a Cube-backed lens, with the word ledger for the
     question it answers. dst calls no model: you read the question, dst checks
@@ -804,8 +828,10 @@ async def query_cube(
     question did not ask for; filter values against the dictionaries; windows
     against the lens clock (a "this month" in `question` is bound to its dates);
     labels grouped without their key. After: data that ends before the window,
-    partly loaded periods, a level metric pinned to one snapshot, empty results,
-    empty buckets, ties at the limit, compare windows.
+    partly loaded periods, a level metric pinned to one snapshot, empty results
+    (a zero on a known value inside the loaded window is served as a measured 0
+    with the window stated; one that cannot be verified is refused), empty
+    buckets, ties at the limit, compare windows.
 
     `caveats` lists what the lens's author says a reader of the figure must know
     about what your query read (an allocated measure, a known duplicate): relay
@@ -827,12 +853,22 @@ async def query_cube(
             it>"}. "none" when nothing carries the word: the answer then asks back.
         question: the user's question as asked. Without it the word, unasked-filter
             and period checks report UNTESTED on the receipt.
+        route_id: the request_id route_query returned for this question. An
+            ambiguous term's reading is selected only by the words of the question
+            recorded there, never by `question`; without it the term's default
+            reading is served and the others disclosed (or, with no default, the
+            user is asked).
     """
     payload, failure = await _request(
         ctx,
         "POST",
         f"/v1/lenses/{lens}/cube",
-        json_body={"query": query, "ledger": ledger, "question": question},
+        json_body={
+            "query": query,
+            "ledger": ledger,
+            "question": question,
+            **({"route_id": route_id} if route_id.strip() else {}),
+        },
     )
     if failure is not None:
         return failure
@@ -935,8 +971,10 @@ async def route_query(
     answer: {ok: true, driver: true, covered, candidates: [{lens, serving,
     no_model, why, matched: [{word, targets}], uncovered}], choose, nearest,
     refusal, explore_kit, no_model: {lens: bool}, routed}. A Cube candidate:
-    describe it and write the query with query_cube; a typed candidate: ask it
-    with query. `choose: true`: several cover it — pick one, or ask the user.
+    describe it and write the query with query_cube, passing this response's
+    request_id as route_id (the asker's recorded words, not yours, select an
+    ambiguous term's reading); a typed candidate: ask it with query. `choose:
+    true`: several cover it — pick one, or ask the user.
     `refusal`: relay it. No Cube lens covering it: the typed lenses route it as
     below and their answer is under `routed`; with no typed lens either,
     `nearest` says which words each lens lacks and `explore_kit` lists the

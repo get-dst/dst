@@ -28,6 +28,7 @@ import re
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
@@ -64,7 +65,10 @@ from services.lenses.store import LensBundle, list_published_for_org
 from services.llm import decision_memo, registry
 from services.observability import cost
 from services.observability import usage as ai_usage
+from services.observability.logger import log_trace
 from services.project.cube_plan import stored_lens_model
+from services.resolve import question_type
+from services.resolve.question_type import Typed
 from services.router import (
     ROUTER_DOWN,
     CoverageProfile,
@@ -83,6 +87,7 @@ from services.runtime.not_for import not_for_hit, not_for_refusal
 from services.runtime.pipeline import LENS_DATA_REFUSAL, deterministic_refusal_not_computable
 from services.serve import door as cube_door
 from services.serve import driver
+from services.serve import question as question_step
 
 log = logging.getLogger("dst")
 
@@ -528,6 +533,15 @@ async def just_ask(
     Cube lens covers is routed among the typed lenses as today and returned
     under ``routed``. ``no_model`` states per lens whether dst calls a model."""
     exclude: frozenset[str] = frozenset()
+    # The question-type step first, over every lens the caller may use: a
+    # question that asks for no number is answered here, from the lenses'
+    # models and the project's hand_off, before routing. A SQL ask routes
+    # on the data question behind it and comes back as its SQL.
+    typed, answered = await asyncio.to_thread(_question_step, caller, body.q, background)
+    if answered is not None:
+        return answered
+    if typed.type == "sql":
+        body = body.model_copy(update={"q": typed.subject})
     if caller.driver:
         with ai_usage.no_models():
             plan, exclude = await asyncio.to_thread(_driver_route, caller, body.q)
@@ -536,7 +550,7 @@ async def just_ask(
     ref: dict[str, str] = {}
     with ai_usage.collecting() as calls:
         try:
-            out = await _just_ask(body, background, caller, ref, exclude)
+            out = await _just_ask(body, background, caller, ref, exclude, typed)
             if exclude:
                 # A mixed catalogue: the typed lenses' answer, the Cube lenses
                 # named as the ones dst would have called no model for.
@@ -563,12 +577,50 @@ async def just_ask(
             )
 
 
+def _question_step(
+    caller: CallerIdentity, question: str, background: BackgroundTasks
+) -> tuple[Typed, RoutedAnswer | None]:
+    """The question-type step on the routed door. The catalogue is every
+    lens the caller may use; the answer's row is written under the lens
+    that held the subject (else the first lens). A driver gets the rules
+    only; a caller with no driver may have the open case read by a model."""
+    bundles = [
+        (name, b)
+        for name, _d, _x, b in list_published_for_org(caller.org_id)
+        if authorize(caller, b.config)[0]
+    ]
+    cat = question_type.merge(
+        [question_step.catalogue(n, b, sorted(caller.groups)) for n, b in bundles]
+    )
+    rid = "req_" + uuid.uuid4().hex[:16]
+    typed, answered = question_step.step(
+        question,
+        cat,
+        lens=bundles[0][0] if bundles else "-",
+        request_id=rid,
+        org_id=str(caller.org_id),
+        caller=caller.name,
+        agent=caller.agent,
+        model=question_step.fast_model(caller),
+        driver=caller.driver,
+    )
+    if answered is None:
+        return typed, None
+    response, trace = answered
+    background.add_task(log_trace, trace)
+    return typed, RoutedAnswer(
+        routed_to=RouteProvenance(lens=response.lens, score=0.0, decided_by="question_type"),
+        answer=response,
+    )
+
+
 async def _just_ask(
     body: JustAskBody,
     background: BackgroundTasks,
     caller: CallerIdentity,
     ref: dict[str, str],
     exclude: frozenset[str] = frozenset(),
+    typed: Typed | None = None,
 ) -> RoutedAnswer | UncoveredEnvelope:
     """Ask without naming a lens. The router routes to the covering lens (second hop,
     governed, provenance-stamped) or declines with the uncovered envelope. A routed
@@ -639,7 +691,7 @@ async def _just_ask(
         # Off the event loop too: the second hop blocks exactly as long as the first
         # (generation + warehouse over sync httpx).
         lens, answer = await _serve_in_order(
-            body, background, caller, decision, rid, decision_id, order
+            body, background, caller, decision, rid, decision_id, order, typed
         )
         ref.update(id=answer.request_id, lens=lens)
         return RoutedAnswer(
@@ -692,7 +744,7 @@ async def _just_ask(
                 caller, body.q, order[0], 0.0, True, decision=sent, request_id=rid
             )
             lens, answer = await _serve_in_order(
-                body, background, caller, sent, rid, decision_id, order
+                body, background, caller, sent, rid, decision_id, order, typed
             )
             ref.update(id=answer.request_id, lens=lens)
             return RoutedAnswer(
@@ -735,6 +787,7 @@ async def _just_ask(
             body.allow_untyped,
             body.purpose,
             request_id=rid,
+            **_typed_kw(typed),
         )
         return RoutedAnswer(
             routed_to=RouteProvenance(lens=explore, score=0.0, decided_by="explore"),
@@ -811,6 +864,7 @@ async def _serve_in_order(
     rid: str,
     decision_id: str,
     order: list[str] | None = None,
+    typed: Typed | None = None,
 ) -> tuple[str, QueryResponse | ConsumerAnswer]:
     """The routed lens's answer, or, while a lens refuses for data it does not
     hold or as another lens's ask, the next one: the sibling its ``not_for``
@@ -840,6 +894,7 @@ async def _serve_in_order(
                     body.purpose,
                     routing=decision.decision,
                     request_id=rid,
+                    **_typed_kw(typed),
                 )
             else:
                 # Its own collection: the row is charged only its own calls'
@@ -854,6 +909,7 @@ async def _serve_in_order(
                     body.bindings,
                     body.allow_untyped,
                     body.purpose,
+                    typed,
                 )
             if _refused_for_data(answer) and len(tried) < COVERAGE_K:
                 if getattr(answer, "mode", None) == FailureMode.misrouted:
@@ -889,9 +945,18 @@ def _run_collected(
     bindings: dict[str, str],
     allow_untyped: bool | None,
     purpose: str,
+    typed: Typed | None = None,
 ) -> QueryResponse | ConsumerAnswer:
     with ai_usage.collecting():
-        return run_lens_query(lens, q, caller, background, fmt, bindings, allow_untyped, purpose)
+        return run_lens_query(
+            lens, q, caller, background, fmt, bindings, allow_untyped, purpose, **_typed_kw(typed)
+        )
+
+
+def _typed_kw(typed: Typed | None) -> dict[str, Any]:
+    """The question-type decision as a keyword only when there is one: a SQL
+    ask carries it into the lens door; a query passes as it always did."""
+    return {"typed": typed} if typed is not None and typed.type == "sql" else {}
 
 
 def _amend(

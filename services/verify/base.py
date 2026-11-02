@@ -45,10 +45,25 @@ class Ask:
     # The lens clock's today (the business day in the lens timezone): the
     # day the question's relative periods resolve against.
     today: date | None = None
+    # Driver mode: the question text is the agent's, so a reading's select
+    # words are read from the question the route recorded for the request
+    # (``recorded``), never from ``question``. None recorded: no select word
+    # applies and the default reading stands, the others disclosed.
+    driver: bool = False
+    recorded: str | None = None
 
     @property
     def clock_end(self) -> str | None:
         return self.lens.probe.clock_end
+
+    @property
+    def select_text(self) -> str:
+        """The text an ambiguous term's select words are read from: the
+        question on the lanes that read it themselves, the recorded route
+        question in driver mode."""
+        if self.driver:
+            return self.recorded or ""
+        return self.question
 
 
 @dataclass

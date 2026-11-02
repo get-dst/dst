@@ -589,6 +589,19 @@ def column_hidden(column: str, entity: Entity) -> bool:
     return _patterned(column, entity, hide_patterns(entity))
 
 
+def predicate_hidden_columns(entity: Entity) -> set[str]:
+    """The hidden columns the entity's own predicates read — its
+    ``population_filter`` and its metrics' ``filters``. Matched by the `hide`
+    patterns, not the fields, so the answer holds after the compile withheld
+    the fields: these names still resolve inside those predicates, and
+    nowhere else."""
+    named = _referenced_columns(entity.population_filter, entity.name)
+    for m in entity.metrics:
+        for f_ in m.filters or []:
+            named |= _referenced_columns(f_, entity.name)
+    return {c for c in named if column_hidden(c, entity)}
+
+
 def passthrough_dimension(dimension: Dimension) -> bool:
     """A dimension that IS its column: no expression, or one naming only its
     own name. Hiding the column withholds the dimension with it."""
@@ -623,6 +636,10 @@ class Join(Authored):
         default=None,
         description="row-count relationship left->right — guards fan-out/double-count bugs",
     )
+    # Set when the join compiles from a role relationship: `right` is then the
+    # role copy of the shared entity (<entity>_<role>), so two roles over one
+    # pair join the same table twice under two aliases.
+    role: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1135,7 +1152,7 @@ class SemanticModel(BaseModel):
     not_computable: list[dict[str, Any]] = PField(default_factory=list)
     # Asks the lens declares it does not answer, each {ask, sibling}
     # (LensConfig.not_for): refused before typing or generation when the
-    # question names every content word of the ask (services/runtime/not_for).
+    # question says the ask as a phrase (services/runtime/not_for).
     not_for: list[dict[str, Any]] = PField(default_factory=list)
     # The dropped metrics' full definitions, keyed by selected entity name —
     # the name list refuses a question that ASKS for a dropped metric; these
@@ -1245,8 +1262,23 @@ class SemanticModel(BaseModel):
             cols.update(e.primary_key or [])
             # A hidden column is out of scope however it was named: a hide on
             # a column an expression still reads is a compile error, and this
-            # subtraction is the guard's own copy of that promise.
+            # subtraction is the guard's own copy of that promise. The one
+            # read that survives is a compiler-owned predicate on the
+            # compiled door (``predicate_columns``).
             cols.difference_update(c for c in list(cols) if column_hidden(c, e))
+        return out
+
+    def predicate_columns(self) -> dict[str, set[str]]:
+        """Map physical table -> the hidden columns the compiler's own
+        predicates read: an entity's ``population_filter`` and its metrics'
+        ``filters``. Absent from ``allowed_columns`` (no caller may name
+        them), they are what the guard admits on the compiled door, in
+        predicate position only — the filter runs, the value never comes
+        back."""
+        out: dict[str, set[str]] = {}
+        for e in self.entities:
+            if hidden := predicate_hidden_columns(e):
+                out.setdefault(e.source.table, set()).update(hidden)
         return out
 
     def allowed_tables(self) -> set[str]:

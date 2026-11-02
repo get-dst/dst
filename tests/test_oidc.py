@@ -62,7 +62,10 @@ def test_groups_map_and_admin_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None
     ident = oidc.resolve_identity("jwt")
     assert ident is not None
     assert ident.user == "boss@corp.example"
-    assert set(ident.groups) == {"dst-admins", "finance"}
+    # Admin reads the raw claim (the operator named that IdP group in the
+    # environment); dst groups come only through the org's declared mapping, and
+    # this org declares none.
+    assert ident.groups == []
     assert ident.is_admin is True
 
     # A member with no admin group is NOT admin — admin is opt-in, per config.
@@ -88,7 +91,9 @@ def test_org_provisioning_is_idempotent() -> None:
 @needs_db
 def test_oidc_group_grants_lens_access_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     """The payoff: a Keycloak group in the token grants a lens whose allow-list names
-    that group — through the SAME policy.authorize every other identity uses."""
+    that group — through the SAME policy.authorize every other identity uses. The
+    IdP group reaches the lens through the org's declared mapping
+    (`groups: {analysts: {idp: [analysts]}}` in dst.yaml, stored on apply)."""
     from fastapi.testclient import TestClient
 
     from services.app import app
@@ -109,6 +114,14 @@ def test_oidc_group_grants_lens_access_end_to_end(monkeypatch: pytest.MonkeyPatc
         c.execute(
             text("INSERT INTO admin_token (org_id, token_hash, label) VALUES (:o, :h, 't')"),
             {"o": org, "h": hash_token(admin_raw)},
+        )
+        c.execute(text("SELECT set_config('app.current_org', :o, true)"), {"o": str(org)})
+        c.execute(
+            text(
+                "INSERT INTO setting (org_id, key, value) VALUES "
+                "(:o, 'groups', CAST(:g AS jsonb)), (:o, 'groups_idp', CAST(:m AS jsonb))"
+            ),
+            {"o": org, "g": '["analysts"]', "m": '{"analysts": ["analysts"]}'},
         )
 
     monkeypatch.setattr(settings, "oidc_issuer", "https://idp.example.com")

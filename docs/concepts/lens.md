@@ -64,7 +64,7 @@ The file layout:
 ```
 semantic/                     # project scope, shared by every lens
   entities/deals.yaml         # table, grain, use/avoid, fields, metrics
-  relationships/deals__reps.yaml  # one join pair per file (left = the FK side)
+  relationships/deals__reps.yaml  # one join pair per file (left = the FK side; `role:` when a pair joins once per role)
   definitions/commission.md   # governed term: frontmatter + prose
 lenses/sales_comp/
   lens.yaml                   # the selection + policy (below)

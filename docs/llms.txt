@@ -17,6 +17,7 @@
 - [Receipts](https://www.dataservetool.com/concepts/receipts/): the SQL, the grade and the cost attached to every answer
 - [What the model sees](https://www.dataservetool.com/concepts/what-the-model-sees/)
 - [Clarify and refusal](https://www.dataservetool.com/concepts/clarify-and-refusal/): a decline is an outcome, not an error
+- [Question types](https://www.dataservetool.com/concepts/question-types/): a definition, a yes/no, the SQL, a report or the caller's log, answered before any binding
 
 ## Guides
 

@@ -149,10 +149,19 @@ def _rule(args: argparse.Namespace) -> int:
     # --certify: promote the ruled question→SQL in the same act (the UI's
     # "Promote this question→SQL"). The rule response carries lens + request_id.
     # Embedder-less installs still succeed (0027): stored unembedded + a warning.
+    certify: dict[str, object] = {"allow_untyped": bool(getattr(args, "allow_untyped", False))}
+    if getattr(args, "cube_query", None):
+        # An outside-lens answer on a lens served through Cube: the reviewer
+        # supplies the Cube query; the server certifies on row equality.
+        try:
+            certify["cube_query"] = json.loads(args.cube_query)
+        except json.JSONDecodeError as exc:
+            print(f"error: --cube-query is not JSON: {exc}", file=sys.stderr)
+            return 1
     r = httpx.post(
         f"{url}/mgmt/lenses/{t['lens']}/certified/from-request/{t['request_id']}",
         headers=headers,
-        json={"allow_untyped": bool(getattr(args, "allow_untyped", False))},
+        json=certify,
         timeout=60,
     )
     if r.status_code >= 400:
@@ -167,6 +176,150 @@ def _rule(args: argparse.Namespace) -> int:
     print(f"certified {cert['id']} (lens={cert['lens']})")
     if cert.get("warning"):
         print(cert["warning"], file=sys.stderr)
+    if pair := cert.get("pair"):
+        # A pair's Cube query lives in the lens's file, not the store: write
+        # it there when the project is at hand, else print it to paste.
+        _write_pair(Path(getattr(args, "dir", ".") or "."), t["lens"], pair)
+    return 0
+
+
+def _write_pair(root: Path, lens: str, pair: dict[str, Any]) -> None:
+    import yaml
+
+    path = root / "lenses" / lens / "certified_answers.yaml"
+    rendered = yaml.safe_dump([pair], sort_keys=False, allow_unicode=True)
+    if not path.parent.is_dir():
+        print(
+            "kind: cube pair verified by row equality — add it to "
+            f"lenses/{lens}/certified_answers.yaml:"
+        )
+        print(rendered)
+        return
+    existing = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else None
+    entries = existing if isinstance(existing, list) else []
+    entries = [
+        e for e in entries if not (isinstance(e, dict) and e.get("question") == pair["question"])
+    ]
+    entries.append(pair)
+    path.write_text(yaml.safe_dump(entries, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    print(f"wrote the kind: cube pair to {path} — `dst apply` serves it through its query")
+
+
+def _seed_lens(args: argparse.Namespace) -> int:
+    """`dst reviews seed-lens <ticket_id>`: scaffold an entity per exposed table
+    an outside-lens answer read, and a lens over them, as a slot map.
+
+    The files say WHERE the definitions go (name, source, fields, the
+    blueprint's grain and key, the question as a must-answer case); the
+    author's agent fills description, dimensions and metrics. Nothing is
+    guessed: a slot it cannot fill from the ticket is left empty and marked."""
+    import httpx
+    import yaml
+
+    from services.semantic.files import slug
+
+    url, headers = _client(args)
+    r = httpx.get(f"{url}/mgmt/reviews/{args.ticket_id}/seed", headers=headers, timeout=60)
+    if r.status_code >= 400:
+        print(f"error: {_detail(r)}", file=sys.stderr)
+        return 1
+    seed = r.json()
+    if not seed["tables"]:
+        print("error: the answer read no exposed table to seed a lens from", file=sys.stderr)
+        return 1
+    root = Path(args.dir)
+    name = args.name or f"{slug(seed['tables'][0]['entity'])}_seed"
+    question = " ".join(str(seed["question"]).split())
+    header = (
+        f"# Seeded by `dst reviews seed-lens {args.ticket_id}` from an outside-lens answer.\n"
+        f"# Question: {question}\n"
+        "# Slots marked TODO are for the author: dst filled only what the ticket held.\n"
+    )
+    written: list[Path] = []
+    entities: list[str] = []
+    for t in seed["tables"]:
+        entity_name = str(t["entity"])
+        entities.append(entity_name)
+        path = root / "semantic" / "entities" / f"{slug(entity_name)}.yaml"
+        if path.exists():
+            print(f"kept {path} (exists)")
+            continue
+        data: dict[str, Any] = {
+            "name": entity_name,
+            "description": t.get("description") or "TODO: what one row is, in the business's words",
+            "grain": t.get("grain") or "TODO: one row per …",
+            "source": {"connection": t["connection"], "table": t["table"]},
+        }
+        if t.get("key"):
+            data["primary_key"] = list(t["key"])
+        data["fields"] = [
+            {k: v for k, v in f.items() if v is not None} for f in t.get("fields", [])
+        ]
+        data["dimensions"] = []
+        data["metrics"] = []
+        body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+        body = body.replace("dimensions: []", "dimensions: []  # TODO: the columns people group by")
+        body = body.replace(
+            "metrics: []",
+            "metrics: []  # TODO: the figures the question asks for, with their filters",
+        )
+        if t.get("clocks"):
+            body += (
+                "# clocks (from the table's blueprint): "
+                + ", ".join(
+                    f"{c} = {v.get('meaning') or 'TODO: meaning'}" for c, v in t["clocks"].items()
+                )
+                + "\n"
+            )
+        for caveat in t.get("caveats", []):
+            body += f"# caveat: {caveat}\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(header + body, encoding="utf-8")
+        written.append(path)
+    lens_dir = root / "lenses" / name
+    lens_path = lens_dir / "lens.yaml"
+    if lens_path.exists():
+        print(f"error: {lens_path} exists — pass --name for a new lens", file=sys.stderr)
+        return 1
+    lens_dir.mkdir(parents=True, exist_ok=True)
+    connections = sorted({str(t["connection"]) for t in seed["tables"]})
+    lens_yaml = yaml.safe_dump(
+        {
+            "name": name,
+            "display_name": name.replace("_", " ").title(),
+            "description": f"TODO: what this lens answers. Seeded from: {question}",
+            "connections": connections,
+            "select": {"entities": [{"name": e} for e in entities]},
+        },
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    lens_path.write_text(header + lens_yaml, encoding="utf-8")
+    written.append(lens_path)
+    (lens_dir / "evals").mkdir(exist_ok=True)
+    cases_path = lens_dir / "evals" / "cases.yaml"
+    cases_path.write_text(
+        header
+        + yaml.safe_dump(
+            [
+                {
+                    "question": question,
+                    "expect": "answer",
+                    "status": "approved",
+                    "source": "authored",
+                }
+            ],
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    written.append(cases_path)
+    sql_lines = "\n".join(f"  {ln}" for ln in str(seed["sql"]).strip().splitlines())
+    for path in written:
+        print(f"wrote {path}")
+    print(f"the SQL that answered it, for the metric's definition:\n{sql_lines}")
+    print(f"next: fill the TODO slots, then `dst plan` and `dst apply --lens {name}`")
     return 0
 
 
@@ -310,6 +463,25 @@ def register_reviews(sub: Any) -> None:
     p.set_defaults(fn=_reviews)
 
 
+def register_seed_lens(sub: Any) -> None:
+    p = sub.add_parser(
+        "seed-lens",
+        help="scaffold an entity per exposed table an outside-lens answer read, and a "
+        "lens over them, from a review ticket — a slot map for the author",
+    )
+    p.add_argument("ticket_id", help="a review ticket on an outside-lens answer (lane explore)")
+    p.add_argument("--name", help="the new lens's name (default: <first entity>_seed)")
+    p.add_argument("--dir", default=".", help="project root to write under")
+    p.add_argument(
+        "--url",
+        help="server URL (default: DST_URL from env or ./.env, else http://localhost:8000)",
+    )
+    p.add_argument(
+        "--token", help="a dstadm_ admin token (default: DST_ADMIN_TOKEN from env or ./.env)"
+    )
+    p.set_defaults(fn=_seed_lens)
+
+
 def register_rule(sub: Any) -> None:
     p = sub.add_parser("rule", help="rule on a review ticket")
     p.add_argument("ticket_id")
@@ -328,6 +500,15 @@ def register_rule(sub: Any) -> None:
         "escalation) — a different act from certifying a typed resolution; you have "
         "read the SQL",
     )
+    p.add_argument(
+        "--cube-query",
+        dest="cube_query",
+        help="with --certify, on an outside-lens answer of a lens served through Cube: the "
+        "Cube query (JSON) that is the governed reading of the question; certified only "
+        "when its rows equal the answer's, and written to the lens's "
+        "certified_answers.yaml as a kind: cube pair",
+    )
+    p.add_argument("--dir", default=".", help="project root holding lenses/ (for --cube-query)")
     p.add_argument(
         "--url",
         help="server URL (default: DST_URL from env or ./.env, else http://localhost:8000)",

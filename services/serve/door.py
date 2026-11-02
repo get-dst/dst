@@ -34,7 +34,7 @@ from services.contracts.cube_probe import (
 from services.contracts.cube_query import Binding, Candidate, CubeQuery
 from services.contracts.failure_modes import FailureMode
 from services.contracts.lens_config import LensConfig
-from services.contracts.lens_model import Overlay, parse_overlay
+from services.contracts.lens_model import LensModel, Overlay, parse_overlay
 from services.contracts.protocols import Connector
 from services.contracts.response import QueryResponse
 from services.contracts.semantic_model import SemanticModel
@@ -257,11 +257,15 @@ def open_view(
     ctx: CubeContext,
     client: CubeClient | None = None,
     root: Path | None = None,
+    stored: LensModel | None = None,
 ) -> tuple[CubeClient, CubeLensView]:
     """The Cube client as this caller and the lens's view of the model as
     Cube shows it to them (``/v1/meta``), with the overlay and the probe's
     and the monitor's facts. What describe, values and data_end read, and
-    what the lane's checks read."""
+    what the lane's checks read. ``stored`` is the lens model apply stamped
+    (every view member, read as a caller in every exception group): what
+    tells a member Cube withheld from this caller apart from a name the
+    view never had."""
     if client is None:
         cfg = configured()
         if cfg is None:
@@ -279,6 +283,7 @@ def open_view(
         probe=load_probe(root, overlay, doc),
         lens=name,
         views=list(config.views),
+        full=stored,
     )
     return client, view
 
@@ -297,8 +302,9 @@ def open_lane(
     request_id: str,
     client: CubeClient | None = None,
     root: Path | None = None,
+    stored: LensModel | None = None,
 ) -> CubeLane:
-    client, view = open_view(name, config, ctx=ctx, client=client, root=root)
+    client, view = open_view(name, config, ctx=ctx, client=client, root=root, stored=stored)
     root = root or project_root()
     return CubeLane(
         lens=name,
@@ -413,11 +419,14 @@ def answer_driver(
     ledger: list[Binding] | None,
     *,
     question: str = "",
+    recorded: str | None = None,
 ) -> tuple[QueryResponse, TraceLog]:
     """A driver's own Cube query and word ledger: every check, no model call.
     With the question, the ledger is checked against its words, the scope it
     did not ask for is refused and its periods are bound; without it those
-    checks report skip, never pass."""
+    checks report skip, never pass. ``recorded``: the question route_query
+    recorded for this request; an ambiguous term's select words are read
+    from it alone, since ``question`` is text the agent wrote."""
     text = question.strip()
     stop = lane.question_refusal(text) if text else None
     if stop is not None:
@@ -431,6 +440,7 @@ def answer_driver(
         untested="no question text was sent, so the ledger was not checked against its words"
         if not text
         else None,
+        recorded=recorded,
     )
 
 

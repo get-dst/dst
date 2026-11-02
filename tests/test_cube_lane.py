@@ -167,6 +167,97 @@ def test_a_level_over_a_quarter_is_the_last_snapshot_not_the_sum(lane: CubeLane)
     assert [row[i] for row in resp.data.rows] == [43]
 
 
+@pytest.mark.parametrize(
+    ("measure", "latest", "month_bucket"),
+    [("staff_daily.active_accounts", 1, 3), ("staff_daily.headcount", 10, 290)],
+)
+def test_a_level_with_no_period_is_the_latest_day_not_the_open_month(
+    lane: CubeLane, measure: str, latest: int, month_bucket: int
+) -> None:
+    """No period word on a stock: one row per company, read on the day the
+    clock's data ends. The open month's bucket would union its accounts
+    (3, not 1) or add its 29 daily snapshots (290, not 10)."""
+    resp, trace = _serve(
+        lane,
+        "active accounts by company",
+        {"measures": [measure], "dimensions": ["staff_daily.company"]},
+        [("active accounts", "member", measure), ("company", "member", "staff_daily.company")],
+    )
+    assert resp.status == "ok", resp.answer
+    assert resp.data is not None
+    i = resp.data.columns.index(measure)
+    assert sorted(row[i] for row in resp.data.rows) == [latest, latest]
+    assert [latest, latest] != [month_bucket, month_bucket]
+    assert resp.confidence == "verified"
+    assert "2026-08-29" in resp.answer and "day grain" in resp.answer
+    assert trace.sql and "2026-08-29" in trace.sql and "date_trunc('day'" in trace.sql.lower()
+
+
+def test_today_on_a_level_serves_the_latest_snapshot_as_partial(lane: CubeLane) -> None:
+    resp, _ = _serve(
+        lane,
+        "headcount today",
+        {
+            "measures": ["staff_daily.headcount"],
+            "timeDimensions": [
+                {"dimension": "staff_daily.day", "dateRange": ["2026-09-01", "2026-09-01"]}
+            ],
+        },
+        [("headcount", "member", "staff_daily.headcount"), ("today", "period", "2026-09-01")],
+    )
+    assert resp.status == "ok", resp.answer
+    assert resp.data is not None and resp.data.row_count == 1
+    assert resp.data.rows[0][resp.data.columns.index("staff_daily.headcount")] == 20
+    assert resp.confidence == "partial" and resp.mode == FailureMode.data_gap
+    assert "holds no snapshot" in resp.answer and "2026-08-29" in resp.answer
+
+
+def test_a_pin_to_a_data_end_with_no_snapshot_is_refused_not_zero_rows(tmp_path: Path) -> None:
+    """The probe says the roster's data ends on a day that holds no row:
+    the stock is not served from nothing, and the answer says to re-run
+    the monitor."""
+    probe = {
+        "cubes": {
+            **fake.PROBE["cubes"],
+            "staff_daily": {
+                "clock": "staff_daily.day",
+                "time_dimensions": {"day": {"kind": "event", "data_end": "2026-08-30"}},
+            },
+        }
+    }
+    lane = _lane(tmp_path, probe=probe)
+    resp, _ = _serve(
+        lane,
+        "headcount",
+        {"measures": ["staff_daily.headcount"]},
+        [("headcount", "member", "staff_daily.headcount")],
+    )
+    assert resp.status == "refused" and resp.mode == FailureMode.data_gap
+    assert "no snapshot of staff_daily.headcount on 2026-08-30" in resp.answer
+
+
+def test_a_flow_asked_for_today_with_nothing_loaded_is_a_gap_not_a_zero(tmp_path: Path) -> None:
+    """The lens clock reached today (another feed loaded), orders are loaded
+    through yesterday: 'orders today' comes back with 0 rows, which is
+    refused as a gap, never served as a count of 0."""
+    lane = _lane(tmp_path, probe={"clock_end": "2026-09-01"})
+    resp, _ = _serve(
+        lane,
+        "orders today",
+        {
+            "measures": ["orders.count"],
+            "timeDimensions": [
+                {"dimension": "orders.ordered_at", "dateRange": ["2026-09-01", "2026-09-01"]}
+            ],
+        },
+        [("orders", "member", "orders.count"), ("today", "period", "2026-09-01")],
+    )
+    assert resp.status == "refused", resp.answer
+    assert resp.mode == FailureMode.data_gap
+    assert "nothing is loaded for 2026-09-01..2026-09-01" in resp.answer
+    assert "not a measured 0" in resp.answer
+
+
 def test_a_comparison_runs_each_window_and_sets_them_side_by_side(lane: CubeLane) -> None:
     resp, _ = _serve(
         lane,
@@ -463,6 +554,148 @@ def test_a_comparison_with_a_partial_month_serves_and_states_the_fact(lane: Cube
     assert "2026-08" in (check.reason or "")
 
 
+def _serve_many(
+    lane: CubeLane, question: str, bodies: list[dict[str, Any]], words: list[str]
+) -> Any:
+    led = [Binding(word=w, kind="member", target="orders.count", source="test") for w in words]
+    cands = [
+        Candidate(query=CubeQuery.model_validate(b), ledger=led, lane="frontier") for b in bodies
+    ]
+    return lane.serve(question, cands, ledger=led, lane="frontier")
+
+
+PAID = {"member": "orders.status", "operator": "equals", "values": ["Paid"]}
+
+
+def test_a_share_asked_as_two_queries_is_divided_and_leads_the_answer(lane: CubeLane) -> None:
+    """The lane answers a share with the numerator and the denominator; dst
+    divides them (the narrower query is the numerator, whichever came
+    first), leads with the figure, and keeps both parts under result 1, 2."""
+    resp, _ = _serve_many(
+        lane,
+        "share of orders that were paid in August",
+        [
+            {"measures": ["orders.count"], "timeDimensions": [AUG]},
+            {"measures": ["orders.count"], "filters": [PAID], "timeDimensions": [AUG]},
+        ],
+        ["share", "orders", "paid", "August"],
+    )
+    assert resp.status == "ok", resp.answer
+    assert resp.answer.startswith("share: 83.3% (5 / 6: orders.count / orders.count")
+    assert resp.data is not None
+    assert resp.data.columns[:2] == ["result", "share"]
+    assert resp.data.rows[0][:2] == [0, pytest.approx(5 / 6)]
+    assert [r[0] for r in resp.data.rows] == [0, 1, 2]
+    assert resp.receipt is not None and "derived:pass" in (resp.receipt.checks or [])
+
+
+def test_a_share_by_group_divides_each_group_by_the_total(lane: CubeLane) -> None:
+    resp, _ = _serve_many(
+        lane,
+        "share of August orders by company",
+        [
+            {
+                "measures": ["orders.count"],
+                "dimensions": ["orders.company"],
+                "timeDimensions": [AUG],
+            },
+            {"measures": ["orders.count"], "timeDimensions": [AUG]},
+        ],
+        ["share", "orders", "company", "August"],
+    )
+    assert resp.status == "ok", resp.answer
+    assert resp.data is not None
+    company, share = (resp.data.columns.index(c) for c in ("orders.company", "share"))
+    lead = {r[company]: r[share] for r in resp.data.rows if r[0] == 0}
+    assert lead == {"North Oy": pytest.approx(1 / 6), "South AB": pytest.approx(5 / 6)}
+    assert resp.answer.startswith("share: ")
+    assert "North Oy: 16.7%" in resp.answer and "South AB: 83.3%" in resp.answer
+
+
+def test_a_per_day_average_divides_the_total_by_the_days_of_the_window_that_ran(
+    lane: CubeLane,
+) -> None:
+    """'divide by 298' is never left to the caller: the total over the
+    window is divided by the days of the window the SQL read."""
+    resp, _ = _serve_many(
+        lane,
+        "average orders per day in August",
+        [{"measures": ["orders.count"], "timeDimensions": [AUG]}],
+        ["average", "orders", "per day", "August"],
+    )
+    assert resp.status == "ok", resp.answer
+    assert resp.answer.startswith("per day: 0.19 (6 / 31 days, 2026-08-01..2026-08-31)")
+    assert resp.data is not None
+    assert resp.data.columns == ["result", "per day", "orders.count"]
+    assert resp.data.rows[0] == [0, pytest.approx(6 / 31), None]
+    assert resp.data.rows[1] == [1, None, 6]
+
+
+def test_parts_over_different_windows_are_not_divided_and_the_answer_says_why(
+    lane: CubeLane,
+) -> None:
+    resp, _ = _serve_many(
+        lane,
+        "share of August orders in all orders",
+        [
+            {"measures": ["orders.count"], "timeDimensions": [AUG]},
+            {"measures": ["orders.count"]},
+        ],
+        ["share", "orders", "August", "all"],
+    )
+    assert resp.status == "ok", resp.answer
+    assert resp.answer.startswith("share: not computed - the parts read different windows")
+    assert "2026-08-01..2026-08-31" in resp.answer and "start..2026-08-31" in resp.answer
+    assert resp.data is not None and [r[0] for r in resp.data.rows] == [1, 2]
+    assert resp.receipt is not None and "derived:skip" in (resp.receipt.checks or [])
+
+
+class _Metered:
+    """A connector that reports what it scanned, like BigQuery's does."""
+
+    kind = "bigquery"
+
+    def __init__(self, inner: DuckDBConnector) -> None:
+        self.inner = inner
+
+    def execute(self, sql: str, *, read_only: bool = True, row_limit: int | None = None) -> Any:
+        out = self.inner.execute(sql, read_only=read_only, row_limit=row_limit)
+        return out.model_copy(update={"bytes_scanned": 1_000_000})
+
+
+def test_a_request_row_carries_the_bytes_the_connector_reported(tmp_path: Path) -> None:
+    """The typed lane stamps wh_bytes / wh_cost_usd from QueryResult.bytes_scanned; the
+    cube lane does the same, summed over every statement the ask ran. Tripwire: a row
+    with SQL and rows has wh_bytes whenever the connector reports it."""
+    from services.observability import cost
+
+    lane = _lane(tmp_path)
+    lane.connector = _Metered(lane.connector)  # type: ignore[assignment]
+    resp, trace = _serve_many(
+        lane,
+        "share of orders that were paid in August",
+        [
+            {"measures": ["orders.count"], "timeDimensions": [AUG]},
+            {"measures": ["orders.count"], "filters": [PAID], "timeDimensions": [AUG]},
+        ],
+        ["share", "orders", "paid", "August"],
+    )
+    assert resp.status == "ok", resp.answer
+    assert trace.sql and trace.row_count
+    assert trace.wh_bytes == 2_000_000
+    assert trace.wh_cost_usd == cost.warehouse_cost_usd(2_000_000, "bigquery") > 0
+    # A connector that reports nothing leaves the bytes unknown and prices
+    # a free warehouse at zero, as the typed lane does.
+    plain = _lane(tmp_path / "plain")
+    _resp, trace = _serve(
+        plain,
+        "orders in August",
+        {"measures": ["orders.count"], "timeDimensions": [AUG]},
+        [("orders", "member", "orders.count"), ("August", "period", "2026-08")],
+    )
+    assert trace.sql and trace.wh_bytes is None and trace.wh_cost_usd == 0.0
+
+
 def test_a_gap_on_one_window_of_several_is_disclosed_not_dropped(lane: CubeLane) -> None:
     """A data gap that is partial — one window of the ask has nothing
     loaded, another does — serves what is loaded and states the gap in the
@@ -517,3 +750,53 @@ def test_an_allocated_figure_in_a_clarification_still_carries_its_caveat(tmp_pat
     reasons = " ".join(c.reason or "" for c in resp.verification.checks)
     assert "orders.revenue_net=820" in reasons
     assert f"orders.revenue_net: {allocated}" in reasons
+
+
+def _marked_view(**dst: Any) -> Any:
+    """The fake lens with its level measure's meta.dst extended."""
+    import copy
+
+    from services.contracts.cube_meta import MetaDoc
+    from services.contracts.cube_probe import CubeProbe
+    from services.cube.lens_view import CubeLensView
+
+    payload = copy.deepcopy(fake.meta_payload())
+    staff = next(c for c in payload["cubes"] if c["name"] == "staff")
+    staff["measures"][0]["meta"]["dst"].update(dst)
+    return CubeLensView.build(
+        MetaDoc.parse(payload),
+        overlay=Overlay.model_validate(fake.OVERLAY),
+        probe=CubeProbe.model_validate(fake.PROBE),
+    )
+
+
+def test_a_level_marked_creation_dated_reads_the_whole_table_without_a_period(
+    lane: CubeLane,
+) -> None:
+    """One row per record, not one per record per day: with no period
+    asked there is no snapshot to pin, so every row counts. A stated
+    period keeps the pin."""
+    body = {"measures": ["staff.headcount"]}
+    ledger = [("headcount", "member", "staff.headcount")]
+    resp, _ = _serve(lane, "headcount", body, ledger)
+    assert resp.status == "ok" and resp.data is not None
+    assert resp.data.rows[0][resp.data.columns.index("staff.headcount")] == 43  # the last snapshot
+    lane.view = _marked_view(creation_dated=True)
+    resp, _ = _serve(lane, "headcount", body, ledger)
+    assert resp.status == "ok" and resp.data is not None
+    assert resp.data.rows[0][resp.data.columns.index("staff.headcount")] == 125  # every row
+    assert resp.receipt is not None and resp.receipt.checks is not None
+    assert "snapshot_pin:disclose" not in resp.receipt.checks
+    resp, _ = _serve(
+        lane,
+        "headcount at the end of Q2",
+        {
+            **body,
+            "timeDimensions": [
+                {"dimension": "staff.month", "dateRange": ["2026-04-01", "2026-06-30"]}
+            ],
+        },
+        [*ledger, ("end of Q2", "period", "2026-04-01..2026-06-30")],
+    )
+    assert resp.status == "ok" and resp.data is not None
+    assert resp.data.rows[0][resp.data.columns.index("staff.headcount")] == 43

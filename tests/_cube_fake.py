@@ -102,6 +102,31 @@ CUBES: list[dict[str, Any]] = [
         "segments": [],
     },
     {
+        # A daily snapshot: which accounts were active on each day, and the
+        # staff on roster that day. No snapshot_grain declared (the default,
+        # month, is what a migrated model carries), so a month bucket would
+        # union the month's accounts and add its 29 days of headcount.
+        "name": "staff_daily",
+        "type": "cube",
+        "title": "Daily roster",
+        "_table": "hr.staff_daily",
+        "measures": [
+            _m(
+                "staff_daily.active_accounts",
+                "countDistinct",
+                "account_id",
+                additivity="level",
+                clock="day",
+            ),
+            _m("staff_daily.headcount", "sum", "headcount", additivity="level", clock="day"),
+        ],
+        "dimensions": [
+            _d("staff_daily.day", "day", "time"),
+            _d("staff_daily.company", "company", dictionary=True),
+        ],
+        "segments": [],
+    },
+    {
         "name": "north_invoices",
         "type": "cube",
         "title": "North Oy invoices",
@@ -139,6 +164,7 @@ VIEWS: list[dict[str, Any]] = [
         "measures": [
             {"name": "shop.count", "type": "number", "aliasMember": "orders.count"},
             {"name": "shop.revenue", "type": "number", "aliasMember": "orders.revenue"},
+            {"name": "shop.revenue_net", "type": "number", "aliasMember": "orders.revenue_net"},
         ],
         "dimensions": [
             {"name": "shop.status", "type": "string", "aliasMember": "orders.status"},
@@ -256,7 +282,12 @@ PROBE: dict[str, Any] = {
         },
         "staff": {
             "clock": "staff.month",
-            "time_dimensions": {"month": {"kind": "event", "data_end": "2026-08-31"}},
+            # The last snapshot in hr.staff_monthly, as the monitor records it.
+            "time_dimensions": {"month": {"kind": "event", "data_end": "2026-06-01"}},
+        },
+        "staff_daily": {
+            "clock": "staff_daily.day",
+            "time_dimensions": {"day": {"kind": "event", "data_end": "2026-08-29"}},
         },
     },
     "measures": {
@@ -278,17 +309,26 @@ PROBE: dict[str, Any] = {
         "quotes.won": {"cube": "quotes", "clock": "quotes.decided_at", "type": "count"},
         "contracts.count": {"cube": "contracts", "clock": "contracts.end_date", "type": "count"},
         "staff.headcount": {"cube": "staff", "clock": "staff.month", "type": "sum"},
+        "staff_daily.active_accounts": {
+            "cube": "staff_daily",
+            "clock": "staff_daily.day",
+            "type": "count_distinct",
+        },
+        "staff_daily.headcount": {"cube": "staff_daily", "clock": "staff_daily.day", "type": "sum"},
     },
 }
 
 
-def view(views: list[str] | None = None, **overlay: Any) -> CubeLensView:
+def view(
+    views: list[str] | None = None, probe: dict[str, Any] | None = None, **overlay: Any
+) -> CubeLensView:
     """The fake lens: scoped to ``views`` through its LensModel when given,
-    else unscoped (every member the fake Cube serves)."""
+    else unscoped (every member the fake Cube serves). ``probe`` overrides
+    top-level keys of ``PROBE`` (``clock_end``, ``cubes``, ``measures``)."""
     return CubeLensView.build(
         doc(),
         overlay=Overlay.model_validate({**OVERLAY, **overlay}),
-        probe=CubeProbe.model_validate(PROBE),
+        probe=CubeProbe.model_validate({**PROBE, **(probe or {})}),
         lens="shop" if views else None,
         views=views,
     )
@@ -438,6 +478,20 @@ def world(path: Path) -> Path:
             ("2026-06-01", "North Oy", 43, 0),
         ],
     )
+    # One row per account per day it was active, 2026-08-01..29: on day d the
+    # accounts are A1..A(1 + (d + 1) % 3), so the last day (29) holds one
+    # account with 10 heads per company, while a month bucket unions three
+    # accounts and adds 29 days of headcount.
+    con.execute(
+        "CREATE TABLE hr.staff_daily (day DATE, company VARCHAR, account_id VARCHAR, headcount INT)"
+    )
+    daily = [
+        (f"2026-08-{d:02d}", company, f"A{i}", 10)
+        for d in range(1, 30)
+        for company in ("North Oy", "South AB")
+        for i in range(1, 2 + (d + 1) % 3)
+    ]
+    con.executemany("INSERT INTO hr.staff_daily VALUES (?, ?, ?, ?)", daily)
     con.execute("CREATE TABLE fin.north_invoices (issued_at TIMESTAMP, amount DOUBLE)")
     con.execute("CREATE TABLE sales.quotes (quote_id INT, sent_at TIMESTAMP, decided_at TIMESTAMP)")
     # Contracts end on a schedule: three run out in October, after the clock.

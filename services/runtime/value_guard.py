@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import sqlglot
@@ -142,6 +143,37 @@ def entity_column_types(
         own = {name.lower(): c.type for name, c in columns.items() if c.type}
         if own:
             out[entity.name] = own
+    return out
+
+
+def is_creation_dated(key: Sequence[str], profile: TableProfile) -> bool:
+    """Does the profile show the table holds one row per record, not one per
+    record per snapshot? True when a column of its declared key is unique
+    on its own: an exact distinct count no smaller than the row count. A
+    key repeated per day (one row per bike per day) is never unique alone,
+    and a sampled count is a lower bound that proves nothing."""
+    rows = profile.row_count
+    if not rows or not key:
+        return False
+    columns = {c.name.lower(): c for c in profile.columns}
+    for name in key:
+        col = columns.get(name.lower())
+        if col is None or not col.distinct_is_exact or col.distinct_count is None:
+            continue
+        if col.distinct_count >= rows:
+            return True
+    return False
+
+
+def creation_dated_entities(model: SemanticModel, profiles: Iterable[TableProfile]) -> set[str]:
+    """The entities whose table ``is_creation_dated`` by its stored profile:
+    a level metric on one, asked over no period, reads the whole table."""
+    by_table = {p.table: p for p in profiles}
+    out: set[str] = set()
+    for entity in model.entities:
+        profile = by_table.get(entity.source.table) or by_table.get(entity.source.table.lower())
+        if profile is not None and is_creation_dated(entity.primary_key, profile):
+            out.add(entity.name)
     return out
 
 

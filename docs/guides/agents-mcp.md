@@ -36,6 +36,19 @@ claude mcp add dst --transport stdio --env DST_API_KEY=dst_... -- dst mcp
 
 Revoke a key with `dst revoke-key` or from the dashboard.
 
+A client that speaks MCP's OAuth (Claude's connectors, the desktop apps) needs no key
+pasted at all: it registers itself, opens dst's consent page in a browser, and receives
+its own token. On that page the person authorizes with a caller key, with Clerk when
+it is configured, or with the company's identity provider when `DST_OIDC_ISSUER` is
+set: one button, a sign-in at Okta, Keycloak, Entra or whatever the issuer is, and
+back. The caller is created on the first sign-in, named by the email in the token
+and bound to its subject, so the next sign-in by the same person reuses it. Groups
+come through the `groups:` mapping in `dst.yaml` and are refreshed on every sign-in;
+the token lives 30 days by default (`DST_OIDC_TOKEN_DAYS`), and `dst keys sync-idp`
+revokes the callers the provider no longer lists. The settings, and what is verified,
+are in [Security](../security.md#the-served-surface) and
+[Configuration](../reference/configuration.md#server-environment).
+
 ## The tools
 
 Eighteen tools (`services/mcp/server.py`). Every MCP request runs in
@@ -52,7 +65,7 @@ Lenses on the typed core answer exactly as without it.
 | `query` | ask a named lens |
 | `query_metrics` | ask with a structured intent (metrics, dimensions, filters) instead of prose; `compare` adds the same figures over a comparison window, with deltas |
 | `query_metrics_batch` | up to 50 structured intents in one call, read at one `data_as_of`, results keyed by each intent's `id`; one failing intent fails alone |
-| `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; honours the lens's `hide` and `not_computable` refusals (code `refused`, the same sentence `query` answers with); answers carry `grain`, `data_end` and `checks` lines and a signed receipt; takes `purpose` like the other asking tools |
+| `sql` | run your own read-only SQL inside a named lens's scope; guarded, row-capped, logged; honours the lens's `hide` and `not_computable` refusals (code `refused`, the same sentence `query` answers with); answers carry `grain`, `data_end`, `clock` and `checks` lines (join conservation, clocks, reconciliation against a certified number) and a signed receipt; takes `purpose` like the other asking tools and `question` when the read answers one, which makes the request reviewable and certifiable |
 | `list_lenses` / `describe_lens` | what this caller may see: schema, definitions, certified count, and the metric catalog; for a lens served through Cube, its views (one in full), members with their `meta.dst` facts and values, refusals, ambiguous terms, freshness and certified pairs |
 | `metric_catalog` | the catalog alone: metrics with label, unit, grains, callable dimensions and `depends_on`; dimensions with their value lists; and the metric `tree` |
 | `lookup_definition` | a governed term's approved meaning verbatim; no SQL, no warehouse call |
@@ -68,14 +81,14 @@ The argument names, as the tools declare them (required first; `format` is
 | Tool | Arguments |
 |---|---|
 | `route_query` | `question`; `format`, `bindings`, `allow_untyped`, `purpose` |
-| `query_cube` | `lens`, `query`, `ledger`; `question` |
+| `query_cube` | `lens`, `query`, `ledger`; `question`, `route_id` |
 | `values` | `lens`, `member`; `prefix` |
 | `data_end` | `lens`, `member` |
 | `grain` | `table`; `lens` |
 | `query` | `name`, `question`; `format`, `bindings`, `allow_untyped`, `purpose` |
 | `query_metrics` | `lens`; `metrics`, `dimensions`, `filters`, `order_by`, `limit`, `entity`, `grain`, `compare`, `format` |
 | `query_metrics_batch` | `lens`, `intents`; `format` |
-| `sql` | `lens`, `sql`; `limit`, `purpose` |
+| `sql` | `lens`, `sql`; `limit`, `purpose`, `question` |
 | `list_lenses` | none |
 | `describe_lens` | `name`; `table`, `view` |
 | `metric_catalog` | `lens` |
@@ -160,9 +173,13 @@ The flow for a lens served through Cube:
    `describe_lens(lens, view=…)` lists that view in full: each member's title,
    description, aliases, additivity, clock and `clock_kind`, observed values (bounded,
    with `values_total`) and data end.
-3. `query_cube(lens, query, ledger, question)` runs the agent's query. The ledger is
-   the same one dst's own lane writes: one entry per content word of the question,
-   `{"word", "to": member | filter | segment | period | none, "ref"}`.
+3. `query_cube(lens, query, ledger, question, route_id)` runs the agent's query. The
+   ledger is the same one dst's own lane writes: one entry per content word of the
+   question, `{"word", "to": member | filter | segment | period | none, "ref"}`.
+   `route_id` is the `request_id` `route_query` returned: an ambiguous term's reading
+   is selected by the words of the question recorded there, never by the `question`
+   text the agent sends, so a rewritten question cannot pick a reading the asker never
+   named. Without it no select word applies.
 
 The checks `query_cube` runs, in order, each reported on the receipt as `name:outcome`:
 
@@ -173,14 +190,14 @@ The checks `query_cube` runs, in order, each reported on the receipt as `name:ou
 | `scope` | a member outside the lens's views |
 | `hidden` | a member withheld from this caller's groups |
 | `declared` | a member the Cube model does not hold |
-| `ambiguous` | an ambiguous term asked without naming a reading; when the readings agree within 1 %, the default is served and the others disclosed |
+| `ambiguous` | an ambiguous term asked without naming a reading (in driver mode, the reading is named only by the question `route_id` recorded); when the readings agree within 1 %, the default is served and the others disclosed |
 | `words` | a content word of the question carried by nothing in the ledger or the query |
 | `unasked_scope` | a filter on a company or scope the question did not ask for |
 | `values` (dictionary) | a filter value the dimension's observed values do not hold |
 | `window` | a window that disagrees with the question's period ("this month" is bound to its dates on the lens clock) |
 | `label_key` | a label grouped without the key it belongs to |
-| `freshness` / `partial_period` | the data ends before the window, or the period is only partly loaded: served with the fact (which period, how complete, judged by which measure) in the answer, the checks and the receipt, and graded `partial`; refused only when no window of the ask has data loaded |
-| `empty_result`, `null_bucket`, `tie_at_limit`, `snapshot_pin`, `empty_window` | after execution: no rows, an empty bucket, rows tied past the limit, a level metric read at one snapshot, an empty window |
+| `freshness` / `partial_period` | the data ends before the window, or the period is short: served with the fact (which period, how complete, judged by which measure, and what the evidence says: partially loaded, or complete with its values still maturing) in the answer, the checks and the receipt, and graded `partial`; refused only when no window of the ask has data loaded |
+| `empty_result`, `null_bucket`, `tie_at_limit`, `snapshot_pin`, `empty_window` | after execution: no rows (a zero on a dictionary value over a window every feed read is loaded through is a measured 0, served with the window stated; otherwise refused as not recorded), an empty bucket, rows tied past the limit, a level metric read at one snapshot, an empty window |
 
 An answer that read a cube or member the overlay gives caveats
 (`cubes.<cube>.caveats`, `cubes.<cube>.member_caveats`: an allocated measure, a known
@@ -202,6 +219,26 @@ facts to its answer: a `grain` line and a `data_end` line per exposed table read
 `empty_result` check that says no rows is not a zero, and a signed receipt whose
 `checks` say `exposed, could not verify …` wherever a check could not run (no
 blueprint, no fresh profile).
+
+Three more checks run before the number leaves the `sql` tool, each a line on the
+receipt with the mode it is counted under: `join`, rows after the statement's joins
+against the rows of its base table, so a join that multiplies rows is disclosed with
+both counts (`wrong_grain`) rather than summed in silence; `clock`, what each time
+column the statement reads records, from the table's blueprint, or that no clock is
+declared for it; and `reconcile`, the leading number computed beside a certified
+answer of the lens over the same tables and window, with the delta when they differ.
+A check that could not run says `could not close` and why. `sql` in the response is
+the statement as it ran; an agent shows it with the number. The confidence stays
+`unverified`: these say what the cap covers, they do not lift it.
+
+A read that answers the user's question takes `question`. The request log then keeps
+the question beside the SQL as `lane: explore`, `send_for_review(request_id)` opens a
+ticket carrying the SQL, the tables read, every check and the question, and the data
+team's approval (`dst rule --certify`) writes a certified pair pinned to the tables'
+blueprints, or a `kind: cube` pair on a lens served through Cube when the reviewer
+supplies the Cube query and its rows equal the answer's, or seeds a lens over the
+tables read (`dst seed-lens`). An exposed table is for looking; the moment a number
+from it is repeated, this is how it becomes governed.
 
 In driver mode, `query` on a lens served through Cube answers 400 pointing at
 `query_cube`, and `run_certified` there serves the approved rows with no written

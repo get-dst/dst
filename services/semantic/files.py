@@ -219,7 +219,7 @@ def parse_semantic_files(
     relationships: dict[str, SharedRelationship] = {}
     entity_paths: dict[str, str] = {}
     definition_paths: dict[str, str] = {}
-    pair_paths: dict[frozenset[str], str] = {}
+    pair_paths: dict[tuple[frozenset[str], str | None], str] = {}
     for path, content in sorted(files.items()):
         asset = parse_semantic_file(path, content, notes=notes)
         # Silent last-file-wins here would be exactly the drift the shared layer
@@ -233,14 +233,17 @@ def parse_semantic_files(
             entity_paths[asset.name] = path
             entities[asset.name] = asset
         elif isinstance(asset, SharedRelationship):
-            # The pair is the identity, unordered: a second file for the same
-            # two entities — reversed included — is a competing claim, not a
-            # second relationship.
-            pair = frozenset((asset.left, asset.right))
+            # The pair plus the role is the identity, unordered: a second file
+            # for the same two entities in the same role — reversed included —
+            # is a competing claim, not a second relationship. A different
+            # role (a booking's payer beside its passenger) is a second join.
+            pair = (frozenset((asset.left, asset.right)), asset.role)
             if pair in pair_paths:
+                played = f" as {asset.role}" if asset.role else ""
                 raise ValueError(
-                    f"the {asset.left} <-> {asset.right} relationship is declared in "
-                    f"both {pair_paths[pair]} and {path} — a pair has one relationship"
+                    f"the {asset.left} <-> {asset.right} relationship{played} is declared in "
+                    f"both {pair_paths[pair]} and {path} — a pair has one relationship per "
+                    "role (give the second one its own `role:`)"
                 )
             pair_paths[pair] = path
             relationships[asset.name] = asset

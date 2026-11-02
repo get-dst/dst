@@ -707,7 +707,12 @@ finding:
   last seven days or its second half is loaded at under 70% of its first
   half's daily rate. A month-grained clock has no day coverage, so there the
   volume rule decides, and the finding says so. The finding names its
-  evidence. A feed is judged by the measures
+  evidence, and the lane's disclosure follows it: "partially loaded" only on
+  load evidence; a month whose load evidence says complete is not flagged at
+  all unless the cube declares `matures_after` for the measure (days after a
+  period ends before its values are final: work billed after completion,
+  refunds still arriving), and within those days it is disclosed as complete
+  with its values still maturing, naming the measure. A feed is judged by the measures
   `cubes.<cube>.feed_measures` names (a billed amount that lags rows that are
   all there), else by its row counts, and a period they find partial is
   partial for every measure of the cube on the same clock (`judged_by` names
@@ -757,6 +762,16 @@ would come back. Mirrored as the `sql` MCP tool.
 It complements `introspect --profile` rather than repeating it: per-column enum values,
 null rates and ranges come from the profile in one pass, so ask it for those. Reach here
 for rows, cross-column facts, and join checks a profile cannot see.
+
+On the lens door a statement that reads an exposed table is an outside-lens read: the
+row lands in the request log with `lane: explore`, and the command prints what it could
+and could not verify under the rows: the `GRAIN` and `DATA END` lines, the clock of
+every time column read, the `join` check (rows after the joins against the base
+table's rows), the `reconcile` check (the number beside a certified answer over the
+same tables and window), and any check that reads `could not close`. `--question "…"`
+records the question the read answers: the log keeps it beside the SQL, a review ticket
+on the request carries it, and `dst rule --certify` certifies the pair. Without it the
+request has no question, and certifying it is refused.
 
 ## Ask and verify
 
@@ -844,6 +859,13 @@ accuracy, and ECE (null, with the status saying why, below 20 measured decisions
 Every recorded row stores its generated value in `eval_result.actual_value`: the
 executed result as JSON on the data lane (the shape a `verified_value` has), the
 typed intent on the slot lane.
+
+Behavioral cases that were answered from an exposed table are outside-lens answers,
+and the summary scores them as their own path, on an `explore:` line: `right` (the case
+expected an answer and got one), `honest` (it expected a clarification or a refusal and
+got one), `wrong`, and what their model calls cost. A right answer from an exposed table
+is not a governed pass, so it is never added to one. `--json` carries the same figures
+under `explore`, and each row's `lane`.
 
 [![dst test with nothing certified: 0/0 passed, exit 4, and the warning that this run could not have failed](../assets/term/test.svg)](../assets/term/test.svg)
 
@@ -972,6 +994,23 @@ with `{"driver": true}` does the same, and `dst keys list` marks driver callers.
 
 [![dst keys create: the caller and their key, shown once](../assets/term/keys.svg)](../assets/term/keys.svg)
 
+### `dst keys sync-idp`
+
+Revoke the keys of every caller the identity provider no longer lists. Reads the users
+listing at `DST_OIDC_USERS_URL` through the server (`POST /mgmt/callers/sync-idp`, so a
+cron `curl` with an admin token does the same) and revokes the keys of each caller an
+IdP sign-in bound to a subject the listing no longer carries; callers an admin created
+by hand are never touched. `--dry-run` reports without revoking.
+
+```
+identity provider lists 41 user(s); 12 caller(s) here are bound to it
+revoked 1 caller(s): tom@corp.example
+keys revoked: 2
+```
+
+Exit 1 with the reason when the listing cannot be read or lists nobody: nothing is
+revoked on a listing the server could not trust.
+
 ### `dst revoke-key --caller <name>`
 
 Revoke the caller's active keys. In-process, immediate. Scoped to **one** org: pass
@@ -1050,6 +1089,11 @@ stays in the ledger and the export but is left out of the headline, the basis li
 and the caller rows; the headline says how many requests it left out, and
 `--include-test` counts them.
 
+Outside-lens reads (`lane: explore` in the request log: the `sql` tool inside a lens,
+and answers read from a table a lens exposes without definitions) are not governed
+queries and are not counted in the headline. An `explore:` line reports them apart:
+how many, how many answered, their AI and warehouse cost, and the bytes they scanned.
+
 The bare form is the answer to "the CFO wants to know who has been using the
 reporting tool": one line of totals, then a row per caller. The totals line
 labels the two bills apart: `AI $…` (the model providers) and `warehouse $…`
@@ -1093,6 +1137,29 @@ Rule on a review ticket. Flags: `--verdict approve|changes|reject` (required),
 `--reasoning`, `--certify` (after an approve, promote the request's question→SQL to a
 certified answer in the same act; requires `--verdict approve`). See
 [The correction loop](../guides/correction-loop.md).
+
+On a ticket raised on an outside-lens answer (a read over exposed tables that carried a
+question), `--certify` writes a `kind: sql` pair pinned to the blueprints of the tables
+it read. On a lens served through Cube, `--cube-query '<json>'` supplies the Cube query
+that is the governed reading of the question: the server compiles it, runs it beside
+the answer's SQL and certifies only when the rows are the same, and the command writes
+the `kind: cube` pair, with its `query` and `verified` hashes, to
+`lenses/<lens>/certified_answers.yaml` under `--dir` (printed when the project is not
+at hand). Rows that differ are a 409 and no pair.
+
+### `dst seed-lens <ticket_id>`
+
+The other outcome of ruling on an outside-lens answer: instead of certifying one pair,
+scaffold the lens the table was missing. From the ticket's request it writes one
+`semantic/entities/<name>.yaml` per exposed table the SQL read (name, source, the
+fields the lens lists, the blueprint's grain and key, its clocks and caveats as
+comments) and `lenses/<name>/lens.yaml` selecting them, with the question as an
+`expect: answer` case in `evals/cases.yaml`. Every slot the ticket could not fill
+(description, dimensions, metrics) is left empty and marked `TODO`: the files say where
+the definitions go, and the author's agent fills them. Flags: `--name` (default
+`<first entity>_seed`), `--dir`, `--url`/`--token`. An existing entity file is kept;
+an existing lens directory is refused. Needs an admin token; a ticket on a governed
+answer is refused, since it has a lens already.
 
 ### `dst retire <lens> <answer_id>`
 

@@ -9,13 +9,16 @@ discover the AS from there. Endpoints:
   POST /oauth/register                              -> dynamic client registration
   GET  /oauth/authorize                             -> server-rendered consent page
   POST /oauth/authorize/complete                    -> credential -> signed auth code
+  POST /oauth/authorize/idp                         -> send the browser to the OIDC issuer
+  GET  /oauth/callback                              -> IdP code -> verified ID token -> auth code
   POST /oauth/token                                 -> code + PKCE -> dsto_ access token
 
 The consent page is **self-contained** (server-rendered HTML, no dashboard SPA, no Clerk
 frontend): the operator authenticates with a credential dst already trusts — a caller
 key (``dst_``/``dsto_``, the per-person/attributable path), an admin token, or a Clerk
-session JWT when Clerk is configured. We mint a ``dsto_`` token bound to a caller row so
-every query is attributable. See ``services.auth.oauth``.
+session JWT when Clerk is configured — or, with ``DST_OIDC_ISSUER`` set, a sign-in at
+the company's own IdP (``services.auth.oidc_login``). We mint a ``dsto_`` token bound
+to a caller row so every query is attributable. See ``services.auth.oauth``.
 """
 
 from __future__ import annotations
@@ -26,11 +29,12 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Cookie, Form, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from mcp.shared.auth import OAuthClientMetadata, OAuthMetadata, ProtectedResourceMetadata
 
-from services.auth import clerk, demo, oauth, scopes
+from services.auth import clerk, demo, oauth, oidc_login, scopes
 from services.auth.deps import resolve_admin_org
 from services.auth.tokens import ADMIN_PREFIX, CALLER_PREFIX, OAUTH_PREFIX, hash_token
 from services.config import instance_name, settings
@@ -245,18 +249,30 @@ def _client_line(client_name: str, redirect_uri: str) -> str:
     )
 
 
-def _token_ttl() -> timedelta:
+def _token_ttl(claims: dict[str, Any]) -> timedelta:
     """An OAuth token's life. In demo mode it matches the demo's own keys
     (demo_key_days): a stranger's client holds access for the week the demo
     promises, then reconnects — there is no refresh token, so the week is the
-    whole grant. Elsewhere the long default stands (revocation is immediate)."""
+    whole grant. A grant from an IdP sign-in gets ``DST_OIDC_TOKEN_DAYS``: the
+    IdP decides who still works here, and a token should not outlive that
+    answer by a year. Elsewhere the long default stands (revocation is immediate)."""
     if demo.enabled():
         return timedelta(days=settings.demo_key_days)
+    if claims.get("idp") == oidc_login.IDP_TAG:
+        return timedelta(days=settings.oidc_token_days)
     return oauth.OAUTH_TOKEN_TTL
 
 
-def _consent_html(params: dict[str, str], error: str = "", *, client_name: str = "") -> str:
-    """Minimal self-contained consent page (no SPA, no Clerk frontend needed)."""
+def _consent_html(
+    params: dict[str, str], error: str = "", *, client_name: str = "", idp_host: str = ""
+) -> str:
+    """Minimal self-contained consent page (no SPA, no Clerk frontend needed).
+
+    With ``idp_host`` the page offers the company IdP's sign-in instead of the
+    credential field: same client line, same grant summary, one button that
+    posts to ``/oauth/authorize/idp``. The person sees who asked and where the
+    code goes BEFORE leaving for the IdP, so the phishing defense above holds
+    for this path too."""
     hidden = "".join(
         f'<input type="hidden" name="{k}" value="{html.escape(v, quote=True)}">'
         for k, v in params.items()
@@ -265,6 +281,26 @@ def _consent_html(params: dict[str, str], error: str = "", *, client_name: str =
     grant = _grant_summary(params.get("scope", ""))
     who = _client_line(client_name, params.get("redirect_uri", ""))
     name = html.escape(instance_name())
+    if idp_host:
+        lead = (
+            f"<p>Sign in at <code>{html.escape(idp_host)}</code> to authorize — the client "
+            "receives its own token, bound to you.</p>"
+        )
+        form = f"""<form method="post" action="/oauth/authorize/idp">
+    {hidden}
+    <button type="submit">Continue with {html.escape(idp_host)}</button>
+  </form>"""
+    else:
+        lead = (
+            "<p>Paste a dst caller key (<code>dst_…</code>) or admin token to authorize — "
+            "the client receives its own token; your key is never stored in its config.</p>"
+        )
+        form = f"""<form method="post" action="/oauth/authorize/complete">
+    {hidden}
+    <input type="password" name="credential" placeholder="dst_… or dstadm_…"
+      autocomplete="off" autofocus required>
+    <button type="submit">Authorize</button>
+  </form>"""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect to {name}</title>
@@ -293,16 +329,10 @@ def _consent_html(params: dict[str, str], error: str = "", *, client_name: str =
   <div class="tag">Connect MCP client</div>
   <h1>Authorize {name} access</h1>
   {who}
-  <p>Paste a dst caller key (<code>dst_…</code>) or admin token to authorize — the client
-  receives its own token; your key is never stored in its config.</p>
+  {lead}
   <p class="grant">{grant}</p>
   {err}
-  <form method="post" action="/oauth/authorize/complete">
-    {hidden}
-    <input type="password" name="credential" placeholder="dst_… or dstadm_…"
-      autocomplete="off" autofocus required>
-    <button type="submit">Authorize</button>
-  </form>
+  {form}
 </div></body></html>"""
 
 
@@ -436,9 +466,13 @@ async def authorize(
         "scope": " ".join(granted),
         "resource": resource or "",
     }
-    # Real browser sign-in when Clerk is configured; otherwise the credential-paste
-    # fallback (self-hosted instances with no IdP).
     name = oauth.client_name(client_id) or ""
+    # The company IdP when one is configured (self-host with Okta, Keycloak, …);
+    # it takes precedence over Clerk, since an operator who set both set the
+    # issuer deliberately. Then Clerk's hosted sign-in; otherwise the
+    # credential-paste fallback (self-hosted instances with no IdP).
+    if oidc_login.configured():
+        return HTMLResponse(_consent_html(params, client_name=name, idp_host=_idp_host()))
     issuer = clerk.issuer()
     if issuer and settings.clerk_publishable_key:
         host = issuer.split("://", 1)[-1]
@@ -453,6 +487,161 @@ async def authorize(
     return HTMLResponse(_consent_html(params, client_name=name))
 
 
+def _idp_host() -> str:
+    return urlsplit(settings.oidc_issuer or "").netloc or (settings.oidc_issuer or "")
+
+
+def _validated_params(
+    client_id: str, redirect_uri: str, code_challenge: str, state: str, scope: str, resource: str
+) -> tuple[dict[str, str], list[str]] | JSONResponse:
+    """The consent POSTs re-validate what the form round-tripped: they are
+    POST-able directly, so every field arriving here is caller-controlled."""
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "state": state,
+        "scope": scope,
+        "resource": resource,
+    }
+    registered = oauth.client_redirect_uris(client_id)
+    if registered is None or redirect_uri not in registered:
+        return _oauth_error("invalid_request", "unknown client or redirect_uri")
+    try:
+        granted = scopes.parse(scope)
+    except ValueError as exc:
+        return _oauth_error("invalid_scope", str(exc))
+    return params, granted
+
+
+def _grant_redirect(
+    params: dict[str, str],
+    granted: list[str],
+    org_id: uuid.UUID,
+    caller_id: uuid.UUID,
+    *,
+    idp: str | None,
+) -> RedirectResponse:
+    # THIS is what makes a registration a real client, and what exempts it from
+    # retention. Deliberately not the `authorize` GET: that step is anonymous, so
+    # marking there would let anyone immunise their own spam registrations against
+    # the cap simply by visiting the consent page for each one. Reaching here means
+    # a credential dst already trusts authorized this client.
+    oauth.mark_client_used(params["client_id"])
+    code = oauth.sign_auth_code(
+        caller_id=str(caller_id),
+        org_id=str(org_id),
+        code_challenge=params["code_challenge"],
+        redirect_uri=params["redirect_uri"],
+        client_id=params["client_id"],
+        scopes=granted,
+        resource=params.get("resource") or None,
+        idp=idp,
+    )
+    redirect_uri = params["redirect_uri"]
+    sep = "&" if "?" in redirect_uri else "?"
+    return RedirectResponse(
+        f"{redirect_uri}{sep}{urlencode({'code': code, 'state': params.get('state', '')})}",
+        status_code=302,
+    )
+
+
+def _idp_page(params: dict[str, str], error: str, status: int) -> HTMLResponse:
+    return HTMLResponse(
+        _consent_html(
+            params,
+            error,
+            client_name=oauth.client_name(params["client_id"]) or "",
+            idp_host=_idp_host(),
+        ),
+        status_code=status,
+    )
+
+
+@router.post("/oauth/authorize/idp", response_model=None)
+async def authorize_idp(
+    request: Request,
+    client_id: str = Form(...),
+    redirect_uri: str = Form(...),
+    code_challenge: str = Form(...),
+    state: str = Form(""),
+    scope: str = Form(""),
+    resource: str = Form(""),
+) -> Response:
+    """The consent page's IdP button: validate the pending request, bind it to
+    this browser in a signed cookie, and send the browser to the issuer."""
+    if not oidc_login.configured():
+        return _oauth_error("invalid_request", "no identity provider is configured", status=404)
+    checked = _validated_params(client_id, redirect_uri, code_challenge, state, scope, resource)
+    if isinstance(checked, JSONResponse):
+        return checked
+    params, granted = checked
+    params["scope"] = " ".join(granted)
+    # Off the event loop: the first call discovers the issuer over the network.
+    started = await run_in_threadpool(
+        oidc_login.start, params, _base(request) + oidc_login.CALLBACK_PATH
+    )
+    if started is None:
+        return _idp_page(params, "The identity provider could not be reached — try again.", 503)
+    url, pending = started
+    response = RedirectResponse(url, status_code=302)
+    response.set_cookie(
+        oidc_login.PENDING_COOKIE,
+        pending,
+        max_age=oidc_login.PENDING_TTL_SECONDS,
+        path=oidc_login.CALLBACK_PATH,
+        httponly=True,
+        # Lax, not Strict: the IdP sends the browser back by a top-level
+        # navigation, and Strict would withhold the cookie from exactly that.
+        samesite="lax",
+        secure=request.url.scheme == "https" or settings.environment == "production",
+    )
+    return response
+
+
+@router.get(oidc_login.CALLBACK_PATH, response_model=None)
+async def oidc_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    dst_oidc: str | None = Cookie(default=None),
+) -> Response:
+    """Back from the issuer. Every step fails closed: the cookie must verify and
+    match the echoed state, the code must redeem, the ID token must verify with
+    the nonce the sign-in started with, and the subject must resolve to a caller.
+    The IdP's code and tokens never reach a log line."""
+    pending = oidc_login.verify_pending(dst_oidc, state)
+    if pending is None:
+        return _oauth_error("invalid_request", "no pending sign-in for this browser", status=400)
+    params = {str(k): str(v) for k, v in pending["params"].items()}
+    cleared = oidc_login.PENDING_COOKIE
+    if error or not code:
+        page = _idp_page(params, "The identity provider declined the sign-in.", 401)
+        page.delete_cookie(cleared, path=oidc_login.CALLBACK_PATH)
+        return page
+    # Two network round trips (token endpoint, JWKS) and the caller write, in a
+    # worker thread so a slow issuer stalls this request and not the event loop.
+    ident = await run_in_threadpool(
+        oidc_login.complete,
+        code,
+        pending,
+        _base(request) + oidc_login.CALLBACK_PATH,
+    )
+    if ident is None:
+        page = _idp_page(params, "The sign-in could not be verified — start again.", 401)
+        page.delete_cookie(cleared, path=oidc_login.CALLBACK_PATH)
+        return page
+    org_id, caller_id = ident
+    try:
+        granted = scopes.parse(params.get("scope", ""))
+    except ValueError as exc:
+        return _oauth_error("invalid_scope", str(exc))
+    response = _grant_redirect(params, granted, org_id, caller_id, idp=oidc_login.IDP_TAG)
+    response.delete_cookie(cleared, path=oidc_login.CALLBACK_PATH)
+    return response
+
+
 @router.post("/oauth/authorize/complete", response_model=None)
 async def authorize_complete(
     credential: str = Form(...),
@@ -465,25 +654,10 @@ async def authorize_complete(
 ) -> Response:
     """The consent form posts the credential + params; resolve the caller and redirect the
     browser back to the client with a one-time code."""
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "code_challenge": code_challenge,
-        "state": state,
-        "scope": scope,
-        "resource": resource,
-    }
-    registered = oauth.client_redirect_uris(client_id)
-    if registered is None or redirect_uri not in registered:
-        return _oauth_error("invalid_request", "unknown client or redirect_uri")
-    # Re-validate rather than trust the round-tripped form field: this endpoint is
-    # POST-able directly, so the scope arriving here is caller-controlled input,
-    # not something the authorize step can vouch for.
-    try:
-        granted = scopes.parse(scope)
-    except ValueError as exc:
-        return _oauth_error("invalid_scope", str(exc))
-
+    checked = _validated_params(client_id, redirect_uri, code_challenge, state, scope, resource)
+    if isinstance(checked, JSONResponse):
+        return checked
+    params, granted = checked
     ident = _resolve_grant_identity(credential.strip())
     if ident is None:
         return HTMLResponse(
@@ -495,25 +669,7 @@ async def authorize_complete(
             status_code=401,
         )
     org_id, caller_id = ident
-    # THIS is what makes a registration a real client, and what exempts it from
-    # retention. Deliberately not the `authorize` GET: that step is anonymous, so
-    # marking there would let anyone immunise their own spam registrations against
-    # the cap simply by visiting the consent page for each one. Reaching here means
-    # a credential dst already trusts authorized this client.
-    oauth.mark_client_used(client_id)
-    code = oauth.sign_auth_code(
-        caller_id=str(caller_id),
-        org_id=str(org_id),
-        code_challenge=code_challenge,
-        redirect_uri=redirect_uri,
-        client_id=client_id,
-        scopes=granted,
-        resource=resource or None,
-    )
-    sep = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(
-        f"{redirect_uri}{sep}{urlencode({'code': code, 'state': state})}", status_code=302
-    )
+    return _grant_redirect(params, granted, org_id, caller_id, idp=None)
 
 
 @router.post("/oauth/token")
@@ -546,7 +702,7 @@ async def token(
 
     granted = [str(s) for s in (claims.get("scope") or [])]
     resource = claims.get("resource")
-    ttl = _token_ttl()
+    ttl = _token_ttl(claims)
     raw = credentials.mint_oauth_token(
         uuid.UUID(str(claims["org"])),
         uuid.UUID(str(claims["cid"])),

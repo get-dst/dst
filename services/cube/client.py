@@ -395,6 +395,47 @@ def status(
         out["model_version"] = doc.model_version(lens_views)
         out["members"] = doc.member_counts(lens_views)
         out["overlay_errors"] = len(doc.overlay_errors)
+        out["warehouse"] = warehouse_probe(client, doc, CubeContext.operator())
         return out
     finally:
         client.close()
+
+
+def smallest_cube(doc: MetaDoc) -> tuple[str, CubeQuery] | None:
+    """The cheapest query the model allows: one dimension of the cube with
+    the fewest members (a measure only when it has no dimension), ``limit
+    1``. None when the model holds no cube to query."""
+    cubes = [c for c in doc.cubes if not c.is_view and (c.dimensions or c.measures)]
+    if not cubes:
+        return None
+    c = min(
+        cubes,
+        key=lambda c: (len(c.measures) + len(c.dimensions), 0 if c.dimensions else 1, c.name),
+    )
+    if c.dimensions:
+        return c.name, CubeQuery(dimensions=[c.dimensions[0].name], limit=1)
+    return c.name, CubeQuery(measures=[c.measures[0].name], limit=1)
+
+
+def warehouse_probe(client: CubeClient, doc: MetaDoc, ctx: CubeContext) -> dict[str, Any]:
+    """One ``/v1/load`` of the smallest query the model allows: the meta
+    compiles without a warehouse call, so a Cube whose driver cannot reach
+    the warehouse (an empty ``CUBEJS_DB_BQ_LOCATION``, a dead host) looks
+    green until a query runs. ``{"ok": bool, "cube", "rows" | "detail",
+    "provider"}``: what ``dst cube status``, ``dst doctor`` and ``/ready``
+    show, so the first sign is here, not the probe erroring on every table."""
+    pick = smallest_cube(doc)
+    if pick is None:
+        return {"ok": False, "detail": "the model holds no cube to query"}
+    name, query = pick
+    started = time.monotonic()
+    try:
+        result = client.load(query, ctx, deadline=15.0)
+    except CubeError as exc:
+        return {"ok": False, "cube": name, "detail": exc.detail, "provider": exc.provider}
+    return {
+        "ok": True,
+        "cube": name,
+        "rows": len(result.data),
+        "ms": round((time.monotonic() - started) * 1000, 1),
+    }

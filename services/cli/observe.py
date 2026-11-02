@@ -184,6 +184,11 @@ def _observe(args: argparse.Namespace) -> int:
             # frequent first: each name says which file fixes it.
             split = " · ".join(f"{n} {m}" for m, n in modes.items())
             print(f"{style.accent('modes:')} {split}")
+        if isinstance(types := kpis.get("question_types"), dict) and types:
+            # The questions that asked for no number, by type: answered
+            # before any binding, never a refusal.
+            split = " · ".join(f"{n} {m}" for m, n in types.items())
+            print(f"{style.accent('question types:')} {split}")
         basis = kpis.get("basis")
         if isinstance(basis, dict) and int(basis.get("n") or 0):
             # Basis over EVERY served caller read, `raw` (the caller's own SQL)
@@ -204,6 +209,18 @@ def _observe(args: argparse.Namespace) -> int:
             order = ("certified", "declared", "mixed", "inferred", "unknown")
             split = " · ".join(f"{hist.get(k, 0)} {k}" for k in order if hist.get(k))
             print(f"{style.accent('basis:')} {split}")
+        explore = kpis.get("explore")
+        if isinstance(explore, dict) and int(explore.get("queries") or 0):
+            # Outside-lens reads, cost and all, apart from the governed
+            # figures: the `sql` tool inside a lens and answers from exposed
+            # tables are not governed answers and are not counted above.
+            print(
+                f"{style.accent('explore:')} {int(explore['queries']):,} outside-lens read(s), "
+                f"{int(explore.get('answered') or 0):,} answered · "
+                f"AI ${float(explore.get('ai_cost_usd') or 0):.4f} · "
+                f"warehouse ${float(explore.get('warehouse_cost_usd') or 0):.4f} · "
+                f"{_bytes(int(explore.get('wh_bytes') or 0))} scanned — not counted above"
+            )
         if test_n := int(kpis.get("test_requests") or 0):
             # Left out, and said: a filter that hides rows names how many.
             print(

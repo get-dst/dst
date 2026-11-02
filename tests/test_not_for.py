@@ -199,3 +199,53 @@ def test_a_certified_match_to_another_question_is_no_exemption(
         certified_question=certified_question,
     )
     assert (res.trace.status == "refused") is refused
+
+
+# ---------------------------------------------------------------------------
+# The ask is matched as a phrase: its content words in order, next to each
+# other (function words between them ignored). A question that scatters the
+# ask's words is not that ask. When several asks match, the longest names the
+# refusal. A one-word ask that sits inside one of the lens's own multi-word
+# metrics would mask that metric, so it never matches.
+
+
+def test_the_ask_is_a_phrase_not_a_bag_of_words() -> None:
+    model = _model("l", "t", [{"ask": "door-scan attendance", "sibling": "gates"}])
+    assert not_for_refusal("attendance at the door scan", model) is None
+    assert not_for_refusal("door scan ticketed attendance", model) is None
+    # Function words between the ask's words do not break the phrase.
+    assert not_for_refusal("door scan of attendance", model) is not None
+    assert (
+        not_for_refusal("What was door-scan attendance in May?", model)
+        == "this lens does not answer door-scan attendance; ask gates"
+    )
+
+
+def test_the_longest_matching_ask_names_the_refusal() -> None:
+    model = _model(
+        "l",
+        "t",
+        [
+            {"ask": "refunds by seat", "sibling": "seats"},
+            {"ask": "booking refunds by seat", "sibling": "bookings"},
+        ],
+    )
+    assert (
+        not_for_refusal("booking refunds by seat in Q3", model)
+        == "this lens does not answer booking refunds by seat; ask bookings"
+    )
+    assert (
+        not_for_refusal("refunds by seat in Q3", model)
+        == "this lens does not answer refunds by seat; ask seats"
+    )
+
+
+def test_a_one_word_ask_inside_the_lens_own_metric_never_matches() -> None:
+    model = _model("l", "t", [{"ask": "rate", "sibling": "x"}, {"ask": "churn", "sibling": "y"}])
+    metric = Metric(name="retention_rate", agg="avg", expr="t.amount", label="Retention rate")
+    entity = model.entities[0].model_copy(update={"metrics": [metric]})
+    model = model.model_copy(update={"entities": [entity]})
+    assert [a.ask for a in declared_asks(model)] == ["churn"]
+    assert not_for_refusal("retention rate last month", model) is None
+    assert not_for_refusal("what is the rate", model) is None
+    assert not_for_refusal("churn last month", model) == "this lens does not answer churn; ask y"

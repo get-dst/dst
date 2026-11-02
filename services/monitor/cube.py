@@ -489,10 +489,9 @@ def monitor(
             series.setdefault(key, {})[month] = float(r.get(member.name) or 0)
         rec: dict[str, Any] = {"cube": member.cube, "clock": clock}
         streams = cubes.get(member.cube, {}).get("streams") or []
-        loaded_at = next(
-            (c.overlay.loaded_at for m in models for c in m.cubes if c.name == member.cube),
-            None,
-        )
+        overlay = next((c.overlay for m in models for c in m.cubes if c.name == member.cube), None)
+        loaded_at = overlay.loaded_at if overlay else None
+        matures = overlay.matures_after.get(base.split(".", 1)[-1]) if overlay else None
         evidence = _Loading(
             loader,
             member.name,
@@ -518,10 +517,22 @@ def monitor(
             judged = _partial(values, start, through)
             if judged is None:
                 continue
-            why = evidence.why_partial(key, judged, through)
+            why, verified = evidence.why_partial(key, judged, through)
             if why is None:
-                continue  # loaded to the period's end: a low month, not a partial load
+                # Loaded to the period's end: a low month, not a partial load.
+                # Declared to mature, and not yet matured: complete, still maturing.
+                final = _month_end(date.fromisoformat(judged["partial_from"])) + timedelta(
+                    days=matures or 0
+                )
+                if matures is None or final < clock_end:
+                    continue
+                why = (
+                    f"complete; values still maturing ({base}: final {matures} days after the "
+                    "period ends)"
+                )
+                judged["maturing"] = base
             judged["evidence"] = why
+            judged["load_evidence"] = verified and "maturing" not in judged
             if labels:
                 rec.setdefault("partial_streams", []).append({"values": labels, **judged})
             else:
@@ -614,7 +625,10 @@ class _Loading:
 
     def why_partial(
         self, key: tuple[object, ...], judged: dict[str, Any], through: date
-    ) -> str | None:
+    ) -> tuple[str | None, bool]:
+        """``(why, verified)``: why the period is a partial load, or None
+        when the evidence says it is loaded to its end; ``verified`` False
+        when no evidence could be read and volume alone flags it."""
         first = date.fromisoformat(judged["partial_from"])
         last = _month_end(first)
         window = [first.isoformat(), _end_of(last)]
@@ -632,16 +646,18 @@ class _Loading:
             if stamps is not None and stamps.get(key):
                 loaded = max(stamps[key])
                 if loaded > last:
-                    return None
+                    return None, True
                 return (
-                    f"last loaded {loaded.isoformat()}, before the period ends {last.isoformat()}"
+                    f"last loaded {loaded.isoformat()}, before the period ends {last.isoformat()}",
+                    True,
                 )
         if self.clock_end < last:
             return (
-                f"the period is still open: loaded to {through.isoformat()} of {last.isoformat()}"
+                f"the period is still open: loaded to {through.isoformat()} of {last.isoformat()}",
+                True,
             )
         if self.month_grained:
-            return "judged on volume alone: a month-grained clock has no day coverage"
+            return "judged on volume alone: a month-grained clock has no day coverage", False
         days = self._by_day(
             "day coverage",
             CubeQuery(
@@ -655,12 +671,13 @@ class _Loading:
             self.measure,
         )
         if days is None:
-            return "judged on volume alone: the day coverage could not be read"
+            return "judged on volume alone: the day coverage could not be read", False
         got = {d: v for d, v in (days.get(key) or {}).items() if v}
         tail = last - timedelta(days=LAST_DAYS - 1)
         if not any(d >= tail for d in got):
             return (
-                f"no rows on the period's last {LAST_DAYS} days (loaded to {through.isoformat()})"
+                f"no rows on the period's last {LAST_DAYS} days (loaded to {through.isoformat()})",
+                True,
             )
         mid = first + timedelta(days=(last - first).days // 2)
         early = sum(v for d, v in got.items() if d <= mid) / ((mid - first).days + 1)
@@ -668,9 +685,10 @@ class _Loading:
         if late < PARTIAL_RATIO * early:
             return (
                 f"the period's second half is loaded at {late / early:.0%} of its first's daily "
-                "rate"
+                "rate",
+                True,
             )
-        return None
+        return None, True
 
 
 def _judge_feeds(

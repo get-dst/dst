@@ -119,6 +119,44 @@ def count_sql(
     return "SELECT " + ", ".join(parts)
 
 
+def bounded_row(
+    connector: Connector, sql: str, *, step: str, connection: str
+) -> tuple[Sequence[object] | None, str | None]:
+    """One read-only statement, one row, within the connection's sampling
+    budget: ``(row, None)``, or ``(None, why)`` when it was not run or did not
+    answer. On a warehouse that bills scanned bytes the statement is dry-run
+    first and refused, never run, when its estimate exceeds the connection's
+    ``sample_bytes_budget`` (the bound the probe works under); the reason
+    carries both numbers. A failure is a reason, said, never a raise."""
+    budget = getattr(connector, "sample_bytes_budget", None)
+    try:
+        if budget is not None and (dry := getattr(connector, "dry_run", None)) is not None:
+            estimate = warehouse_bounded(
+                f"{step}'s dry run", partial(dry, sql), connection=connection
+            )
+            if not estimate.valid:
+                return None, f"{step} failed its dry run: {estimate.error}"
+            scanned = estimate.bytes_estimated or 0
+            if scanned > budget:
+                return None, (
+                    f"{step} would scan {scanned:,} bytes, over the connection's "
+                    f"{budget:,}-byte sampling budget (config: sample_bytes_budget), "
+                    "so it was not run"
+                )
+        result = warehouse_bounded(
+            step,
+            partial(connector.execute, sql, read_only=True, row_limit=1),
+            connection=connection,
+        )
+    except WarehouseTimeout as exc:
+        return None, f"{step} did not return: {exc}"
+    except Exception as exc:  # noqa: BLE001 — a failed read is a reason, said, never a raise
+        return None, f"{step} failed: {str(exc)[:200]}"
+    if not result.rows:
+        return None, f"{step} returned no row"
+    return result.rows[0], None
+
+
 def live_count(
     connector: Connector,
     table: str,
@@ -127,40 +165,14 @@ def live_count(
     connection: str,
     unique_on: Sequence[str] = (),
 ) -> KeyCount:
-    """One live count of rows against distinct key, read-only and one row.
-
-    On a warehouse that bills scanned bytes the statement is dry-run first and
-    refused, never run, when its estimate exceeds the connection's sampling
-    budget (``sample_bytes_budget``, the same bound the probe works under); the
-    skip says so with both numbers."""
+    """One live count of rows against distinct key, read-only and one row,
+    within the connection's sampling budget (``bounded_row``)."""
     dialect = getattr(connector, "kind", "duckdb")
     sql = count_sql(table, columns, dialect, unique_on)
-    budget = getattr(connector, "sample_bytes_budget", None)
+    row, skipped = bounded_row(connector, sql, step="the live count", connection=connection)
+    if row is None:
+        return KeyCount(skipped=skipped)
     try:
-        if budget is not None and (dry := getattr(connector, "dry_run", None)) is not None:
-            estimate = warehouse_bounded(
-                "the grain check's dry run", partial(dry, sql), connection=connection
-            )
-            if not estimate.valid:
-                return KeyCount(skipped=f"the live count failed its dry run: {estimate.error}")
-            scanned = estimate.bytes_estimated or 0
-            if scanned > budget:
-                return KeyCount(
-                    skipped=f"the live count would scan {scanned:,} bytes, over the "
-                    f"connection's {budget:,}-byte sampling budget (config: "
-                    "sample_bytes_budget), so it was not run"
-                )
-        result = warehouse_bounded(
-            "the grain check",
-            partial(connector.execute, sql, read_only=True, row_limit=1),
-            connection=connection,
-        )
-    except WarehouseTimeout as exc:
-        return KeyCount(skipped=f"the live count did not return: {exc}")
-    except Exception as exc:  # noqa: BLE001 — a failed count is a skip, said, never a raise
-        return KeyCount(skipped=f"the live count failed: {str(exc)[:200]}")
-    try:
-        row = result.rows[0]
         return KeyCount(
             rows=int(str(row[0])),
             distinct=int(str(row[1])),

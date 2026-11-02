@@ -201,6 +201,9 @@ class AssembledInputs:
     # entity name -> column -> the warehouse's own type (value_guard.
     # entity_column_types): what a compiled window bound is cast to.
     column_types: dict[str, dict[str, str]] = field(default_factory=dict)
+    # entities whose table the profile shows is no snapshot (value_guard.
+    # creation_dated_entities): a level on one reads whole when no period is asked.
+    creation_dated: set[str] = field(default_factory=set)
     # entity name -> its month-period string field (value_guard.period_fields):
     # the window compiles to a range on it; proven by the profile's sample.
     period_fields: dict[str, str] = field(default_factory=dict)
@@ -753,6 +756,7 @@ def assemble(
     per_table: dict[str, dict[str, list[str]]] = {}
     per_entity: dict[str, dict[str, list[str]]] = {}
     types: dict[str, dict[str, str]] = {}
+    creation_dated: set[str] = set()
     periods: dict[str, str] = {}
     unsampled: dict[str, str] = {}
     coverage: dict[str, profile_enrich.EntityCoverage] = {}
@@ -768,6 +772,7 @@ def assemble(
         per_entity = value_guard.entity_domains(model, profiles)
         unsampled = value_guard.entity_unsampled(model, profiles)
         types = value_guard.entity_column_types(model, profiles)
+        creation_dated = value_guard.creation_dated_entities(model, profiles)
         periods = value_guard.period_fields(model, profiles)
         coverage = profile_enrich.entity_coverage(bundle.semantic_model, profiles)
 
@@ -815,6 +820,7 @@ def assemble(
         entity_domains=per_entity,
         unsampled=unsampled,
         column_types=types,
+        creation_dated=creation_dated,
         period_fields=periods,
         entity_coverage=coverage,
         decisions=decisions,
@@ -1000,7 +1006,11 @@ def select_generators(
                 today=business_today_date(assembled.model.timezone),
             )
             return (
-                TypedIntentGenerator(resolver, column_types=assembled.column_types),
+                TypedIntentGenerator(
+                    resolver,
+                    column_types=assembled.column_types,
+                    creation_dated=assembled.creation_dated,
+                ),
                 GroundedSQLGenerator(llm, model=model_name, temperature=gen_temp)
                 if assembled.allow_untyped
                 else None,
@@ -1016,6 +1026,7 @@ def select_generators(
                 domains=assembled.value_domains,
                 entity_domains=assembled.entity_domains,
                 column_types=assembled.column_types,
+                creation_dated=assembled.creation_dated,
             ),
             GroundedSQLGenerator(llm, model=model_name, temperature=gen_temp),
             assembled.certification,

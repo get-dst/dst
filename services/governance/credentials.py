@@ -41,14 +41,22 @@ class CallerIdentity:
 
 
 def create_caller(
-    session: Session, name: str, type_: str = "service", groups: list[str] | None = None
+    session: Session,
+    name: str,
+    type_: str = "service",
+    groups: list[str] | None = None,
+    *,
+    idp_subject: str | None = None,
 ) -> uuid.UUID:
+    """``idp_subject`` is the verified ``sub`` an identity-provider sign-in bound
+    the caller to (``services/auth/oidc_login.py``); admin-created callers have none."""
     cid = session.execute(
         text(
-            "INSERT INTO caller (org_id, name, type, groups) VALUES "
-            "(NULLIF(current_setting('app.current_org', true), '')::uuid, :n, :t, :g) RETURNING id"
+            "INSERT INTO caller (org_id, name, type, groups, idp_subject) VALUES "
+            "(NULLIF(current_setting('app.current_org', true), '')::uuid, :n, :t, :g, :s) "
+            "RETURNING id"
         ),
-        {"n": name, "t": type_, "g": groups or []},
+        {"n": name, "t": type_, "g": groups or [], "s": idp_subject},
     ).scalar_one()
     return uuid.UUID(str(cid))
 
@@ -135,10 +143,19 @@ def touch_key(key_hash: str) -> None:
 
 def list_callers(session: Session) -> list[dict[str, object]]:
     rows = session.execute(
-        text("SELECT id, name, type, groups, driver FROM caller ORDER BY name")
+        text("SELECT id, name, type, groups, driver, idp_subject FROM caller ORDER BY name")
     ).all()
     return [
-        {"id": str(r[0]), "name": r[1], "type": r[2], "groups": list(r[3] or []), "driver": r[4]}
+        {
+            "id": str(r[0]),
+            "name": r[1],
+            "type": r[2],
+            "groups": list(r[3] or []),
+            "driver": r[4],
+            # True for a caller an identity-provider sign-in created or claimed: its
+            # mapped groups follow the IdP, and `dst keys sync-idp` may revoke it.
+            "idp": r[5] is not None,
+        }
         for r in rows
     ]
 

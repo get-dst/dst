@@ -37,6 +37,7 @@ Purpose = Literal[
     "bind",  # a certified template's slot values from the question
     "generate",  # SQL, including a repair
     "compose",  # the answer's prose
+    "question_type",  # what kind of thing was asked, when the rules left it open
     "other",  # authoring and maintenance commands
 ]
 

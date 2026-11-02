@@ -52,6 +52,7 @@ nav:
       - Receipts: concepts/receipts.md
       - What the model sees: concepts/what-the-model-sees.md
       - Clarify & refusal: concepts/clarify-and-refusal.md
+      - Question types: concepts/question-types.md
       - Typed decisions: concepts/typed-decisions.md
   - Guides:
       - Migrate to Cube: guides/migrate-to-cube.md

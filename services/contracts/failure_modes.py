@@ -1,5 +1,5 @@
 """The failure-mode vocabulary: twenty names for why an answer did not come
-back clean.
+back clean, and six for a question that asked for no number.
 
 A mode is a governed outcome the caller can read: every clarification,
 refusal, capped answer, failed eval case, observe row, receipt and plan line
@@ -43,6 +43,30 @@ class FailureMode(StrEnum):
     unverifiable = "unverifiable"
     stale = "stale"
     provider_down = "provider_down"
+    # question type: decided before any binding (services/resolve/question_type)
+    definition = "definition"
+    capability = "capability"
+    sql_request = "sql_request"
+    hand_off = "hand_off"
+    admin = "admin"
+    not_a_data_question = "not_a_data_question"
+
+
+# The modes a question's TYPE carries: it asked for a meaning, a yes/no over
+# the model, the SQL, a report, its own log, or nothing about data. These are
+# answered (or declined) before the ledger, and observe and `dst test` count
+# them apart from the refusals and clarifications a data question gets.
+QUESTION_MODES: frozenset[FailureMode] = frozenset(
+    {
+        FailureMode.definition,
+        FailureMode.capability,
+        FailureMode.sql_request,
+        FailureMode.hand_off,
+        FailureMode.admin,
+        FailureMode.not_a_data_question,
+    }
+)
+QUESTION_TYPE_NAMES: frozenset[str] = frozenset(str(m) for m in QUESTION_MODES)
 
 
 # Where each mode is raised: the earliest deterministic point, and the one
@@ -68,6 +92,12 @@ STAGE: dict[FailureMode, str] = {
     FailureMode.unverifiable: "verify",
     FailureMode.stale: "serve",
     FailureMode.provider_down: "serve",
+    FailureMode.definition: "question",
+    FailureMode.capability: "question",
+    FailureMode.sql_request: "question",
+    FailureMode.hand_off: "question",
+    FailureMode.admin: "question",
+    FailureMode.not_a_data_question: "question",
 }
 
 # The slot a typed clarification could not fill (``ClarificationRequest.term``

@@ -134,8 +134,15 @@ class PartialPeriod(BaseModel):
     # (the cube's ``feed_measures``, else its row count).
     judged_by: str | None = None
     # What beyond volume says the period is not fully loaded (an open period,
-    # a last load before its end, no rows on its last days).
+    # a last load before its end, no rows on its last days), or that it is
+    # complete and still maturing.
     evidence: str | None = None
+    # The evidence is of loading (a stamp, an open period, day coverage): the
+    # period is partially loaded. False: judged on volume alone, or maturing.
+    load_evidence: bool = False
+    # The period's rows are complete; the overlay declares this measure's
+    # values final only ``matures_after`` days past the period, not yet reached.
+    maturing: str | None = None
 
 
 class MeasureFacts(BaseModel):

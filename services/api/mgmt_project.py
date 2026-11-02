@@ -1237,7 +1237,7 @@ def _apply(
         # The probe settings serving reads (profile age against max_age).
         # The caller groups a `hide` entry may except: stored before any lens
         # compiles, so every compile below checks the names against them.
-        if groups_applied := caller_groups.apply(session, project.groups):
+        if groups_applied := caller_groups.apply(session, project.groups, project.idp_groups):
             out.append({"scope": "groups", "applied": groups_applied, "warnings": [], "errors": []})
         probe_applied, probe_warnings = probe_settings.apply(session, project.probe)
         if probe_applied:

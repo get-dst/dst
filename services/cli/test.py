@@ -22,6 +22,7 @@ from services.cli.project import (
     _selection_line,
     _tables_from,
 )
+from services.contracts.failure_modes import QUESTION_TYPE_NAMES
 
 if TYPE_CHECKING:
     from services.certify.store import CertifiedAnswer
@@ -706,6 +707,11 @@ def _test(args: argparse.Namespace) -> int:
                                 "verdict": "pass" if res.passed else "fail",
                                 "reason": res.reason,
                                 "mode": res.mode,
+                                # The path that served it: 'explore' for an
+                                # outside-lens answer, scored apart below.
+                                "lane": res.checks.get("lane"),
+                                "answered": bool(res.checks.get("answered")),
+                                "ai_cost_usd": res.ai_cost_usd,
                                 **({"tags": case.tags} if case.tags else {}),
                             }
                         )
@@ -835,9 +841,14 @@ def _test(args: argparse.Namespace) -> int:
     # from the rows (a clarification's or refusal's name, whatever the case
     # expected); certified rows that matched carry none.
     by_mode: dict[str, int] = {}
+    by_type: dict[str, int] = {}
     for row in rows:
         if isinstance(m := row.get("mode"), str):
-            by_mode[m] = by_mode.get(m, 0) + 1
+            # A question type (definition, capability, ...) is an answer of
+            # its own kind, counted apart from the failure modes.
+            tally = by_type if m in QUESTION_TYPE_NAMES else by_mode
+            tally[m] = tally.get(m, 0) + 1
+    explore = _explore_scorecard(rows)
     if emit_json:
         # Computed FROM the rows, never from a parallel counter: a tally that can
         # disagree with its own results is the class the comparator ticket named.
@@ -858,6 +869,11 @@ def _test(args: argparse.Namespace) -> int:
                     "candidates_not_run": candidates_n,
                     "wrong_by_stage": wrong_by_stage,
                     "by_mode": by_mode,
+                    "by_type": by_type,
+                    # Outside-lens answers as their own path: right (answered
+                    # as expected), honest (declined as expected), wrong, and
+                    # what their model calls cost. None when none ran.
+                    "explore": explore,
                     # The deciders' calibration over this corpus (advisory —
                     # never a gate until the defaults are stamped from it).
                     "calibration": calibration,
@@ -906,6 +922,23 @@ def _test(args: argparse.Namespace) -> int:
                 style.accent("modes:")
                 + " "
                 + " · ".join(f"{n} {m}" for m, n in sorted(by_mode.items(), key=lambda kv: -kv[1]))
+            )
+        if by_type:
+            print(
+                style.accent("question types:")
+                + " "
+                + " · ".join(f"{n} {m}" for m, n in sorted(by_type.items(), key=lambda kv: -kv[1]))
+            )
+        if explore is not None:
+            # The outside-lens path on its own line: a right answer from an
+            # exposed table is not a governed pass, and its cost is its own.
+            cost = explore["ai_cost_usd"]
+            print(
+                style.accent("explore:")
+                + f" {explore['right']} right · {explore['honest']} honest · "
+                + f"{explore['wrong']} wrong"
+                + (f" · ${cost:.4f} AI" if cost is not None else " · AI cost unpriced")
+                + " (outside-lens answers, their own path)"
             )
         for _oid, org_name, lens_name, run_id in run_ids:
             print(f"recorded: run {run_id[:8]} ({org_name}/{lens_name}) in {database}")
@@ -975,6 +1008,29 @@ def _test(args: argparse.Namespace) -> int:
         )
         return 4
     return 0
+
+
+def _explore_scorecard(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The outside-lens rows of a sweep scored as their own path. ``right`` is
+    a passing case that answered, ``honest`` a passing case that declined
+    (the expectation was a clarification or refusal), ``wrong`` a failing
+    case; ``ai_cost_usd`` sums their model calls, None when any was unpriced.
+    None when no case went through the explore path."""
+    mine = [r for r in rows if r.get("lane") == "explore"]
+    if not mine:
+        return None
+    right = sum(1 for r in mine if r.get("verdict") == "pass" and r.get("answered"))
+    honest = sum(1 for r in mine if r.get("verdict") == "pass" and not r.get("answered"))
+    costs = [r.get("ai_cost_usd") for r in mine]
+    return {
+        "cases": len(mine),
+        "right": right,
+        "honest": honest,
+        "wrong": len(mine) - right - honest,
+        "ai_cost_usd": None
+        if any(c is None for c in costs)
+        else round(sum(float(c) for c in costs if c is not None), 6),
+    }
 
 
 def register(sub: Any) -> None:

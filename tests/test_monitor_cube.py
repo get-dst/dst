@@ -268,7 +268,9 @@ def test_live_monitor_over_the_fixture_cube_finds_what_the_cassette_does() -> No
 # evidence of loading decides.
 
 
-def _deliveries(august: dict[int, float], loaded_at: bool = False) -> LensModel:
+def _deliveries(
+    august: dict[int, float], loaded_at: bool = False, matures_after: dict[str, int] | None = None
+) -> LensModel:
     from services.contracts.cube_meta import MetaDoc
 
     dims = [{"name": "deliveries.delivered_at", "type": "time"}]
@@ -313,7 +315,9 @@ def _deliveries(august: dict[int, float], loaded_at: bool = False) -> LensModel:
             ]
         }
     )
-    cube = {"loaded_at": "synced_at"} if loaded_at else {}
+    cube: dict[str, Any] = {"loaded_at": "synced_at"} if loaded_at else {}
+    if matures_after:
+        cube["matures_after"] = matures_after
     overlay = Overlay.model_validate({"cubes": {"deliveries": cube}, "lenses": {"ops": {}}})
     return LensModel.build(meta, overlay, "ops", views=["ops"])
 
@@ -363,6 +367,11 @@ def _partials(model: LensModel, load: Any) -> list[dict[str, Any]]:
     return [f for f in findings if f["kind"] == "partial_period"]
 
 
+def _recorded(model: LensModel, load: Any) -> dict[str, Any]:
+    _p, fresh, _f = monitor.monitor([model], load, clock_end=date(2026, 8, 31), probed=PROBED)
+    return dict(fresh["measures"]["deliveries.count"].get("partial") or {})
+
+
 def test_a_complete_low_month_is_not_a_partial_period() -> None:
     assert _partials(_deliveries(LOW), _load(_daily(LOW))) == []
 
@@ -371,6 +380,30 @@ def test_a_half_loaded_month_is_a_partial_period_and_says_why() -> None:
     (found,) = _partials(_deliveries(HALF), _load(_daily(HALF)))
     assert found["member"] == "deliveries.count" and "2026-08" in found["detail"]
     assert "second half" in found["detail"]
+
+
+def test_a_complete_month_still_maturing_is_said_as_complete_not_partially_loaded() -> None:
+    """A low month whose load evidence says complete (the stamp is after the
+    period closed) is recorded only where the overlay declares the measure's
+    values mature after the period, and then as complete with its values
+    still maturing: never as partially loaded. Load evidence of a short load
+    still says partially loaded, maturing declared or not."""
+    model = _deliveries(LOW, loaded_at=True, matures_after={"count": 30})
+    (found,) = _partials(model, _load(_daily(LOW), synced=date(2026, 9, 1)))
+    assert "complete; values still maturing (deliveries.count" in found["detail"]
+    recorded = _recorded(model, _load(_daily(LOW), synced=date(2026, 9, 1)))
+    assert recorded["maturing"] == "deliveries.count" and recorded["load_evidence"] is False
+    short = _recorded(model, _load(_daily(LOW), synced=date(2026, 8, 30)))
+    assert short["load_evidence"] is True and "maturing" not in short
+    assert short["evidence"].startswith("last loaded 2026-08-30")
+    # Matured: thirty days after August ends is past the clock of mid-October.
+    _p, fresh, _f = monitor.monitor(
+        [model],
+        _load(_daily(LOW), synced=date(2026, 9, 1)),
+        clock_end=date(2026, 10, 15),
+        probed=PROBED,
+    )
+    assert "partial" not in fresh["measures"]["deliveries.count"]
 
 
 def test_the_feed_s_last_load_decides_where_it_is_declared() -> None:

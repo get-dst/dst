@@ -6,7 +6,11 @@ Approve a question→SQL pair for a lens so future matching questions are served
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -18,6 +22,8 @@ from services.auth.deps import AdminIdentity, get_admin_identity, get_admin_org,
 from services.certify import store
 from services.certify.bindings import certified_bindings, foreign_tables
 from services.certify.generate import generate_for_lens
+from services.contracts.cube_query import CubeQuery
+from services.cube.context import CubeContext
 from services.db import embedding_meta
 from services.lenses import store as lens_store
 from services.lenses.connections import resolve_connector
@@ -26,6 +32,8 @@ from services.llm.assist import assist_llm
 from services.reviews.store import get_trace
 from services.runtime import sql_guard
 from services.runtime.pipeline import WITHHELD_ANSWER
+from services.serve import door as cube_door
+from services.serve.cube_lane import inline_params
 
 router = APIRouter(prefix="/mgmt/lenses/{lens}/certified", tags=["certified"])
 
@@ -188,6 +196,12 @@ class CertifyFromRequestBody(BaseModel):
     # An UNTYPED serve (the raw-SQL escalation a caller accepted) is a
     # different certification: a human has read the SQL. Say so.
     allow_untyped: bool = False
+    # For an outside-lens answer on a lens served through Cube: the Cube
+    # query the reviewer supplies as the governed reading of the question.
+    # dst compiles it, runs both and certifies only on row equality; the
+    # response then carries the ``kind: cube`` pair for the lens's
+    # certified_answers.yaml (the file is where a pair's query lives).
+    cube_query: dict[str, Any] | None = None
 
 
 def _bindings(session: Session, lens: str, sql: str) -> dict[str, str] | None:
@@ -261,8 +275,15 @@ def certify_request(
     body: CertifyFromRequestBody | None = None,
     session: Session = Depends(get_app_session),
     identity: AdminIdentity = Depends(get_admin_identity),
+    org_id: uuid.UUID = Depends(get_admin_org),
 ) -> dict[str, object]:
     """Certify a prior answer: snapshot its question + SQL from the request log.
+
+    An outside-lens answer (the `sql` tool with a question, an answer read
+    from an exposed table) certifies the same way: ``kind: sql``, pinned to
+    the blueprints of the tables it read. With ``cube_query`` on a lens served
+    through Cube the response also carries a ``kind: cube`` pair, verified by
+    row equality, for the lens's certified_answers.yaml.
 
     Without an embedding provider the promotion still succeeds — the answer is stored
     with a NULL embedding (skipped by the matcher, backfilled by ``dst reindex``)
@@ -283,6 +304,17 @@ def certify_request(
     if corrected and corrected.strip() and corrected.strip() != trace.sql.strip():
         sql = corrected.strip()
     bindings = _bindings(session, lens, sql)
+    if trace.question.strip() == sql.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="this read carried no question (the sql tool was called without one), "
+            "so there is no question→SQL pair to certify; ask it again with `question`",
+        )
+    pair = (
+        _cube_pair(session, lens, org_id, trace.question, sql, body.cube_query)
+        if body is not None and body.cube_query is not None
+        else None
+    )
     # The trace already holds the prose that was composed ONCE from
     # this SQL's executed result — and certifying the request approves that
     # exact answer, so it becomes the verbatim serve (no per-request composer
@@ -337,6 +369,7 @@ def certify_request(
             "replaced": replaced,
             "corrected": sql != trace.sql,
             "warning": NO_EMBEDDER_WARNING,
+            "pair": pair,
         }
     emb = _embed(session, trace.question)
     cid = store.create(
@@ -352,7 +385,90 @@ def certify_request(
         verified_prose=verified_prose,
         resolution=resolution,
     )
-    return {"id": cid, "lens": lens, "replaced": replaced, "corrected": sql != trace.sql}
+    return {
+        "id": cid,
+        "lens": lens,
+        "replaced": replaced,
+        "corrected": sql != trace.sql,
+        "pair": pair,
+    }
+
+
+def _rows_key(result: object) -> list[str]:
+    rows = getattr(result, "rows", [])
+    return sorted(json.dumps([_cell(v) for v in r], default=str) for r in rows)
+
+
+def _cell(value: object) -> object:
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    return int(number) if number == int(number) else round(number, 9)
+
+
+def _sha(obj: object) -> str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _cube_pair(
+    session: Session, lens: str, org_id: uuid.UUID, question: str, sql: str, raw: dict[str, Any]
+) -> dict[str, Any]:
+    """The ``kind: cube`` pair for an outside-lens answer: the reviewer's Cube
+    query compiled through the lens's Cube, run beside the traced SQL, and
+    accepted only when the two return the same rows. 400 when the lens does
+    not serve through Cube or the query is not one; 409 when the rows differ
+    (the detail says how), so a pair never certifies a reading its SQL did
+    not have."""
+    row = lens_store.get_lens(session, lens)
+    bundle_raw = (row or {}).get("published") or (row or {}).get("draft")
+    if bundle_raw is None:
+        raise HTTPException(status_code=404, detail=f"lens '{lens}' not found")
+    bundle = lens_store.LensBundle.model_validate(bundle_raw)
+    if cube_door.serving_core(bundle.config, bundle.semantic_model) != "cube":
+        raise HTTPException(
+            status_code=400,
+            detail=f"lens '{lens}' does not serve through Cube: a cube_query certifies "
+            "nothing here; approve the SQL pair instead",
+        )
+    try:
+        query = CubeQuery.model_validate(raw)
+    except Exception as exc:  # noqa: BLE001 — pydantic's message names the field
+        raise HTTPException(status_code=400, detail=f"cube_query: {exc}") from exc
+    ctx = CubeContext.operator(lens=lens)
+    try:
+        client, view = cube_door.open_view(lens, bundle.config, ctx=ctx)
+        compiled = client.sql(query, ctx)
+    except cube_door.CubeUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — Cube's refusal is the answer
+        raise HTTPException(status_code=400, detail=f"Cube did not compile it: {exc}") from exc
+    dialect = bundle.semantic_model.dialect
+    connector = resolve_connector(bundle.config.connections[0], org_id, session=session)
+    statement = inline_params(compiled.sql, compiled.params, dialect)
+    theirs = connector.execute(statement, read_only=True, row_limit=5001)
+    mine = connector.execute(sql, read_only=True, row_limit=5001)
+    if _rows_key(theirs) != _rows_key(mine):
+        raise HTTPException(
+            status_code=409,
+            detail=f"the Cube query's rows differ from the answer's: {len(theirs.rows)} row(s) "
+            f"against {len(mine.rows)}; a pair is certified on row equality only",
+        )
+    hashed = {"columns": list(mine.columns), "rows": _rows_key(mine)}
+    return {
+        "kind": "cube",
+        "question": question,
+        "query": query.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
+        "sql": sql,
+        "verified": {
+            "model_version": view.model_version,
+            "sql_sha256": hashlib.sha256(sql.encode()).hexdigest(),
+            "result_sha256": _sha(hashed),
+            "as_of": datetime.now(UTC).date().isoformat(),
+        },
+    }
 
 
 def _trace_resolution(session: Session, request_id: str) -> dict[str, object] | None:

@@ -3,8 +3,11 @@ model does it hold?
 
 Prints the URL, whether `/readyz` answers, the version when Cube states one,
 the model_version (the sha256 of the canonical meta) and the member counts,
-plus how many `meta.dst` blocks the closed schema refused. Exit 0 when Cube
-is reachable and its meta parsed, 1 otherwise.
+how many `meta.dst` blocks the closed schema refused, and whether one tiny
+query (`limit 1` on the smallest cube) came back from the warehouse: the meta
+compiles with no warehouse call, so a dead driver shows only here. Exit 0
+when Cube is reachable, its meta parsed and the warehouse answered, 1
+otherwise.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ def _status(args: argparse.Namespace) -> int:
     out = status(root=Path(args.dir))
     if args.as_json:
         print(json.dumps(out if isinstance(out, dict) else {"status": out}, indent=2))
-        return 0 if isinstance(out, dict) and out.get("model_version") else 1
+        return 0 if isinstance(out, dict) and out.get("model_version") and _wh_ok(out) else 1
     if not isinstance(out, dict):
         print(
             f"cube          {out} — set DST_CUBE_URL or `cube: {{url: …}}` in dst.yaml",
@@ -60,7 +63,25 @@ def _status(args: argparse.Namespace) -> int:
     )
     if out["overlay_errors"]:
         print(style.warn(f"overlay       {out['overlay_errors']} meta.dst block(s) refused"))
-    return 0
+    wh = out.get("warehouse") or {}
+    if wh.get("ok"):
+        print(f"warehouse     ok (one row from {wh['cube']}, {wh['ms']} ms)")
+        return 0
+    print(style.bad(f"warehouse     FAIL — {_wh_detail(wh)}"))
+    return 1
+
+
+def _wh_ok(out: dict[str, Any]) -> bool:
+    return bool((out.get("warehouse") or {}).get("ok"))
+
+
+def _wh_detail(wh: dict[str, Any]) -> str:
+    where = f" (limit 1 on {wh['cube']})" if wh.get("cube") else ""
+    return (
+        f"{wh.get('detail', 'no answer')}{where} — Cube compiles but cannot query the "
+        "warehouse: check the CUBEJS_DB_* values the sidecar reads (an empty "
+        "CUBEJS_DB_BQ_LOCATION fails every BigQuery query)"
+    )
 
 
 def doctor_row(root: Path) -> int:
@@ -73,8 +94,15 @@ def doctor_row(root: Path) -> int:
     if not isinstance(out, dict):
         print(f"cube          {out}")
         return 0
-    if out.get("model_version"):
-        print(f"cube          ok ({out['url']}, model {out['model_version'][:12]})")
+    if out.get("model_version") and _wh_ok(out):
+        print(f"cube          ok ({out['url']}, model {out['model_version'][:12]}, warehouse ok)")
         return 0
+    if out.get("model_version"):
+        print(
+            style.bad(
+                f"cube          FAIL — {out['url']}: warehouse {_wh_detail(out['warehouse'])}"
+            )
+        )
+        return 1
     print(style.bad(f"cube          FAIL — {out['url']}: {out.get('detail', 'unreachable')}"))
     return 1

@@ -52,7 +52,7 @@ backstop for the rest.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -534,19 +534,31 @@ class _HiddenReads:
     second reads every column of its sources, so any hiding entity among them
     is a hit, recorded as ``entity.*``."""
 
-    def __init__(self, model: SemanticModel) -> None:
+    def __init__(self, model: SemanticModel, predicate_columns: Mapping[str, set[str]]) -> None:
         self.model = model
         self.hits: set[str] = set()
         self.seen: set[tuple[int, str]] = set()
         self.branch: dict[int, tuple[Scope, int]] = {}
+        self.predicate_columns = {
+            t.lower(): {c.lower() for c in cols} for t, cols in predicate_columns.items()
+        }
+        # Set while the reference being resolved sits in predicate position.
+        self.in_predicate = False
 
     # -- sources -------------------------------------------------------------
     def table(self, tbl: exp.Table, column: str | None) -> None:
         for e in _hide_owners(tbl, self.model):
             if column is None:
                 self.hits.add(f"{e.name}.*")
-            elif _withheld(column, e):
+            elif _withheld(column, e) and not self.admitted(e, column):
                 self.hits.add(f"{e.name}.{column}")
+
+    def admitted(self, entity: Entity, column: str) -> bool:
+        """A compiler-owned predicate's read of its hidden column, in
+        predicate position — the one read of a hidden column that passes."""
+        return self.in_predicate and column.lower() in self.predicate_columns.get(
+            entity.source.table.lower(), set()
+        )
 
     def carry(self, src: object, column: str) -> None:
         """``column`` read off ``src`` by name."""
@@ -720,7 +732,9 @@ class _HiddenReads:
                         continue
                     if node.find_ancestor(exp.Star) is not None and node.arg_key == "except_":
                         continue  # `* EXCLUDE (c)` drops c, it does not read it
+                    self.in_predicate = bool(self.predicate_columns) and _in_predicate(node)
                     self.column(scope, node)
+                    self.in_predicate = False
                 elif _implicit(node):
                     self.implicit_star(scope, node)
                 elif isinstance(node, exp.Join):
@@ -730,6 +744,27 @@ class _HiddenReads:
                         # Joined on every shared column, named or not.
                         for src in self.everything(scope):
                             self.whole(src)
+
+
+def _in_predicate(col: exp.Column) -> bool:
+    """Does the reference sit in a predicate of its own query — a WHERE,
+    HAVING or QUALIFY, a join's ON, or the condition of a CASE WHEN / IF —
+    rather than in something that carries a value out: a projection, GROUP
+    BY, ORDER BY, or a subquery's own projection (`(SELECT c ...) = 1`
+    under a WHERE is a value, not a predicate)?"""
+    child: Any = col
+    parent: Any = col.parent
+    while parent is not None:
+        if isinstance(parent, exp.Where | exp.Having | exp.Qualify):
+            return True
+        if isinstance(parent, exp.Join):
+            return child is parent.args.get("on")
+        if isinstance(parent, exp.If):
+            return child is parent.this
+        if isinstance(parent, exp.Select | exp.Subquery | exp.SetOperation):
+            return False
+        child, parent = parent, parent.parent
+    return False
 
 
 def _lookup(scope: Scope, name: str, *, here_only: bool = False) -> object | None:
@@ -786,17 +821,28 @@ def _provides(src: object, name: str, model: SemanticModel) -> bool:
     return False
 
 
-def hidden_reads(stmt: exp.Expr, model: SemanticModel) -> list[str]:
+def hidden_reads(
+    stmt: exp.Expr,
+    model: SemanticModel,
+    *,
+    predicate_columns: Mapping[str, set[str]] | None = None,
+) -> list[str]:
     """``entity.column`` for every column ``stmt`` reads that the model's
     `hide` withholds, resolved through CTEs, derived tables, set operations,
     laterals and correlation to the base table it comes from; ``entity.*`` for
     a star, `COLUMNS(...)`, positional or whole-row read that takes every
     column of a hiding entity. A shape whose scopes cannot be built or walked is
     read by name on every entity the statement reads, and any star in it reads
-    every hiding entity whole, so nothing is missed."""
+    every hiding entity whole, so nothing is missed.
+
+    ``predicate_columns`` (table -> columns, the compiled door's
+    ``SemanticModel.predicate_columns``) are hidden columns a reference in
+    predicate position may name — a WHERE, HAVING, QUALIFY, join ON, or the
+    condition of a CASE WHEN / IF — and nowhere else. A shape read by name
+    (no scopes) admits none of them."""
     if not any(_withholds(e) for e in model.entities):
         return []
-    reads = _HiddenReads(model)
+    reads = _HiddenReads(model, predicate_columns or {})
     try:
         root = build_scope(stmt)
         if root is not None:
@@ -938,9 +984,22 @@ def _has_outer_star(stmt: exp.Expression) -> bool:
 
 
 def check(
-    sql: str, model: SemanticModel, *, trust_tables: bool = False, allow_star: bool = False
+    sql: str,
+    model: SemanticModel,
+    *,
+    trust_tables: bool = False,
+    allow_star: bool = False,
+    compiled: bool = False,
 ) -> GuardResult:
     """Guard a SQL string against the lens.
+
+    ``compiled`` says dst wrote the statement from an intent (the metric
+    compiler), so a hidden column one of its own predicates reads — an
+    entity's ``population_filter``, a metric's ``filters`` — is admitted in
+    predicate position (``SemanticModel.predicate_columns``). The column is
+    read to filter rows, never projected, grouped or ordered by; every other
+    door, trusted or not, still refuses the read. Never set it on SQL anyone
+    else wrote.
 
     ``trust_tables`` relaxes ONLY the table/column allow-list — for pre-approved
     SQL (a certified answer, a certified-definition page's authored query) a human has already
@@ -1083,6 +1142,11 @@ def check(
     allowed_cols = {
         t.lower(): {c.lower() for c in cols} for t, cols in model.allowed_columns().items()
     }
+    predicate_cols = model.predicate_columns() if compiled else {}
+    for t, cols in predicate_cols.items():
+        # Admitted here so the allow-list walk does not refuse the predicate;
+        # `hidden_reads` below still refuses the column anywhere but one.
+        allowed_cols.setdefault(t.lower(), set()).update(c.lower() for c in cols)
     alias_to_table: dict[str, list[str]] = {}
     for tbl in stmt.find_all(exp.Table):
         # Hard backstop: dst's in-warehouse validation plane is never readable by a
@@ -1164,7 +1228,7 @@ def check(
     # caller's view, that caller's hide). And the allow-list cannot see a
     # hidden column a star carries out of a CTE or derived table, so here every
     # reference is resolved to the base column it reads.
-    if withheld := hidden_reads(stmt, model):
+    if withheld := hidden_reads(stmt, model, predicate_columns=predicate_cols):
         entity, _, column = withheld[0].partition(".")
         if column == "*":
             reason = (

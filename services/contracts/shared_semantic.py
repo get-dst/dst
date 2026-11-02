@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Literal
 
 from pydantic import Field as PField
@@ -27,10 +28,18 @@ from services.contracts.semantic_model import (
 )
 
 
-def relationship_name(left: str, right: str) -> str:
+def relationship_name(left: str, right: str, role: str | None = None) -> str:
     """The asset name a relationship is stored and hashed under. Derived from
-    the pair, never authored — the same pair can have exactly one identity."""
-    return f"{left}__{right}"
+    the pair (and the role, when the pair is joined once per role), never
+    authored — the same pair can have exactly one identity per role."""
+    return f"{left}__{right}__{role}" if role else f"{left}__{right}"
+
+
+def role_alias(right: str, role: str) -> str:
+    """The name a role relationship's right entity is addressed by (`persons`
+    as the `payer` of a booking → `persons_payer`): the compiled model holds
+    that entity under this name, and generated SQL aliases the table to it."""
+    return f"{right}_{role}"
 
 
 class SharedRelationship(Authored):
@@ -46,11 +55,29 @@ class SharedRelationship(Authored):
         default=None,
         description="row-count relationship left->right — guards fan-out/double-count bugs",
     )
+    role: str | None = PField(
+        default=None,
+        description="the part `right` plays for `left` when the pair joins more than once "
+        "(a booking's payer and its passenger are both persons): one file per role, "
+        "and the joined entity is addressed as <right>_<role>, e.g. persons_payer.city",
+    )
 
     @model_validator(mode="before")
     @classmethod
     def _on_key(cls, data: object) -> object:
         return _restore_on_key(data)
+
+    @field_validator("role")
+    @classmethod
+    def _role_is_identifier(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", v):
+            raise ValueError(
+                f"role '{v}' must be a lowercase identifier (letters, digits, underscores) "
+                "— it becomes the alias generated SQL joins the entity under"
+            )
+        return v
 
     @model_validator(mode="after")
     def _two_entities(self) -> SharedRelationship:
@@ -63,7 +90,7 @@ class SharedRelationship(Authored):
 
     @property
     def name(self) -> str:
-        return relationship_name(self.left, self.right)
+        return relationship_name(self.left, self.right, self.role)
 
 
 class SharedEntity(Entity):

@@ -9,6 +9,7 @@ default reading) hands the rewritten queries to the next check.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from datetime import date
@@ -18,7 +19,7 @@ from services.contracts.cube_query import CubeFilter, CubeQuery, TimeDimension
 from services.contracts.failure_modes import FailureMode
 from services.contracts.lens_model import OverlayDefinition
 from services.cube.lens_view import CubeLensView, norm, toks
-from services.runtime.not_for import names_ask
+from services.runtime.not_for import NotForAsk, names_ask, usable_asks
 from services.runtime.pipeline import not_computable_refusal
 from services.verify.base import (
     Ask,
@@ -34,7 +35,7 @@ from services.verify.base import (
 from services.verify.periods import Period
 from services.verify.periods import resolve as periods_of
 from services.verify.post import partial_period
-from services.verify.words import PERIOD, STOP, has_stem, phrase_in, stem
+from services.verify.words import OPERATOR_TEXT, OPERATORS, PERIOD, STOP, has_stem, phrase_in, stem
 
 # Readings of an ambiguous term within this relative distance on every row are
 # served on the declared default reading, the others disclosed with their values.
@@ -151,12 +152,14 @@ def not_for(ask: Ask, qs: list[CubeQuery]) -> Check:
     for q in qs:
         for m in q.measures:
             asks += [(a, "") for a in ask.lens.not_for(m)]
-    for text, sibling in asks:
-        if text.strip() and names_ask(ask.question, text):
-            reason = f"this lens does not answer {text.strip()}"
-            return Check(
-                name, mode, "refuse", f"{reason}; ask {sibling}" if sibling.strip() else reason
-            )
+    # The longest ask names the refusal; a one-word ask inside one of the
+    # lens's own measures would refuse that measure, so it never matches.
+    own = ask.lens.measure_phrases()
+    for item in usable_asks([NotForAsk(ask=t, sibling=s) for t, s in asks], own):
+        if names_ask(ask.question, item.ask):
+            reason = f"this lens does not answer {item.ask.strip()}"
+            sibling = item.sibling.strip()
+            return Check(name, mode, "refuse", f"{reason}; ask {sibling}" if sibling else reason)
     return passed(name, mode)
 
 
@@ -357,8 +360,8 @@ def ambiguous_metric(ask: Ask, qs: list[CubeQuery]) -> Check:
             if not hit:
                 continue
             ri = next(iter(hit))
-            if _selected(ask.question, rds[ri].select_words):
-                continue  # the question names this reading: served as asked
+            if _selected(ask.select_text, rds[ri].select_words):
+                continue  # the asker named this reading: served as asked
             first = next(iter(hit[ri]))
             clar = _clarify_term(t, first, rds[ri].says)
             declared = next((i for i, r in enumerate(rds) if r.says == t.default), None)
@@ -657,6 +660,7 @@ def uncovered_word(ask: Ask, qs: list[CubeQuery]) -> Check:
         if t not in STOP and not re.fullmatch(r"[0-9%'\-]+", t) and stem(t) not in scoped
     ]
     uncovered: list[str] = []
+    operators: dict[str, list[str]] = {}
     for st, t in content:
         entries = [b for b in ask.ledger if any(stem(x) == st for x in toks(b.word))]
         ok = any(entry_ok(b.kind, b.target) for b in entries)
@@ -665,6 +669,10 @@ def uncovered_word(ask: Ask, qs: list[CubeQuery]) -> Check:
                 uncovered.append(t)
             continue
         if ok:
+            continue
+        if t in OPERATORS:
+            # An operation over the named measures, checked after them.
+            operators.setdefault(OPERATORS[t], []).append(t)
             continue
         if not (
             any(has_stem(lens.member_text(m), st) for m in allmem)
@@ -686,6 +694,10 @@ def uncovered_word(ask: Ask, qs: list[CubeQuery]) -> Check:
         (unbound if False in res else untested).append(ph)
     uncovered = list(dict.fromkeys(uncovered))
     unbound = list(dict.fromkeys(unbound))
+    for kind, words in operators.items():
+        missing = _operator_missing(lens, qs, kind, words)
+        if missing:
+            return Check(name, mode, "clarify", missing)
     if uncovered or unbound:
         parts = []
         if uncovered:
@@ -709,6 +721,72 @@ def uncovered_word(ask: Ask, qs: list[CubeQuery]) -> Check:
             + " cannot be checked",
         )
     return passed(name, mode)
+
+
+def _operator_missing(
+    lens: CubeLensView, qs: list[CubeQuery], kind: str, words: list[str]
+) -> str | None:
+    """None when the queries carry the operation the words ask for; else the
+    clarify text, naming what the queries read and the measures of the lens
+    that carry the operation, so the word is never read as an unbound noun."""
+    measures = list(dict.fromkeys(m for q in qs for m in q.measures))
+    texts = {m: lens.member_text(m) for m in measures}
+    marks = OPERATOR_TEXT[kind]
+
+    def carries(text: str) -> bool:
+        return any(has_stem(text, mark) for mark in marks)
+
+    if kind == "average":
+        if any(
+            (mm := lens.measure(m)) is not None and (mm.aggType or "").lower() in ("avg", "average")
+            for m in measures
+        ) or any(carries(t) for t in texts.values()):
+            return None
+    elif kind == "ratio":
+        if (
+            len(measures) >= 2
+            or any(carries(t) for t in texts.values())
+            or any(
+                (mm := lens.measure(m)) is not None and (mm.format or "").lower() == "percent"
+                for m in measures
+            )
+        ):
+            return None
+    else:  # change
+        windows = {
+            json.dumps(td.dateRange, default=str)
+            for q in qs
+            for td in q.timeDimensions
+            if td.dateRange is not None
+        }
+        if (
+            any(td.compareDateRange for q in qs for td in q.timeDimensions)
+            or len(windows) >= 2
+            or any(carries(t) for t in texts.values())
+        ):
+            return None
+    candidates = [
+        m.name
+        for c in lens.doc.cubes
+        for m in c.measures
+        if lens.in_scope(m.name) is not False and carries(lens.member_text(m.name))
+    ]
+    asked = ", ".join(repr(w) for w in dict.fromkeys(words))
+    reads = ", ".join(measures) if measures else "no measure"
+    what = {
+        "average": "an average",
+        "ratio": "a ratio (a share, a rate) of one measure over another",
+        "change": "a change between two periods or a growth measure",
+    }[kind]
+    held = (
+        f"the lens holds {', '.join(candidates[:6])}"
+        if candidates
+        else f"the lens holds no {kind} measure"
+    )
+    return (
+        f"{asked} asks for {what}, and the query carries none: it reads {reads}; {held} - "
+        f"which measure, over what?"
+    )
 
 
 # ── unasked_filter ──────────────────────────────────────────────────────────

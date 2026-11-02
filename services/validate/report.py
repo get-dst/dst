@@ -709,6 +709,40 @@ def status_done_family_warnings(
     return issues
 
 
+def level_on_creation_date_warnings(
+    sm: SemanticModel, profiles: Mapping[str, TableProfile]
+) -> list[Issue]:
+    """A level metric on a table the profile shows is no snapshot: its key is
+    unique per row (one row per rental, dated by when it started), so the
+    table's "latest snapshot" is the sliver of rows created on its newest
+    day. Asked over no period, such a level reads the whole table; a stated
+    period still reads the rows inside it. The author sees which."""
+    from services.runtime.value_guard import is_creation_dated
+
+    issues: list[Issue] = []
+    for e in sm.entities:
+        profile = profiles.get(e.source.table) or profiles.get(e.source.table.lower())
+        if profile is None or not is_creation_dated(e.primary_key, profile):
+            continue
+        for m in e.metrics:
+            if m.additivity != "level":
+                continue
+            clock = m.agg_time_field or e.default_time_field
+            issues.append(
+                Issue(
+                    severity="warning",
+                    code="level_on_creation_date",
+                    message=f"entity '{e.name}': metric '{m.name}' is `additivity: level`, "
+                    f"but the table holds one row per {', '.join(e.primary_key)} dated by "
+                    f"'{clock}', not a snapshot per period. Asked with no period it reads "
+                    "the whole table; a stated period reads the rows dated inside it. If "
+                    "the metric is a flow, drop `additivity:`.",
+                    subject=f"{e.name}.{m.name}",
+                )
+            )
+    return issues
+
+
 def _spelled(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
@@ -1027,6 +1061,7 @@ def _check_bundle(
         CompileError,
         metric_entity_refs,
         metric_sql,
+        reads_as_level,
         unsafe_join_reason,
     )
 
@@ -1077,6 +1112,21 @@ def _check_bundle(
             except CompileError as exc:
                 issues.append(Issue(severity="error", code="metric_ref_invalid", message=str(exc)))
                 continue
+            if metric.additivity == "level" and not reads_as_level(metric, entity):
+                # A ratio reads as its operands do: returns over starts is a
+                # flow on each side, and "level" on it would pin both to the
+                # newest day of the entity clock instead of windowing each.
+                issues.append(
+                    Issue(
+                        severity="error",
+                        code="level_on_flow_ratio",
+                        message=f"metric '{metric.name}' on entity '{entity.name}' declares "
+                        "`additivity: level`, but it is a ratio of flows and reads as they "
+                        "do (each operand over its own time field). Remove `additivity:` "
+                        "from it, or declare the operands that are snapshots as level.",
+                        subject=metric.name,
+                    )
+                )
             try:
                 sqlglot.parse_one(f"SELECT {expanded}", read=sm.dialect)
             except Exception:

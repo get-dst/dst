@@ -379,8 +379,10 @@ DRIVER_NOTE = (
     "members, not-computable and ambiguous terms, the ledger against the question's "
     "words, filters the question did not ask for, dictionary values, windows against "
     "the lens clock, then compiles through Cube, runs the SQL and checks freshness, "
-    "partial periods, empty results and ties. Views are summarised (member names); "
-    "describe again with `view` to list one in full: each member's clock, values, "
+    "partial periods, empty results and ties. Name every member exactly as listed: a "
+    "joined cube's members carry the cube name as a prefix (`view.stores_region`), and "
+    "`view.region` is a member the view does not have. Views are summarised (member "
+    "names); describe again with `view` to list one in full: each member's clock, values, "
     "data end and aliases."
 )
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import decimal
 import functools
+import logging
 import re
 import time
 import uuid
@@ -63,6 +64,7 @@ from services.runtime import (
     cte_guard,
     data_end,
     decision_policy,
+    explore_checks,
     faithfulness,
     filter_guard,
     grain,
@@ -148,6 +150,35 @@ class PipelineResult:
 
 
 _SCOPE_COLUMN = re.compile(r"^column '([^']+)' is out of lens scope$")
+
+
+def _explore_checks(
+    sql: str,
+    rows: Sequence[Sequence[object]],
+    model: SemanticModel,
+    exposed: list[str],
+    connector: Connector,
+    certified_pairs: Callable[[], list[tuple[str, str]]] | None,
+) -> list[explore_checks.ExploreCheck]:
+    """The checks beyond grain on an answer that read an exposed table."""
+    connection = ", ".join(
+        sorted({e.source.connection for e in model.entities if e.source.table in exposed})
+    )
+    out: list[explore_checks.ExploreCheck] = []
+    join = explore_checks.join_check(sql, model, connector, connection=connection)
+    if join is not None:
+        out.append(join)
+    out += explore_checks.clock_checks(sql, model, exposed)
+    pairs: list[tuple[str, str]] = []
+    if certified_pairs is not None:
+        try:
+            pairs = certified_pairs()
+        except Exception:  # noqa: BLE001 — without the corpus the check says it could not close
+            logging.getLogger("dst").exception("certified lookup for the reconcile check failed")
+    out.append(
+        explore_checks.reconcile_check(sql, rows, pairs, model, connector, connection=connection)
+    )
+    return out
 
 
 def droppable_column(reason: str | None, sql: str, dialect: str) -> str | None:
@@ -699,6 +730,10 @@ def run_query(
     # distinct-key counts the grain check reads on an exposed table before it
     # counts live. None = no profile facts, so the check counts live.
     table_profiles: Mapping[str, TableProfile] | None = None,
+    # The lens's active certified pairs as (question, sql), read on demand:
+    # what an answer from an exposed table is reconciled against when one
+    # reads the same tables over the same window (runtime.explore_checks).
+    certified_pairs: Callable[[], list[tuple[str, str]]] | None = None,
     scan_text: str | None = None,
     untyped: tuple[str, list[DecisionRecord]] | None = None,
     # What a decision assembly made billed before it failed (AssembledInputs.spent).
@@ -1288,7 +1323,14 @@ def run_query(
         # Pre-approved SQL (a certified answer or a certified-definition page's authored query) is
         # trusted on table scope — a human chose those tables, not the model. The
         # generation path stays constrained to the modeled conformed tables.
-        guard = sql_guard.check(gen.sql, semantic_model, trust_tables=certification == "certified")
+        # SQL dst compiled from an intent may read a hidden column inside a
+        # population filter or a metric filter; SQL anyone wrote may not.
+        guard = sql_guard.check(
+            gen.sql,
+            semantic_model,
+            trust_tables=certification == "certified",
+            compiled=gen.intent is not None,
+        )
         if not guard.ok or not guard.sql:
             if gen.sql.strip():
                 refused = (gen.sql, guard.reason)
@@ -2357,6 +2399,7 @@ def run_query(
     # discloses it, and the grade must not say otherwise above it.
     exposed = sql_guard.exposed_tables(guard.sql, semantic_model)
     grain_readings: list[grain.GrainReading] = []
+    exposed_checks: list[explore_checks.ExploreCheck] = []
     if exposed:
         report = verification.fold_exposed(report, exposed)
         # Rows against distinct key for every exposed table read: the
@@ -2372,6 +2415,13 @@ def run_query(
             ttl=profile_age.max_age if profile_age is not None else None,
         )
         report = grain.fold(report, grain_readings)
+        # Beyond the grain line: row conservation across the SQL's joins, the
+        # clock of every time column it reads, and its number against a
+        # certified answer over the same tables and window.
+        exposed_checks = _explore_checks(
+            guard.sql, served.rows, semantic_model, exposed, connector, certified_pairs
+        )
+        report = explore_checks.fold(report, exposed_checks)
     # Folded LAST so nothing upgrades past it: a serve that exists only because
     # serve_ungoverned_shapes bypassed the selection boundary grades unverified.
     if ungoverned_reason is not None:
@@ -2670,6 +2720,7 @@ def run_query(
             f"EXPOSED: reads {', '.join(exposed)}, {what} with no governed definitions"
         )
         degraded_notes.extend(grain.lines(grain_readings))
+        degraded_notes.extend(explore_checks.lines(exposed_checks))
     for item in declined:
         what, _, why = item.partition(": ")
         degraded_notes.append(f"answered the rest: {what} is {why}")
@@ -2797,6 +2848,9 @@ def run_query(
             latency_ms=latency_ms,
             status="ok",
             mode=cap_mode,
+            # An answer read from an exposed table is an outside-lens answer:
+            # its own lane in the log, counted apart from the governed ones.
+            lane="explore" if exposed and certification != "certified" else None,
             ai_input_tokens=ai_in,
             ai_output_tokens=ai_out,
             ai_cost_usd=round(ai_cost, 6) if ai_cost is not None else None,

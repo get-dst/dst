@@ -49,6 +49,10 @@ class MeasureDst(BaseModel):
     default_segment: str | None = None
     window_reading: str | None = None
     snapshot_grain: str | None = None
+    # A level on a table that holds one row per record (its key is unique per
+    # row), not one per record per period: with no period asked there is no
+    # snapshot to pin, and the lane reads every row.
+    creation_dated: bool = False
     rejected_reading: str | None = None
     aliases: list[str] = Field(default_factory=list)
     not_for: list[str] = Field(default_factory=list)

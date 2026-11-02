@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from services.auth import oidc_login
 from services.auth.deps import get_app_session
 from services.governance import credentials
 
@@ -50,6 +51,22 @@ def set_groups(
     if credentials.set_groups(session, name, groups) == 0:
         raise HTTPException(status_code=404, detail=f"caller '{name}' not found")
     return {"name": name, "groups": groups}
+
+
+@router.post("/sync-idp")
+def sync_idp(
+    dry_run: bool = False, session: Session = Depends(get_app_session)
+) -> dict[str, object]:
+    """Deprovisioning against the identity provider: read the configured users
+    endpoint (`DST_OIDC_USERS_URL`) and revoke every key of each IdP-bound
+    caller whose subject it no longer lists. `dst keys sync-idp` and a scheduled
+    `curl` both land here. A listing that cannot be read, or lists nobody,
+    revokes nothing and answers 503: a sync that cannot see the IdP must not act
+    on its behalf. `dry_run=true` reports without revoking."""
+    try:
+        return oidc_login.sync_idp(session, dry_run=dry_run)
+    except oidc_login.UsersUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 class DriverBody(BaseModel):

@@ -22,7 +22,7 @@ and the pipeline falls back to the raw-SQL path.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -112,6 +112,7 @@ def metric_sql(
     *,
     inline_filters: bool = True,
     where: Sequence[str] = (),
+    windows: Mapping[str, Sequence[str]] | None = None,
 ) -> str:
     """The full SQL aggregate expression for a metric, expanded against its entity.
 
@@ -126,9 +127,13 @@ def metric_sql(
     references and reference cycles raise CompileError. ``where`` are extra
     conditions this one metric is restricted to (its own time window, when
     the selected metrics read different time fields); they ride inside the
-    aggregate exactly like its filters.
+    aggregate exactly like its filters. ``windows`` are the same per SIMPLE
+    metric by name: a ratio or derived metric inherits its operands' time
+    fields, so each operand takes the window on its own clock.
     """
-    return _expand(metric, {m.name: m for m in entity.metrics}, list(where), (), inline_filters)
+    return _expand(
+        metric, {m.name: m for m in entity.metrics}, list(where), (), inline_filters, windows or {}
+    )
 
 
 def _ref(name: str, by_name: dict[str, Metric], owner: str) -> Metric:
@@ -144,6 +149,7 @@ def _expand(
     inherited: list[str],
     seen: tuple[str, ...],
     inline_filters: bool,
+    windows: Mapping[str, Sequence[str]],
 ) -> str:
     if metric.name in seen:
         chain = " -> ".join((*seen, metric.name))
@@ -161,7 +167,11 @@ def _expand(
     if metric.type == "simple":
         assert metric.agg is not None and metric.expr is not None  # pydantic enforces
         expr = metric.expr
-        conds = [*inherited, *(metric.filters if inline_filters else [])]
+        conds = [
+            *inherited,
+            *windows.get(metric.name, ()),
+            *(metric.filters if inline_filters else []),
+        ]
         if conds:
             expr = f"CASE WHEN {' AND '.join(conds)} THEN {expr} END"
         if metric.agg == "count_distinct":
@@ -176,14 +186,16 @@ def _expand(
         # metric through _weighted_ratio_sql, where the window gives the
         # weight and the snapshot pin. (Raising here rejected the lens at
         # apply, from the parse lint that only wanted the shape.)
-        num = _expand(_ref(metric.numerator, by_name, metric.name), by_name, filters, seen, True)
-        den = _expand(_ref(metric.denominator, by_name, metric.name), by_name, filters, seen, True)
-        return f"CAST({num} AS DOUBLE) / NULLIF({den}, 0)"
+        num = _ref(metric.numerator, by_name, metric.name)
+        den = _ref(metric.denominator, by_name, metric.name)
+        num_sql = _expand(num, by_name, filters, seen, True, windows)
+        den_sql = _expand(den, by_name, filters, seen, True, windows)
+        return f"CAST({num_sql} AS DOUBLE) / NULLIF({den_sql}, 0)"
     assert metric.expr is not None  # derived
 
     def _sub(m: re.Match[str]) -> str:
         ref = _ref(m.group(1), by_name, metric.name)
-        return "(" + _expand(ref, by_name, filters, seen, True) + ")"
+        return "(" + _expand(ref, by_name, filters, seen, True, windows) + ")"
 
     return PLACEHOLDER.sub(_sub, metric.expr)
 
@@ -375,7 +387,7 @@ def _time_bucket(
     # override still has one (the entity default), so `revenue` (order_date) beside
     # `shipped` (shipped_at) is a real disagreement. Reading only the overrides made
     # that pair silently bucket revenue by the shipping date.
-    effective = {m.agg_time_field or entity.default_time_field for m in metrics}
+    effective = {metric_clock(m, entity) for m in metrics}
     if len(effective) > 1:
         named = ", ".join(sorted(f or "(none)" for f in effective))
         raise CompileError(
@@ -426,8 +438,11 @@ def _level_fields(
     when it is not one. A metric declaring ``additivity`` says so itself; a
     ratio or derived metric that declares none is a level when every operand
     is one (occupied berths over all berths, both snapshots), read at the same
-    snapshot as they are."""
-    if metric.additivity is not None:
+    snapshot as they are. A ratio or derived metric declaring ``level``
+    itself still reads as its operands do: a ratio of two flows is a flow,
+    whatever the declaration says (plan refuses it; see
+    ``level_on_flow_ratio``)."""
+    if metric.additivity is not None and (metric.type == "simple" or metric.additivity != "level"):
         if metric.additivity != "level":
             return None
         return {metric.agg_time_field or entity.default_time_field}
@@ -876,8 +891,41 @@ def _predicate(
     raise CompileError(f"unsupported operator '{f.op}'")
 
 
-def _effective_time_field(entity: Entity, metric: Metric) -> str | None:
-    return metric.agg_time_field or entity.default_time_field
+def _leaf_time_fields(
+    metric: Metric,
+    entity: Entity,
+    by_name: Mapping[str, Metric],
+    seen: frozenset[str] = frozenset(),
+) -> dict[str, str | None]:
+    """``{simple metric: its time field}`` for every aggregate *metric* is
+    computed from. A simple metric is its own leaf; a ratio or derived
+    metric inherits each operand's clock (returns in September over starts
+    in September: each side on its own date), unless it declares an
+    ``agg_time_field`` of its own, which then dates every operand."""
+    own = metric.agg_time_field
+    if metric.type == "simple" or metric.name in seen:
+        return {metric.name: own or entity.default_time_field}
+    out: dict[str, str | None] = {}
+    for o in _operands(metric, by_name):
+        if o is None:
+            continue
+        for leaf, f in _leaf_time_fields(o, entity, by_name, seen | {metric.name}).items():
+            out[leaf] = own or f
+    return out or {metric.name: own or entity.default_time_field}
+
+
+def metric_clock(metric: Metric, entity: Entity) -> str | None:
+    """The one time field a window on *metric* is placed on: its own, a
+    simple metric's effective one, or the clock its operands share. Operands
+    on different clocks window each on its own (``_per_metric_windows``);
+    the entity default is named when it is one of them, else the first."""
+    by_name = {m.name: m for m in entity.metrics}
+    fields = set(_leaf_time_fields(metric, entity, by_name).values())
+    if len(fields) == 1:
+        return next(iter(fields))
+    if entity.default_time_field in fields:
+        return entity.default_time_field
+    return next(iter(sorted(f for f in fields if f)), None)
 
 
 def _per_metric_windows(
@@ -890,8 +938,12 @@ def _per_metric_windows(
     over the wrong period (invoices collected in September instead of invoices
     raised in it), silently. The window filters are lifted out of the WHERE
     and re-placed inside each aggregate on that metric's own field. Empty when
-    the metrics agree, or no filter bounds a time field."""
-    fields = {m.name: _effective_time_field(entity, m) for m in metrics}
+    the metrics agree, or no filter bounds a time field. The fields are per
+    LEAF: a ratio's operands each take the window on their own clock."""
+    by_name = {m.name: m for m in entity.metrics}
+    fields: dict[str, str | None] = {}
+    for m in metrics:
+        fields |= _leaf_time_fields(m, entity, by_name)
     if len(set(fields.values())) < 2:
         return {}, []
     bounded = {f.field.rpartition(".")[2] for f in intent.filters} & {
@@ -1231,7 +1283,7 @@ def _weighted_ratio_sql(
     conds = " AND ".join([pin, *metric.filters, *level.filters])
     level_sql = f"{_AGG[level.agg]}(CASE WHEN {conds} THEN {level.expr} END) * {weight}"
     flow = num if level is den else den
-    flow_sql = _expand(flow, by_name, list(metric.filters), (metric.name,), True)
+    flow_sql = _expand(flow, by_name, list(metric.filters), (metric.name,), True, {})
     if level is den:
         return f"CAST({flow_sql} AS DOUBLE) / NULLIF({level_sql}, 0)"
     return f"CAST({level_sql} AS DOUBLE) / NULLIF({flow_sql}, 0)"
@@ -1402,12 +1454,16 @@ def compile_intent(
     *,
     domains: Mapping[str, Sequence[str]] | None = None,
     column_types: Mapping[str, Mapping[str, str]] | None = None,
+    creation_dated: Collection[str] = (),
 ) -> str:
     """``domains``: column -> known values, named in a pinned-dimension
     refusal (``UnpinnedDimension``) so the caller can offer them.
     ``column_types``: entity -> column (lowercased) -> the warehouse's own
     type from the stored profile, which a window bound is cast to where the
-    declared type cannot say (``_typed_lit``)."""
+    declared type cannot say (``_typed_lit``). ``creation_dated``: the
+    entities whose table the profile shows is no snapshot (its key is unique
+    per row): a level on one, asked over no period, reads every row rather
+    than the rows dated on the newest day."""
     if intent.compare is not None:
         # Two windows, each compiled by this same function, joined in one statement.
         from services.runtime.compare import compile_comparison
@@ -1506,19 +1562,22 @@ def compile_intent(
     # undeclared clock is never invented, and the literal then stays plain.
     zone = model.timezone if dialect in _ZONED_DIALECTS else ""
     distinct_items: list[tuple[str, list[str]]] = []
-    for m in intent.metrics:
-        own_window = [
+    windows: dict[str, list[str]] = {
+        leaf: [
             _predicate(
-                _qualify(entity, window_fields[m], dialect),
+                _qualify(entity, field, dialect),
                 f,
                 dialect,
-                zone if _member_type(entity, window_fields[m]) == "timestamp" else "",
-                _member_type(entity, window_fields[m]),
-                _physical_type(column_types, entity, window_fields[m]),
+                zone if _member_type(entity, field) == "timestamp" else "",
+                _member_type(entity, field),
+                _physical_type(column_types, entity, field),
             )
             for f in window_filters
-            if m in window_fields
         ]
+        for leaf, field in window_fields.items()
+    }
+    for m in intent.metrics:
+        own_window = windows.get(m, [])
         if distinct_mode:
             distinct_items.append((m, own_window))
             continue
@@ -1535,7 +1594,7 @@ def compile_intent(
             select.append(f"{weighted} AS {quote_ident(m, dialect)}")
             continue
         select.append(
-            f"{metric_sql(metrics_by[m], entity, inline_filters=mixed, where=own_window)} "
+            f"{metric_sql(metrics_by[m], entity, inline_filters=mixed, windows=windows)} "
             f"AS {quote_ident(m, dialect)}"
         )
 
@@ -1648,6 +1707,17 @@ def compile_intent(
             intent.snapshot is None
             and (window or intent.grain or buckets)
             and window_reading(metrics_by[intent.metrics[0]], entity) == "any_in_window"
+        ):
+            snapshot_field = None
+        # One row per record, dated by when it was created: the "latest
+        # snapshot" of such a table is the sliver of rows created on its
+        # newest day. With no period asked there is nothing to pin; the
+        # whole table is the current state. A stated period keeps its
+        # reading, which is the author's to change.
+        if (
+            entity.name in creation_dated
+            and intent.snapshot is None
+            and not (window or intent.grain or buckets)
         ):
             snapshot_field = None
     if snapshot_field is not None:

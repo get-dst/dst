@@ -136,6 +136,43 @@ updated (`+N -M`), or new. It touches nothing else, and the write is uncondition
 local edit is replaced, and survives as a diff in your own git. Worth running as the last
 step of every upgrade.
 
+## 0.15.1
+
+### Migrations
+
+`dst migrate` applies two revisions:
+
+| Revision | What it does | Downgrade |
+|---|---|---|
+| `0077` | adds `caller.idp_subject`: the identity-provider subject an MCP sign-in bound the caller to, unique per org | drops the column |
+| `0078` | adds `request_log.lane`: `explore` on an outside-lens read (the `sql` tool inside a lens, an answer read from an exposed table), NULL on governed rows | drops the column |
+
+### Questions that ask for no number are answered before routing
+
+A definition, a capability ask, a SQL ask, a "what report shows", "my last request" and a
+question not about data each come back under a new mode (`definition`, `capability`,
+`sql_request`, `hand_off`, `admin`, `not_a_data_question`) instead of a clarification or an
+`unroutable` decline ([Question types](concepts/question-types.md)). A client that switched on
+`mode` for the twenty failure modes sees six more values. `dst observe` and `dst test` count
+them apart. Declare `hand_off:` in `dst.yaml` so "what report shows" and "email this to"
+asks have somewhere to point; without it they are refused saying so.
+
+### Identity-provider groups need a mapping
+
+The groups claim of an OIDC token used to pass through as dst group names. It now
+reaches dst only through a mapping declared under `groups:` in `dst.yaml`
+([Security](security.md#hidden-columns-and-group-exceptions)):
+
+```yaml
+groups:
+  analysts:
+    idp: [analysts]
+```
+
+A deployment whose lens allow-lists or `except_groups` name IdP groups directly loses
+those grants on upgrade until the mapping is applied; nothing is granted that was not
+before. The list form of `groups:` keeps working for admin-set groups.
+
 ## 0.15.0
 
 ### Migrations

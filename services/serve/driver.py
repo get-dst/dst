@@ -228,10 +228,15 @@ CHANGE: dict[str, str] = {
     "period": "write every dateRange as absolute ISO dates [start, end]",
     "label_key": "group by the key the label belongs to as well (the detail names it)",
     "freshness": "the data ends before the window: narrow it to data_end, or relay the gap",
-    "partial_period": "the period is only partly loaded: relay that, or end the window at "
-    "the last full period",
-    "empty_result": "no rows match: check the filter values (values) and the window "
+    "partial_period": "the period is partly loaded, or complete with its values still "
+    "maturing (the detail says which): relay that, or end the window at the last full period",
+    "empty_result": "no rows match and the zero could not be verified (the detail says "
+    "what): check the filter values (values) and end the window at the data end "
     "(data_end) before reporting zero",
+    "loaded": "nothing is loaded for the window (data_end names where the data ends): end "
+    "the window at the data end, or relay the gap; 0 rows is not a measured zero",
+    "snapshot_pin": "the probe's data end for this stock names a day with no snapshot: run "
+    "`dst monitor`, or window the ask on days that hold snapshots",
     "execute": "the detail says what Cube or the warehouse refused; fix the query it names",
 }
 

@@ -560,3 +560,68 @@ def test_regular_expression_matches_are_predicates() -> None:
         assert is_predicate(sql, dialect), sql
     for sql in ("amount * 2", "'done'", "closed_at", "COALESCE(amount, 0)"):
         assert not is_predicate(sql, "postgres") or sql == "closed_at", sql
+
+
+def test_validate_refuses_a_level_on_a_ratio_of_flows() -> None:
+    """`additivity: level` on a ratio whose operands are flows: the ratio
+    reads as its operands do, so the declaration can only mislead."""
+    from services.contracts.semantic_model import Metric
+
+    bundle = jaffle_customer_value_bundle()
+    bundle.semantic_model.entities[0].metrics.append(
+        Metric(
+            name="clv_share",
+            type="ratio",
+            numerator="total_clv",
+            denominator="avg_clv",
+            additivity="level",
+        )
+    )
+    report = validate_bundle(bundle, [], [])
+    assert not report.ok
+    hit = [i for i in report.issues if i.code == "level_on_flow_ratio"]
+    assert len(hit) == 1 and "clv_share" in hit[0].message and hit[0].severity == "error"
+
+
+def test_a_level_on_a_creation_dated_table_is_a_plan_warning() -> None:
+    """A table whose key is unique per row is no snapshot: a level on it,
+    asked over no period, reads the whole table — plan says so by name."""
+    from services.contracts.profile import ColumnProfile, TableProfile
+    from services.contracts.semantic_model import Entity, EntitySource, Field, Metric, SemanticModel
+    from services.validate.report import level_on_creation_date_warnings
+
+    rentals = Entity(
+        name="rentals",
+        source=EntitySource(connection="wh", table="rentals"),
+        default_time_field="started_at",
+        primary_key=["rental_id"],
+        fields=[Field(name="rental_id", type="integer"), Field(name="started_at", type="date")],
+        metrics=[
+            Metric(name="open_rentals", agg="count", expr="rentals.rental_id", additivity="level"),
+            Metric(name="rentals_started", agg="count", expr="rentals.rental_id"),
+        ],
+    )
+    sm = SemanticModel(lens="fleet", dialect="duckdb", entities=[rentals])
+
+    def profile(distinct: int, exact: bool = True) -> TableProfile:
+        return TableProfile(
+            connection="wh",
+            table="rentals",
+            row_count=6,
+            columns=[
+                ColumnProfile(
+                    name="rental_id",
+                    type="INTEGER",
+                    distinct_count=distinct,
+                    distinct_is_exact=exact,
+                )
+            ],
+        )
+
+    issues = level_on_creation_date_warnings(sm, {"rentals": profile(6)})
+    assert [i.code for i in issues] == ["level_on_creation_date"]
+    assert issues[0].severity == "warning" and "open_rentals" in issues[0].message
+    # One row per bike per day repeats the key: a snapshot, no warning.
+    assert level_on_creation_date_warnings(sm, {"rentals": profile(2)}) == []
+    # A sampled count is a lower bound and proves nothing.
+    assert level_on_creation_date_warnings(sm, {"rentals": profile(6, exact=False)}) == []

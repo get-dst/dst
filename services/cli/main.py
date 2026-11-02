@@ -92,6 +92,7 @@ def main() -> int:
     test.register(sub)
     reviews.register_reviews(sub)
     reviews.register_rule(sub)
+    reviews.register_seed_lens(sub)
     reviews.register_retire(sub)
     reviews.register_correct(sub)
     observe.register(sub)

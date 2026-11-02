@@ -297,6 +297,30 @@ class CubePlanContext(Authored):
     )
 
 
+class HandOff(Authored):
+    """Where a question that is not dst's goes: a report, a dashboard, a BI
+    tool, a ticket queue. Named by the project so a "what report shows" or
+    "email this to" ask is answered with the place, never with a number;
+    dst never learns the inventory behind it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="what people call it, e.g. 'Sales dashboard'")
+    kind: str = Field(
+        description="what it is: dashboard | report | bi | ticket | docs | chat | other"
+    )
+    url: str | None = Field(default=None, description="where to open it")
+    mcp: str | None = Field(default=None, description="its MCP endpoint, for an agent")
+
+    @model_validator(mode="after")
+    def _somewhere(self) -> HandOff:
+        if not self.name.strip():
+            raise ValueError("hand_off: every entry needs a name")
+        if not (self.url or self.mcp):
+            raise ValueError(f"hand_off '{self.name}': give a url or an mcp endpoint")
+        return self
+
+
 class ProjectConfig(Authored):
     model_config = ConfigDict(extra="forbid")
 
@@ -309,13 +333,50 @@ class ProjectConfig(Authored):
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     lineage: LineageDecl | None = None
     cube: CubeDecl | None = None
+    hand_off: list[HandOff] = Field(
+        default_factory=list,
+        description="where a question that is not dst's goes (a report, a dashboard, a "
+        "ticket queue): a `locate` or `not_a_data_question` ask is answered with these",
+    )
     groups: StrList = Field(
         default_factory=list,
         description="the caller groups a `hide` entry may except, e.g. [support, "
         "sales]; a name not listed here fails plan and apply. Declaring a group "
         "grants nothing: membership is set on the caller (or asserted by the "
-        "identity provider), never by a request",
+        "identity provider), never by a request. A mapping form "
+        "`{support: {idp: [cs-team]}}` declares the same names and which "
+        "identity-provider groups grant each",
     )
+    idp_groups: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="dst group -> the identity-provider groups that grant it; filled "
+        "from the mapping form of `groups:`. An IdP group named nowhere here grants "
+        "nothing",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _groups_mapping_form(cls, data: Any) -> Any:
+        """``groups: {support: {idp: [cs-team]}, sales: {}}`` is the same
+        declaration as ``groups: [support, sales]`` plus the IdP mapping."""
+        if not isinstance(data, dict) or not isinstance(data.get("groups"), dict):
+            return data
+        names: list[str] = []
+        mapping: dict[str, list[str]] = {}
+        for name, decl in data["groups"].items():
+            names.append(str(name))
+            if decl is None:
+                continue
+            if not isinstance(decl, dict) or set(decl) - {"idp"}:
+                raise ValueError(f"groups.{name}: a group takes `idp: [<IdP group>, ...]` only")
+            idp = decl.get("idp") or []
+            if isinstance(idp, str):
+                idp = [idp]
+            if not isinstance(idp, list) or any(not str(g).strip() for g in idp):
+                raise ValueError(f"groups.{name}.idp: a list of identity-provider group names")
+            if idp:
+                mapping[str(name)] = [str(g).strip() for g in idp]
+        return {**data, "groups": names, "idp_groups": mapping}
 
     @field_validator("groups")
     @classmethod

@@ -66,6 +66,8 @@ from services.observability import cost
 from services.observability import usage as ai_usage
 from services.observability.logger import log_trace
 from services.project import demo_page
+from services.project.cube_plan import stored_lens_model
+from services.resolve.question_type import Typed
 from services.reviews import service as reviews_service
 from services.reviews import store as reviews_store
 from services.runtime import assembly, sql_guard, value_guard
@@ -85,6 +87,7 @@ from services.runtime.typed_resolver import (
     sole_metric_intent,
 )
 from services.serve import door as cube_door
+from services.serve import question as question_step
 
 log = logging.getLogger("dst")
 
@@ -448,7 +451,10 @@ def _describe_cube(
     rid = "req_" + uuid.uuid4().hex[:16]
     try:
         _client, lens_view = cube_door.open_view(
-            name, bundle.config, ctx=CubeContext.of(caller, lens=name, request_id=rid)
+            name,
+            bundle.config,
+            ctx=CubeContext.of(caller, lens=name, request_id=rid),
+            stored=stored_lens_model(bundle.semantic_model.cube),
         )
     except cube_door.CubeUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1006,6 +1012,7 @@ def run_lens_query(
     purpose: str = "",
     routing: Decision | None = None,
     request_id: str | None = None,
+    typed: Typed | None = None,
 ) -> QueryResponse | ConsumerAnswer:
     """Authorize + run the governed query pipeline for one lens question.
 
@@ -1035,7 +1042,7 @@ def run_lens_query(
     rid = request_id or "req_" + uuid.uuid4().hex[:16]
     with calls_logged(background, caller, rid, name):
         return _run_lens_query(
-            name, q, caller, background, fmt, bindings, allow_untyped, purpose, routing, rid
+            name, q, caller, background, fmt, bindings, allow_untyped, purpose, routing, rid, typed
         )
 
 
@@ -1050,10 +1057,40 @@ def _run_lens_query(
     purpose: str,
     routing: Decision | None,
     rid: str,
+    typed: Typed | None = None,
 ) -> QueryResponse | ConsumerAnswer:
     bundle = _authorized_bundle(name, caller, rid)
+    # The question-type step, before any binding: a question that asks for
+    # no number (a meaning, a yes/no over the model, a report, the caller's
+    # log, nothing about data) is answered here, running nothing. The routed
+    # door decided once and passes its decision; a SQL ask carries the data
+    # question in ``subject`` and gets its SQL back as the answer body.
+    if typed is None:
+        typed, answered = question_step.step(
+            q,
+            question_step.catalogue(name, bundle, sorted(caller.groups)),
+            lens=name,
+            request_id=rid,
+            org_id=str(caller.org_id),
+            caller=caller.name,
+            agent=caller.agent,
+            model=question_step.fast_model(caller, bundle),
+            driver=caller.driver,
+        )
+        if answered is not None:
+            response, trace = answered
+            trace.purpose = _logged_purpose(purpose, bundle.config)
+            background.add_task(log_trace, trace)
+            return _shaped(response, fmt, _audience(caller))
+        if typed.type == "sql":
+            q = typed.subject
     if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube":
-        return _serve_cube(name, bundle, caller, background, fmt, rid, purpose, routing, q=q)
+        out, trace = _serve_cube_traced(
+            name, bundle, caller, background, fmt, rid, purpose, routing, q=q
+        )
+        if typed.type == "sql" and isinstance(out, QueryResponse):
+            question_step.as_sql_answer(typed, out, trace)
+        return out
 
     resolved = require_llm(bundle.config.model.model_ref())
     try:
@@ -1122,6 +1159,8 @@ def _run_lens_query(
     # The lens can auto-flag its own low-confidence answers for review (origin=ai).
     if _auto_review_flags(bundle.config.auto_review, result.response):
         background.add_task(_auto_review, caller.org_id, result.response.request_id)
+    if typed.type == "sql":
+        question_step.as_sql_answer(typed, result.response, result.trace)
     return _shaped(result.response, fmt, audience)
 
 
@@ -1142,6 +1181,37 @@ def _serve_cube(
     """A lens on ``serving: cube``: the question through the frontier lane,
     or the caller's own Cube query, checked, compiled by Cube and executed
     through the lens's connection. 503 when Cube is not there to compile."""
+    return _serve_cube_traced(
+        name,
+        bundle,
+        caller,
+        background,
+        fmt,
+        rid,
+        purpose,
+        routing,
+        q=q,
+        query=query,
+        intent=intent,
+    )[0]
+
+
+def _serve_cube_traced(
+    name: str,
+    bundle: LensBundle,
+    caller: CallerIdentity,
+    background: BackgroundTasks,
+    fmt: AnswerFormat,
+    rid: str,
+    purpose: str = "",
+    routing: Decision | None = None,
+    *,
+    q: str | None = None,
+    query: CubeQuery | None = None,
+    intent: QueryIntent | None = None,
+) -> tuple[QueryResponse | ConsumerAnswer, TraceLog]:
+    """``_serve_cube`` with the trace it logs, for a door that rewrites the
+    answer (a SQL ask) before the log row is written."""
     try:
         connector = _authorized_connector(bundle, caller)
     except (IndexError, ValueError) as exc:
@@ -1153,6 +1223,7 @@ def _serve_cube(
             connector=connector,
             dialect=bundle.semantic_model.dialect,
             ctx=CubeContext.of(caller, lens=name, request_id=rid),
+            stored=stored_lens_model(bundle.semantic_model.cube),
             today=assembly.business_today_date(bundle.config.timezone),
             org_id=str(caller.org_id),
             caller=caller.name,
@@ -1191,7 +1262,7 @@ def _serve_cube(
     trace.agent = caller.agent
     trace.purpose = _logged_purpose(purpose, bundle.config)
     background.add_task(log_trace, trace)
-    return _shaped(response, fmt, _audience(caller))
+    return _shaped(response, fmt, _audience(caller)), trace
 
 
 DRIVER_QUESTION_REFUSAL = (
@@ -1321,6 +1392,7 @@ def serve_lens_question(
                         **assembled.entity_domains.get(intent.entity or "", {}),
                     },
                     column_types=assembled.column_types,
+                    creation_dated=assembled.creation_dated,
                 )
             except UnpinnedDimension as exc:
                 # The metric sums kinds of record that do not add: ask which.
@@ -1356,6 +1428,7 @@ def serve_lens_question(
         entity_coverage=assembled.entity_coverage,
         profile_age=assembled.profile_age,
         table_profiles=assembled.table_profiles,
+        certified_pairs=lambda: certified_pairs_for(name, org_id),
         decisions=assembled.decisions,
         spent=assembled.spent,
         connector=connector,
@@ -1442,6 +1515,20 @@ async def query_lens(
         body.allow_untyped,
         body.purpose,
     )
+
+
+def certified_pairs_for(lens: str, org_id: uuid.UUID | str) -> list[tuple[str, str]]:
+    """The lens's active, slot-free certified pairs as ``(question, sql)``:
+    the governed numbers an answer from an exposed table is reconciled against
+    (runtime.explore_checks). Read only when such an answer is served."""
+    from services.certify import store as certify_store
+
+    with org_session(org_id) as session:
+        return [
+            (a.question, a.sql)
+            for a in certify_store.list_for_lens(session, lens)
+            if certify_store.is_active(a.status) and not a.slots and a.sql
+        ]
 
 
 def _logged_purpose(purpose: str, config: LensConfig) -> str | None:
@@ -1553,6 +1640,7 @@ class _MetricsServe:
         # a bound or a bucket shift on a column declared `date` that the
         # warehouse stores as a TIMESTAMP must be written for the TIMESTAMP.
         self.column_types = value_guard.entity_column_types(bundle.semantic_model, profiles)
+        self.creation_dated = value_guard.creation_dated_entities(bundle.semantic_model, profiles)
         self.audience = _audience(caller)
 
     @classmethod
@@ -1592,7 +1680,10 @@ class _MetricsServe:
         """The intent's SQL, or a 400 carrying the compiler's own sentence."""
         try:
             return compile_intent(
-                intent, self.bundle.semantic_model, column_types=self.column_types
+                intent,
+                self.bundle.semantic_model,
+                column_types=self.column_types,
+                creation_dated=self.creation_dated,
             )
         except CompileError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1957,6 +2048,7 @@ def _run_certified_cube(
             connector=connector,
             dialect=bundle.semantic_model.dialect,
             ctx=CubeContext.of(caller, lens=name, request_id=rid),
+            stored=stored_lens_model(bundle.semantic_model.cube),
             today=assembly.business_today_date(bundle.config.timezone),
             org_id=str(caller.org_id),
             caller=caller.name,

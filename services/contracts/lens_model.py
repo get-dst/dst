@@ -106,6 +106,13 @@ class OverlayCube(Authored):
         "time): a period the monitor finds short is a partial load only when its rows were "
         "last loaded before the period ended",
     )
+    matures_after: dict[str, int] = Field(
+        default_factory=dict,
+        description="measure of this cube → days after a period ends before its values are "
+        "final (jobs billed after completion, refunds still arriving). A period the monitor "
+        "finds short whose load evidence says complete is disclosed, within those days, as "
+        "complete with its values still maturing; never as partially loaded",
+    )
     entity_scope: OverlayEntityScope | None = Field(
         default=None,
         description="this cube holds one company's figures: which, and per measure the "
@@ -569,6 +576,8 @@ KEY_READERS: dict[str, dict[str, str]] = {
         "default_segment": "plan (the segment must exist)",
         "window_reading": "catalog",
         "snapshot_grain": "catalog",
+        "creation_dated": "verify (post: a level with no period asked reads every row, no "
+        "snapshot pin)",
         "rejected_reading": "not read yet (the Cube lane)",
         "aliases": "catalog",
         "not_for": "not read yet (the Cube lane)",

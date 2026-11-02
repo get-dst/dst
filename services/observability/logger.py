@@ -46,7 +46,7 @@ _INSERT = text(
         answer, citations, definition_used, confidence, verification, certification,
         latency, ai_input_tokens, ai_output_tokens, ai_cost_usd, wh_bytes, wh_cost_usd,
         status, error, prompt_hash, generator_tier, repairs, context_refs, degraded,
-        resolution, resolution_tag, typed, clarification, purpose, mode
+        resolution, resolution_tag, typed, clarification, purpose, mode, lane
     ) VALUES (
         :org_id, :request_id, :lens, :caller, :agent, :question, :sql, :valid, :row_count,
         CAST(:sample AS jsonb), :answer, CAST(:citations AS jsonb), :definition_used,
@@ -55,7 +55,7 @@ _INSERT = text(
         :ai_cost_usd, :wh_bytes, :wh_cost_usd, :status, :error, :prompt_hash,
         :generator_tier, :repairs, CAST(:context_refs AS jsonb), CAST(:degraded AS jsonb),
         CAST(:resolution AS jsonb), :resolution_tag, :typed, CAST(:clarification AS jsonb),
-        :purpose, :mode
+        :purpose, :mode, :lane
     )
     """
 )
@@ -142,6 +142,8 @@ def _params(trace: TraceLog) -> dict[str, object]:
         "purpose": trace.purpose,
         # The failure mode (0074): one name per non-answer or capped answer.
         "mode": str(trace.mode) if trace.mode is not None else None,
+        # The outside-lens lane (0078): 'explore', else NULL.
+        "lane": trace.lane,
     }
 
 

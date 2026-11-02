@@ -139,7 +139,11 @@ other) match that way. Two rows that would fold into one bucket stay a failure.
 `lenses/<name>/evals/cases.yaml` holds the behavioral cases: cases that pin the
 *shape* of a response, not its value. A case declares
 `expect: clarify | refuse | answer`, plus an optional `term` — the term a
-clarify must name, ignored on the other two shapes.
+clarify must name, ignored on the other two shapes. A case can also pin a
+[question type](../concepts/question-types.md): `expect: definition | capability |
+sql_request | hand_off | admin | not_a_data_question` passes when the response
+carries that mode, whatever its status, so "what does SQO mean" stays a
+definition and never becomes a query.
 Each case is asked the way the query door asks it: the server's typed serving
 and its decider, the lens's `untyped_fallback`, its certified answers, caps and
 answer mode, and the deterministic clarify and exclusion pre-checks, since that

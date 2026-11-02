@@ -60,10 +60,13 @@ def _signing_secret() -> str:
 # --- PKCE (S256) ----------------------------------------------------------------
 
 
-def verify_pkce_s256(verifier: str, challenge: str) -> bool:
+def pkce_s256_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
-    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-    return secrets.compare_digest(expected, challenge)
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def verify_pkce_s256(verifier: str, challenge: str) -> bool:
+    return secrets.compare_digest(pkce_s256_challenge(verifier), challenge)
 
 
 # --- one-time authorization codes (stateless, signed) ---------------------------
@@ -78,7 +81,10 @@ def sign_auth_code(
     client_id: str,
     scopes: list[str] | None = None,
     resource: str | None = None,
+    idp: str | None = None,
 ) -> str:
+    """``idp`` names the sign-in that produced the grant ("oidc") so the token
+    endpoint can give the token that sign-in's lifetime; None for a pasted key."""
     now = int(time.time())
     payload = {
         "typ": _CODE_TYP,
@@ -93,6 +99,7 @@ def sign_auth_code(
         "client": client_id,
         "scope": scopes or [],
         "resource": resource,
+        "idp": idp,
         "iat": now,
         "exp": now + _CODE_TTL_SECONDS,
     }

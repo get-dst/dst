@@ -2,10 +2,45 @@
 
 from __future__ import annotations
 
+import uuid
+from typing import Any
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from services.contracts.failure_modes import QUESTION_TYPE_NAMES
+from services.db.session import org_session
 from services.runtime.scope import parse_scope
+
+
+def last_requests(org_id: uuid.UUID | str, caller: str, n: int) -> list[dict[str, Any]]:
+    """The caller's own most recent requests, newest first: what an "my last
+    request" ask is answered from. Scoped to the org by RLS and to the caller
+    by name, never another caller's; the ask itself (``admin``) is not a
+    request worth listing."""
+    with org_session(org_id) as session:
+        rows = session.execute(
+            text(
+                "SELECT request_id, lens, question, status, mode, sql, created_at "
+                "FROM request_log WHERE caller = :c AND COALESCE(mode, '') <> 'admin' "
+                "AND COALESCE(generator_tier, '') <> 'probe' "
+                "ORDER BY created_at DESC LIMIT :n"
+            ),
+            {"c": caller, "n": max(1, min(int(n), 50))},
+        ).all()
+    return [
+        {
+            "request_id": r[0],
+            "lens": r[1],
+            "question": r[2],
+            "status": r[3],
+            "mode": r[4],
+            "sql": r[5],
+            "created_at": r[6],
+        }
+        for r in rows
+    ]
+
 
 # The agent labels that mark test traffic — the suite's own (``dst-test``) and
 # the label measurement runs are told to send (``benchmark``). A request
@@ -123,7 +158,9 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
     refusals); ``routing`` carries that part on its own.
     """
     serving = _serving(include_test)
-    governed = f"COALESCE(generator_tier, '') <> 'probe' AND {serving}"
+    governed = (
+        f"COALESCE(generator_tier, '') <> 'probe' AND COALESCE(lane, '') <> 'explore' AND {serving}"
+    )
     row = session.execute(
         text(
             "SELECT count(*) AS queries, "
@@ -186,17 +223,36 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
     # Every non-clean outcome by its failure mode (0074): what a refusal, a
     # clarification or a capped answer was, in the twenty-name vocabulary.
     # Rows from before the column, and faults, carry none and are not here.
-    modes = {
-        str(r[0]): int(r[1])
-        for r in session.execute(
-            text(
-                "SELECT mode, count(*) FROM request_log "
-                f"WHERE mode IS NOT NULL AND {governed} GROUP BY 1 ORDER BY 2 DESC, 1"
-            )
+    # The question types answered before any binding (a definition, a
+    # yes/no over the model, the SQL, a hand-off, the caller's log, not a
+    # data question) are counted apart: they are neither refusals nor
+    # clarifications, and a count of ``modes`` that blended them would read
+    # a term explained as a term refused.
+    modes: dict[str, int] = {}
+    question_types: dict[str, int] = {}
+    for r in session.execute(
+        text(
+            "SELECT mode, count(*) FROM request_log "
+            f"WHERE mode IS NOT NULL AND {governed} GROUP BY 1 ORDER BY 2 DESC, 1"
         )
-    }
+    ):
+        (question_types if str(r[0]) in QUESTION_TYPE_NAMES else modes)[str(r[0])] = int(r[1])
     basis = _basis(session, include_test=include_test)
     routing = _routing_total(_routing_spend(session, include_test=include_test))
+    # Outside-lens answers (lane 'explore', 0078): the `sql` tool inside a
+    # lens's scope and answers read from an exposed table. Their cost is
+    # reported apart, never blended into the governed figures above.
+    explore_row = session.execute(
+        text(
+            "SELECT count(*), "
+            "count(*) FILTER (WHERE status = 'ok'), "
+            "COALESCE(SUM(ai_cost_usd), 0), "
+            "COALESCE(SUM(wh_cost_usd), 0), "
+            "COALESCE(SUM(wh_bytes), 0) "
+            f"FROM request_log WHERE lane = 'explore' AND {serving}"
+        )
+    ).first()
+    assert explore_row is not None
     from services.lenses.profile_age import connection_ages
 
     return {
@@ -235,6 +291,7 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
         "confidence_histogram": histogram,
         "resolution_histogram": resolution_histogram,
         "modes": modes,
+        "question_types": question_types,
         # Raw-SQL probes, reported as what they are — never as governed
         # queries. `admin_sql` is the connection passthrough (an admin's own
         # SQL against an org credential); `lens_scoped` is a caller probing
@@ -246,6 +303,14 @@ def kpis(session: Session, include_test: bool = False) -> dict[str, object]:
             "warehouse_cost_usd": round(float(probe_row[2]), 4),
         },
         "basis": basis,
+        # Outside-lens answers, cost and all, apart from the governed figures.
+        "explore": {
+            "queries": int(explore_row[0]),
+            "answered": int(explore_row[1]),
+            "ai_cost_usd": round(float(explore_row[2]), 4),
+            "warehouse_cost_usd": round(float(explore_row[3]), 4),
+            "wh_bytes": int(explore_row[4]),
+        },
         # Test traffic left out of every figure above (0 with include_test).
         "test_requests": 0 if include_test else _test_requests(session),
         "include_test": include_test,
@@ -441,7 +506,7 @@ def request_detail(session: Session, request_id: str) -> dict[str, object] | Non
             "citations, definition_used, confidence, verification, certification, latency, "
             "ai_input_tokens, ai_output_tokens, ai_cost_usd, wh_bytes, wh_cost_usd, "
             "status, error, created_at, prompt_hash, generator_tier, repairs, context_refs, "
-            "resolution, resolution_tag, typed, clarification, purpose "
+            "resolution, resolution_tag, typed, clarification, purpose, lane, degraded "
             "FROM request_log WHERE request_id = :r"
         ),
         {"r": request_id},
@@ -490,6 +555,10 @@ def request_detail(session: Session, request_id: str) -> dict[str, object] | Non
         # The caller's stated purpose (0068): self-reported prose, NULL unless the
         # lens logs it. A label on the row, never an input to anything.
         "purpose": row[30],
+        # The outside-lens lane (0078) and the lines the answer carried
+        # (EXPOSED, GRAIN, JOIN, CLOCK, RECONCILE): what a review of it reads.
+        "lane": row[31],
+        "degraded": row[32],
     }
 
 

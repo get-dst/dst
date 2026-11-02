@@ -502,3 +502,64 @@ def test_a_not_for_ask_returns_the_lens_refusal_naming_the_sibling(
     finally:
         _drop_lenses(org)
         _cleanup(org)
+
+
+@needs_db
+def test_a_question_naming_a_refused_alias_routes_to_the_lens_that_refuses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two lenses over the same tables; one declares a measure (and its
+    aliases) not computable. A question phrased in the alias routes to that
+    lens, with no model asked, so its own refusal is the answer: before, the
+    alias was no routing anchor, the sibling scored closest and served a
+    different figure under the asked name."""
+    from services.contracts.lens_config import NotComputable
+    from services.db.session import org_session
+    from services.lenses import store
+    from services.lenses.demo import jaffle_customer_value_bundle
+
+    org, raw = _make_org_token()
+    refusing = jaffle_customer_value_bundle()
+    entry = NotComputable(
+        measure="rescue rate",
+        aliases=["rescue ratio"],
+        reason="rescued carts are not recorded",
+    )
+    refusing.config.not_computable = [entry]
+    refusing.semantic_model.not_computable = [entry.model_dump(mode="json")]
+    sibling = jaffle_customer_value_bundle()
+    sibling.config.name = "order_pace"
+    sibling.semantic_model.lens = "order_pace"
+    with org_session(org) as session:
+        store.create_lens(session, refusing)
+        store.publish(session, "customer_value")
+        store.create_lens(session, sibling)
+        store.publish(session, "order_pace")
+
+    served: list[str] = []
+
+    def fake_run(lens: str, q: str, *a: object, **k: object) -> QueryResponse:
+        served.append(lens)
+        return QueryResponse(
+            lens=lens,
+            status="refused",
+            answer="this lens cannot compute rescue rate — rescued carts are not recorded",
+            request_id="req_refusal_owner",
+        )
+
+    monkeypatch.setattr("services.api.route.run_lens_query", fake_run)
+    try:
+        r = client.post(
+            "/v1/query",
+            json={"q": "What was the rescue ratio last month?"},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["covered"] is True
+        assert body["routed_to"]["lens"] == "customer_value"
+        assert body["routed_to"]["decided_by"] == "not_computable"
+        assert body["answer"]["status"] == "refused"
+        assert served == ["customer_value"]
+    finally:
+        _cleanup(org)

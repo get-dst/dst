@@ -23,13 +23,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from services.api import route_store
 from services.api.query import (
     _audience,
     _authorized_bundle,
     _authorized_connector,
     _shaped,
 )
-from services.api.sql import _grain_lines, clock_columns
+from services.api.sql import _grain_lines
 from services.auth.deps import get_caller
 from services.contracts.cube_query import CubeQuery
 from services.contracts.lens_config import LensConfig
@@ -38,15 +39,18 @@ from services.contracts.response import ConsumerAnswer, QueryResponse
 from services.contracts.semantic_model import Entity
 from services.cube.context import CubeContext
 from services.cube.lens_view import CubeLensView
+from services.db.session import org_session
 from services.governance.credentials import CallerIdentity
 from services.governance.policy import authorize
 from services.lenses.describe import ExposedTableInfo, _exposed_info
 from services.lenses.store import LensBundle, list_published_for_org
 from services.observability import usage as ai_usage
 from services.observability.logger import log_trace
+from services.project.cube_plan import stored_lens_model
 from services.resolve.frontier import read_ledger
 from services.runtime import assembly
 from services.runtime.attribution import Attribution, attributed
+from services.runtime.explore_checks import clock_columns
 from services.serve import door as cube_door
 from services.serve.driver import Retry, retry
 from services.verify.base import Ask
@@ -75,6 +79,14 @@ class CubeBody(BaseModel):
         "a scope it did not ask for is refused and its periods are bound to the lens clock. "
         "Without it those checks report UNTESTED",
     )
+    route_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="the request_id route_query returned for the question this query answers: "
+        "an ambiguous term's select words are read from the question recorded there, never "
+        "from `question`. Without it no select word applies: the term's default reading is "
+        "served and the others disclosed",
+    )
 
 
 class DriverAnswer(QueryResponse):
@@ -95,14 +107,32 @@ def _cube_lens(name: str, caller: CallerIdentity, rid: str) -> LensBundle:
     return bundle
 
 
-def _view(name: str, config: LensConfig, caller: CallerIdentity, rid: str) -> CubeLensView:
+def _view(name: str, bundle: LensBundle, caller: CallerIdentity, rid: str) -> CubeLensView:
     try:
         _client, view = cube_door.open_view(
-            name, config, ctx=CubeContext.of(caller, lens=name, request_id=rid)
+            name,
+            bundle.config,
+            ctx=CubeContext.of(caller, lens=name, request_id=rid),
+            stored=stored_lens_model(bundle.semantic_model.cube),
         )
     except cube_door.CubeUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return view
+
+
+def _recorded_question(caller: CallerIdentity, route_id: str | None) -> str | None:
+    """The question route_query recorded under ``route_id`` for this org,
+    the text an ambiguous term's select words are read from in driver mode.
+    None when nothing was recorded under it: no select word applies."""
+    if not route_id:
+        return None
+    try:
+        with org_session(caller.org_id) as session:
+            found = route_store.by_id(session, route_id.strip())
+    except Exception:  # noqa: BLE001 — an unreadable route selects nothing, loud in the log
+        log.exception("recorded route question unavailable")
+        return None
+    return found.question if found is not None else None
 
 
 def run_cube(
@@ -131,6 +161,7 @@ def run_cube(
                 connector=connector,
                 dialect=bundle.semantic_model.dialect,
                 ctx=CubeContext.of(caller, lens=name, request_id=rid),
+                stored=stored_lens_model(bundle.semantic_model.cube),
                 today=assembly.business_today_date(bundle.config.timezone),
                 org_id=str(caller.org_id),
                 caller=caller.name,
@@ -148,7 +179,11 @@ def run_cube(
             )
         ):
             response, trace = cube_door.answer_driver(
-                lane, body.query, ledger, question=body.question
+                lane,
+                body.query,
+                ledger,
+                question=body.question,
+                recorded=_recorded_question(caller, body.route_id),
             )
     trace.agent = caller.agent
     background.add_task(log_trace, trace)
@@ -242,7 +277,7 @@ def lens_values(name: str, member: str, prefix: str, caller: CallerIdentity) -> 
     bundle = _authorized_bundle(name, caller, rid)
     want = prefix.strip().lower()
     if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube":
-        view = _view(name, bundle.config, caller, rid)
+        view = _view(name, bundle, caller, rid)
         _member_refusal(view, bundle.config, caller, member)
         values = view.dictionary(member)
         if values is None:
@@ -306,7 +341,7 @@ def lens_data_end(name: str, member: str, caller: CallerIdentity) -> DataEndResu
     rid = "req_" + uuid.uuid4().hex[:16]
     bundle = _authorized_bundle(name, caller, rid)
     if cube_door.serving_core(bundle.config, bundle.semantic_model) == "cube":
-        view = _view(name, bundle.config, caller, rid)
+        view = _view(name, bundle, caller, rid)
         probe = view.probe
         stale = None
         clock = probe.clock()

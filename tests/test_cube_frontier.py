@@ -99,6 +99,43 @@ def test_a_lens_with_views_shows_only_what_its_views_reach() -> None:
     assert '"cube":"quotes"' not in text
 
 
+def test_a_lens_over_views_lists_each_member_by_its_exact_name() -> None:
+    """The model writes the names it is shown: a view's members are listed
+    verbatim (`shop.count`, not the cube's `orders.count`), each with the
+    cube member's facts and values, and a clock named as the view names it."""
+    text = frontier.context(fake.view(["shop"]), today=date(2026, 9, 1))
+    assert '"name":"shop.count"' in text and '"name":"shop.status"' in text
+    assert '"name":"orders.count"' not in text
+    assert '"clock":"shop.ordered_at"' in text
+    assert '"values":["Open","Paid","Refunded"]' in text
+    assert "Name every member EXACTLY as listed" in text
+    assert "prefix" not in text  # the shop view prefixes nothing
+
+
+def test_a_view_with_prefixed_members_lists_them_prefixed_and_says_so() -> None:
+    """migrate-model writes joined views with `prefix: true`: the member is
+    `sales_orders.stores_region`, and the prompt lists that name and says a
+    joined cube's members carry the prefix, so the model never writes
+    `sales_orders.region`."""
+    from services.contracts.lens_model import parse_overlay
+    from services.cube.lens_view import CubeLensView
+    from tests import cube_shop
+
+    overlay = parse_overlay(cube_shop.project_files()["cube/overlay.yaml"])
+    view = CubeLensView.build(
+        cube_shop.meta(), overlay=overlay, lens="sales", views=["sales_orders"]
+    )
+    assert frontier.prefixed_members(view)
+    text = frontier.context(view, today=date(2026, 9, 1))
+    assert '"name":"sales_orders.stores_region"' in text
+    assert '"name":"sales_orders.orders_revenue"' in text
+    assert '"sales_orders.region"' not in text
+    assert "carry the cube name as a prefix" in text
+    # The hidden manager email is not listed to a caller outside ops.
+    assert "manager_email" not in text
+    assert "manager_email" in frontier.context(view, today=date(2026, 9, 1), groups=["ops"])
+
+
 @pytest.mark.parametrize(
     ("reply", "outcome"),
     [

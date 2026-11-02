@@ -157,11 +157,15 @@ class FakeCube:
         continue_waits: int = 0,
         meta: dict[str, Any] | None = None,
         healthy: bool = True,
+        warehouse_error: str | None = None,
     ) -> None:
         self.secret = secret
         self.continue_waits = continue_waits
         self.meta = meta or META
         self.healthy = healthy
+        # What the warehouse says through Cube on /load (a dead driver: the
+        # meta compiles, every query fails); None = rows come back.
+        self.warehouse_error = warehouse_error
         self.requests: list[httpx.Request] = []
         self.claims: list[dict[str, Any]] = []
 
@@ -223,6 +227,8 @@ class FakeCube:
                 200, json={"queryType": "regularQuery", "normalizedQueries": [query]}
             )
         if path == "/cubejs-api/v1/load":
+            if self.warehouse_error:
+                return httpx.Response(500, json={"error": self.warehouse_error})
             if self.continue_waits > 0:
                 self.continue_waits -= 1
                 return httpx.Response(200, json={"error": "Continue wait"})

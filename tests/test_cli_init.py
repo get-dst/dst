@@ -77,6 +77,67 @@ def test_bigquery_init_asks_for_credentials_path(tmp_path: Path, monkeypatch: ob
         resolve_env_ref("X")
 
 
+def test_bigquery_cube_init_writes_the_sidecar_env_with_the_dataset_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--cube` over BigQuery writes what Cube's driver reads into .env: the
+    type, the key as the container sees it, the project from the key, and
+    the location read from the dataset the user names through the connector.
+    An empty location is never written: compose would pass it as an empty
+    value and Cube would fail every query."""
+    sa = tmp_path / "sa.json"
+    sa.write_text('{"type": "service_account", "project_id": "harbour-data"}', encoding="utf-8")
+    asked: list[str] = []
+    monkeypatch.setattr(
+        "services.cli.init._bq_dataset_location",
+        lambda key, dataset: asked.append(f"{key.name}:{dataset}") or "europe-north1",
+    )
+    # name, warehouse, example, instance name, creds, dataset
+    answers = iter(["proj", "bigquery", "n", "", str(sa), "harbour-data.sales"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    root = tmp_path / "proj"
+    ns = argparse.Namespace(
+        dir=str(root), name=None, warehouse=None, example=None, yes=False, cube=True
+    )
+    assert run_init(ns) == 0
+    env = (root / ".env").read_text(encoding="utf-8")
+    assert asked == ["sa.json:harbour-data.sales"]
+    assert "\nCUBEJS_DB_TYPE=bigquery\n" in env
+    assert "\nCUBEJS_DB_BQ_KEY_FILE=/data/sa.json\n" in env
+    assert "\nCUBEJS_DB_BQ_PROJECT_ID=harbour-data\n" in env
+    assert "\nCUBEJS_DB_BQ_LOCATION=europe-north1\n" in env
+
+
+def test_bigquery_cube_init_asks_the_location_when_no_dataset_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "services.cli.init._bq_dataset_location", lambda key, dataset: pytest.fail("not asked")
+    )
+    # name, warehouse, example, instance name, creds (blank), dataset (blank), location
+    answers = iter(["proj", "bigquery", "n", "", "", "", "US"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    root = tmp_path / "proj"
+    ns = argparse.Namespace(
+        dir=str(root), name=None, warehouse=None, example=None, yes=False, cube=True
+    )
+    assert run_init(ns) == 0
+    env = (root / ".env").read_text(encoding="utf-8")
+    assert "\nCUBEJS_DB_BQ_LOCATION=US\n" in env
+    assert "# CUBEJS_DB_BQ_KEY_FILE=/data/<your-key>.json" in env
+
+
+def test_headless_bigquery_cube_init_never_writes_an_empty_location(tmp_path: Path) -> None:
+    root = _init(tmp_path, cube=True, warehouse="bigquery", example=False)
+    env = (root / ".env").read_text(encoding="utf-8")
+    assert "\nCUBEJS_DB_TYPE=bigquery\n" in env
+    assert not re.search(r"^CUBEJS_DB_BQ_LOCATION=\s*$", env, re.M)
+    assert "# CUBEJS_DB_BQ_LOCATION=EU" in env
+    # Without --cube nothing of the sidecar's is written.
+    plain = _init(tmp_path / "plain", warehouse="bigquery", example=False)
+    assert "CUBEJS_DB" not in (plain / ".env").read_text(encoding="utf-8")
+
+
 def test_non_tty_init_names_the_fix_instead_of_tracebacking(
     tmp_path: Path, monkeypatch: object, capsys: object
 ) -> None:

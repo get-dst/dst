@@ -299,6 +299,51 @@ def test_a_failing_check_returns_the_mode_and_what_to_change(
     assert r.json()["status"] == "refused" and r.json()["retry"]["check"] == "scope"
 
 
+def test_query_cube_reads_a_select_word_from_the_route_s_recorded_question_only(
+    org: tuple[object, str], world: fake.FakeCube
+) -> None:
+    """The ambiguous term's select words are read from the question
+    route_query recorded for the request (route_id), never from the free
+    `question` text an agent can rewrite. With no route_id no select word
+    applies: the term is handled as for an unnamed reading (here, with no
+    declared default and readings far apart, it asks)."""
+    org_id, raw = org
+    query = {
+        "measures": ["shop.revenue_net"],
+        "timeDimensions": [
+            {"dimension": "shop.ordered_at", "dateRange": ["2026-08-01", "2026-08-31"]}
+        ],
+    }
+    ledger = [
+        {"word": "revenue", "to": "member", "ref": "shop.revenue_net"},
+        {"word": "august", "to": "period", "ref": "2026-08-01..2026-08-31"},
+    ]
+    # The asker never named a reading; the agent rewrites the question to pick one.
+    r = _call(raw, "POST", "/v1/query", json={"q": "webshop revenue in August"})
+    assert r.status_code == 200 and r.json()["covered"] is True, r.text
+    route_id = r.json()["request_id"]
+    body = {"query": query, "ledger": ledger, "question": "revenue by order date in August"}
+    r = _call(raw, "POST", "/v1/lenses/shop/cube", json={**body, "route_id": route_id})
+    assert r.status_code == 200, r.text
+    answer = r.json()
+    assert (answer["status"], answer["mode"]) == ("clarification", "ambiguous_metric"), answer
+    assert "Which do you mean" in answer["answer"]
+    # No route_id: the free text selects nothing either.
+    r = _call(raw, "POST", "/v1/lenses/shop/cube", json=body)
+    assert r.status_code == 200 and r.json()["mode"] == "ambiguous_metric", r.text
+    # The asker named the reading: the recorded question selects it.
+    r = _call(raw, "POST", "/v1/query", json={"q": "revenue by order date in August"})
+    assert r.status_code == 200, r.text
+    named = r.json()["request_id"]
+    ledger2 = [*ledger, {"word": "order date", "to": "member", "ref": "shop.ordered_at"}]
+    r = _call(
+        raw, "POST", "/v1/lenses/shop/cube", json={**body, "ledger": ledger2, "route_id": named}
+    )
+    assert r.status_code == 200, r.text
+    assert "ambiguous:pass" in r.json()["receipt"]["checks"], r.json()
+    assert _ai_calls(org_id) == 0
+
+
 def test_without_the_question_the_word_checks_report_untested(
     org: tuple[object, str], world: fake.FakeCube
 ) -> None:
@@ -834,3 +879,103 @@ def test_a_covered_ask_also_sees_an_exposed_table_holding_it(
     assert "sales" in [c["lens"] for c in route["candidates"]], route
     kit = route["explore_kit"]
     assert kit is not None and [t["table"] for t in kit["tables"]] == ["crm.rep_quotas"]
+
+
+def test_an_outside_lens_answer_on_a_cube_lens_certifies_as_a_cube_pair_on_row_equality(
+    org: tuple[object, str], world: fake.FakeCube, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reviewer supplies the Cube query that is the governed reading of
+    the question; dst compiles it, runs both, and writes the kind: cube pair
+    only when the rows are the same. The CLI puts the pair in the lens's
+    certified_answers.yaml, where a pair's query lives."""
+    from services.api import mgmt_certify
+
+    org_id, raw = org
+    monkeypatch.setattr(
+        mgmt_certify,
+        "resolve_connector",
+        lambda *a, **k: DuckDBConnector(str(tmp_path / "world.duckdb"), profile=False),
+    )
+    r = _call(
+        raw,
+        "POST",
+        "/v1/sql",
+        json={
+            "lens": "shop",
+            "sql": "SELECT company, SUM(headcount) AS headcount FROM hr.staff_monthly "
+            "GROUP BY company",
+            "question": "headcount by company",
+        },
+    )
+    assert r.status_code == 200, r.text
+    rid = r.json()["request_id"]
+    h = {"Authorization": f"Bearer {raw}"}
+    # Rows differ: no pair, and the detail says so.
+    wrong = client.post(
+        f"/mgmt/lenses/shop/certified/from-request/{rid}",
+        headers=h,
+        json={"cube_query": {"measures": ["staff.headcount"]}},
+    )
+    assert wrong.status_code == 409 and "row equality" in wrong.json()["detail"]
+    # Not a Cube query at all.
+    assert (
+        client.post(
+            f"/mgmt/lenses/shop/certified/from-request/{rid}",
+            headers=h,
+            json={"cube_query": {"measures": ["staff.headcount"], "nope": 1}},
+        ).status_code
+        == 400
+    )
+    query = {"measures": ["staff.headcount"], "dimensions": ["staff.company"]}
+    ok = client.post(
+        f"/mgmt/lenses/shop/certified/from-request/{rid}", headers=h, json={"cube_query": query}
+    )
+    assert ok.status_code == 201, ok.text
+    pair = ok.json()["pair"]
+    assert pair["kind"] == "cube" and pair["question"] == "headcount by company"
+    assert pair["query"] == query and pair["sql"].startswith("SELECT company")
+    assert set(pair["verified"]) == {"model_version", "sql_sha256", "result_sha256", "as_of"}
+    assert _ai_calls(org_id) == 0
+
+    # Through the CLI: the ruling, the certification, and the pair in the file.
+    import json as json_mod
+    import sys
+    from urllib.parse import urlsplit
+
+    import httpx
+    import yaml
+
+    from services.cli.main import main as cli_main
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: client.post(
+            urlsplit(url).path, headers=headers, json=json
+        ),
+    )
+    ticket = client.post("/v1/reviews", headers=h, json={"request_id": rid}).json()
+    root = tmp_path / "project"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dst",
+            "rule",
+            ticket["ticket_id"],
+            "--verdict",
+            "approve",
+            "--certify",
+            "--cube-query",
+            json_mod.dumps(query),
+            "--dir",
+            str(root),
+            "--token",
+            raw,
+        ],
+    )
+    assert cli_main() == 0
+    entries = yaml.safe_load((root / "lenses" / "shop" / "certified_answers.yaml").read_text())
+    written = next(e for e in entries if e.get("question") == "headcount by company")
+    assert written["kind"] == "cube" and written["query"] == query
+    assert entries[0]["question"] == "orders by status", "the existing pair is kept"

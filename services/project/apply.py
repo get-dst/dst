@@ -90,6 +90,7 @@ from services.semantic.files import parse_blueprint_files, parse_semantic_files
 from services.validate.report import (
     ValidationReport,
     collapse_warnings,
+    level_on_creation_date_warnings,
     status_done_family_warnings,
     validate_bundle,
 )
@@ -743,6 +744,7 @@ def _dictionary_warnings(
 
     return [
         *(i.message for i in status_done_family_warnings(sm, by_table)),
+        *(i.message for i in level_on_creation_date_warnings(sm, by_table)),
         *join_cardinality_warnings(sm, by_table),
     ]
 

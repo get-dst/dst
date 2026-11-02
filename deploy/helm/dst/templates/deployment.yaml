@@ -88,9 +88,13 @@ spec:
               value: memory
             - name: CUBEJS_SCHEDULED_REFRESH_DEFAULT
               value: "false"
+            {{- /* An empty value is left out: Cube's drivers read an empty
+                 CUBEJS_DB_BQ_LOCATION (or host) as a value and fail every query. */}}
             {{- range $k, $v := .Values.cube.env }}
+            {{- if ne (toString $v) "" }}
             - name: {{ $k }}
               value: {{ $v | quote }}
+            {{- end }}
             {{- end }}
           {{- with .Values.cube.envFrom }}
           envFrom: {{- toYaml . | nindent 12 }}

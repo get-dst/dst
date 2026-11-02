@@ -56,19 +56,22 @@ from services.api.query import (
     _logged_purpose,
 )
 from services.auth.deps import get_caller
+from services.contracts.failure_modes import FailureMode
 from services.contracts.profile import TableProfile
 from services.contracts.protocols import Connector
 from services.contracts.response import Receipt
-from services.contracts.semantic_model import Entity, SemanticModel
+from services.contracts.semantic_model import SemanticModel
 from services.contracts.trace import TraceLog
+from services.contracts.verification import VerificationCheck, VerificationReport
 from services.contracts.warehouse import QueryResult
 from services.governance.credentials import CallerIdentity
 from services.lenses.connections import ConnectionUnavailable, resolve_connector
 from services.observability import cost
 from services.observability.logger import log_trace
-from services.runtime import grain, scope_rails, sql_guard
+from services.runtime import explore_checks, grain, scope_rails, sql_guard
 from services.runtime import receipt as receipts
 from services.runtime.bounded import WarehouseTimeout, warehouse_bounded
+from services.runtime.explore_checks import clock_columns
 from services.runtime.pipeline import not_computable_refusal
 
 log = logging.getLogger("dst")
@@ -88,6 +91,11 @@ class SqlBody(BaseModel):
     lens: str | None = None
     limit: int = Field(default=PROBE_DEFAULT_ROWS, ge=1, le=PROBE_MAX_ROWS)
     purpose: str = Field(default="", max_length=PURPOSE_MAX, description=PURPOSE_HELP)
+    # The question this read answers, when it answers one: what the request
+    # log keeps as the question (the SQL otherwise), what a review ticket on
+    # the answer carries, and the question side of the pair an approval
+    # certifies. A look at five rows has none.
+    question: str = Field(default="", max_length=2000)
 
 
 class SqlResponse(BaseModel):
@@ -106,9 +114,20 @@ class SqlResponse(BaseModel):
     # For each exposed table read: where its dated columns end, from the
     # stored profile, or "could not verify" and why. Lens scope only.
     data_end: list[str] = Field(default_factory=list)
+    # For each time column the statement reads from an exposed table: what
+    # it records per the table's blueprint, or that no clock is declared.
+    clock: list[str] = Field(default_factory=list)
     # Every post-check, as the receipt lists it: ``name:outcome``, or
-    # ``name:exposed, could not verify …`` where a check could not run.
+    # ``name:exposed, could not verify …`` where a check could not run, or
+    # ``name:skip (unverifiable): could not close: …`` (services/runtime/
+    # explore_checks: join conservation, clocks, reconciliation).
     checks: list[str] = Field(default_factory=list)
+    # The SQL that ran, as the guard rewrote it: shown with every outside-lens
+    # answer, so the reader can see what the number is a count of.
+    sql: str | None = None
+    # The mode the first disclosing check carries (a join that multiplies
+    # rows: wrong_grain; a delta against a certified number: unverifiable).
+    mode: FailureMode | None = None
     receipt: Receipt | None = None
 
 
@@ -188,7 +207,7 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         org_id=str(caller.org_id),
         lens=scope,
         caller=caller.name,
-        question=body.sql,
+        question=body.question.strip() or body.sql,
         sql=body.sql,
         # Which path produced the SQL. Not a generation tier — a human wrote it, which
         # is exactly what makes the row worth keeping.
@@ -230,7 +249,11 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
     rows = [list(r) for r in result.rows[: body.limit]]
     grain_lines: list[str] = []
     end_lines: list[str] = []
+    clock_lines: list[str] = []
     checks: list[str] = []
+    report = VerificationReport(grade="unverified")
+    degraded: list[str] = []
+    mode: FailureMode | None = None
     if scope_model is not None and (exposed := sql_guard.exposed_tables(guard.sql, scope_model)):
         readings, profiles, fresh = _grain_readings(scope_model, exposed, connector, caller)
         grain_lines = [r.line for r in readings]
@@ -238,21 +261,48 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
             f"grain:exposed, {r.line}" if r.status == "unverified" else f"grain:{r.status}"
             for r in readings
         ]
+        report = grain.fold(report, readings)
         for table in exposed:
             line, ok = _data_end_line(scope_model, table, profiles, fresh)
             end_lines.append(line)
             checks.append("data_end:pass" if ok else f"data_end:exposed, {line}")
+            report.checks.append(
+                VerificationCheck(name="data_end", status="pass" if ok else "skip", reason=line)
+            )
+        # Beyond the grain line: row conservation across the statement's
+        # joins, the clock of every time column it reads, and its number
+        # against a certified answer over the same tables and window. Each
+        # is a line on the receipt; one that could not run says so.
+        more = _explore_checks(guard.sql, rows, scope_model, exposed, connector, caller, wh)
+        clock_lines = [c.detail for c in more if c.name == "clock"]
+        checks += [c.line for c in more]
+        mode = explore_checks.mode_of(more)
+        report = explore_checks.fold(report, more)
+        what = "a table" if len(exposed) == 1 else "tables"
+        degraded = [
+            f"EXPOSED: reads {', '.join(exposed)}, {what} with no governed definitions",
+            *grain.lines(readings),
+            *explore_checks.lines(more),
+        ]
     if rows:
         checks.append("empty_result:pass")
+        report.checks.append(VerificationCheck(name="empty_result", status="pass"))
     else:
         # No rows is not a zero: the filter values or the window may be what
         # is wrong, and nothing here can tell which.
-        checks.append(
-            "empty_result:disclose: the statement returned no rows; an empty result is not "
-            "a zero — check the filter values and where the data ends before reporting one"
+        empty = (
+            "the statement returned no rows; an empty result is not a zero — check the "
+            "filter values and where the data ends before reporting one"
         )
+        checks.append(f"empty_result:disclose: {empty}")
+        report.checks.append(VerificationCheck(name="empty_result", status="fail", reason=empty))
     trace.confidence = "unverified"
     trace.valid, trace.row_count, trace.wh_bytes = True, len(rows), result.bytes_scanned
+    if scope_model is not None:
+        # An outside-lens read: its own lane in the request log, every check
+        # on the row a review ticket reads, and the mode the receipt carries.
+        trace.lane = "explore"
+        trace.verification, trace.degraded, trace.mode = report, degraded, mode
     # Priced exactly like the lens-query trace (pipeline.py): bytes recorded
     # without a cost read as $0.00 in observe, so a heavy authoring phase can
     # understate org warehouse spend by an order of magnitude.
@@ -267,7 +317,10 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
         request_id=request_id,
         grain=grain_lines,
         data_end=end_lines,
+        clock=clock_lines,
         checks=checks,
+        sql=guard.sql,
+        mode=mode,
         # The rows are the caller's own SQL over the lens's tables: nothing
         # governed their meaning, so the receipt never grades them verified.
         receipt=receipts.build(
@@ -278,6 +331,7 @@ def _run(body: SqlBody, background: BackgroundTasks, caller: CallerIdentity) -> 
             confidence="unverified",
             sql=body.sql,
             data_as_of=None,
+            mode=mode,
             checks=checks,
         ),
     )
@@ -292,14 +346,46 @@ def _grain_lines(
     return [r.line for r in _grain_readings(model, tables, connector, caller)[0]]
 
 
-def clock_columns(entity: Entity, model: SemanticModel) -> list[str]:
-    """The dated columns of an exposed table: its blueprint's clocks, else
-    every date or timestamp field the lens reads."""
-    blueprint = model.blueprints.get(entity.source.table)
-    if blueprint is not None and blueprint.clocks:
-        return list(blueprint.clocks)
-    dated = ("date", "timestamp", "time", "datetime")
-    return [f.name for f in entity.fields if (f.type or "").lower() in dated]
+def _explore_checks(
+    sql: str,
+    rows: list[list[Any]],
+    model: SemanticModel,
+    exposed: list[str],
+    connector: Connector,
+    caller: CallerIdentity,
+    connection: str,
+) -> list[explore_checks.ExploreCheck]:
+    """The checks beyond grain on an outside-lens read (runtime.explore_checks),
+    the reconciliation reading the lens's active certified answers."""
+    out: list[explore_checks.ExploreCheck] = []
+    join = explore_checks.join_check(sql, model, connector, connection=connection)
+    if join is not None:
+        out.append(join)
+    out += explore_checks.clock_checks(sql, model, exposed)
+    out.append(
+        explore_checks.reconcile_check(
+            sql, rows, _certified_pairs(model.lens, caller), model, connector, connection=connection
+        )
+    )
+    return out
+
+
+def _certified_pairs(lens: str, caller: CallerIdentity) -> list[tuple[str, str]]:
+    """The lens's active, slot-free certified pairs as ``(question, sql)``:
+    the governed numbers an outside-lens read can be reconciled against."""
+    from services.certify import store as certify_store
+    from services.db.session import org_session
+
+    try:
+        with org_session(caller.org_id) as session:
+            return [
+                (a.question, a.sql)
+                for a in certify_store.list_for_lens(session, lens)
+                if certify_store.is_active(a.status) and not a.slots and a.sql
+            ]
+    except Exception:  # noqa: BLE001 — without the corpus the check says it could not close
+        log.exception("certified lookup for the reconcile check failed")
+        return []
 
 
 def _data_end_line(

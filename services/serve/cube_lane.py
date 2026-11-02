@@ -42,10 +42,11 @@ from services.contracts.verification import VerificationReport
 from services.cube.client import CubeClient, CubeError
 from services.cube.context import CubeContext
 from services.cube.lens_view import CubeLensView
+from services.observability import cost
 from services.runtime import receipt as receipts
 from services.runtime import sql_guard
 from services.runtime.external_access import ExternalAccessRefused
-from services.verify import post
+from services.verify import derive, post
 from services.verify.base import Ask, Check, Rows
 from services.verify.pre import PRE_ORDER, QUESTION_ONLY
 
@@ -208,6 +209,10 @@ class CubeLane:
     groups: list[str] = field(default_factory=list)
     request_id: str = ""
     executed: list[str] = field(default_factory=list)
+    # Bytes the warehouse reported scanning for every statement this ask
+    # ran (None when the connector reports none): the request row's
+    # wh_bytes and wh_cost_usd, as the typed lane stamps them.
+    wh_bytes: int | None = None
     # The lens's certified question → Cube query pairs: the frontier lane's
     # exemplars, in its cached system block.
     exemplars: list[tuple[str, CubeQuery]] = field(default_factory=list)
@@ -249,6 +254,8 @@ class CubeLane:
         except Exception as exc:  # noqa: BLE001 — the warehouse's own error, any connector
             # Cube's SQL failing on the warehouse is a fault, named and loud.
             raise LaneRefusal(None, f"the warehouse did not run Cube's SQL: {exc}") from exc
+        if result.bytes_scanned is not None:
+            self.wh_bytes = (self.wh_bytes or 0) + result.bytes_scanned
         alias = (compiled.raw.get("sql") or {}).get("aliasNameToMember") or {}
         return [
             {str(alias.get(c, c)): _plain(v) for c, v in zip(result.columns, row, strict=False)}
@@ -263,6 +270,8 @@ class CubeLane:
         *,
         ledger: list[Binding] | None,
         queries: list[CubeQuery],
+        driver: bool = False,
+        recorded: str | None = None,
     ) -> Ask:
         queries = [absolute(q, self.today) for q in queries]
         return Ask(
@@ -274,6 +283,8 @@ class CubeLane:
             asked=queries,
             run=self.run,
             today=self.today,
+            driver=driver,
+            recorded=recorded,
         )
 
     def question_refusal(self, question: str) -> Check | None:
@@ -296,14 +307,23 @@ class CubeLane:
         note: str = "",
         structured: bool = False,
         untested: str | None = None,
+        recorded: str | None = None,
     ) -> tuple[QueryResponse, TraceLog]:
         """The candidates (one decision of one to three queries) through every
         check, executed and served. ``structured``: the caller wrote the
         query itself (no question words to account for, no ledger).
         ``untested``: why the question-word checks a structured ask skips
-        could not run, recorded as a skip on the receipt instead of left out."""
+        could not run, recorded as a skip on the receipt instead of left out.
+        ``recorded``: on the driver lane, the question the route recorded
+        for this request, the only text a reading's select words read."""
         started = time.monotonic()
-        ask = self.ask(question, ledger=ledger, queries=[c.query for c in candidates])
+        ask = self.ask(
+            question,
+            ledger=ledger,
+            queries=[c.query for c in candidates],
+            driver=lane == "driver",
+            recorded=recorded,
+        )
         checks: list[Check] = []
         qs = list(ask.asked)
         left = next((r for r in map(_relative_left, qs) if r), None)
@@ -343,16 +363,36 @@ class CubeLane:
                 if fresh.stops:
                     refusals.append(fresh)
                     continue
-                for q2, pin, coarse in post.snapshot_split(self.view, q):
+                for sp in post.snapshot_split(self.view, q):
+                    q2, pin, coarse = sp.query, sp.pin, sp.coarse
                     if pin:
-                        checks.append(post.snapshot_pin(ask, q))
+                        checks.append(Check("snapshot_pin", sp.mode, "disclose", sp.note))
                     rows = self.run(q2)
                     if pin:
                         rows = post.snapshot_reduce(q2, rows, pin, coarse)
+                    if sp.day and not rows:
+                        # Pinned to the day the probe says the data ends and
+                        # nothing is there: the probe is wrong, not the stock.
+                        gap = Check(
+                            "snapshot_pin",
+                            FailureMode.data_gap,
+                            "refuse",
+                            f"no snapshot of {', '.join(q2.measures)} on {sp.day}, the day the "
+                            f"probe records as {str(pin).rsplit('.', 1)[0]}'s data end; nothing is "
+                            "served in its place - run `dst monitor` and ask again",
+                        )
+                        checks.append(gap)
+                        refusals.append(gap)
+                        continue
                     empty = post.empty_result(ask, q2, rows)
                     checks.append(empty)
                     if empty.stops:
                         refusals.append(empty)
+                        continue
+                    loaded = post.unloaded_window(ask, q2, rows)
+                    checks.append(loaded)
+                    if loaded.stops:
+                        refusals.append(loaded)
                         continue
                     nb = post.null_bucket(ask, q2, rows)
                     checks.append(nb)
@@ -435,6 +475,10 @@ class CubeLane:
             question=question,
             status=status,  # type: ignore[arg-type]
             sql=";\n".join(self.executed) or None,
+            wh_bytes=self.wh_bytes,
+            wh_cost_usd=cost.warehouse_cost_usd(self.wh_bytes, self.connector.kind)
+            if self.executed
+            else None,
             cube_query=[q.wire() for q in qs],
             ledger=ledger,
             serving=f"cube:{lane}",
@@ -503,26 +547,39 @@ class CubeLane:
         note: str,
         started: float,
     ) -> tuple[QueryResponse, TraceLog]:
-        columns, rows = _table(served)
+        # The figure the question asked for when the lane answered with its
+        # parts (a share, a ratio, a per-day average): computed here from
+        # the parts, leading the answer, the parts beside it under result 1, 2.
+        figure = derive.derive(question, [(s.query, s.rows) for s in served], self.view)
+        columns, rows = _table(served, figure.rows if figure and figure.computed else None)
         caveats = self.view.caveats([m for s in served for m in _read(s.query)])
         if caveats:
             # The author's caveats on what was read: a fact dst cannot check
             # the caller relays, so it leads the answer and is signed.
             checks = [*checks, Check("caveats", None, "disclose", "; ".join(caveats))]
+        if figure is not None:
+            checks = [
+                *checks,
+                Check("derived", None, "pass" if figure.computed else "skip", figure.lead()),
+            ]
         cap = next((c for c in checks if c.outcome == "disclose" and c.mode in _CAPS), None)
         report = VerificationReport(
             grade="partial" if cap else "verified",
             checks=[c.verification() for c in checks],
             partial_reason=f"{cap.name}: {cap.detail}" if cap else None,
         )
-        disclosures = [c.detail for c in checks if c.outcome == "disclose" and c.name != "caveats"]
-        disclosures += [c.detail for c in checks if c.outcome == "pass" and c.detail]
+        own = {"caveats", "derived"}
+        disclosures = [c.detail for c in checks if c.outcome == "disclose" and c.name not in own]
+        disclosures += [
+            c.detail for c in checks if c.outcome == "pass" and c.detail and c.name not in own
+        ]
         limit = self.config.model.max_rows_to_return
         shown = rows[:limit] if limit else rows
         text = " ".join(
             x
             for x in [
                 *(f"CAVEAT {c}" for c in caveats),
+                figure.lead().rstrip(".") + "." if figure is not None else "",
                 note.strip().rstrip(".") + "." if note.strip() else "",
                 f"{len(rows)} row{'s' if len(rows) != 1 else ''}.",
                 *(f"NOTE {d}" for d in dict.fromkeys(disclosures)),
@@ -609,23 +666,25 @@ def _read(q: CubeQuery) -> list[str]:
     return out
 
 
-def _table(served: list[Served]) -> tuple[list[str], list[list[object]]]:
+def _table(served: list[Served], lead: Rows | None = None) -> tuple[list[str], list[list[object]]]:
     """One table for the response: a single query's rows as they are; several
-    queries' rows stacked under a leading ``result`` column (1, 2, …)."""
+    queries' rows stacked under a leading ``result`` column (1, 2, …). A
+    figure computed from the parts (``lead``) comes first under result 0."""
 
-    def cols_of(s: Served) -> list[str]:
+    def cols_of(rows: Rows) -> list[str]:
         cols: list[str] = []
-        for r in s.rows:
+        for r in rows:
             cols += [c for c in r if c not in cols]
         return cols
 
-    if len(served) == 1:
-        cols = cols_of(served[0])
+    if len(served) == 1 and not lead:
+        cols = cols_of(served[0].rows)
         return cols, [[r.get(c) for c in cols] for r in served[0].rows]
     cols = ["result"]
+    cols += [c for c in cols_of(lead or []) if c not in cols]
     for s in served:
-        cols += [c for c in cols_of(s) if c not in cols]
-    rows: list[list[object]] = []
+        cols += [c for c in cols_of(s.rows) if c not in cols]
+    rows: list[list[object]] = [[0, *(r.get(c) for c in cols[1:])] for r in lead or []]
     for i, s in enumerate(served, 1):
         rows += [[i, *(r.get(c) for c in cols[1:])] for r in s.rows]
     return cols, rows

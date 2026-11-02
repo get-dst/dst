@@ -26,7 +26,7 @@ from sqlglot import exp
 # a bare name denotes a qualified one's last segment, two different
 # qualifications never match.
 from services.certify.bindings import _ref_matches
-from services.contracts.semantic_model import Entity, SemanticModel
+from services.contracts.semantic_model import Entity, SemanticModel, predicate_hidden_columns
 from services.runtime.identifiers import is_reserved
 
 # Derived-metric sibling refs ("{revenue} - {cost}") — the compiler's grammar.
@@ -45,12 +45,16 @@ class _Ctx:
 
     def __post_init__(self) -> None:
         self.by_name: dict[str, Entity] = {e.name.lower(): e for e in self.entities}
+        # A hidden column the entity's own predicates read (a population
+        # filter, a metric filter) is withheld from the fields by the compile
+        # but still a member those fragments may name.
         self.members: dict[str, dict[str, str]] = {
             e.name.lower(): {
                 m.lower(): m
                 for m in [f.name for f in e.fields]
                 + [d.name for d in e.dimensions]
                 + [mt.name for mt in e.metrics]
+                + sorted(predicate_hidden_columns(e))
             }
             for e in self.entities
         }
@@ -296,10 +300,17 @@ def resolve_model(model: SemanticModel) -> tuple[SemanticModel, list[str], list[
     # exposed table is the exception as `b`: it carries no authored
     # expression, it is exposed under its qualified name when a selected
     # entity holds its bare one, and a bare reference resolves to the entity
-    # name first here and in the guard.
+    # name first here and in the guard. Two entities over ONE table (a role
+    # copy beside the entity it copies) are no collision: either reading of
+    # `<name>.<col>` is the same column.
     for a in out.entities:
         for b in out.entities:
-            if a is not b and not b.exposed and _ref_matches(a.name.lower(), b.source.table):
+            if (
+                a is not b
+                and not b.exposed
+                and a.source.table != b.source.table
+                and _ref_matches(a.name.lower(), b.source.table)
+            ):
                 ctx.error(
                     f"entity '{a.name}' collides with the source table of entity "
                     f"'{b.name}' ('{b.source.table}') — entity names are the logical "

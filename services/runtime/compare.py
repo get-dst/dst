@@ -40,6 +40,7 @@ from services.runtime.compiler import (
     _physical_type,
     _resolve_entity,
     compile_intent,
+    metric_clock,
 )
 from services.runtime.identifiers import quote_ident
 
@@ -286,9 +287,9 @@ def plan_comparison(intent: QueryIntent, model: SemanticModel) -> ComparisonPlan
     unknown = [m for m in intent.metrics if m not in by_name]
     if unknown:
         raise CompileError(f"unknown metric '{unknown[0]}'")
-    time_fields = sorted(
-        {f for m in intent.metrics if (f := by_name[m].agg_time_field or entity.default_time_field)}
-    )
+    # A ratio is dated as its operands are (metric_clock): each side then
+    # takes the window on its own clock inside compile_intent.
+    time_fields = sorted({f for m in intent.metrics if (f := metric_clock(by_name[m], entity))})
     window_filters = _window_filters(intent, entity, set(time_fields))
     if not window_filters:
         named = ", ".join(time_fields) or "the entity's time field"

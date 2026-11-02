@@ -9,6 +9,7 @@ projection of the published lens, refreshed when it changes.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from services.certdefs import CertifiedDefinition, load_certified_defs
 from services.contracts.cube_probe import CubeProbe
@@ -23,7 +24,13 @@ from services.contracts.semantic_model import (
 from services.lenses.store import LensBundle
 from services.router import CoverageProfile
 from services.router.coverage import vocabulary
-from services.runtime.not_for import declared_asks, is_avoid_line
+from services.runtime.not_for import (
+    NotForAsk,
+    declared_asks,
+    is_avoid_line,
+    metric_phrases,
+    usable_asks,
+)
 from services.runtime.typed_resolver import _grain_nouns, _keyish
 
 # What the decider is shown of a lens's stored values: a few per dimension,
@@ -35,6 +42,26 @@ _DIMENSIONS_SHOWN = 8
 
 def _dedupe(items: list[str]) -> list[str]:
     return list(dict.fromkeys(s.strip() for s in items if s and s.strip()))
+
+
+def _words(text: str) -> str:
+    return " ".join(text.replace("_", " ").split()).strip()
+
+
+def _refuses(entries: list[Any]) -> dict[str, str]:
+    """Each surface of a ``not_computable`` entry (the measure, its aliases,
+    as words) -> the lens its ``route_to`` names. Read defensively: an entry
+    is a model or a mapping."""
+    out: dict[str, str] = {}
+    for entry in entries:
+        get = entry.get if isinstance(entry, dict) else lambda k, e=entry: getattr(e, k, None)
+        measure = str(get("measure") or "")
+        aliases = [str(a) for a in (get("aliases") or [])]
+        route_to = str(get("route_to") or "").strip()
+        for surface in [measure, *aliases]:
+            if _words(surface):
+                out.setdefault(_words(surface).lower(), route_to)
+    return out
 
 
 def coverage_profile(
@@ -77,6 +104,13 @@ def coverage_profile(
     # An "Avoid for:" line names what the entity is NOT for: as an anchor it
     # pulls exactly those asks toward the lens. It rides ``not_for`` instead.
     anchors += [u for e in governed for u in e.use_cases if not is_avoid_line(u)]
+    # A metric's declared aliases are scored like its name: a question phrased
+    # only in an alias must still find the lens.
+    anchors += [a for e in governed for m in e.metrics for a in m.aliases]
+    # The measures the lens declares it cannot compute are its anchors too:
+    # the question belongs at its door, which refuses with the reason.
+    refuses = _refuses(list(sm.not_computable) + list(getattr(cfg, "not_computable", None) or []))
+    anchors += list(refuses)
 
     pages = certified
     if pages is None and cfg.model.certified_dir:
@@ -109,6 +143,8 @@ def coverage_profile(
         names=_dedupe(names),
         not_for=_not_for(cfg, sm),
         metric_names=_dedupe(metric_names),
+        metric_aliases=_dedupe([a for e in governed for m in e.metrics for a in m.aliases]),
+        refuses=refuses,
         time_fields=_dedupe(time_fields),
         sources=sources,
         data_scope=str(getattr(cfg, "scope", None) or ""),
@@ -185,6 +221,8 @@ def _held_texts(
                 texts += [str(v) for v in values]
     for definition in sm.definitions:
         texts += [definition.term, *definition.aliases, *definition.value_aliases]
+    # A measure the lens declares it cannot compute is still its own word.
+    texts += list(_refuses(list(sm.not_computable)))
     return texts
 
 
@@ -204,12 +242,15 @@ def _not_for(cfg: object, sm: SemanticModel) -> list[str]:
     door refuses on (``not_for.declared_asks``: ``not_for`` and a single
     governed entity's ``Avoid for:`` use cases), plus the config's entries
     for a model compiled before it carried them. Read defensively: each entry
-    is an ``{ask, sibling}`` mapping or model."""
+    is an ``{ask, sibling}`` mapping or model. An ask that would mask one of
+    the lens's own metrics is left out, as the door leaves it out."""
     out = [a.ask for a in declared_asks(sm)]
+    extra: list[NotForAsk] = []
     for item in getattr(cfg, "not_for", None) or []:
         ask = item.get("ask") if isinstance(item, dict) else getattr(item, "ask", None)
         if isinstance(ask, str):
-            out.append(ask)
+            extra.append(NotForAsk(ask=ask))
+    out += [a.ask for a in usable_asks(extra, metric_phrases(sm))]
     return _dedupe(out)
 
 
@@ -243,7 +284,12 @@ def cube_coverage_profile(
     def phrase(text: str | None) -> str:
         return (text or "").replace("_", " ").strip()
 
+    def aliases(m: LensMember) -> list[str]:
+        dst = m.dst
+        return list(getattr(dst, "aliases", None) or [])
+
     anchors = [phrase(m.title) or phrase(m.member) for m in measures]
+    anchors += [a for m in measures for a in aliases(m)]
     anchors += [phrase(d.metric) for d in definitions]
     anchors += [
         phrase(s.segment.term if s.segment and s.segment.term else s.member) for s in segments
@@ -252,6 +298,8 @@ def cube_coverage_profile(
         anchors += list(c.overlay.common_questions)
         anchors += [u for u in c.overlay.use_cases if not is_avoid_line(u)]
     anchors += list(certified or [])
+    refuses = _refuses([*config.not_computable, *model.policy.not_computable])
+    anchors += list(refuses)
 
     values: dict[str, list[str]] = {}
     for d in dims:
@@ -268,10 +316,6 @@ def cube_coverage_profile(
                 scope_words += [str(v) for v in dictionaries.get(w[len("dictionary:") :], [])]
             else:
                 scope_words.append(w)
-
-    def aliases(m: LensMember) -> list[str]:
-        dst = m.dst
-        return list(getattr(dst, "aliases", None) or [])
 
     declared: list[str] = [
         config.name,
@@ -308,7 +352,10 @@ def cube_coverage_profile(
             prose += [part.dst.grain or "", part.dst.population or "", part.dst.system or ""]
     prose += [d.summary or "" for d in definitions]
 
-    not_for = [a.ask for a in [*config.not_for, *model.policy.not_for] if a.ask.strip()]
+    own = [p for m in measures for p in (m.member, m.title or "", *aliases(m))]
+    declared_not_for = [*config.not_for, *model.policy.not_for]
+    asks = [NotForAsk(ask=a.ask, sibling=a.sibling) for a in declared_not_for]
+    not_for = [a.ask for a in usable_asks(asks, own)]
     clocks = [model.clock_of(m) for m in measures]
     description = f"{config.display_name}: {config.description}".strip(": ")
     return CoverageProfile(
@@ -327,6 +374,8 @@ def cube_coverage_profile(
         metric_names=_dedupe(
             [p for m in measures for p in (m.member, phrase(m.member), m.short_title or "")]
         ),
+        metric_aliases=_dedupe([a for m in measures for a in aliases(m)]),
+        refuses=refuses,
         time_fields=_dedupe([c.split(".", 1)[-1] for c in clocks if c]),
         sources=sources,
         data_scope=str(config.scope or model.policy.scope or ""),

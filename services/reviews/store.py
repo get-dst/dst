@@ -44,6 +44,10 @@ class Trace(BaseModel):
     rows: list[list[object]] | None = None
     structured: bool = False
     correction_sql: str | None = None
+    # The outside-lens lane (``explore``) and the lines the answer carried
+    # (EXPOSED, GRAIN, JOIN, CLOCK, RECONCILE): what a ticket on it shows.
+    lane: str | None = None
+    degraded: list[str] | None = None
 
 
 class Ticket(BaseModel):
@@ -80,7 +84,7 @@ def get_trace(session: Session, request_id: str) -> Trace | None:
     row = session.execute(
         text(
             "SELECT request_id, lens, caller, question, sql, answer, definition_used, "
-            "confidence, row_count, certification, verification, sample "
+            "confidence, row_count, certification, verification, sample, lane, degraded "
             "FROM request_log WHERE request_id = :r"
         ),
         {"r": request_id},
@@ -103,6 +107,8 @@ def get_trace(session: Session, request_id: str) -> Trace | None:
         # evidence the queue has; absent, the judge is told so.
         rows=row[11] if isinstance(row[11], list) else None,
         structured=not (row[5] or "").strip(),
+        lane=row[12],
+        degraded=[str(x) for x in row[13]] if isinstance(row[13], list) else None,
     )
 
 

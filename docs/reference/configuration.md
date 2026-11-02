@@ -31,7 +31,8 @@ Top-level keys (`services/project/schema.py`):
 | `probe` | how `dst probe` samples and how old its profile may get; see [Probe](#probe-probe) |
 | `lineage` | where the dbt or SQLMesh model DAG lives, for `table/X+` selection; see [Lineage](#lineage-lineage) |
 | `cube` | the Cube this project compiles governed asks through; see [Cube](#cube-cube) |
-| `groups` | the caller groups a `hide` entry may except, e.g. `[support, sales]`; plan and apply fail on an `except_groups` name not listed. Apply stores the list per org, and a pushed `dst.yaml` without it clears it. Declaring a group grants nothing: membership is set on the caller ([Security](../security.md#hidden-columns-and-group-exceptions)) |
+| `hand_off` | where a question that is not dst's goes: reports, dashboards, a ticket queue; see [Hand-off](#hand-off-hand_off) |
+| `groups` | the caller groups a `hide` entry may except, e.g. `[support, sales]`; plan and apply fail on an `except_groups` name not listed. Apply stores the list per org, and a pushed `dst.yaml` without it clears it. Declaring a group grants nothing: membership is set on the caller ([Security](../security.md#hidden-columns-and-group-exceptions)). The mapping form `{support: {idp: [cs-team]}, ops: }` declares the same names and which identity-provider groups grant each; an IdP group named nowhere grants nothing |
 
 ### Provider fields (`providers.<name>`)
 
@@ -339,6 +340,32 @@ cube:
 `DST_CUBE_URL`, `DST_CUBE_API_SECRET_ENV`, `DST_CUBE_META_TTL` and `DST_CUBE_JWT_CLOCK` override the block
 field by field.
 
+### Hand-off (`hand_off`)
+
+Where a caller is sent for what dst does not do. A question that asks which report
+shows a figure, or asks for an errand (email this, export that, schedule it), is
+answered with these entries under the `hand_off` or `not_a_data_question` mode
+([Question types](../concepts/question-types.md)). dst keeps no inventory of reports
+and reads nothing behind the entries; it only names them. With no `hand_off`
+declared, a "what report shows" ask is refused saying so.
+
+| Key | What |
+|---|---|
+| `name` | what people call it, e.g. `Sales dashboard` |
+| `kind` | what it is: `dashboard`, `report`, `bi`, `ticket`, `docs`, `chat` or `other` |
+| `url` | where to open it |
+| `mcp` | its MCP endpoint, for an agent. One of `url` or `mcp` is required |
+
+```yaml
+hand_off:
+  - name: Sales dashboard
+    kind: dashboard
+    url: https://bi.example.com/sales
+  - name: Helpdesk
+    kind: ticket
+    mcp: https://helpdesk.example.com/mcp
+```
+
 ## Entity rails (`semantic/entities/<name>.yaml`)
 
 The deterministic behaviour levers on an entity, enforced by the compiler and the
@@ -393,7 +420,7 @@ scaffold's reference block carries the full key list
 | Key | Default | What it declares |
 |---|---|---|
 | `stale_after_days` (top level) | unset | the freshness contract: days after the scope's measured last-update at which answers flag stale: the freshness check fails, the grade caps at `partial`, and the answer says so. Unset = undeclared; the check reports skip, never a vacuous pass. Read [how `data_as_of` is measured](../guides/project-files.md#freshness-is-a-declared-contract) before setting it |
-| `not_for` (top level) | `[]` | asks this lens must refuse although its tables could produce a figure, each `{ask, sibling}`: a question naming every content word of the ask is refused before typing or generation, naming the sibling lens. `Avoid for:` lines in a single entity's `use_cases` are read the same way |
+| `not_for` (top level) | `[]` | asks this lens must refuse although its tables could produce a figure, each `{ask, sibling}`: a question saying the ask as a phrase (its content words in order) is refused before typing or generation, naming the sibling lens; the longest matching ask wins, and a one-word ask inside one of the lens's own metrics never matches. `Avoid for:` lines in a single entity's `use_cases` are read the same way |
 | `sources` (top level) | `[]` | the source systems the lens's data comes from, as people name them, e.g. `[ticketing, door scanners]`: a question naming a system some lens declares routes only to lenses declaring it, and is uncovered, naming the system, when no lens the caller may use does. Whole words, case ignored; an entry twice or with no letter or digit is an error, and one spelled like a metric of the lens is a plan warning |
 | `scope` (top level) | unset | whose figures the lens holds: `own` or `market`. Shown to the routing decider |
 | `model.answer_contract` | `strict` | the output-grid contract in every generation prompt: project exactly the asked quantities at the asked grain, full precision. `off` removes the block (a bare `off` is fine; YAML 1.1 parses it as a boolean and the loader coerces it back) |
@@ -443,7 +470,7 @@ error naming the file, the key path and the nearest valid key.
 | Key | What it holds |
 |---|---|
 | `version` | `1` |
-| `cubes.<cube>` | per cube: `default_time_dimension` (its clock), `use_cases` and `common_questions` (routing text), `caveats` and `member_caveats` (carried by every answer that reads the cube or member), `pinned_dimensions`, `clock_kind` (`event` or `schedule` per time dimension), `feed_axes` and `feed_measures` (what the monitor judges as feeds), `loaded_at` (the time dimension stamping each row's load, the monitor's evidence that a short month is a partial load), `entity_scope` (a one-company cube and its group-level counterparts) |
+| `cubes.<cube>` | per cube: `default_time_dimension` (its clock), `use_cases` and `common_questions` (routing text), `caveats` and `member_caveats` (carried by every answer that reads the cube or member), `pinned_dimensions`, `clock_kind` (`event` or `schedule` per time dimension), `feed_axes` and `feed_measures` (what the monitor judges as feeds), `loaded_at` (the time dimension stamping each row's load, the monitor's evidence that a short month is a partial load), `matures_after` (measure → days after a period ends before its values are final: a short month whose load evidence says complete is disclosed, within those days, as complete with values still maturing, never as partially loaded), `entity_scope` (a one-company cube and its group-level counterparts) |
 | `lenses.<lens>` | per lens: `views`, and its policy over them: `owner`, `timezone`, `stale_after_days`, `scope`, `sources`, `not_for`, `not_computable`, `access`, `expose`, `eval_gate`, `auto_review`, `definitions` (the overlay definitions it reads, by term) |
 | `definitions` | prose definitions the model cannot carry as a segment: `metric`, `about` (a cube or member), `summary`, `aliases`, `status`, `audiences`, `file` |
 | `ambiguous` | ambiguous terms, the same fields plus `readings` (each `says`, `members`, `select_words`, `default: true`) and `default` |
@@ -500,11 +527,20 @@ older installs. The interesting ones:
 | `DST_OIDC_GROUPS_CLAIM` | `groups` | the token claim carrying the user's groups/roles, mapped to caller groups so lens allow-lists grant by group |
 | `DST_OIDC_ADMIN_GROUP` | — | the group value that grants admin. Unset ⇒ OIDC users are never admin (safe default: name the privileged group deliberately) |
 | `DST_OIDC_ORG` | `oidc` | display name for the org all users of one issuer share |
+| `DST_OIDC_CLIENT_ID` | the audience | the client id dst is registered under at the IdP, for the MCP consent page's sign-in; the audience is the client id at every common IdP, so it is rarely needed |
+| `DST_OIDC_CLIENT_SECRET` | — | set when the IdP registered dst as a confidential client; a public PKCE client needs none. Sent to the token endpoint only |
+| `DST_OIDC_SCOPES` | `openid email profile` | the scopes the sign-in requests. Okta puts the groups claim in the ID token only when `groups` is added; Keycloak and Entra reject a scope they do not define |
+| `DST_OIDC_TOKEN_DAYS` | `30` | lifetime of an MCP token minted after an IdP sign-in |
+| `DST_OIDC_USERS_URL` | — | a URL listing the IdP's current users as JSON, read by `dst keys sync-idp`: Okta `https://<org>.okta.com/api/v1/users?filter=status eq "ACTIVE"`, Keycloak `https://<host>/admin/realms/<realm>/users?enabled=true`. Put the "still active" filter in the URL; a listed user is kept, an unlisted one is revoked. `Link: rel="next"` pages are followed |
+| `DST_OIDC_USERS_TOKEN` | — | bearer token for that URL (an Okta API token, a Keycloak service-account token) |
+| `DST_OIDC_USERS_SUBJECT_FIELD` | `id` | the field of each listed user holding the subject the `sub` claim carries; `id` at Okta and Keycloak |
 
-Generic OIDC is included; SAML and SCIM are not. A common self-host shape is an auth
-proxy (oauth2-proxy) terminating the browser redirect and forwarding the token, so
-the backend's job (verify issuer + audience + signature, map groups) is the whole
-integration.
+Generic OIDC is included, on the dashboard and on the MCP consent page; SAML and SCIM
+are not. The groups claim reaches dst only through the `groups:` mapping in
+`dst.yaml` ([Security](../security.md#hidden-columns-and-group-exceptions)). A common
+self-host shape for the dashboard is an auth proxy (oauth2-proxy) terminating the
+browser redirect and forwarding the token; the MCP sign-in runs the redirect itself
+and needs the IdP to allow `<DST_PUBLIC_BASE_URL>/oauth/callback` as a redirect URI.
 
 ### Names and compatibility
 

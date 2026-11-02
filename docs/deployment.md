@@ -188,6 +188,12 @@ COMPOSE_PROFILES=cube DST_CUBE_URL=http://cube:4000 CUBEJS_API_SECRET=$(dst secr
 With helm, set the same variables under `cube.env` and mount the key from a
 Secret with `cube.extraVolumes` and `cube.extraVolumeMounts`.
 
+A variable that is unset is not passed: the compose file lists Cube's warehouse
+variables as bare entries, and the chart skips an empty `cube.env` value. An empty
+`CUBEJS_DB_BQ_LOCATION` is not "unset" to Cube's driver: every query fails on it while
+`/readyz` and the meta stay green. `dst cube status` runs one `limit 1` query through
+Cube and reports the warehouse's answer, so this shows before `dst probe` does.
+
 Three things differ from a DuckDB or Postgres warehouse:
 
 - **Time dimensions are TIMESTAMPs.** Cube bounds a window with `TIMESTAMP(?)`,

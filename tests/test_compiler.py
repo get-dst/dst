@@ -1565,3 +1565,255 @@ def test_the_operand_pair_under_a_per_week_formula_compiles_as_the_ratio() -> No
     gated = gate_grain(q, prefer_weighted_ratio(pair, model), model)
     assert gated.metrics == ["utilisation"] and gated.grain is None
     assert "(30 / 7.0)" in compile_intent(gated, model)
+
+
+# ── role joins: one pair joined once per role ─────────────────────────────────
+
+
+def _ferry_model() -> SemanticModel:
+    """bookings with a payer AND a passenger, both persons: two joins to one
+    table, each under the role's alias (what a role relationship compiles to)."""
+    bookings = Entity(
+        name="bookings",
+        source=EntitySource(connection="ferry", table="bookings"),
+        fields=[
+            Field(name="booking_id", type="string"),
+            Field(name="payer_id", type="string"),
+            Field(name="passenger_id", type="string"),
+            Field(name="fare_eur", type="number"),
+        ],
+        metrics=[Metric(name="fare_total", agg="sum", expr="bookings.fare_eur")],
+    )
+
+    def role(name: str) -> Entity:
+        return Entity(
+            name=f"persons_{name}",
+            source=EntitySource(connection="ferry", table="persons"),
+            fields=[Field(name="id", type="string"), Field(name="city", type="string")],
+        )
+
+    joins = [
+        Join(
+            left="bookings",
+            right=f"persons_{name}",
+            on=f"bookings.{name}_id = persons_{name}.id",
+            relationship="many_to_one",
+            role=name,
+        )
+        for name in ("payer", "passenger")
+    ]
+    return SemanticModel(
+        lens="t",
+        dialect="duckdb",
+        entities=[bookings, role("payer"), role("passenger")],
+        joins=joins,
+    )
+
+
+def test_compile_joins_both_roles_of_one_pair_under_distinct_aliases() -> None:
+    sql = compile_intent(
+        QueryIntent(
+            entity="bookings",
+            metrics=["fare_total"],
+            dimensions=["persons_payer.city", "persons_passenger.city"],
+        ),
+        _ferry_model(),
+    )
+    assert "JOIN persons AS persons_payer ON bookings.payer_id = persons_payer.id" in sql
+    assert (
+        "JOIN persons AS persons_passenger ON bookings.passenger_id = persons_passenger.id" in sql
+    )
+    assert "persons_payer.city" in sql and "persons_passenger.city" in sql
+
+
+def test_compile_reads_the_dimension_of_the_role_the_intent_names() -> None:
+    sql = compile_intent(
+        QueryIntent(entity="bookings", metrics=["fare_total"], dimensions=["persons_payer.city"]),
+        _ferry_model(),
+    )
+    assert "bookings.payer_id = persons_payer.id" in sql and "persons_payer.city" in sql
+    assert "passenger" not in sql
+    # the bare name is carried by both roles: a coin flip is refused, not taken
+    with pytest.raises(CompileError, match="ambiguous dimension/field 'city'"):
+        compile_intent(
+            QueryIntent(entity="bookings", metrics=["fare_total"], dimensions=["city"]),
+            _ferry_model(),
+        )
+
+
+def _bike_fleet_model() -> SemanticModel:
+    """A bike-rental fleet's rentals, compiled through the lens compiler: the
+    rider's phone is hidden, and the population filter reads it to keep the
+    mechanics' own test rides out of every answer."""
+    from services.contracts.lens_config import LensConfig
+    from services.contracts.shared_semantic import SharedEntity
+    from services.project.compile import compile_lens_model
+
+    rentals = SharedEntity.model_validate(
+        {
+            "name": "rentals",
+            "source": {"connection": "wh", "table": "fleet.rentals"},
+            "primary_key": ["rental_id"],
+            "default_time_field": "started_at",
+            "fields": [
+                {"name": "rental_id", "type": "integer"},
+                {"name": "station", "type": "string"},
+                {"name": "rider_phone", "type": "string"},
+                {"name": "minutes", "type": "number"},
+                {"name": "started_at", "type": "timestamp"},
+            ],
+            "dimensions": [{"name": "station", "type": "string"}],
+            "hide": ["rider_phone"],
+            "population_filter": "rentals.rider_phone NOT LIKE '+358 40 000%'",
+            "metrics": [
+                {
+                    "name": "ride_minutes",
+                    "agg": "sum",
+                    "expr": "rentals.minutes",
+                    "filters": ["rentals.rider_phone IS NOT NULL"],
+                }
+            ],
+        }
+    )
+    config = LensConfig.model_validate(
+        {
+            "name": "fleet",
+            "display_name": "fleet",
+            "connections": ["wh"],
+            "select": {"entities": ["rentals"], "definitions": []},
+        }
+    )
+    model, _ = compile_lens_model(
+        config=config,
+        shared_entities={"rentals": rentals},
+        shared_definitions={},
+        shared_relationships={},
+        local_definitions=[],
+        use_when=[],
+        sample_queries=[],
+        dialect="duckdb",
+    )
+    return model
+
+
+def test_compiled_sql_reads_a_hidden_column_only_inside_its_predicates() -> None:
+    from services.runtime import sql_guard
+
+    model = _bike_fleet_model()
+    sql = compile_intent(QueryIntent(metrics=["ride_minutes"], dimensions=["station"]), model)
+    low = sql.lower()
+    assert low.count("rentals.rider_phone") == 2 and low.index("where") < low.index("rider_phone")
+    assert "rider_phone" not in low.split("where")[0]  # never in the projection
+    # the compiled door passes; the caller's door refuses the same statement
+    assert sql_guard.check(sql, model, compiled=True).ok
+    assert not sql_guard.check(sql, model).ok
+    # a caller cannot select, group by or filter on the hidden column (an
+    # equality literal on it is the governed-literal drop, not a read)
+    for intent in (
+        QueryIntent(metrics=["ride_minutes"], dimensions=["rider_phone"]),
+        QueryIntent(metrics=["ride_minutes"], fields=["rider_phone"]),
+        QueryIntent(
+            metrics=["ride_minutes"],
+            filters=[IntentFilter(field="rider_phone", op="!=", value="x")],
+        ),
+    ):
+        with pytest.raises(CompileError):
+            compile_intent(intent, model)
+
+
+# ── a ratio windows on its operands' clocks; a level on a creation-dated table ──
+
+
+def _fleet_model() -> SemanticModel:
+    """A bike-rental fleet: one row per rental, dated by when it started and
+    (once back) when it was returned. Not a snapshot table: a rental's row is
+    written once, so the newest start day holds a sliver of what is open."""
+    rentals = Entity(
+        name="rentals",
+        source=EntitySource(connection="wh", table="rentals"),
+        default_time_field="started_at",
+        primary_key=["rental_id"],
+        fields=[
+            Field(name="rental_id", type="integer"),
+            Field(name="bike_id", type="integer"),
+            Field(name="started_at", type="date"),
+            Field(name="returned_at", type="date"),
+        ],
+        metrics=[
+            Metric(name="rentals_started", agg="count", expr="rentals.rental_id"),
+            Metric(
+                name="rentals_returned",
+                agg="count",
+                expr="rentals.returned_at",
+                agg_time_field="returned_at",
+            ),
+            Metric(
+                name="return_rate",
+                type="ratio",
+                numerator="rentals_returned",
+                denominator="rentals_started",
+            ),
+            Metric(
+                name="open_rentals",
+                agg="count",
+                expr="rentals.rental_id",
+                filters=["rentals.returned_at IS NULL"],
+                additivity="level",
+            ),
+        ],
+    )
+    return SemanticModel(lens="t", dialect="duckdb", entities=[rentals])
+
+
+_SEPT = [
+    IntentFilter(field="started_at", op=">=", value="2026-09-01"),
+    IntentFilter(field="started_at", op="<=", value="2026-09-30"),
+]
+
+
+def _fleet_warehouse():
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE rentals AS SELECT * FROM (VALUES "
+        "(1, 7, DATE '2026-08-20', DATE '2026-09-02'), "
+        "(2, 8, DATE '2026-09-10', DATE '2026-09-12'), "
+        "(3, 9, DATE '2026-09-25', NULL), "
+        "(4, 7, DATE '2026-09-28', DATE '2026-10-01'), "
+        "(5, 8, DATE '2026-08-25', DATE '2026-09-05'), "
+        "(6, 9, DATE '2026-07-01', NULL)"
+        ") t(rental_id, bike_id, started_at, returned_at)"
+    )
+    return con
+
+
+def test_a_ratio_windows_each_operand_on_its_own_time_field() -> None:
+    """Returns in September over starts in September: the numerator's own
+    clock (returned_at) takes the window, not the entity default both
+    operands were read through."""
+    sql = compile_intent(
+        QueryIntent(entity="rentals", metrics=["return_rate"], filters=_SEPT), _fleet_model()
+    )
+    assert "rentals.returned_at >= " in sql and "rentals.started_at >= " in sql
+    assert " WHERE " not in sql  # the window rides inside each operand, never shared
+    assert _fleet_warehouse().execute(sql).fetchall() == [(1.0,)]  # 3 returned / 3 started
+
+
+def test_a_level_on_a_creation_dated_table_reads_the_whole_table_without_a_period() -> None:
+    """Open rentals asked with no period: every open row, not the rows that
+    happened to start on the newest day."""
+    model = _fleet_model()
+    bare = QueryIntent(entity="rentals", metrics=["open_rentals"])
+    pinned = compile_intent(bare, model)
+    assert "SELECT MAX(rentals_latest.started_at)" in pinned  # a snapshot table: its last day
+    whole = compile_intent(bare, model, creation_dated={"rentals"})
+    assert "rentals_latest" not in whole and "MAX(" not in whole
+    assert _fleet_warehouse().execute(whole).fetchall() == [(2,)]
+    # A stated period keeps its reading.
+    windowed = compile_intent(
+        QueryIntent(entity="rentals", metrics=["open_rentals"], filters=_SEPT),
+        model,
+        creation_dated={"rentals"},
+    )
+    assert "SELECT MAX(rentals_latest.started_at)" in windowed
